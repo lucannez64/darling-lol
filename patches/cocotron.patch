@@ -1127,6 +1127,22 @@ index 5ca58772..54b60ef5 100644
  }
  
  @end
+diff --git a/AppKit/NSScroller.m b/AppKit/NSScroller.m
+index 6c361fa3..55027e7e 100644
+--- a/AppKit/NSScroller.m
++++ b/AppKit/NSScroller.m
+@@ -34,8 +34,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     return [[NSDisplay currentDisplay] scrollerWidth];
+ }
+ 
++// Chromium forwards this to its renderer, which rejects an out-of-range value and leaves
++// the Riot Client black; macOS reports legacy scrollers when no trackpad is attached.
+ + (NSScrollerStyle) preferredScrollerStyle {
+-    NSUnimplementedMethod();
++    return NSScrollerStyleLegacy;
+ }
+ /* OS X has a global default "AppleScrollBarVariant" with the values: Single,
+  DoubleMin, DoubleMax, and DoubleBoth This controls the default position of the
 diff --git a/AppKit/NSScrubberItemView.m b/AppKit/NSScrubberItemView.m
 index dea5e1d3..7b3a877b 100644
 --- a/AppKit/NSScrubberItemView.m
