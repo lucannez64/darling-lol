@@ -7796,7 +7796,7 @@ index fee1bde87..bee86604b 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82b..1d12043c2 100644
+index 6617ef82b..a227abee8 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -154,7 +154,7 @@ int main(int argc, char** argv, char** envp)
@@ -7825,7 +7825,19 @@ index 6617ef82b..1d12043c2 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -673,7 +683,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +658,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+ 
+ 	pthread_mutex_lock(&bitmap->mutex);
+ 
++	// darling-lol: placed above the slots because its slot was taken (socket_bitmap_place).
++	if (socket > bitmap->highest) {
++		goto out;
++	}
++
+ 	index = bitmap->highest - socket;
+ 
+ 	bitmap->bits[index / 8] &= ~(1 << (index % 8));
+@@ -673,7 +688,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -7840,7 +7852,7 @@ index 6617ef82b..1d12043c2 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +701,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +706,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -7866,6 +7878,68 @@ index 6617ef82b..1d12043c2 100644
  		}
  	}
  
+@@ -698,6 +727,22 @@ out:
+ 	pthread_mutex_unlock(&bitmap->mutex);
+ };
+ 
++/* darling-lol: move `fd` to the next slot. dup2() silently closed whatever the guest or a native library (NVIDIA's
++ * driver: one fd per allocation) already held on that number, and its owner later closed our socket. F_DUPFD never
++ * replaces a descriptor: if the slot is taken, it returns the lowest free number above it, which is ours alone. */
++static int socket_bitmap_place(int fd) {
++	int slot = socket_bitmap_get(&socket_bitmap);
++	if (slot < 0) {
++		return -1;
++	}
++
++	int placed = fcntl(fd, F_DUPFD, slot);
++	if (placed != slot) {
++		socket_bitmap_put(&socket_bitmap, slot);
++	}
++	return placed;
++}
++
+ int __mldr_create_rpc_socket(void) {
+ 	int pre_fd = -1;
+ 	int fd = -1;
+@@ -707,18 +752,11 @@ int __mldr_create_rpc_socket(void) {
+ 		goto err_out;
+ 	}
+ 
+-	fd = socket_bitmap_get(&socket_bitmap);
++	fd = socket_bitmap_place(pre_fd);
+ 	if (fd < 0) {
+ 		goto err_out;
+ 	}
+ 
+-	if (dup2(pre_fd, fd) < 0) {
+-		// we have to put it away ourselves here because `fd` is not yet valid, so we can't close() it in the error handler
+-		socket_bitmap_put(&socket_bitmap, fd);
+-		fd = -1;
+-		goto err_out;
+-	}
+-
+ 	close(pre_fd);
+ 	pre_fd = -1;
+ 
+@@ -772,17 +810,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+ 	}
+ 
+ 	for (int i = 0; i < 2; ++i) {
+-		fds[i] = socket_bitmap_get(&socket_bitmap);
++		fds[i] = socket_bitmap_place(pre_fds[i]);
+ 		if (fds[i] < 0) {
+ 			goto err_out;
+ 		}
+ 
+-		if (dup2(pre_fds[i], fds[i]) < 0) {
+-			socket_bitmap_put(&socket_bitmap, fds[i]);
+-			fds[i] = -1;
+-			goto err_out;
+-		}
+-
+ 		close(pre_fds[i]);
+ 		pre_fds[i] = -1;
+ 	}
 diff --git a/src/tools/open.m b/src/tools/open.m
 index 126bd394c..f62c2e0e8 100644
 --- a/src/tools/open.m
