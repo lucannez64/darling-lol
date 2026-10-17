@@ -28,6 +28,7 @@ python3 tools/build-riot-cxxabi-runtime.py
 python3 tools/build-riot-indium-runtime.py
 python3 tools/build-riot-metal-runtime.py
 python3 tools/build-riot-server-runtime.py
+python3 tools/ensure-darling-root-certificates.py
 build/riot-host-message-check
 cc -shared -fPIC -O2 -Wall -Wextra -Wl,-soname,"$project_dir/build/libdarling-xshm.so" tools/m58f299-xshm.c -o build/libdarling-xshm.so.next -pthread $(pkg-config --cflags --libs x11 x11-xcb xcb-shm xext)
 python3 tools/stop-darling-runtime.py

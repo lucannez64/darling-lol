@@ -13,6 +13,7 @@ for line in (folder / 'CMakeFiles/Metal.dir/flags.make').read_text().splitlines(
         flags[key] = shlex.split(value)
 resource_include = subprocess.check_output(['clang++', '-print-resource-dir'], text=True).strip() + '/include'
 flags['CXX_INCLUDES'] = [resource_include if value.startswith('/usr/lib/clang/') and value.endswith('/include') else value for value in flags['CXX_INCLUDES']]
+flags['CXX_INCLUDES'].append('-I' + str(root / 'build/darling-src/src/external/metal/deps/indium/private-include'))
 link = shlex.split((folder / 'CMakeFiles/Metal.dir/link.txt').read_text())
 # These objects passed live League validation. Keep the broader resource/queue
 # optimization experiment out of the default build after fresh-match stalls.
@@ -28,7 +29,6 @@ for name in ('MTLBuffer', 'MTLTexture', 'MTLDevice', 'MTLSamplerDescriptor', 'MT
         link.append(str(obj))
 link[link.index('-o') + 1] = str(root / 'build/riot-Metal')
 subprocess.run(link, cwd=folder, check=True)
-flags['CXX_INCLUDES'].append('-I' + str(root / 'build/darling-src/src/external/metal/deps/indium/private-include'))
 obj = root / 'build/riot-metal-sampler-check.o'
 subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'],
                 *flags['CXX_FLAGS'], '-c', str(root / 'tools/riot-metal-sampler-check.mm'),

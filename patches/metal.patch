@@ -1123,10 +1123,10 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..6cfc697 100644
+index f58184a..d78ffe7 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
-@@ -2,13 +2,26 @@
+@@ -2,14 +2,28 @@
  // SPDX-License-Identifier: MPL-2.0
  
  #import <Metal/MTLDeviceInternal.h>
@@ -1151,9 +1151,11 @@ index f58184a..6cfc697 100644
 +#import <Metal/MTLVertexDescriptor.h>
 +#include <type_traits>
  #import <Metal/MTLRenderPipelineInternal.h>
++#include <indium/device.private.hpp>
  
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceWasAddedNotification = @"MTLDeviceWasAdded";
-@@ -88,6 +101,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ MTL_EXTERN const MTLDeviceNotificationName MTLDeviceRemovalRequestedNotification = @"MTLDeviceRemovalRequested";
+@@ -88,6 +102,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[observer release];
  };
  
@@ -1191,7 +1193,7 @@ index f58184a..6cfc697 100644
  @implementation MTLDeviceInternal
  
  #if DARLING_METAL_ENABLED
-@@ -153,12 +197,46 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +198,112 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1205,16 +1207,82 @@ index f58184a..6cfc697 100644
 +	return MTLReadWriteTextureTier2;
 +}
 +
++static NSString* sanitizeGpuName(std::string rawName) {
++	const char* envOverride = getenv("DARLING_METAL_GPU_NAME");
++	if (envOverride && envOverride[0] != '\0') {
++		return [NSString stringWithUTF8String:envOverride];
++	}
++
++	// Strip driver annotations like " (RADV NAVI21)", " (LLVM ...)", etc.
++	size_t paren = rawName.find('(');
++	if (paren != std::string::npos) {
++		rawName = rawName.substr(0, paren);
++	}
++	while (!rawName.empty() && isspace((unsigned char)rawName.back())) {
++		rawName.pop_back();
++	}
++
++	// If string is empty or contains forbidden emulator strings:
++	if (rawName.empty() ||
++	    rawName.find("Darling") != std::string::npos ||
++	    rawName.find("Indium") != std::string::npos ||
++	    rawName.find("llvmpipe") != std::string::npos ||
++	    rawName.find("softpipe") != std::string::npos) {
++		return @"AMD Radeon Pro 5500M";
++	}
++
++	// Mac Metal officially supports AMD, Apple Silicon, and Intel.
++	// If the GPU is NVIDIA (unsupported on macOS Big Sur+) or something non-Mac:
++	if (rawName.find("NVIDIA") != std::string::npos ||
++	    rawName.find("GeForce") != std::string::npos ||
++	    rawName.find("Intel Arc") != std::string::npos) {
++		return @"AMD Radeon Pro 5700 XT";
++	}
++
++	return [NSString stringWithUTF8String:rawName.c_str()];
++}
++
 +/* darling-lol M57: feature queries ANGLE's Metal backend needs. */
 +- (BOOL)isDepth24Stencil8PixelFormatSupported { return _device->supportsDepth24Stencil8PixelFormat(); }
-+- (BOOL)hasUnifiedMemory { return YES; }
-+- (NSUInteger)maxBufferLength { return 256u * 1024u * 1024u; }
-+- (NSUInteger)recommendedMaxWorkingSetSize { return 1ull << 30; }
++- (BOOL)hasUnifiedMemory
++{
++	auto priv = dynamic_cast<Indium::PrivateDevice*>(_device.get());
++	if (priv) {
++		return priv->properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
++	}
++	return NO;
++}
++- (NSUInteger)recommendedMaxWorkingSetSize
++{
++	const char* envVram = getenv("DARLING_METAL_VRAM_MB");
++	if (envVram && envVram[0] != '\0') {
++		unsigned long long mb = strtoull(envVram, NULL, 10);
++		if (mb > 0) return mb * 1024ull * 1024ull;
++	}
++
++	auto priv = dynamic_cast<Indium::PrivateDevice*>(_device.get());
++	if (priv) {
++		uint64_t vram = 0;
++		const auto& mem = priv->memoryProperties();
++		for (uint32_t i = 0; i < mem.memoryHeapCount; ++i) {
++			if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
++				vram += mem.memoryHeaps[i].size;
++			}
++		}
++		if (vram > 0) return vram;
++	}
++	return 4ull << 30;
++}
++- (NSUInteger)maxBufferLength
++{
++	NSUInteger vram = [self recommendedMaxWorkingSetSize];
++	return vram > (1ull << 30) ? (1ull << 30) : vram;
++}
 +- (BOOL)isLowPower { return NO; }
 +- (BOOL)isRemovable { return NO; }
 +- (BOOL)isHeadless { return NO; }
-+- (NSString*)name { return @"Darling Indium Device"; }
-+- (uint64_t)registryID { return 0; }
++- (NSString*)name { return sanitizeGpuName(_device ? _device->name() : ""); }
++- (uint64_t)registryID { return 0x10000028bull; }
 +- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
@@ -1239,7 +1307,7 @@ index f58184a..6cfc697 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +244,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +311,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1247,7 +1315,7 @@ index f58184a..6cfc697 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +262,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +329,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1262,7 +1330,7 @@ index f58184a..6cfc697 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +276,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +343,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1308,7 +1376,7 @@ index f58184a..6cfc697 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +321,114 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +388,114 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1424,7 +1492,7 @@ index f58184a..6cfc697 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +498,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +565,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
