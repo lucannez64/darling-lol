@@ -59,7 +59,9 @@ int main() {
         [window makeKeyAndOrderFront:nil];
         pump(app);
         id<MTLCommandQueue> queue = [device newCommandQueue];
-        const unsigned frameCount = captureTest ? 130u : getenv("RIOT_PRESENTATION_STRESS") ? 120u : 10u;
+        // RIOT_PRESENTATION_HOLD=<seconds> keeps presenting so the window's pixels can be captured from the host.
+        const unsigned holdFrames = getenv("RIOT_PRESENTATION_HOLD") ? (unsigned) atoi(getenv("RIOT_PRESENTATION_HOLD")) * 20u : 0u;
+        const unsigned frameCount = captureTest ? 130u : getenv("RIOT_PRESENTATION_STRESS") ? 120u : holdFrames ? holdFrames : 10u;
         for (unsigned frame = 0; frame < frameCount; ++frame) {
             if (captureTest && frame == 80) {
                 FILE* flag = fopen("/tmp/metal-frame-interval-repeat", "a");

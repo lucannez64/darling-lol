@@ -1576,7 +1576,7 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..0646cb7 100644
+index 206e92e..011c8ca 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 @@ -151,8 +151,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
@@ -1595,7 +1595,7 @@ index 206e92e..0646cb7 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -267,13 +272,150 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +272,168 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -1678,6 +1678,24 @@ index 206e92e..0646cb7 100644
  	int status = dserver_rpc_interrupt_enter();
 +	int relaxed = 0;
 +
++	/* darling-lol: threads created by native host libraries (for example NVIDIA's
++	 * driver threads, which do not block signals as Mesa's do) have no darlingserver
++	 * socket; mldr reports that as a broken pipe instead of aborting. Linux can
++	 * deliver a process-directed signal such as SIGWINCH to such a thread. Any
++	 * thread may handle an asynchronous signal, so forward it to the main thread.
++	 * A synchronous fault in such a thread still takes the path below. */
++	if (status == -32 /* -LINUX_EPIPE: no socket on this thread */ &&
++	    !(info->si_code > 0 &&
++	      (linux_signum == LINUX_SIGSEGV || linux_signum == LINUX_SIGBUS ||
++	       linux_signum == LINUX_SIGILL || linux_signum == LINUX_SIGFPE ||
++	       linux_signum == LINUX_SIGTRAP))) {
++		long pid = LINUX_SYSCALL(__NR_getpid);
++		if (LINUX_SYSCALL(__NR_gettid) != pid) {
++			LINUX_SYSCALL(__NR_tgkill, pid, pid, linux_signum);
++			return;
++		}
++	}
++
 +#ifdef __x86_64__
 +	if (_lol_depth > 0) {
 +		/* Nested fault inside the reporter above: do not recurse, fall
@@ -1747,7 +1765,7 @@ index 206e92e..0646cb7 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +501,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +519,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -3297,6 +3315,32 @@ index 0a8f1e4..55aadbe 100644
  	}
  
  	if (cmd != NULL)
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+index 352c739..aa60849 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+@@ -19,6 +19,21 @@ long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
+ 	{
+ 		lim.rlim_cur++;
+ 		lim.rlim_max++;
++
++		// darling-lol: mldr hands out per-thread darlingserver sockets from the top of the
++		// descriptor limit the process started with. macOS apps set RLIMIT_NOFILE to a value
++		// such as 10240 to get at least that many; where the Linux limit is higher (1048576 on
++		// some distributions) that lowered it, every later socket dup2() failed with EBADF and
++		// the next thread creation aborted the process. Keep the current limits when the
++		// request is lower.
++		struct xnu_rlimit current;
++		if (LINUX_SYSCALL(__NR_prlimit64, 0, which, 0, &current) == 0)
++		{
++			if (lim.rlim_cur < current.rlim_cur)
++				lim.rlim_cur = current.rlim_cur;
++			if (lim.rlim_max < current.rlim_max)
++				lim.rlim_max = current.rlim_max;
++		}
+ 	}
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, &lim, 0);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c
 index 10f39a5..29747d4 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sysctl.c

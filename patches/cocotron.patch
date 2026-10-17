@@ -4472,6 +4472,88 @@ index 0000000..31fa646
 +}
 +
 +#endif
+diff --git a/AppKit/X11.backend/X11SubWindow.h b/AppKit/X11.backend/X11SubWindow.h
+index 65b63a3e..f9fcd115 100644
+--- a/AppKit/X11.backend/X11SubWindow.h
++++ b/AppKit/X11.backend/X11SubWindow.h
+@@ -7,6 +7,7 @@
+     X11Window *_parent;
+     Display *_display;
+     Window _window;
++    Colormap _colormap;
+ }
+ 
+ - initWithParentWindow: (X11Window *) parent frame: (CGRect) frame;
+diff --git a/AppKit/X11.backend/X11SubWindow.m b/AppKit/X11.backend/X11SubWindow.m
+index 738ab457..7eb601e8 100644
+--- a/AppKit/X11.backend/X11SubWindow.m
++++ b/AppKit/X11.backend/X11SubWindow.m
+@@ -1,6 +1,11 @@
+ #import "X11SubWindow.h"
+ #import "X11Display.h"
+ #import "X11Window.h"
++#import <X11/Xutil.h>
++#import <OpenGL/CGLInternal.h>
++
++// Weak so this backend still loads with an older OpenGL overlay.
++extern unsigned long CGLGetNativeVisualID(void) __attribute__((weak_import));
+ 
+ @implementation X11SubWindow
+ 
+@@ -20,11 +25,39 @@
+ 
+     _display = [(X11Display *) [NSDisplay currentDisplay] display];
+ 
+-    _window = XCreateSimpleWindow(_display, [parent windowHandle],
+-                                  frame.origin.x, frame.origin.y,
+-                                  frame.size.width, frame.size.height, 0, 0,
+-                                  0 /* border_width, border, background */
+-    );
++    // The subwindow hosts the CGL surface of the layer compositor, so it must
++    // use the visual of CGL's EGL config: NVIDIA refuses to create a surface
++    // for a window with any other visual. The parent's GLX visual usually
++    // differs and may have no EGL config at all.
++    XVisualInfo *visualInfo = NULL;
++    XVisualInfo template;
++    int matched = 0;
++    template.visualid = CGLGetNativeVisualID ? CGLGetNativeVisualID() : 0;
++    if (template.visualid != 0)
++        visualInfo = XGetVisualInfo(_display, VisualIDMask, &template, &matched);
++
++    if (visualInfo != NULL) {
++        XSetWindowAttributes attributes;
++        _colormap = XCreateColormap(_display, [parent windowHandle],
++                                    visualInfo->visual, AllocNone);
++        attributes.colormap = _colormap;
++        attributes.border_pixel = 0;
++        attributes.background_pixel = 0;
++        _window = XCreateWindow(_display, [parent windowHandle],
++                                frame.origin.x, frame.origin.y,
++                                frame.size.width, frame.size.height, 0,
++                                visualInfo->depth, InputOutput,
++                                visualInfo->visual,
++                                CWColormap | CWBorderPixel | CWBackPixel,
++                                &attributes);
++        XFree(visualInfo);
++    } else {
++        _window = XCreateSimpleWindow(_display, [parent windowHandle],
++                                      frame.origin.x, frame.origin.y,
++                                      frame.size.width, frame.size.height, 0, 0,
++                                      0 /* border_width, border, background */
++        );
++    }
+ 
+     [self show];
+     return self;
+@@ -32,6 +65,8 @@
+ 
+ - (void) dealloc {
+     XDestroyWindow(_display, _window);
++    if (_colormap != None)
++        XFreeColormap(_display, _colormap);
+     [super dealloc];
+ }
+ 
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
 index bfe3839a..e8c8828f 100644
 --- a/AppKit/X11.backend/X11Window.h
@@ -8703,10 +8785,10 @@ index 5dcac115..5de4f03f 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c56..dee2b80c 100644
+index 5dce8c56..7cd67d2c 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
-@@ -1,47 +1,58 @@
+@@ -1,47 +1,75 @@
  #import <Foundation/NSString.h>
 +#import <Foundation/NSMutableArray.h>
  #import <QuartzCore/CALayer.h>
@@ -8735,6 +8817,23 @@ index 5dce8c56..dee2b80c 100644
 +    for(CALayer *child in layer.sublayers)
 +        if(hasFullWindowSurface(child,size))return YES;
 +    return NO;
++}
++static BOOL hasMetalLayer(CALayer *layer) {
++    if([[layer class] isSubclassOfClass:[CAMetalLayerInternal class]])return YES;
++    for(CALayer *child in layer.sublayers)
++        if(hasMetalLayer(child))return YES;
++    return NO;
++}
++/* With DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER the remote frame presenter shows
++ * IOSurface (Chromium) content. Without RCLOL_GPU_DIRECT_PRESENT that content
++ * arrives by CPU readback and the local compositor would only load a stale copy
++ * of each surface once, then leave it on the subwindow over the live client
++ * (seen on NVIDIA, where the subwindow previously had no surface at all). Only
++ * Metal layers, which have no other presenter, are composited locally then. */
++static BOOL skipLocalRender(CALayer *layer,CGSize size) {
++    if(!getenv("DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER") || !layer)return NO;
++    if(hasFullWindowSurface(layer,size))return YES;
++    return !getenv("RCLOL_GPU_DIRECT_PRESENT") && !hasMetalLayer(layer);
 +}
  @implementation CALayerContext
  
@@ -8784,7 +8883,7 @@ index 5dce8c56..dee2b80c 100644
      [super dealloc];
  }
  
-@@ -51,12 +62,22 @@
+@@ -51,12 +79,22 @@
  }
  
  - (void) setLayer: (CALayer *) layer {
@@ -8807,7 +8906,7 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) setSubwindow: (CGSubWindow*) subwindow
-@@ -68,16 +89,50 @@
+@@ -68,16 +106,50 @@
      }
  
      _subwindow = [subwindow retain];
@@ -8859,7 +8958,7 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,7 +148,22 @@
+@@ -93,7 +165,22 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
@@ -8882,7 +8981,7 @@ index 5dce8c56..dee2b80c 100644
      CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
  
      glEnable(GL_DEPTH_TEST);
-@@ -118,27 +188,63 @@
+@@ -118,27 +205,62 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -8906,8 +9005,7 @@ index 5dce8c56..dee2b80c 100644
  - (void) render {
 +    if (_cglWindow == NULL || _layer == nil)
 +        return;
-+    if(getenv("DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER") &&
-+       hasFullWindowSurface(_layer,_frame.size))return;
++    if(skipLocalRender(_layer,_frame.size))return;
      [self renderLayer: _layer];
  }
  
@@ -8951,7 +9049,7 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +253,7 @@
+@@ -147,7 +269,7 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -8960,13 +9058,12 @@ index 5dce8c56..dee2b80c 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +261,10 @@
+@@ -155,7 +277,9 @@
  }
  
  - (void) flush {
 -    CGLFlushDrawable(_glContext);
-+    if(getenv("DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER") && _layer &&
-+       hasFullWindowSurface(_layer,_frame.size))return;
++    if(skipLocalRender(_layer,_frame.size))return;
 +    if (_glContext != NULL && _cglWindow != NULL)
 +        CGLFlushDrawable(_glContext);
  }

@@ -2835,17 +2835,18 @@ index 5f62ad0..5957bec 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..78b77ae 100644
+index 322e186..b4d5f69 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
-@@ -1,4 +1,6 @@
+@@ -1,4 +1,7 @@
++#include <chrono>
  #include <indium/device.private.hpp>
 +#include <indium/submit-thread.private.hpp>
 +#include <indium/command-encoder.private.hpp>
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,39 +14,207 @@
+@@ -12,39 +15,207 @@
  
  #include <iridium/iridium.hpp>
  
@@ -3059,7 +3060,7 @@ index 322e186..78b77ae 100644
  			continue;
  		}
  
-@@ -67,12 +237,105 @@ void Indium::initGlobalDeviceList() {
+@@ -67,12 +238,105 @@ void Indium::initGlobalDeviceList() {
  		DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
  
  		if (!features12.timelineSemaphore) {
@@ -3167,7 +3168,7 @@ index 322e186..78b77ae 100644
  };
  
  void Indium::finitGlobalDeviceList() {
-@@ -83,7 +346,8 @@ Indium::Device::~Device() {};
+@@ -83,7 +347,8 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -3177,7 +3178,7 @@ index 322e186..78b77ae 100644
  	DynamicVK::vkGetPhysicalDeviceProperties(_physicalDevice, &_properties);
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
-@@ -233,6 +497,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +498,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -3214,7 +3215,7 @@ index 322e186..78b77ae 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +540,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +541,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -3222,7 +3223,7 @@ index 322e186..78b77ae 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -297,6 +592,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -297,6 +593,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  };
  
  Indium::PrivateDevice::~PrivateDevice() {
@@ -3232,7 +3233,7 @@ index 322e186..78b77ae 100644
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +606,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +607,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3256,7 +3257,7 @@ index 322e186..78b77ae 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +632,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +633,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3269,7 +3270,7 @@ index 322e186..78b77ae 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -357,6 +672,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,6 +673,7 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -3277,7 +3278,47 @@ index 322e186..78b77ae 100644
  		funcInfo.bindings.insert(funcInfo.bindings.end(), info.bindings.begin(), info.bindings.end());
  		funcInfo.embeddedSamplers.insert(funcInfo.embeddedSamplers.end(), info.embeddedSamplers.begin(), info.embeddedSamplers.end());
  	}
-@@ -480,9 +796,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -396,6 +713,39 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+ 
+ 	lock.unlock();
+ 
++	// darling-lol: NVIDIA's blocking vkWaitSemaphores wakes the waiter 1-2 ms after the GPU signals (an empty submit
++	// completes in about 15 us when the counter is polled), and its waits with short timeouts busy-spin anyway.
++	// Completion handlers release drawables and resources, so that wake-up latency serialized frames while the GPU
++	// idled at low clocks. Poll the counters for a bounded time first; an idle device still blocks below. The guest
++	// file /tmp/metal-wait-spin-us overrides the budget in microseconds (0 disables it).
++	static const uint64_t spinNanoseconds = [this]() -> uint64_t {
++		if (FILE* file = fopen("/tmp/metal-wait-spin-us", "r")) {
++			unsigned long microseconds = 0;
++			const bool parsed = fscanf(file, "%lu", &microseconds) == 1;
++			fclose(file);
++			if (parsed) return (uint64_t) microseconds * 1000;
++		}
++		return _properties.vendorID == 0x10de ? 2'000'000 : 0;
++	}();
++	if (spinNanoseconds > 0 && timeoutNanoseconds > 0) {
++		const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(std::min(spinNanoseconds, timeoutNanoseconds));
++		bool anyReady = false;
++		do {
++			for (size_t i = 0; i < semaphores.size() && !anyReady; ++i) {
++				uint64_t count = 0;
++				if (DynamicVK::vkGetSemaphoreCounterValue(_device, semaphores[i], &count) == VK_SUCCESS && count >= values[i]) {
++					anyReady = true;
++				}
++			}
++			if (anyReady) break;
++			__builtin_ia32_pause();
++		} while (std::chrono::steady_clock::now() < deadline);
++		if (anyReady) {
++			// the wait below only has to report it
++			timeoutNanoseconds = 0;
++		}
++	}
++
+ 	VkSemaphoreWaitInfo info {};
+ 	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+ 	info.semaphoreCount = semaphores.size();
+@@ -480,9 +830,18 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  	wakeupEventLoop();
  };
  
@@ -3297,7 +3338,7 @@ index 322e186..78b77ae 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +830,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +864,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -3313,7 +3354,7 @@ index 322e186..78b77ae 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +883,160 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +917,160 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };

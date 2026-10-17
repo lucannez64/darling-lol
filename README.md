@@ -35,7 +35,7 @@ Game files, Riot installers, account databases, tokens, local prefixes, captures
 
 ## Requirements
 
-- x86-64 Linux **5.14 or newer**, an X11 session or Xwayland, and a working hardware Vulkan/OpenGL driver. AMD RADV has been exercised; other drivers are not validated. Hybrid laptops usually render on the integrated GPU unless started with PRIME offload; NVIDIA is not validated. See [hybrid graphics](docs/TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
+- x86-64 Linux **5.14 or newer**, an X11 session or Xwayland, and a working hardware Vulkan/OpenGL driver. AMD RADV has been exercised; other drivers are not validated. Hybrid laptops usually render on the integrated GPU unless started with PRIME offload; NVIDIA's proprietary driver runs on a single-GPU desktop with known limits; see [NVIDIA](docs/TROUBLESHOOTING.md#nvidia-proprietary-driver) and [hybrid graphics](docs/TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
 - Git + Git LFS, Bash, curl, unzip, CMake, Make, Clang/LLD, LLVM development files, a C/C++ compiler, Python 3.12+ and the Darling build dependencies. The patch includes LLVM 22/23 branch-opcode compatibility; the new PC used LLVM/Clang 23. Node.js is needed only for the offline JavaScript checks.
 - X11/XCB/SHM development files for the current runtime helpers.
 - Enough free disk for Darling sources/build, Git LFS assets and the game: budget at least 50 GB. Building is substantially larger than this source-only repository.

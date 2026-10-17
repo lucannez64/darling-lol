@@ -7,6 +7,15 @@ set -eu
 if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
  ulimit -c 0
 fi
+# Darling processes inherit this descriptor limit, and mldr places each thread's
+# darlingserver socket just below it. At 1024 or 2048 those sockets sit next to
+# the descriptors the game and the GPU driver open, so a stray close can hit one
+# and the thread's next Mach call aborts. Keep them far away. 65536 bounds the
+# per-process descriptor table that the highest socket number forces.
+nofile_hard=$(ulimit -Hn)
+if [ "$nofile_hard" = unlimited ] || [ "$nofile_hard" -ge 65536 ]; then
+ ulimit -Sn 65536
+fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 python3 "$runner_dir/ensure-darling-runtime.py"
 python3 "$runner_dir/ensure-darling-service-accounts.py"

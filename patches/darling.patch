@@ -6257,7 +6257,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..1ff212d34 100644
+index ffd7fe054..1536c8c4b 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -6527,9 +6527,23 @@ index ffd7fe054..1ff212d34 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -171,14 +309,18 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +308,55 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+     return (CGLWindowRef) surface;
  }
  
++/* X visual of the config CGLGetWindow surfaces use, or 0 when unknown.
++ * NVIDIA rejects a window whose visual differs from the config's
++ * (EGL_BAD_CONFIG); Mesa accepts it. Windows meant for CGLGetWindow must be
++ * created with this visual. */
++CGL_EXPORT unsigned long CGLGetNativeVisualID(void) {
++    EGLint visual = 0;
++    if (display == EGL_NO_DISPLAY || config == NULL || !p_eglGetConfigAttrib)
++        return 0;
++    if (!p_eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &visual))
++        return 0;
++    return (unsigned long) visual;
++}
++
  CGL_EXPORT void CGLDestroyWindow(CGLWindowRef window) {
 -    eglDestroySurface(display, (EGLSurface) window);
 +    p_eglDestroySurface(display, (EGLSurface) window);
@@ -6542,13 +6556,36 @@ index ffd7fe054..1ff212d34 100644
      context->egl_surface = (EGLSurface) window;
 -    return CGLSetCurrentContext(context);
 +    CGLError result = CGLSetCurrentContext(context);
-+    if (result != kCGLNoError)
++    if (result != kCGLNoError) {
 +        context->egl_surface = oldSurface;
-+    return result;
++        return result;
++    }
++    /* A context first made current without a surface keeps GL_NONE as its
++     * default framebuffer's draw and read buffers. NVIDIA applies this even
++     * after a window surface is attached, so everything drawn to the window was
++     * discarded (black window); Mesa resets the buffers on attach. */
++    if (window != NULL && (EGLSurface) window != oldSurface) {
++        GLint drawFramebuffer = 0, readFramebuffer = 0, drawBuffer = GL_BACK, readBuffer = GL_BACK;
++        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer);
++        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
++        if (drawFramebuffer != 0 || readFramebuffer != 0)
++            glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
++        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
++        if (drawBuffer == GL_NONE)
++            glDrawBuffer(GL_BACK);
++        if (readBuffer == GL_NONE)
++            glReadBuffer(GL_BACK);
++        if (drawFramebuffer != 0 || readFramebuffer != 0) {
++            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFramebuffer);
++            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
++        }
++    }
++    return kCGLNoError;
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +340,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +376,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -6596,7 +6633,7 @@ index ffd7fe054..1ff212d34 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +389,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +425,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -6611,7 +6648,7 @@ index ffd7fe054..1ff212d34 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +419,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +455,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -6622,7 +6659,7 @@ index ffd7fe054..1ff212d34 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -304,24 +476,67 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -304,24 +512,67 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
  }
  
  CGLError CGLCreateContext(CGLPixelFormatObj pixelFormat, CGLContextObj share, CGLContextObj *resultp) {
@@ -6691,7 +6728,7 @@ index ffd7fe054..1ff212d34 100644
  
      *resultp = context;
  
-@@ -333,7 +548,7 @@ CGLContextObj CGLRetainContext(CGLContextObj context) {
+@@ -333,7 +584,7 @@ CGLContextObj CGLRetainContext(CGLContextObj context) {
          return NULL;
      }
  
@@ -6700,7 +6737,7 @@ index ffd7fe054..1ff212d34 100644
      return context;
  }
  
-@@ -342,11 +557,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +593,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -6721,7 +6758,7 @@ index ffd7fe054..1ff212d34 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +575,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +611,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -6734,7 +6771,7 @@ index ffd7fe054..1ff212d34 100644
  
      free(context);
  }
-@@ -383,9 +608,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +644,330 @@ CGLError CGLUnlockContext(CGLContextObj context) {
      return kCGLNoError;
  }
  
@@ -7067,7 +7104,7 @@ index ffd7fe054..1ff212d34 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -394,8 +940,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -394,8 +976,9 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
  
      if (parameter == kCGLCPSwapInterval)
      {
@@ -7078,7 +7115,7 @@ index ffd7fe054..1ff212d34 100644
          if (success)
              context->swap_interval = v;
          return success ? kCGLNoError : kCGLBadValue;
-@@ -417,14 +964,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1000,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -7104,6 +7141,18 @@ index ffd7fe054..1ff212d34 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
+index 1d0b10e65..7f5e2d963 100644
+--- a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
++++ b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
+@@ -15,6 +15,7 @@ CGL_EXPORT CGLError CGLRegisterNativeDisplay(void *native_display);
+ 
+ CGL_EXPORT CGLWindowRef CGLGetWindow(void *native_window);
+ CGL_EXPORT void CGLDestroyWindow(CGLWindowRef window);
++CGL_EXPORT unsigned long CGLGetNativeVisualID(void);
+ 
+ CGL_EXPORT CGLError CGLContextMakeCurrentAndAttachToWindow(CGLContextObj context, CGLWindowRef window);
+ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid);
 diff --git a/src/frameworks/OpenGL/include/OpenGL/CGLTypes.h b/src/frameworks/OpenGL/include/OpenGL/CGLTypes.h
 index 7d5eda01a..803ac02d3 100644
 --- a/src/frameworks/OpenGL/include/OpenGL/CGLTypes.h
@@ -7795,11 +7844,78 @@ index fee1bde87..bee86604b 100644
  
  #endif
 -
+diff --git a/src/startup/mldr/elfcalls/threads.c b/src/startup/mldr/elfcalls/threads.c
+index e789986ea..8cb9bcf19 100644
+--- a/src/startup/mldr/elfcalls/threads.c
++++ b/src/startup/mldr/elfcalls/threads.c
+@@ -213,7 +213,13 @@ static void* darling_thread_entry(void* p)
+ 	uintptr_t* flags = args.is_workqueue ? &args.arg2 : &args.arg3;
+ 
+ 	// create a new dserver RPC socket
+-	int new_rpc_fd = __mldr_create_rpc_socket();
++	// darling-lol: retry a few times; __mldr_create_rpc_socket logs each failure's cause.
++	int new_rpc_fd = -1;
++	for (int attempt = 1; attempt <= 4 && new_rpc_fd < 0; ++attempt) {
++		new_rpc_fd = __mldr_create_rpc_socket();
++		if (new_rpc_fd < 0)
++			usleep(2000 * attempt);
++	}
+ 	if (new_rpc_fd < 0) {
+ 		// we can't do anything if we don't get our own separate connection to darlingserver
+ 		fprintf(stderr, "Failed to create socket\n");
+@@ -235,7 +241,23 @@ static void* darling_thread_entry(void* p)
+ 	// let's check-in with darlingserver on this new thread
+ 	int dummy_stack_variable;
+ 	// the lifetime pipe fd is ignored as the process should already have been registered
+-	if (dserver_rpc_explicit_checkin(t_server_socket, false, &dummy_stack_variable, -1) < 0) {
++	// darling-lol: a failed checkin used to abort silently (the game's stderr is not
++	// visible). Record each failure's status in the host's /tmp/lolsig.log and retry a
++	// few times in case the failure is transient.
++	int checkin_status = -1;
++	for (int attempt = 1; attempt <= 4; ++attempt) {
++		checkin_status = dserver_rpc_explicit_checkin(t_server_socket, false, &dummy_stack_variable, -1);
++		if (checkin_status >= 0)
++			break;
++		FILE* report = fopen("/tmp/lolsig.log", "a");
++		if (report) {
++			fprintf(report, "LOLCHECKIN pid=%d tid=%ld attempt=%d status=%d\n", getpid(), (long) syscall(SYS_gettid), attempt, checkin_status);
++			fclose(report);
++		}
++		fprintf(stderr, "darling_thread_entry: checkin attempt %d failed with status %d\n", attempt, checkin_status);
++		usleep(2000 * attempt);
++	}
++	if (checkin_status < 0) {
+ 		// we can't do ANYTHING if darlingserver doesn't acknowledge us successfully
+ 		abort();
+ 	}
+@@ -387,8 +409,11 @@ int __darling_thread_rpc_socket(void) {
+ 			// this is the main thread
+ 			t_server_socket = __dserver_main_thread_socket_fd;
+ 		} else {
+-			// threads should already have a per-thread socket assigned when they're created
+-			abort();
++			// threads created by Darwin get a per-thread socket when they're created.
++			// darling-lol: threads created by native host libraries have none. Report
++			// that (callers see a broken pipe) instead of aborting, so a signal delivered
++			// to such a thread can be forwarded to the main thread by sigexc_handler.
++			return -1;
+ 		}
+ 	}
+ 	return t_server_socket;
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82b..1d12043c2 100644
+index 6617ef82b..8fa41aa7e 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
-@@ -154,7 +154,7 @@ int main(int argc, char** argv, char** envp)
+@@ -23,6 +23,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #include <stdio.h>
++#include <sys/syscall.h>
++#include <dirent.h>
+ #include <string.h>
+ #include <errno.h>
+ #include <stdlib.h>
+@@ -154,7 +156,7 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -7808,7 +7924,7 @@ index 6617ef82b..1d12043c2 100644
  
  	process_special_env(&mldr_load_results);
  
-@@ -563,6 +563,16 @@ static socket_bitmap_t socket_bitmap = {
+@@ -563,6 +565,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -7825,7 +7941,7 @@ index 6617ef82b..1d12043c2 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -673,7 +683,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +685,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -7840,7 +7956,7 @@ index 6617ef82b..1d12043c2 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +701,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +703,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -7864,6 +7980,88 @@ index 6617ef82b..1d12043c2 100644
 +				bitmap->bits = ptr;
 +			}
  		}
+ 	}
+ 
+@@ -698,21 +724,63 @@ out:
+ 	pthread_mutex_unlock(&bitmap->mutex);
+ };
+ 
++// darling-lol: a failed per-thread socket used to abort the process with no trace of the
++// cause. Record the failing step, errno, the open descriptor count and RLIMIT_NOFILE in the
++// host's /tmp/lolsig.log. The log stays open from the first socket on, so a failure caused
++// by descriptor exhaustion can still be reported.
++static int lolsig_fd = -1;
++static dev_t lolsig_dev;
++static ino_t lolsig_ino;
++
++static void rpc_socket_failure(const char* step, int error, int target_fd) {
++	struct rlimit limit = { 0, 0 };
++	getrlimit(RLIMIT_NOFILE, &limit);
++	// -1 when the directory cannot be opened (for example when no descriptor is left)
++	int open_fds = -1;
++	DIR* fds = opendir("/proc/self/fd");
++	if (fds) {
++		open_fds = -3; // ".", ".." and the directory's own descriptor
++		while (readdir(fds))
++			++open_fds;
++		closedir(fds);
++	}
++	// Apps may close every descriptor and reuse the number; only write if it is still the log.
++	struct stat current;
++	if (lolsig_fd >= 0 && fstat(lolsig_fd, &current) == 0 &&
++	    current.st_dev == lolsig_dev && current.st_ino == lolsig_ino) {
++		dprintf(lolsig_fd, "LOLRPCSOCKET pid=%d tid=%ld step=%s errno=%d (%s) target_fd=%d open_fds=%d nofile=%llu/%llu\n",
++			getpid(), (long) syscall(SYS_gettid), step, error, strerror(error), target_fd, open_fds,
++			(unsigned long long) limit.rlim_cur, (unsigned long long) limit.rlim_max);
++	}
++}
++
+ int __mldr_create_rpc_socket(void) {
+ 	int pre_fd = -1;
+ 	int fd = -1;
+ 
++	if (lolsig_fd < 0) {
++		struct stat opened;
++		lolsig_fd = open("/tmp/lolsig.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
++		if (lolsig_fd >= 0 && fstat(lolsig_fd, &opened) == 0) {
++			lolsig_dev = opened.st_dev;
++			lolsig_ino = opened.st_ino;
++		}
++	}
++
+ 	pre_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+ 	if (pre_fd < 0) {
++		rpc_socket_failure("socket", errno, -1);
+ 		goto err_out;
+ 	}
+ 
+ 	fd = socket_bitmap_get(&socket_bitmap);
+ 	if (fd < 0) {
++		rpc_socket_failure("bitmap", errno, -1);
+ 		goto err_out;
+ 	}
+ 
+ 	if (dup2(pre_fd, fd) < 0) {
++		rpc_socket_failure("dup2", errno, fd);
+ 		// we have to put it away ourselves here because `fd` is not yet valid, so we can't close() it in the error handler
+ 		socket_bitmap_put(&socket_bitmap, fd);
+ 		fd = -1;
+@@ -726,14 +794,17 @@ int __mldr_create_rpc_socket(void) {
+ 
+ 	int fd_flags = fcntl(fd, F_GETFD);
+ 	if (fd_flags < 0) {
++		rpc_socket_failure("getfd", errno, fd);
+ 		goto err_out;
+ 	}
+ 	if (fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC) < 0) {
++		rpc_socket_failure("setfd", errno, fd);
+ 		goto err_out;
+ 	}
+ 
+ 	sa_family_t family = AF_UNIX;
+ 	if (bind(fd, (const struct sockaddr*)&family, sizeof(family)) < 0) {
++		rpc_socket_failure("bind", errno, fd);
+ 		goto err_out;
  	}
  
 diff --git a/src/tools/open.m b/src/tools/open.m
