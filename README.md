@@ -77,6 +77,14 @@ First installation and future Riot updates can still encounter compatibility gap
 
 For another region, set `RCLOL_REGION` and `RCLOL_LOCALE` before launch. For example `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh`. Linux display selection follows `$DISPLAY`; the legacy launcher fallback is `:1`.
 
+On KDE, install a desktop icon and taskbar entries so that icons show up properly:
+
+```sh
+./scripts/install-desktop-launchers.sh
+```
+
+Clicking on the League icon launches `scripts/run.sh`. Startup output is saved to `~/.local/state/darling-lol/launcher.log` (or `$XDG_STATE_HOME/darling-lol/launcher.log`); Riot's own client logs remain under `~/.darling`.
+
 ## Testing
 
 Start with standalone regression checks, then play a match manually. See [testing](docs/TESTING.md). Do not attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. This project ships no client-side automation, inspection or profiling helpers.
