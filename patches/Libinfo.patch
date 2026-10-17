@@ -1,11 +1,15 @@
 diff --git a/darling-resolver/resolver.c b/darling-resolver/resolver.c
-index f3ae33d..75944eb 100644
+index f3ae33d..6fb6e9e 100644
 --- a/darling-resolver/resolver.c
 +++ b/darling-resolver/resolver.c
-@@ -23,6 +23,21 @@
+@@ -22,6 +22,33 @@
+ #include <stdio.h>
  #include <stdbool.h>
  #include <time.h>
- 
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
 +/* res_query shares the global resolver's sockets. Concurrent lookups must
 + * own their resolver state so they cannot consume each other's replies. */
 +static int
@@ -13,6 +17,15 @@ index f3ae33d..75944eb 100644
 +{
 +	struct __res_state state = {0};
 +	int result;
++	/* Riot's bundled downloader cannot use IPv6 CONNECT_TO addresses.
++	 * Restrict this opt-in workaround to its CDN; keep other DNS unchanged. */
++	const char *ipv4_only = getenv("RCLOL_CDN_IPV4_ONLY");
++	size_t name_len = strlen(name);
++	const char suffix[] = ".riotcdn.net";
++	if (type == ns_t_aaaa && ipv4_only && strcmp(ipv4_only, "1") == 0 &&
++	    name_len >= sizeof(suffix) - 1 &&
++	    strcasecmp(name + name_len - (sizeof(suffix) - 1), suffix) == 0)
++		return -1;
 +
 +	if (res_ninit(&state) < 0)
 +		return -1;
@@ -20,11 +33,10 @@ index f3ae33d..75944eb 100644
 +	res_ndestroy(&state);
 +	return result;
 +}
-+
+ 
  static int
  dr_is_valid(si_mod_t *si, si_item_t *item)
- {
-@@ -58,7 +73,7 @@ dr_hostbyname(si_mod_t *si, const char *name, int af, const char *interface, uin
+@@ -58,7 +85,7 @@ dr_hostbyname(si_mod_t *si, const char *name, int af, const char *interface, uin
  	else
  		return NULL;
  
@@ -33,7 +45,7 @@ index f3ae33d..75944eb 100644
  	if (l < 0)
  		return NULL;
  
-@@ -144,7 +159,7 @@ dr_hostbyaddr(si_mod_t *si, const void *addr, int af, const char *interface, uin
+@@ -144,7 +171,7 @@ dr_hostbyaddr(si_mod_t *si, const void *addr, int af, const char *interface, uin
  	else
  		return NULL;
  
@@ -42,7 +54,7 @@ index f3ae33d..75944eb 100644
  	if (l < 0)
  		return NULL;
  
-@@ -240,7 +255,7 @@ dr_addrinfo(si_mod_t *si, const void *node, const void *serv, uint32_t family, u
+@@ -240,7 +267,7 @@ dr_addrinfo(si_mod_t *si, const void *node, const void *serv, uint32_t family, u
  		
  		if (resolveV6)
  		{
@@ -51,7 +63,7 @@ index f3ae33d..75944eb 100644
  			if (l < 0)
  				goto after_v6;
  
-@@ -279,7 +294,7 @@ dr_addrinfo(si_mod_t *si, const void *node, const void *serv, uint32_t family, u
+@@ -279,7 +306,7 @@ dr_addrinfo(si_mod_t *si, const void *node, const void *serv, uint32_t family, u
  after_v6:
  		if (resolveV4)
  		{
@@ -60,7 +72,7 @@ index f3ae33d..75944eb 100644
  			if (l < 0)
  				goto after_v4;
  
-@@ -375,4 +390,3 @@ si_mod_t *si_module_static_darling(void)
+@@ -375,4 +402,3 @@ si_mod_t *si_module_static_darling(void)
  	return (si_mod_t*)&si;
  
  }

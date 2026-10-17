@@ -18,6 +18,54 @@ The LLVM version check compiles Iridium's actual dynamic loader against small st
 
 The patch check uses temporary base indexes and does not reset or modify the source checkout. The launcher check uses stub commands and never starts or contacts Riot or Darling. It checks installed-client and first-time-installer launches, strips inherited `DYLD_INSERT_LIBRARIES` even with the old VPX opt-in set, and preserves Darling runtime library/framework paths. The memory-installer check imports the installer and exercises its policy (default source is the prepared artifact; the artifact is never a destination of a different library) in temporary directories. The Foundation-installer check does the same for the overlay installer: it seeds a temporary framework from a stub SDK, replaces `Versions/C/Foundation`, keeps the standard symlinks, stages a backup, treats a re-run as current and refuses a non-Mach-O source. The installer handoff mock covers 28 scenarios, including HTTP 409, interrupted verification and preserving active downloads.
 
+## NSURLSession lifecycle regression
+
+After configuring and building the patched Darling source:
+
+```sh
+python3 tools/build-riot-urlsession-check.py
+python3 tools/riot-urlsession-check.py
+```
+
+The runner starts a loopback-only HTTP fixture, reserves a second non-listening
+port for the transport-error case, and creates a fresh private DPREFIX. It runs
+only the independent probe, then shuts down that private prefix. It never
+starts Riot/League, queries their APIs, sends game input or shuts down the
+normal prefix. The fixture delays its response so session invalidation is
+tested with a request still outstanding. Run native guest probes with clients
+and the game closed; source-only CI does not run them.
+
+The builder accepts `--build-dir` and `--sdk` for an existing configured tree.
+The runner accepts `--frameworks` and `--libraries` host paths for installed
+overlays, and keeps diagnostics in mode-0600 `build/urlsession-check.log`.
+
+Expected checks: five successful HTTP GETs with exact response bytes/status;
+connection refusal delivered as an error; repeated resume/cancel without
+duplicate completion; finish waiting for task completion; and session
+invalidation delivered once for both graceful finish and cancellation.
+Expected output includes `URLSESSION_PASS` and `LIFECYCLE_PASS`. The original
+runtime aborts on missing data-task initialization or session invalidation.
+These checks do not establish full NSURLSession conformance or transport-level
+interruption of an already-running request.
+
+Host-only checks, which do not start Darling:
+
+```sh
+python3 tools/riot-cdn-dns-offline-check.py
+python3 -m unittest discover -s tests -p 'test_hidden_riot_recovery.py'
+python3 -m unittest discover -s tests -p 'test_desktop_run.py'
+python3 -m unittest discover -s tests -p 'test_urlsession_runner.py'
+```
+
+The DNS check compiles the actual `dr_query` addition from `Libinfo.patch`
+against stub resolver functions. It covers default/opt-out behavior, case
+insensitivity, A queries, non-CDN names and misleading domain suffixes without
+sending a DNS query. Recovery tests use fake `/proc` entries and mock every
+compositor/shutdown command. The desktop test checks exit/argument forwarding,
+append-only output and tightening an existing public log to mode 0600. The
+runner test uses a fake `darling` executable to verify loopback fixtures and
+private-prefix-only shutdown/cleanup.
+
 ## CoreText font-list and AppKit resize regressions
 
 After preparing the source and configuring the runtime tools:

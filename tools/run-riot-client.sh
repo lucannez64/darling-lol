@@ -8,6 +8,12 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
  ulimit -c 0
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "${RCLOL_RECOVER_HIDDEN_CLIENT:-0}" = 1 ]; then
+ python3 "$runner_dir/recover-hidden-riot-client.py"
+fi
+# The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
+# AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
+export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
 python3 "$runner_dir/ensure-darling-runtime.py"
 python3 "$runner_dir/ensure-darling-service-accounts.py"
 python3 "$runner_dir/ensure-league-runtime-layout.py"

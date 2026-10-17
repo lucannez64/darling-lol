@@ -13,3 +13,7 @@ jobs:
       - run: python scripts/validate.py
       - run: python tools/riot-input-offline-check.py
       - run: python tools/riot-runtime-cleanup-offline-check.py
+      - run: python tools/riot-cdn-dns-offline-check.py
+      - run: python -m unittest discover -s tests -p 'test_hidden_riot_recovery.py'
+      - run: python -m unittest discover -s tests -p 'test_desktop_run.py'
+      - run: python -m unittest discover -s tests -p 'test_urlsession_runner.py'

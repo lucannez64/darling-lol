@@ -140,7 +140,7 @@ def main():
                 shutil.copyfile(png_target, icons_base / "league-of-legends.png")
 
     # 3. Create .desktop file
-    run_script = PROJECT_ROOT / "scripts/run.sh"
+    run_script = PROJECT_ROOT / "scripts/desktop-run.sh"
     exec_path = str(run_script).replace("%", "%%")
     exec_cmd = f'"{exec_path}"' if " " in exec_path else exec_path
     desktop_content = f"""[Desktop Entry]

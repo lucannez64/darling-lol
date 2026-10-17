@@ -28,6 +28,20 @@ Run configuration, builds and the per-user runtime installation as your ordinary
 
 The normal launcher starts neither an Electron inspector nor client API/UI helpers. It clears inherited `DYLD_INSERT_LIBRARIES`, retains Darling runtime library/framework overrides, supplies an absolute log directory to the launcher, and selects the League product. The log-directory/Chromium argument shim, empty-autofill hook and optional native VPX bridge are no longer injected or built by runtime installation. Existing copies on disk are inactive and may remain. Child-process log-directory rewriting and Chromium feature overrides previously supplied by the shim are removed; client startup without those workarounds needs manual validation. The first-time installer uses `--skip-to-install` and omits the installed client's `--app-root`, avoiding an immediate exit or inaccessible intro screen. The project ships no inspector hooks, client API helpers, input automation or client binary patches. Keep account data, logs and captures private.
 
+## Application-menu diagnostics and recovery options
+
+`scripts/create-desktop-entry.sh` creates an application-menu entry that runs
+`scripts/desktop-run.sh`, preserving the normal launcher behavior and saving
+stdout/stderr in `build/desktop-launch.log` with mode 0600. Logs can contain
+private session details; do not attach raw launcher logs to a public issue.
+Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
+
+`RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
+to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`
+opts in to Hyprland-only recovery of a default-prefix Riot session with no
+visible window; it is off by default. See [troubleshooting](TROUBLESHOOTING.md#riot-exits-and-league-reports-that-it-lost-its-connection)
+for the observed failures, recovery guards and NSURLSession limitations.
+
 ## Updating an existing runtime
 
 `./scripts/update.sh` updates everything after `git pull`: `build.sh`, then the base install, then `install-runtime.sh`. When a pull changes a patch, `prepare.py` finds the earlier version applied in that component (its copy in `build/applied-patches`, or a version from this repository's history), reverts it, and applies the new one. It never resets a repository; if neither version matches, it stops and names the repository with other edits. The steps below update single components instead.

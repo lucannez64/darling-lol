@@ -1,3 +1,25 @@
+diff --git a/include/CFNetwork/NSCFURLSession.h b/include/CFNetwork/NSCFURLSession.h
+index e2326a3..b7489da 100644
+--- a/include/CFNetwork/NSCFURLSession.h
++++ b/include/CFNetwork/NSCFURLSession.h
+@@ -2,7 +2,7 @@
+ #import <Foundation/NSURLSession.h>
+ #import <dispatch/dispatch.h>
+ 
+-@class NSOperationQueue, NSString, __NSCFSessionBridge;
++@class NSOperationQueue, NSString, NSMutableSet, __NSCFSessionBridge;
+ 
+ __attribute__((visibility("hidden")))
+ @interface __NSCFURLSessionConfiguration : NSObject
+@@ -19,6 +19,8 @@ __attribute__((visibility("hidden")))
+     __NSCFSessionBridge *_connectionSession;
+     __NSCFURLSession *_extraRetain;
+     NSOperationQueue *_realDelegateQueue;
++    NSMutableSet *_activeDataTasks;
++    BOOL _invalidationNotified;
+ }
+ 
+ @property(retain) NSOperationQueue *realDelegateQueue; // @synthesize realDelegateQueue=_realDelegateQueue;
 diff --git a/src/Host/CFHost.c b/src/Host/CFHost.c
 index 91c0d0f..d6e3daf 100644
 --- a/src/Host/CFHost.c
@@ -15,3 +37,256 @@ index 91c0d0f..d6e3daf 100644
  			NULL,							// copyDescription
  			NULL,							// equal
  			NULL,							// hash
+diff --git a/src/URL/NSCFURLSession.m b/src/URL/NSCFURLSession.m
+index 95a726b..f5ff824 100644
+--- a/src/URL/NSCFURLSession.m
++++ b/src/URL/NSCFURLSession.m
+@@ -9,6 +9,8 @@
+ 
+ #import <Foundation/NSData.h>
+ #import <Foundation/NSOperation.h>
++#import <Foundation/NSSet.h>
++#import <Foundation/NSArray.h>
+ 
+ @implementation __NSCFURLSessionConfiguration
+ @end
+@@ -20,19 +22,19 @@
+     static dispatch_once_t once = 0L;
+     static NSURLSession *sharedSession = nil;
+     dispatch_once(&once, ^{
+-        sharedSession = (NSURLSession *)[[__NSCFURLSession alloc] initWithConfiguration:(NSURLSessionConfiguration *)[__NSCFURLSessionConfiguration defaultSessionConfiguration] delegate:nil delegateQueue:nil];
++        sharedSession = (NSURLSession *)[[__NSCFURLSession alloc] initWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration] delegate:nil delegateQueue:nil];
+     });
+     return sharedSession;
+ }
+ 
+ + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration
+ {
+-    return (NSURLSession *)[[[self alloc] initWithConfiguration:configuration delegate:nil delegateQueue:nil] autorelease];
++    return (NSURLSession *)[[[__NSCFURLSession alloc] initWithConfiguration:configuration delegate:nil delegateQueue:nil] autorelease];
+ }
+ 
+ + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration delegate:(id <NSURLSessionDelegate>)delegate delegateQueue:(NSOperationQueue *)queue
+ {
+-    return (NSURLSession *)[[[self alloc] initWithConfiguration:configuration delegate:delegate delegateQueue:queue] autorelease];
++    return (NSURLSession *)[[[__NSCFURLSession alloc] initWithConfiguration:configuration delegate:delegate delegateQueue:queue] autorelease];
+ }
+ 
+ + (void)_releaseProcessAssertionForSessionIdentifier:(NSString *)identifier
+@@ -56,12 +58,62 @@
+             return nil;
+         }
+         _nsCFConfig = (__NSCFURLSessionConfiguration *)[configuration retain];
+-        _delegateQueue = [queue retain];
+-        _delegate = delegate;
++        _delegateQueue = queue ? [queue retain] : [[NSOperationQueue alloc] init];
++        if (!queue) [_delegateQueue setMaxConcurrentOperationCount:1];
++        _delegate = [delegate retain];
++        _activeDataTasks = [[NSMutableSet alloc] init];
+     }
+     return self;
+ }
+ 
++- (void)_notifyInvalidationIfReady
++{
++    @synchronized(self) {
++        if (!_invalid || [_activeDataTasks count] || _invalidationNotified) return;
++        _invalidationNotified = YES;
++    }
++    [self.delegateQueue addOperationWithBlock:^{
++        if ([self.delegate respondsToSelector:@selector(URLSession:didBecomeInvalidWithError:)])
++            [self.delegate URLSession:(NSURLSession *)self didBecomeInvalidWithError:nil];
++        [_delegate release];
++        _delegate = nil;
++    }];
++}
++
++- (void)_taskDidComplete:(NSURLSessionTask *)task
++{
++    @synchronized(self) { [_activeDataTasks removeObject:task]; }
++    [self _notifyInvalidationIfReady];
++}
++
++- (void)finishTasksAndInvalidate
++{
++    @synchronized(self) { _invalid = YES; }
++    [self _notifyInvalidationIfReady];
++}
++
++- (void)invalidateAndCancel
++{
++    NSArray *tasks;
++    @synchronized(self) {
++        _invalid = YES;
++        tasks = [[_activeDataTasks allObjects] copy];
++    }
++    for (NSURLSessionTask *task in tasks) [task cancel];
++    [tasks release];
++    [self _notifyInvalidationIfReady];
++}
++
++- (void)dealloc
++{
++    [_nsCFConfig release];
++    [_delegateQueue release];
++    [_delegate release];
++    [_sessionDescription release];
++    [_activeDataTasks release];
++    [super dealloc];
++}
++
+ - (void)delegate_didFinishEventsForBackgroundURLSession
+ {
+     if ([self can_delegate_didFinishEventsForBackgroundURLSession])
+@@ -364,7 +416,13 @@
+ 
+ - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler
+ {
+-    return [[[NSURLSessionDataTask alloc] initWithRequest:request completionHandler:completionHandler] autorelease];
++    @synchronized(self) {
++        if (_invalid) return nil;
++        NSURLSessionDataTask *task = [[[NSURLSessionDataTask alloc] initWithRequest:request completionHandler:completionHandler] autorelease];
++        [task _setSession:self];
++        [_activeDataTasks addObject:task];
++        return task;
++    }
+ }
+ 
+ - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
+@@ -374,9 +432,7 @@
+ 
+ - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler
+ {
+-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+-    [request setHTTPMethod:@"POST"];
+-    return [self dataTaskWithRequest:request completionHandler:completionHandler];
++    return [self dataTaskWithRequest:[NSURLRequest requestWithURL:url] completionHandler:completionHandler];
+ }
+ 
+ - (NSURLSessionDataTask *)dataTaskWithHTTPGetRequest:(NSURL *)url
+diff --git a/src/URL/NSURLSession.m b/src/URL/NSURLSession.m
+index 39367a5..625e88d 100644
+--- a/src/URL/NSURLSession.m
++++ b/src/URL/NSURLSession.m
+@@ -7,6 +7,11 @@
+ 
+ #import <Foundation/NSURLSession.h>
+ #import <objc/runtime.h>
++#import <Foundation/NSURLConnection.h>
++#import <Foundation/NSError.h>
++#import <Foundation/NSURLError.h>
++#import <Foundation/NSData.h>
++#import <dispatch/dispatch.h>
+ 
+ const int64_t NSURLSessionTransferSizeUnknown = -1LL;
+ NSString* const NSURLSessionDownloadTaskResumeData = @"NSURLSessionDownloadTaskResumeData";
+@@ -28,7 +33,108 @@ NSString* const NSURLSessionDownloadTaskResumeData = @"NSURLSessionDownloadTaskR
+ @implementation NSURLSessionTask
+ @end
+ 
+-@implementation NSURLSessionDataTask
++@implementation NSURLSessionDataTask {
++    NSURLRequest *_taskRequest;
++    NSURLResponse *_taskResponse;
++    NSError *_taskError;
++    NSString *_taskDescription;
++    void (^_taskCompletion)(NSData *, NSURLResponse *, NSError *);
++    NSURLSessionTaskState _taskState;
++    NSUInteger _taskIdentifier;
++    int64_t _taskReceived;
++    id _taskSession;
++}
++
++- (id)initWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))handler
++{
++    self = [super init];
++    if (self) {
++        static NSUInteger nextIdentifier;
++        _taskIdentifier = __sync_add_and_fetch(&nextIdentifier, 1);
++        _taskRequest = [request copy];
++        _taskCompletion = [handler copy];
++        _taskState = NSURLSessionTaskStateSuspended;
++    }
++    return self;
++}
++
++- (void)_finishWithData:(NSData *)data response:(NSURLResponse *)response error:(NSError *)error
++{
++    void (^handler)(NSData *, NSURLResponse *, NSError *) = nil;
++    id session = nil;
++    @synchronized(self) {
++        if (_taskState == NSURLSessionTaskStateCompleted)
++            return;
++        _taskState = NSURLSessionTaskStateCompleted;
++        _taskResponse = [response retain];
++        _taskError = [error retain];
++        _taskReceived = [data length];
++        handler = [_taskCompletion copy];
++        [_taskCompletion release];
++        _taskCompletion = nil;
++        session = _taskSession;
++        _taskSession = nil;
++    }
++    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
++        @autoreleasepool {
++            if (handler) handler(data, response, error);
++            [session _taskDidComplete:self];
++        }
++    });
++    [handler release];
++    [session release];
++}
++
++- (void)_setSession:(id)session { _taskSession = [session retain]; }
++
++- (void)resume
++{
++    @synchronized(self) {
++        if (_taskState != NSURLSessionTaskStateSuspended)
++            return;
++        _taskState = NSURLSessionTaskStateRunning;
++    }
++    // Use the existing CFNetwork transport off the caller's thread. The block
++    // keeps the task alive even if the caller releases it immediately.
++    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
++        @autoreleasepool {
++            NSURLResponse *response = nil;
++            NSError *error = nil;
++            NSData *data = [NSURLConnection sendSynchronousRequest:_taskRequest returningResponse:&response error:&error];
++            [self _finishWithData:data response:response error:error];
++        }
++    });
++}
++
++- (void)cancel
++{
++    [self _finishWithData:nil response:nil error:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]];
++}
++
++- (NSUInteger)taskIdentifier { return _taskIdentifier; }
++- (NSURLRequest *)originalRequest { return _taskRequest; }
++- (NSURLRequest *)currentRequest { return _taskRequest; }
++- (NSURLResponse *)response { @synchronized(self) { return _taskResponse; } }
++- (NSError *)error { @synchronized(self) { return _taskError; } }
++- (NSURLSessionTaskState)state { @synchronized(self) { return _taskState; } }
++- (int64_t)countOfBytesReceived { @synchronized(self) { return _taskReceived; } }
++- (NSString *)taskDescription { return _taskDescription; }
++- (void)setTaskDescription:(NSString *)value {
++    NSString *copy = [value copy];
++    [_taskDescription release];
++    _taskDescription = copy;
++}
++- (id)copyWithZone:(NSZone *)zone { return [self retain]; }
++- (void)dealloc
++{
++    [_taskRequest release];
++    [_taskResponse release];
++    [_taskError release];
++    [_taskDescription release];
++    [_taskCompletion release];
++    [_taskSession release];
++    [super dealloc];
++}
+ @end
+ 
+ @implementation NSURLSessionDownloadTask

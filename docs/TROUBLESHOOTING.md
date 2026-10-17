@@ -56,6 +56,73 @@ The installer fetcher no longer treats a missing archive `Info.plist` or the inf
 
 There is also a separate known compatibility gap: native LaunchAgent watch registration can return HTTP 409 after the League install path is accepted, leaving the download idle. A historical inspector hook handles this and interrupted `pending_verify` states in 28 mock cases, but that hook is disabled in normal launches and excluded from the manual workflow. There is no verified runtime-only replacement for that handoff in this snapshot. Do not assume the native permission and launcher fixes resolve every idle Install case, or enable debugger/API automation to work around it.
 
+## Riot exits and League reports that it lost its connection
+
+Check the launcher stderr or `build/desktop-launch.log` when launched through
+the generated application-menu entry. The following Objective-C exceptions
+were observed immediately before RiotClientServices aborted:
+
+```
+-[NSURLSessionDataTask initWithRequest:completionHandler:]: unrecognized selector
+-[NSURLSession finishTasksAndInvalidate]: unrecognized selector
+```
+
+League then reports localhost connection refusal and loses its external-client
+authorization. Restarting temporarily clears the broken session, but does not
+implement the missing methods. The CFNetwork patch now supplies a minimal
+completion-handler data-task implementation, uses the existing NSURLConnection
+transport on a worker, and tracks outstanding tasks while a session finishes
+or cancels. Session factories create the concrete CFNetwork session so its
+delegate-queue storage is not confused with the public class's synthesized
+properties. The URL convenience method also preserves GET rather than forcing POST.
+
+Rebuild and install the base and paired runtime with both clients and the game
+closed. Run the standalone NSURLSession regression in [testing](TESTING.md#nsurlsession-lifecycle-regression).
+This is partial NSURLSession compatibility: in-flight cancellation reports the
+cancellation once but does not interrupt the synchronous transport already in
+progress. Completion handlers use a global worker queue rather than the
+session's delegate queue. Delegate-only data tasks, suspension, background
+sessions, downloads and uploads are not established by these tests.
+
+### Client remains running without a window
+
+New launches can exit with `Client already running, exiting` when a stale Riot
+session has no visible window. After exiting the game and clients, `darling
+shutdown` followed by `scripts/run.sh` recovers this case without deleting game
+files. For a dedicated Riot installation in the default prefix, Hyprland users
+can opt in to automatic recovery:
+
+```sh
+RCLOL_RECOVER_HIDDEN_CLIENT=1 ./scripts/run.sh
+```
+
+The helper requires an owned Riot process in the default prefix and a successful
+Hyprland window query. It preserves a running game, any visible Riot/League
+window, foreign-owned processes and custom prefixes, and takes no action when
+ownership or window information cannot be read. A hidden background client or
+download is restarted when recovery is enabled. Other desktop environments are
+not supported by this helper; recovery is off by default.
+
+### Downloads repeatedly fail with an IPv6 CONNECT_TO error
+
+The bundled downloader was observed retrying CDN chunks with:
+
+```
+Use of IPv6 in *_CONNECT_TO without IPv6 support built-in
+```
+
+The launcher now defaults `RCLOL_CDN_IPV4_ONLY=1`. The Libinfo resolver suppresses
+AAAA queries only for subdomains of `riotcdn.net`, retaining IPv4 DNS rotation,
+TLS and the normal resolver for all other names. It does not pin CDN addresses
+or disable IPv6 on the Linux host. Opt out with:
+
+```sh
+RCLOL_CDN_IPV4_ONLY=0 ./scripts/run.sh
+```
+
+The resolver change requires a rebuilt/installed base runtime. The environment
+flag alone cannot alter an older Libinfo binary.
+
 ## Riot closes after a network lookup is cancelled
 
 Two local crashes were traced to `CFNetwork::_HostCancel` calling `CFRetain(NULL)`.
