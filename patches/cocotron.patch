@@ -4528,7 +4528,7 @@ index bfe3839a..e8c8828f 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..f9dd38cc 100644
+index f4925b66..0296203b 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -23,6 +23,7 @@
@@ -4583,7 +4583,27 @@ index f4925b66..f9dd38cc 100644
      BOOL isPanel = [delegate isKindOfClass: [NSPanel class]];
      if (isPanel && _styleMask & NSDocModalWindowMask)
          _styleMask = NSBorderlessWindowMask;
-@@ -193,8 +222,16 @@ static NSData *makeWindowIcon() {
+@@ -177,7 +206,18 @@ static NSData *makeWindowIcon() {
+ 
+     int screen = DefaultScreen(_display);
+ 
+-    if ((_visualInfo = glXChooseVisual(_display, screen, att)) == NULL) {
++    // Rendering goes through EGL. NVIDIA's glXChooseVisual can return a GLX-only visual that every
++    // eglCreateWindowSurface rejects (EGL_BAD_CONFIG), so prefer the default visual when usable.
++    XVisualInfo visualTemplate;
++    int visualCount = 0;
++    visualTemplate.visualid = XVisualIDFromVisual(DefaultVisual(_display, screen));
++    visualTemplate.screen = screen;
++    _visualInfo = XGetVisualInfo(_display, VisualIDMask | VisualScreenMask, &visualTemplate, &visualCount);
++    if (_visualInfo != NULL && (_visualInfo->class != TrueColor || _visualInfo->depth < 24)) {
++        XFree(_visualInfo);
++        _visualInfo = NULL;
++    }
++    if (_visualInfo == NULL && (_visualInfo = glXChooseVisual(_display, screen, att)) == NULL) {
+         NSLog(@"glXChooseVisual failed at %s %d", __FILE__, __LINE__);
+     }
+ 
+@@ -193,8 +233,16 @@ static NSData *makeWindowIcon() {
  
      XSetWindowAttributes xattr;
      unsigned long xattr_mask;
@@ -4602,7 +4622,7 @@ index f4925b66..f9dd38cc 100644
      xattr_mask = CWOverrideRedirect | CWColormap;
      xattr.colormap = cmap;
  
-@@ -206,6 +243,12 @@ static NSData *makeWindowIcon() {
+@@ -206,6 +254,12 @@ static NSData *makeWindowIcon() {
              (_visualInfo == NULL) ? CopyFromParent : _visualInfo->visual,
              xattr_mask, &xattr);
  
@@ -4615,7 +4635,7 @@ index f4925b66..f9dd38cc 100644
      [self syncDelegateProperties];
  
      Atom atm = XInternAtom(_display, "WM_DELETE_WINDOW", False);
-@@ -217,6 +260,15 @@ static NSData *makeWindowIcon() {
+@@ -217,6 +271,15 @@ static NSData *makeWindowIcon() {
                              .res_class = (char *) name};
      XSetClassHint(_display, _window, &classHint);
  
@@ -4631,7 +4651,7 @@ index f4925b66..f9dd38cc 100644
      XSetWindowBackgroundPixmap(_display, _window, None);
  
      _isModal = [delegate isSheet] || [NSApp modalWindow] == delegate;
-@@ -266,6 +318,13 @@ static NSData *makeWindowIcon() {
+@@ -266,6 +329,13 @@ static NSData *makeWindowIcon() {
  
      [self setWindowIcon];
  
@@ -4645,7 +4665,7 @@ index f4925b66..f9dd38cc 100644
      return self;
  }
  
-@@ -279,24 +338,30 @@ static NSData *makeWindowIcon() {
+@@ -279,24 +349,30 @@ static NSData *makeWindowIcon() {
      return _styleMask;
  }
  
@@ -4692,7 +4712,7 @@ index f4925b66..f9dd38cc 100644
      if (!_mapped) {
          long states[2];
          int states_cnt = 0;
-@@ -304,7 +369,7 @@ static NSData *makeWindowIcon() {
+@@ -304,7 +380,7 @@ static NSData *makeWindowIcon() {
              states[states_cnt++] =
                      (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
          }
@@ -4701,7 +4721,7 @@ index f4925b66..f9dd38cc 100644
              states[states_cnt++] = (long) XInternAtom(
                      _display, "_NET_WM_STATE_FULLSCREEN", False);
          }
-@@ -312,14 +377,13 @@ static NSData *makeWindowIcon() {
+@@ -312,14 +388,13 @@ static NSData *makeWindowIcon() {
                          XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
                          32, PropModeReplace, (const unsigned char *) states,
                          states_cnt);
@@ -4718,7 +4738,7 @@ index f4925b66..f9dd38cc 100644
          event.data.l[1] =
                  (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
          event.data.l[3] = 1;
-@@ -327,6 +391,35 @@ static NSData *makeWindowIcon() {
+@@ -327,6 +402,35 @@ static NSData *makeWindowIcon() {
                     SubstructureNotifyMask | SubstructureRedirectMask,
                     (XEvent *) &event);
      }
@@ -4754,7 +4774,7 @@ index f4925b66..f9dd38cc 100644
  }
  
  - (void) setStyleMask: (NSUInteger) mask {
-@@ -338,7 +431,6 @@ static NSData *makeWindowIcon() {
+@@ -338,7 +442,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -4762,7 +4782,7 @@ index f4925b66..f9dd38cc 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -358,6 +450,7 @@ static NSData *makeWindowIcon() {
+@@ -358,6 +461,7 @@ static NSData *makeWindowIcon() {
      if (!_mapped) {
          XMapWindow(_display, _window);
          _mapped = YES;
@@ -4770,7 +4790,7 @@ index f4925b66..f9dd38cc 100644
      }
  }
  
-@@ -377,15 +470,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +481,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -4803,7 +4823,7 @@ index f4925b66..f9dd38cc 100644
      // TODO: background color
  }
  
-@@ -393,6 +498,28 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +509,28 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -4832,7 +4852,7 @@ index f4925b66..f9dd38cc 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +548,392 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +559,392 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -5225,7 +5245,7 @@ index f4925b66..f9dd38cc 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -470,14 +983,32 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +994,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -5259,7 +5279,7 @@ index f4925b66..f9dd38cc 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1019,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1030,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -5285,7 +5305,7 @@ index f4925b66..f9dd38cc 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -543,6 +1093,21 @@ static NSData *makeWindowIcon() {
+@@ -543,6 +1104,21 @@ static NSData *makeWindowIcon() {
  - (void) makeKey {
      [self ensureMapped];
      XRaiseWindow(_display, _window);
@@ -5307,7 +5327,7 @@ index f4925b66..f9dd38cc 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1124,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1135,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -5337,7 +5357,7 @@ index f4925b66..f9dd38cc 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1202,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1213,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -5350,7 +5370,7 @@ index f4925b66..f9dd38cc 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1245,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1256,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -5359,7 +5379,7 @@ index f4925b66..f9dd38cc 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1259,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1270,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -5367,7 +5387,7 @@ index f4925b66..f9dd38cc 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,14 +1304,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,14 +1315,6 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
@@ -8703,7 +8723,7 @@ index 5dcac115..5de4f03f 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c56..7f9125e3 100644
+index 5dce8c56..d325ba5f 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
 @@ -1,47 +1,69 @@
@@ -8870,7 +8890,7 @@ index 5dce8c56..7f9125e3 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,7 +159,22 @@
+@@ -93,8 +159,27 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
@@ -8891,9 +8911,14 @@ index 5dce8c56..7f9125e3 100644
  - (void) renderLayer: (CALayer *) layer {
 +    CFTimeInterval renderLayerStart = CACurrentMediaTime();
      CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
++    // CAMetalLayer first makes this context current without a surface, which leaves GL_DRAW_BUFFER
++    // at GL_NONE on NVIDIA even once the window is attached (Mesa resets it).
++    glDrawBuffer(GL_BACK);
++    glReadBuffer(GL_BACK);
  
      glEnable(GL_DEPTH_TEST);
-@@ -118,27 +199,63 @@
+     glShadeModel(GL_SMOOTH);
+@@ -118,27 +203,63 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -8962,7 +8987,7 @@ index 5dce8c56..7f9125e3 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +264,7 @@
+@@ -147,7 +268,7 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -8971,7 +8996,7 @@ index 5dce8c56..7f9125e3 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +272,10 @@
+@@ -155,7 +276,10 @@
  }
  
  - (void) flush {
