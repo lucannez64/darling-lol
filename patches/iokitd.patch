@@ -663,6 +663,7 @@ index 91d11a1..37551e1 100644
 -}
 diff --git a/src/IOPlatformExpertDevice.h b/src/IOPlatformExpertDevice.h
 new file mode 100644
+index 0000000..38ad635
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.h
 @@ -0,0 +1,21 @@
@@ -673,8 +674,8 @@ new file mode 100644
 +#include "ServiceRegistry.h"
 +
 +// The root platform device (what IOServiceMatching("IOPlatformExpertDevice") finds on macOS).
-+// Its properties describe the host machine as reported by the Linux kernel's DMI tables.
-+// Identifiers the host does not expose to us (serial number, UUID) are left out.
++// Its model strings name a fixed MacBookPro16,1. IOPlatformUUID and IOPlatformSerialNumber are
++// derived from the host machine-id, so they differ per host and stay stable across reinstalls.
 +class IOPlatformExpertDevice : public IOService
 +{
 +public:
@@ -689,14 +690,19 @@ new file mode 100644
 +#endif
 diff --git a/src/IOPlatformExpertDevice.mm b/src/IOPlatformExpertDevice.mm
 new file mode 100644
+index 0000000..e330569
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.mm
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,93 @@
 +#include "IOPlatformExpertDevice.h"
 +#import <Foundation/NSString.h>
 +#import <Foundation/NSData.h>
 +#import <Foundation/NSArray.h>
 +#import <Foundation/NSCharacterSet.h>
++#import <Foundation/NSDictionary.h>
++#include <CommonCrypto/CommonDigest.h>
++#include <uuid/uuid.h>
++#include <unistd.h>
 +#include <cstring>
 +
 +// Platform expert strings are NUL-terminated data
@@ -719,17 +725,52 @@ new file mode 100644
 +	};
 +}
 +
++// Per-host identifiers, stable like a real Mac's: a SHA-256 of the host machine-id and a fixed
++// string, so the raw machine-id (which machine-id(5) says not to expose) never reaches apps.
++// The serial's "DARLING-" form is longer than any Apple serial and cannot match a real Mac.
++static bool hostIdentifiers(NSString** uuid, NSString** serial)
++{
++	static const char app[] = "darling-lol IOPlatformExpertDevice";
++	uuid_t machineID;
++	struct timespec wait = { 0, 0 };
++	if (gethostuuid(machineID, &wait) != 0)
++		return false;
++
++	unsigned char input[sizeof(machineID) + sizeof(app)];
++	std::memcpy(input, machineID, sizeof(machineID));
++	std::memcpy(input + sizeof(machineID), app, sizeof(app));
++	unsigned char hash[CC_SHA256_DIGEST_LENGTH];
++	CC_SHA256(input, sizeof(input), hash);
++
++	hash[6] = (hash[6] & 0x0f) | 0x40; // version 4
++	hash[8] = (hash[8] & 0x3f) | 0x80; // RFC 4122 variant
++	uuid_string_t text;
++	uuid_unparse_upper(hash, text);
++	// Owned (not autoreleased): the caller keeps them in statics for the daemon's lifetime
++	*uuid = [[NSString alloc] initWithUTF8String: text];
++	*serial = [[NSString alloc] initWithFormat: @"DARLING-%02X%02X%02X%02X", hash[16], hash[17], hash[18], hash[19]];
++	return true;
++}
++
 +NSDictionary* IOPlatformExpertDevice::getProperties()
 +{
-+	// Fixed MacBookPro16,1 identity; the Linux DMI values describe the host hardware, not the Mac we emulate
-+	return @{
++	// MacBookPro16,1 model strings; the Linux DMI values describe the host hardware, not the Mac we emulate
++	NSMutableDictionary* properties = [NSMutableDictionary dictionaryWithDictionary: @{
 +		@"manufacturer": dataForString(@"Apple Inc."),
 +		@"model": dataForString(@"MacBookPro16,1"),
 +		@"product-name": dataForString(@"MacBookPro16,1"),
 +		@"board-id": dataForString(@"Mac-E1008331FDC96864"),
-+		@"IOPlatformUUID": @"6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B",
-+		@"IOPlatformSerialNumber": @"C02ZL0GVMD6N",
-+	};
++	}];
++
++	static NSString* uuid;
++	static NSString* serial;
++	static bool known = hostIdentifiers(&uuid, &serial);
++	if (known)
++	{
++		properties[@"IOPlatformUUID"] = uuid;
++		properties[@"IOPlatformSerialNumber"] = serial;
++	}
++	return properties;
 +}
 +
 +bool IOPlatformExpertDevice::conformsTo(const char* className)
