@@ -22,9 +22,9 @@ def check():
         stub = f'''#!{sys.executable}
 import json, os, sys
 record = {{"command": os.path.basename(sys.argv[0]), "args": sys.argv[1:]}}
-if record["command"] == "darling":
+if record["command"] in ("darling", "python3"):
     record["flags"] = {{key: os.environ.get(key) for key in
-        ("RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT", "RCLOL_UX_ARG1", "RCLOL_APP_ARGS", "RCLOL_APP_ARG2", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY")}}
+        ("RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT", "RCLOL_UX_ARG1", "RCLOL_APP_ARGS", "RCLOL_APP_ARG2", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY", "MANGOHUD", "DISABLE_MANGOHUD")}}
 with open({str(log)!r}, "a") as output:
     output.write(json.dumps(record) + "\\n")
 '''
@@ -46,6 +46,8 @@ with open({str(log)!r}, "a") as output:
         env["DYLD_INSERT_LIBRARIES"] = "/Users/offline-check/zzlogdir.dylib:/tmp/inherited.dylib"
         env["RCLOL_APP_ARGS"] = "--inherited-shim-argument"
         env["RCLOL_APP_ARG2"] = "--inherited-shim-argument-2"
+        env["MANGOHUD"] = "1"
+        env.pop("DISABLE_MANGOHUD", None)
         env["RCLOL_NATIVE_VPX"] = "1"
         env["RCLOL_LEAGUE_UX_TUNING"] = "1"
         # Inherited legacy settings must not re-enable inspection or unlimited frames.
@@ -69,6 +71,9 @@ with open({str(log)!r}, "a") as output:
         ], "unexpected automatic helper"
         launches = [r for r in records if r["command"] == "darling"]
         assert len(launches) == 1, "unexpected launch count"
+        for record in records:
+            assert record["flags"]["MANGOHUD"] is None, "inherited MangoHud activation survived"
+            assert record["flags"]["DISABLE_MANGOHUD"] == "1", "MangoHud not disabled before a runtime helper"
         launch = launches[0]
         assert all(launch["flags"][key] is None for key in (
             "RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT"
@@ -84,18 +89,23 @@ with open({str(log)!r}, "a") as output:
         assert "--log-dir=/Users/offline-check/Library/Logs/Riot Games/Riot Client" in launch["args"], "absolute log directory lost"
         # An inherited injection must also be absent for first-time installation.
         env["RIOT_LAUNCHER_HOST"] = str(folder / "Install Riot.app/Contents/MacOS/RiotClientServices")
+        env["DISABLE_MANGOHUD"] = "0"  # An inherited value cannot override launcher policy.
         subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
         install = json.loads(log.read_text().splitlines()[-1])
         assert install["args"][0] == env["RIOT_LAUNCHER_HOST"]
         assert "--skip-to-install" in install["args"]
         assert not any(arg.startswith("--app-root=") for arg in install["args"])
         assert install["flags"]["DYLD_INSERT_LIBRARIES"] is None
+        assert install["flags"]["MANGOHUD"] is None
+        assert install["flags"]["DISABLE_MANGOHUD"] == "1"
         env.pop("RIOT_LAUNCHER_HOST")
         env.pop("DYLD_INSERT_LIBRARIES")
         subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
         clean = json.loads(log.read_text().splitlines()[-1])
         assert clean["flags"]["DYLD_INSERT_LIBRARIES"] is None
-        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved")
+        assert clean["flags"]["MANGOHUD"] is None
+        assert clean["flags"]["DISABLE_MANGOHUD"] == "1"
+        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent mangohud=disabled runtime=preserved")
 
 
 if __name__ == "__main__":

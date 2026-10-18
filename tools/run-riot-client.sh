@@ -2,6 +2,11 @@
 # Launch Riot Client using the Darling runtime, without library injection.
 # Darling supplies Xlib Display pointers to EGL, so select X11 explicitly.
 set -eu
+# Native MangoHud uses the guest PID against the host /proc view and can abort
+# in GPU_fdinfo::find_fd (issue #38). Disable inherited implicit activation
+# before any helper can start Darling, including first-time installation.
+unset MANGOHUD
+export DISABLE_MANGOHUD=1
 # Native guest crashes created large system core files and exhausted this disk.
 # Address-only diagnostics suffice; bound this runner and its new namespace.
 if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then

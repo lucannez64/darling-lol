@@ -422,3 +422,36 @@ Recovery requires every matching client to be at least 60 seconds old and a
 complete Hyprland window record (`class`, `title`, `mapped`, `hidden`). A second
 process scan after window inspection must find the same client identities and
 no game. Missing information or shutdown failure leaves normal launch in charge.
+
+## Installer aborts on `/proc/<pid>/fdinfo`
+
+[Issue #38](https://github.com/lucannez64/darling-lol/issues/38) reports an
+uncaught `ghc::filesystem::filesystem_error` with `Permission denied` on
+`/proc/<pid>/fdinfo`. `ghc::filesystem` is a C++ filesystem library, not evidence
+that the Riot installer is written in Haskell.
+
+An independent guest/native Vulkan probe reproduced this exact exception with
+MangoHud 0.8.4 enabled on 2026-10-18. MangoHud's `GPU_fdinfo::find_fd()` builds
+`/proc/<getpid()>/fdinfo` and uses a throwing directory iterator. Inside Darling,
+the native library's PID is in the guest PID namespace while its native `/proc`
+view can still refer to host processes: the probe's native PID 35 resolved to an
+inaccessible host process. The same probe completed Vulkan instance, device and
+swapchain creation with MangoHud disabled. This does not establish the cause of
+every installer abort; confirmation from the original reporter remains pending.
+
+The normal launcher now unsets `MANGOHUD` and exports `DISABLE_MANGOHUD=1` before
+runtime helpers start, including first-time installation. This disables inherited
+implicit MangoHud activation for the launched session without changing the host
+configuration. Do not wrap the launcher in `mangohud` or explicitly force its
+Vulkan layer. Updating these launcher scripts needs no Darling rebuild. For an
+older checkout, use:
+
+```sh
+env -u MANGOHUD DISABLE_MANGOHUD=1 ./scripts/installer.sh euw
+```
+
+Do not run the installer as root or change `/proc` permissions. If it still
+fails, include the exception and whether a host overlay was enabled; redact
+account tokens from logs.
+
+Upstream source: [MangoHud 0.8.4 fdinfo scan](https://github.com/flightlessmango/MangoHud/blob/v0.8.4/src/gpu_fdinfo.cpp#L9).
