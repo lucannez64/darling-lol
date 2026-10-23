@@ -6200,3 +6200,83 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root = prefix_path;
  								ctxt->current_root_len = prefix_path_len;
  							}
+
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c
+index f890ab2..8969577 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c
+@@ -2,12 +2,29 @@
+ 
+ #include <sys/errno.h>
+ #include <sys/socket.h>
+-#include <ifaddrs.h>
+ #include <net/if.h>
++#include <net/if_media.h>
+ #include <netinet/in.h>
+ #include <sys/sockio.h>
+ #include <netinet6/in6_var.h>
+ 
++#include <darling/emulation/xnu_syscall/bsd/impl/ioctl/ioctl.h>
++
++extern int strcmp(const char* a, const char* b);
++extern int strncmp(const char* a, const char* b, size_t n);
++extern char* strncpy(char* destination, const char* source, size_t length);
++
++#define LINUX_SIOCGIFFLAGS 0x8913
++#define LINUX_IFNAMSIZ 16
++
++struct linux_ifreq {
++	char lifr_name[LINUX_IFNAMSIZ];
++	union {
++		short lifr_flags;
++		char lifr_pad[24];
++	};
++};
++
+ int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
+ {
+ 	switch (cmd)
+@@ -19,6 +36,43 @@ int handle_socket(int fd, unsigned int cmd, void* arg, int* retval)
+ 		case SIOCAIFADDR_IN6: // set IPv6 address
+ 			*retval = -ENOTSUP;
+ 			return IOCTL_HANDLED;
++		case SIOCGIFMEDIA:
++#ifdef SIOCGIFXMEDIA
++		case SIOCGIFXMEDIA:
++#endif
++		{
++			struct ifmediareq* ifmr = (struct ifmediareq*) arg;
++			struct linux_ifreq ifr;
++			int status;
++
++			if (ifmr == NULL)
++			{
++				*retval = -EINVAL;
++				return IOCTL_HANDLED;
++			}
++
++			ifr.lifr_name[LINUX_IFNAMSIZ - 1] = '\0';
++			strncpy(ifr.lifr_name, ifmr->ifm_name, LINUX_IFNAMSIZ - 1);
++			status = __real_ioctl(fd, LINUX_SIOCGIFFLAGS, &ifr);
++			if (status < 0)
++			{
++				*retval = status;
++				return IOCTL_HANDLED;
++			}
++
++			if (strncmp(ifmr->ifm_name, "wl", 2) == 0)
++				ifmr->ifm_current = IFM_IEEE80211 | IFM_AUTO;
++			else
++				ifmr->ifm_current = IFM_ETHER | IFM_AUTO;
++			ifmr->ifm_mask = 0;
++			ifmr->ifm_status = ((ifr.lifr_flags & IFF_UP) && (ifr.lifr_flags & IFF_RUNNING))
++					? (IFM_AVALID | IFM_ACTIVE) : IFM_AVALID;
++			ifmr->ifm_active = ifmr->ifm_current;
++			ifmr->ifm_count = 0;
++			ifmr->ifm_ulist = NULL;
++			*retval = 0;
++			return IOCTL_HANDLED;
++		}
+ 	}
+ 	return IOCTL_PASS;
+ }
