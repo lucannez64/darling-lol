@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 768 768" width="768" height="768" role="img" aria-labelledby="title desc">
+  <title id="title">Darling-lol: capa de compatibilidad no oficial</title>
+  <desc id="desc">Riot instala el cliente macOS. Darling lo ejecuta en Linux. El proyecto no redistribuye binarios ni assets de Riot, no elude DRM ni anti-cheat y el uso puede conllevar sanciones de cuenta.</desc>
+  <g transform="scale(1.5)">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f7189"/>
+    </marker>
+  </defs>
+
+  <rect width="768" height="768" rx="24" fill="url(#bg)"/>
+  <rect x="1" y="1" width="510" height="510" rx="23" fill="none" stroke="#22324a" stroke-width="2"/>
+
+  <!-- Reused project mark: the shapes are the same as darling-lol.svg. -->
+  <g transform="translate(28 22) scale(0.72)" aria-label="Darling Launcher">
+    <rect x="8" y="8" width="112" height="112" rx="26" fill="#0f172a"/>
+    <path fill-rule="evenodd" fill="#2dd4bf" d="M38 30h20c21 0 34 15 34 34s-13 34-34 34H38V30zm18 18v32h2c9 0 16-7 16-16s-7-16-16-16h-2z"/>
+    <rect x="30" y="90" width="68" height="8" rx="4" fill="#818cf8"/>
+  </g>
+
+  <text x="126" y="55" fill="#f8fafc" font-family="DejaVu Sans, sans-serif" font-size="25" font-weight="700">Darling-lol</text>
+  <text x="126" y="78" fill="#9fb0c7" font-family="DejaVu Sans, sans-serif" font-size="11">Unofficial compatibility layer</text>
+
+  <rect x="382" y="30" width="102" height="27" rx="13.5" fill="#2b210d" stroke="#e7c66b" stroke-width="1"/>
+  <text x="433" y="47.5" text-anchor="middle" fill="#e7c66b" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="700" letter-spacing="1.2">NOT OFFICIAL</text>
+
+  <text x="28" y="118" fill="#2dd4bf" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="700" letter-spacing="1.8">HOW IT WORKS</text>
+
+  <rect x="28" y="128" width="456" height="184" rx="16" fill="#111b2c" stroke="#26364d" stroke-width="1"/>
+
+  <!-- Riot installer -->
+  <rect x="44" y="148" width="94" height="74" rx="11" fill="#17243a" stroke="#30445f"/>
+  <path d="M88 160v20m0 0-8-8m8 8 8-8M74 188h28" fill="none" stroke="#818cf8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="91" y="207" text-anchor="middle" fill="#dbe7f6" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="600">Riot</text>
+  <text x="91" y="220" text-anchor="middle" fill="#8da1ba" font-family="DejaVu Sans, sans-serif" font-size="8">official installer</text>
+
+  <path d="M143 185h19" stroke="#5f7189" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- macOS client -->
+  <rect x="168" y="148" width="94" height="74" rx="11" fill="#17243a" stroke="#30445f"/>
+  <rect x="188" y="154" width="54" height="31" rx="4" fill="none" stroke="#2dd4bf" stroke-width="2"/>
+  <path d="M188 190h54" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round"/>
+  <text x="215" y="207" text-anchor="middle" fill="#dbe7f6" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="600">League</text>
+  <text x="215" y="220" text-anchor="middle" fill="#8da1ba" font-family="DejaVu Sans, sans-serif" font-size="8">macOS client</text>
+
+  <path d="M267 185h19" stroke="#5f7189" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Darling -->
+  <rect x="292" y="148" width="94" height="74" rx="11" fill="#17243a" stroke="#30445f"/>
+  <rect x="315" y="160" width="48" height="33" rx="6" fill="none" stroke="#e7c66b" stroke-width="2"/>
+  <path d="M323 170h32M323 178h20" stroke="#e7c66b" stroke-width="2" stroke-linecap="round"/>
+  <text x="339" y="207" text-anchor="middle" fill="#dbe7f6" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="600">Darling</text>
+  <text x="339" y="220" text-anchor="middle" fill="#8da1ba" font-family="DejaVu Sans, sans-serif" font-size="8">runtime</text>
+
+  <path d="M391 185h19" stroke="#5f7189" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Linux -->
+  <rect x="416" y="148" width="52" height="74" rx="11" fill="#17243a" stroke="#30445f"/>
+  <text x="442" y="184" text-anchor="middle" fill="#2dd4bf" font-family="DejaVu Sans, sans-serif" font-size="18" font-weight="700">&gt;_</text>
+  <text x="442" y="207" text-anchor="middle" fill="#dbe7f6" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="600">Linux</text>
+  <text x="442" y="219" text-anchor="middle" fill="#8da1ba" font-family="DejaVu Sans, sans-serif" font-size="7">X11 / Wayland</text>
+
+  <text x="44" y="249" fill="#9fb0c7" font-family="DejaVu Sans, sans-serif" font-size="9">Riot installs the client. Darling runs it. This project does not redistribute Riot content.</text>
+  <rect x="44" y="263" width="424" height="1" fill="#26364d"/>
+  <text x="44" y="286" fill="#e7c66b" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="600">The official client handles authentication and updates.</text>
+
+  <text x="28" y="337" fill="#2dd4bf" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="700" letter-spacing="1.8">PROJECT BOUNDARIES</text>
+
+  <rect x="28" y="347" width="456" height="138" rx="16" fill="#111b2c" stroke="#26364d" stroke-width="1"/>
+
+  <circle cx="48" cy="371" r="4" fill="#2dd4bf"/>
+  <text x="60" y="375" fill="#dbe7f6" font-family="DejaVu Sans, sans-serif" font-size="10">No Riot binaries or game assets.</text>
+
+  <circle cx="48" cy="397" r="4" fill="#818cf8"/>
+  <text x="60" y="401" fill="#dbe7f6" font-family="DejaVu Sans, sans-serif" font-size="10">No DRM, anti-cheat or telemetry bypass.</text>
+
+  <circle cx="48" cy="423" r="4" fill="#e7c66b"/>
+  <text x="60" y="427" fill="#dbe7f6" font-family="DejaVu Sans, sans-serif" font-size="10">Riot does not support this environment.</text>
+
+  <rect x="44" y="444" width="424" height="29" rx="8" fill="#2b210d" stroke="#5b4b1f"/>
+  <text x="56" y="462" fill="#f2d98a" font-family="DejaVu Sans, sans-serif" font-size="9">May violate the Terms of Service; account sanctions are possible.</text>
+
+  <text x="28" y="505" fill="#718198" font-family="DejaVu Sans, sans-serif" font-size="7">Unofficial project, not affiliated with Riot Games · Source and license in the repository</text>
+  </g>
+</svg>

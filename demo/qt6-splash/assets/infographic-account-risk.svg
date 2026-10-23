@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 768 768" width="768" height="768" role="img" aria-labelledby="title desc">
+  <title id="title">Darling-lol account suspension risk</title>
+  <desc id="desc">Riot does not support this environment. Third-party compatibility tools may violate the Terms of Service. Users have reported temporary suspensions, including before playing a match. There is no guarantee of account safety.</desc>
+  <g transform="scale(1.5)">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#17121a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="768" height="768" rx="24" fill="url(#bg)"/>
+  <rect x="1" y="1" width="510" height="510" rx="23" fill="none" stroke="#38283a" stroke-width="2"/>
+
+  <g transform="translate(28 22) scale(0.58)" aria-label="Darling Launcher">
+    <rect x="8" y="8" width="112" height="112" rx="26" fill="#0f172a"/>
+    <path fill-rule="evenodd" fill="#2dd4bf" d="M38 30h20c21 0 34 15 34 34s-13 34-34 34H38V30zm18 18v32h2c9 0 16-7 16-16s-7-16-16-16h-2z"/>
+    <rect x="30" y="90" width="68" height="8" rx="4" fill="#818cf8"/>
+  </g>
+
+  <text x="112" y="53" fill="#f8fafc" font-family="DejaVu Sans, sans-serif" font-size="23" font-weight="700">Darling-lol</text>
+  <text x="112" y="73" fill="#b7a5b2" font-family="DejaVu Sans, sans-serif" font-size="10">Account and platform risk</text>
+
+  <rect x="378" y="28" width="106" height="27" rx="13.5" fill="#3b1719" stroke="#f87171" stroke-width="1"/>
+  <text x="431" y="45.5" text-anchor="middle" fill="#fca5a5" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="700" letter-spacing="1.1">ACCOUNT RISK</text>
+
+  <rect x="28" y="112" width="456" height="194" rx="16" fill="#1d1519" stroke="#5c3138" stroke-width="1"/>
+
+  <path d="M92 138 L132 207 H52 Z" fill="#3a2410" stroke="#fbbf24" stroke-width="3" stroke-linejoin="round"/>
+  <text x="92" y="195" text-anchor="middle" fill="#fbbf24" font-family="DejaVu Sans, sans-serif" font-size="38" font-weight="700">!</text>
+
+  <text x="152" y="151" fill="#fca5a5" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="700" letter-spacing="1.4">SUSPENSION RISK</text>
+  <text x="152" y="174" fill="#f8fafc" font-family="DejaVu Sans, sans-serif" font-size="14" font-weight="700">Riot does not support this environment.</text>
+
+  <circle cx="154" cy="198" r="3" fill="#fbbf24"/>
+  <text x="164" y="202" fill="#dbcbd4" font-family="DejaVu Sans, sans-serif" font-size="10">Third-party compatibility tools may violate the Terms of Service.</text>
+
+  <circle cx="154" cy="222" r="3" fill="#fbbf24"/>
+  <text x="164" y="226" fill="#dbcbd4" font-family="DejaVu Sans, sans-serif" font-size="10">Users have reported temporary suspensions,</text>
+  <text x="164" y="240" fill="#dbcbd4" font-family="DejaVu Sans, sans-serif" font-size="10">including before playing a match.</text>
+
+  <circle cx="154" cy="260" r="3" fill="#f87171"/>
+  <text x="164" y="264" fill="#dbcbd4" font-family="DejaVu Sans, sans-serif" font-size="10">No guarantee of account safety. Use at your own risk.</text>
+
+  <text x="152" y="288" fill="#a58b98" font-family="DejaVu Sans, sans-serif" font-size="8">The project does not provide a way to evade detection, DRM or anti-cheat.</text>
+
+  <rect x="28" y="326" width="216" height="96" rx="13" fill="#151c2b" stroke="#2c3c55"/>
+  <rect x="44" y="342" width="34" height="29" rx="5" fill="none" stroke="#fbbf24" stroke-width="2"/>
+  <path d="M44 349h34M55 338v8M67 338v8" stroke="#fbbf24" stroke-width="2" stroke-linecap="round"/>
+  <text x="92" y="353" fill="#f8fafc" font-family="DejaVu Sans, sans-serif" font-size="11" font-weight="700">REPORTED</text>
+  <text x="92" y="369" fill="#d8c7d0" font-family="DejaVu Sans, sans-serif" font-size="9">temporary suspensions</text>
+  <text x="44" y="405" fill="#fbbf24" font-family="DejaVu Sans, sans-serif" font-size="20" font-weight="700">3 days</text>
+  <text x="118" y="405" fill="#9e8794" font-family="DejaVu Sans, sans-serif" font-size="8">in public reports</text>
+
+  <rect x="268" y="326" width="216" height="96" rx="13" fill="#151c2b" stroke="#2c3c55"/>
+  <path d="M288 342l15-8 15 8v19c0 12-9 19-15 22-6-3-15-10-15-22z" fill="none" stroke="#f87171" stroke-width="2"/>
+  <path d="M296 349l14 15m0-15-14 15" stroke="#f87171" stroke-width="2" stroke-linecap="round"/>
+  <text x="328" y="353" fill="#f8fafc" font-family="DejaVu Sans, sans-serif" font-size="11" font-weight="700">NO GUARANTEE</text>
+  <text x="328" y="369" fill="#d8c7d0" font-family="DejaVu Sans, sans-serif" font-size="9">account safety</text>
+  <text x="288" y="405" fill="#fca5a5" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="700">Use at your own risk.</text>
+
+  <rect x="28" y="438" width="456" height="36" rx="9" fill="#241b10" stroke="#5b4b1f"/>
+  <text x="42" y="461" fill="#f2d98a" font-family="DejaVu Sans, sans-serif" font-size="9">This is not legal advice. Review Riot's Terms of Service before using this project.</text>
+
+  <text x="28" y="501" fill="#718198" font-family="DejaVu Sans, sans-serif" font-size="7">Unofficial project, not affiliated with Riot Games · No DRM, anti-cheat or telemetry bypass</text>
+  </g>
+</svg>
