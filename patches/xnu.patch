@@ -4140,7 +4140,7 @@ index c3c33f9..831e8cb 100644
 +{
 +	char argv0[512];
 +	const char* basename = argv0;
-+	const char* clients[] = { "LeagueClient", "RiotClientServices" };
++	const char* clients[] = { "LeagueClient", "LeagueClientUx", "RiotClientServices" }; /* Ux: CEF browser main thread, issue #82 */
 +	long fd, length;
 +	unsigned i, j;
 +	if (LINUX_SYSCALL(__NR_access, "/tmp/rclol-no-select-backoff", 0) == 0)
