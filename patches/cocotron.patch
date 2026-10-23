@@ -10019,12 +10019,13 @@ diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
 index d6f86b31..687f05d5 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
-@@ -31,6 +31,13 @@
+@@ -31,6 +31,14 @@
  #include <OpenGL/glext.h>
  #include <indium/indium.private.hpp>
  
 +#include <atomic>
 +#include <cstdio>
++#include <cstdlib>
 +#include <cstring>
 +#include <mutex>
 +#include <string>
@@ -10033,7 +10034,7 @@ index d6f86b31..687f05d5 100644
  namespace DynamicVK = Indium::DynamicVK;
  
  static void reportGLErrors(void) {
-@@ -50,8 +57,111 @@ static void reportGLErrors(void) {
+@@ -50,8 +57,114 @@
  namespace Indium::DynamicVK {
  	static DynamicFunction<PFN_vkGetSemaphoreFdKHR> vkGetSemaphoreFdKHR("vkGetSemaphoreFdKHR");
  	static DynamicFunction<PFN_vkGetMemoryFdKHR> vkGetMemoryFdKHR("vkGetMemoryFdKHR");
@@ -10057,8 +10058,11 @@ index d6f86b31..687f05d5 100644
 +	}
 +}
 +
-+// Same line format as Indium's device log.
++// Same line format as Indium's device log; off unless DARLING_METAL_DEVICE_LOG is
++// set, so the guest-readable file does not name the host GPU by default.
 +static void appendDeviceLog(const std::string& line) {
++	const char* enabled = getenv("DARLING_METAL_DEVICE_LOG");
++	if (!enabled || !*enabled || (enabled[0] == '0' && !enabled[1])) return;
 +	if (FILE* log = fopen("/tmp/metal-device.log", "a")) {
 +		fprintf(log, "[MetalDevice] pid=%d %s\n", getpid(), line.c_str());
 +		fclose(log);

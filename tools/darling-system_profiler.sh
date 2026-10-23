@@ -35,7 +35,11 @@ pci_name() { # vendor device (hex without 0x) -> "Vendor Model"
  done
 }
 
-displays() { # one line per GPU: vendor|device|vram MB or empty|name
+displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
+ # Same switch as the Metal device name: a Mac profile presents the MacBookPro16,1
+ # discrete GPU instead of the host card, so system_profiler and Metal agree.
+ mac_spoof=0
+ case "${DARLING_METAL_MAC_GPU_NAME:-}" in '') ;; 0) ;; *) mac_spoof=1;; esac
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
   [ -r "$card/device/vendor" ] || continue
   vendor=$(sed 's/^0x//' "$card/device/vendor"); device=$(sed 's/^0x//' "$card/device/device")
@@ -44,7 +48,23 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name
    vram=$(awk '{ printf "%d", $1 / 1048576 }' "$card/device/mem_info_vram_total")
   fi
   name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
-  echo "$vendor|$device|$vram|$name"
+  bus=builtin
+  if [ "$mac_spoof" = 1 ]; then
+   case "$vendor" in
+    1002|10de) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
+               vram=${DARLING_METAL_VRAM_MB:-4096}
+               case "$vram" in ''|*[!0-9]*) vram=4096;; esac
+               # Keep the numeric test overflow-safe: a long digit string must
+               # fall back before the shell compares it.
+               if [ "${#vram}" -gt 7 ] || [ "$vram" -eq 0 ] || [ "$vram" -gt 1048576 ]; then
+                vram=4096
+               fi
+               bus=pcie;;
+    8086) vendor=8086; device=3e9b; name='Intel UHD Graphics 630'
+          vram=; bus=builtin;;
+   esac
+  fi
+  echo "$vendor|$device|$vram|$name|$bus"
  done
 }
 
@@ -144,11 +164,11 @@ if [ "$xml" = 1 ]; then
    SPHardwareDataType) hardware | overview_xml hardware_overview;;
    SPSoftwareDataType) software | overview_xml os_overview;;
    SPDisplaysDataType)
-    displays | while IFS='|' read -r vendor device vram name; do
+    displays | while IFS='|' read -r vendor device vram name bus; do
      name=$(printf '%s' "$name" | escape)
      echo '   <dict>'
      echo "    <key>_name</key><string>$name</string>"
-     echo '    <key>spdisplays_bus</key><string>spdisplays_builtin</string>'
+     echo "    <key>spdisplays_bus</key><string>spdisplays_$bus</string>"
      echo "    <key>spdisplays_device-id</key><string>0x$device</string>"
      echo "    <key>spdisplays_vendor</key><string>${name%% *} (0x$vendor)</string>"
      [ -z "$vram" ] || echo "    <key>spdisplays_vram</key><string>$vram MB</string>"
@@ -190,8 +210,9 @@ for type in $types; do
   SPSoftwareDataType) software | overview_text Software 'System Software Overview';;
   SPDisplaysDataType)
    printf 'Graphics/Displays:\n\n'
-   displays | while IFS='|' read -r vendor device vram name; do
-    printf '    %s:\n\n      Chipset Model: %s\n      Type: GPU\n      Bus: Built-In\n' "$name" "$name"
+   displays | while IFS='|' read -r vendor device vram name bus; do
+    [ "$bus" = pcie ] && bus_text=PCIe || bus_text='Built-In'
+    printf '    %s:\n\n      Chipset Model: %s\n      Type: GPU\n      Bus: %s\n' "$name" "$name" "$bus_text"
     [ -z "$vram" ] || printf '      VRAM (Total): %s MB\n' "$vram"
     printf '      Vendor: %s (0x%s)\n      Device ID: 0x%s\n\n' "${name%% *}" "$vendor" "$device"
    done;;
