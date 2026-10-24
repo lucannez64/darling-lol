@@ -1,0 +1,8 @@
+dc-codesign
+dc-parse-fuzz
+crash-*
+oom-*
+timeout-*
+leak-*
+corpus/
+*.o

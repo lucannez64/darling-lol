@@ -1,8 +1,35 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 4920879..012235e 100644
+index 4920879..a4f1c10 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -133,6 +133,13 @@ target_compile_options(darlingserver PRIVATE
+@@ -105,6 +105,10 @@ add_custom_target(generate_dserver_rpc_wrappers
+ 		${CMAKE_CURRENT_BINARY_DIR}/src/rpc.c
+ )
+ 
++add_library(darlingserver_dc_codesign STATIC src/dc_codesign.c)
++target_compile_options(darlingserver_dc_codesign PRIVATE -std=c11)
++target_compile_definitions(darlingserver_dc_codesign PRIVATE _GNU_SOURCE)
++
+ add_executable(darlingserver
+ 	src/darlingserver.cpp
+ 	src/server.cpp
+@@ -118,6 +122,7 @@ add_executable(darlingserver
+ 	src/kqchan.cpp
+ 	src/async-writer.cpp
+ 	src/stack-pool.cpp
++	src/cs_verify.cpp
+ )
+ 
+ add_dependencies(darlingserver
+@@ -127,12 +132,21 @@ add_dependencies(darlingserver
+ 
+ target_link_libraries(darlingserver PRIVATE
+ 	darlingserver_duct_tape
++	darlingserver_dc_codesign
++	-lcrypto
+ )
+ 
+ target_compile_options(darlingserver PRIVATE
  	-pthread
  	-std=c++17
  )
@@ -1562,10 +1589,35 @@ index 708f3f3..fd46ab8 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..31772dc 100644
+index c97be30..48f5ad2 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
-@@ -94,6 +94,13 @@ namespace DarlingServer {
+@@ -21,6 +21,8 @@
+ #define _DARLINGSERVER_PROCESS_HPP_
+ 
+ #include <sys/types.h>
++#include <atomic>
++#include <limits>
+ #include <memory>
+ #include <vector>
+ #include <mutex>
+@@ -32,6 +34,7 @@
+ #include <darlingserver/utility.hpp>
+ #include <darlingserver/kqchan.hpp>
+ #include <darlingserver/rpc.h>
++#include <darlingserver/cs_state.h>
+ #include <darlingserver/logging.hpp>
+ #include <darlingserver/registry.hpp>
+ 
+@@ -86,6 +89,7 @@ namespace DarlingServer {
+ 	private:
+ 		pid_t _pid;
+ 		pid_t _nspid;
++		std::atomic<uid_t> _uid{std::numeric_limits<uid_t>::max()};
+ 		EternalID _eid;
+ 		std::shared_ptr<FD> _pidfd;
+ 		mutable std::shared_mutex _rwlock;
+@@ -94,6 +98,13 @@ namespace DarlingServer {
  		std::shared_ptr<FD> _vchrootDescriptor;
  		dtape_task_t* _dtapeTask;
  		std::weak_ptr<Process> _parentProcess;
@@ -1579,6 +1631,43 @@ index c97be30..31772dc 100644
  		bool _startSuspended = false;
  		bool _pendingReplacement = false;
  		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
+@@ -102,6 +113,16 @@ namespace DarlingServer {
+ 		Architecture _architecture;
+ 		std::weak_ptr<Process> _tracerProcess;
+ 		std::string _executablePath;
++
++		// M3 task-owned signing state. Guarded separately from _rwlock because
++		// getters copy variable-length blobs and must not hold the process lock
++		// while writing into another task.
++		mutable std::shared_mutex _csMutex;
++		struct dc_cs_state _csState = {};
++		std::vector<uint8_t> _csBlob;
++		std::vector<uint8_t> _csEntitlements;
++		std::vector<uint8_t> _csDerEntitlements;
++
+ 		bool _dead = false;
+ 		std::shared_ptr<Process> _selfReference = nullptr;
+ 		std::vector<uint32_t> _groups;
+@@ -194,6 +215,19 @@ namespace DarlingServer {
+ 		std::string executablePath() const;
+ 		void setExecutablePath(std::string path);
+ 
++		uid_t uid() const;
++		void setUid(uid_t uid);
++
++		void setCsState(const struct dc_cs_state& state,
++		    const uint8_t* blob, size_t blobLen,
++		    const uint8_t* entitlements, size_t entitlementsLen,
++		    const uint8_t* derEntitlements, size_t derEntitlementsLen);
++		void copyCsState(struct dc_cs_state* state,
++		    std::vector<uint8_t>* blob,
++		    std::vector<uint8_t>* entitlements,
++		    std::vector<uint8_t>* derEntitlements) const;
++		uint32_t updateCsFlags(uint32_t setFlags, uint32_t clearFlags, int valid);
++
+ 		uintptr_t allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite);
+ 		void freePages(uintptr_t address, size_t pageCount);
+ 		uintptr_t mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite);
 diff --git a/internal-include/darlingserver/server.hpp b/internal-include/darlingserver/server.hpp
 index b960f17..5f0e621 100644
 --- a/internal-include/darlingserver/server.hpp
@@ -1594,7 +1683,7 @@ index b960f17..5f0e621 100644
  		int _timerFD;
  		uint64_t _currentTimerDeadline = 0;
 diff --git a/scripts/generate-rpc-wrappers.py b/scripts/generate-rpc-wrappers.py
-index e35221c..1068426 100755
+index e35221c..65d4582 100755
 --- a/scripts/generate-rpc-wrappers.py
 +++ b/scripts/generate-rpc-wrappers.py
 @@ -268,6 +268,22 @@ calls = [
@@ -1620,11 +1709,71 @@ index e35221c..1068426 100755
  	#
  	# pthread cancelation
  	#
+@@ -643,6 +659,59 @@ calls = [
+ 		('message_count', 'uint64_t'),
+ 		('fd', '@fd'),
+ 	], UNMANAGED_CALL),
++
++	#
++	# M3 code-signing state (appended so existing call numbers stay stable)
++	#
++
++	('set_cs_state', [
++		('state', 'const void*', 'uint64_t'),
++		('blob', 'const void*', 'uint64_t'),
++		('blob_size', 'uint64_t'),
++		('entitlements', 'const void*', 'uint64_t'),
++		('entitlements_size', 'uint64_t'),
++		('der_entitlements', 'const void*', 'uint64_t'),
++		('der_entitlements_size', 'uint64_t')
++	], [
++		('generation', 'uint64_t'),
++	]),
++
++	('get_cs_state', [
++		('pid', 'int32_t'),
++		('state', 'void*', 'uint64_t'),
++		('blob', 'void*', 'uint64_t'),
++		('blob_size', 'uint64_t'),
++		('entitlements', 'void*', 'uint64_t'),
++		('entitlements_size', 'uint64_t'),
++		('der_entitlements', 'void*', 'uint64_t'),
++		('der_entitlements_size', 'uint64_t')
++	], [
++		('blob_len', 'uint64_t'),
++		('entitlements_len', 'uint64_t'),
++		('der_entitlements_len', 'uint64_t'),
++	]),
++
++	('update_cs_state', [
++		('pid', 'int32_t'),
++		('set_flags', 'uint32_t'),
++		('clear_flags', 'uint32_t'),
++		('valid', 'int32_t')
++	], [
++		('flags', 'uint32_t'),
++	]),
++
++	('verify_cs_image', [
++		('fd', '@fd'),
++		('offset', 'uint64_t'),
++		('check_lv', 'int32_t'),
++		('error_message', 'char*', 'uint64_t'),
++		('error_message_size', 'uint64_t')
++	], [
++		('valid', 'int32_t'),
++		('lv_ok', 'int32_t'),
++		('covered_length', 'uint64_t'),
++		('flags', 'uint32_t'),
++	]),
+ ]
+ 
+ ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..7df0056 100644
+index cc10f1d..4f88f49 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
-@@ -18,9 +18,20 @@
+@@ -18,27 +18,101 @@
   */
  
  #define _GNU_SOURCE 1
@@ -1634,6 +1783,7 @@ index cc10f1d..7df0056 100644
 +#include <chrono>
 +#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
  #include <darlingserver/call.hpp>
  #include <darlingserver/server.hpp>
  #include <sys/uio.h>
@@ -1645,7 +1795,10 @@ index cc10f1d..7df0056 100644
  
  #include <darlingserver/logging.hpp>
  #include <darlingserver/duct-tape.h>
-@@ -29,16 +40,76 @@
+ #include <darlingserver/config.hpp>
++#include <darlingserver/cs_state.h>
++#include <darlingserver/cs_verify.hpp>
+ #include <sys/fcntl.h>
  #include <sys/syscall.h>
  #include <darlingserver/kqchan.hpp>
  
@@ -1722,7 +1875,7 @@ index cc10f1d..7df0056 100644
  	std::shared_ptr<Call> result = nullptr;
  	std::shared_ptr<Process> process = nullptr;
  	std::shared_ptr<Thread> thread = nullptr;
-@@ -123,9 +194,43 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
+@@ -123,9 +197,43 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
  		}
  	}
  
@@ -1769,7 +1922,16 @@ index cc10f1d..7df0056 100644
  
  	if (header->number == dserver_callnum_s2c) {
  		// this is an S2C reply
-@@ -694,6 +799,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
+@@ -521,6 +629,8 @@ void DarlingServer::Call::Uidgid::processCall() {
+ 			// HACK
+ 			// we shouldn't need to access _dtapeTask; Process should provide a method for this (but it doesn't yet because i'm not sure how to make that API feel at-home in C++)
+ 			dtape_task_uidgid(process->_dtapeTask, _body.new_uid, _body.new_gid, &uid, &gid);
++			if (_body.new_uid >= 0)
++				process->setUid((uid_t) _body.new_uid);
+ 		} else {
+ 			code = -ESRCH;
+ 		}
+@@ -694,6 +804,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
  	_sendReply(code, socket);
  };
  
@@ -1830,7 +1992,7 @@ index cc10f1d..7df0056 100644
  void DarlingServer::Call::ForkWaitForChild::processCall() {
  	int code = 0;
  
-@@ -714,6 +873,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
+@@ -714,6 +878,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
  	int code = 0;
  	int newBSDSignal = 0;
  
@@ -1855,6 +2017,224 @@ index cc10f1d..7df0056 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
+@@ -1040,6 +1222,217 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+ 	_sendReply(code, fullLength);
+ }
+ 
++static bool csStateLayoutValid(const struct dc_cs_state* state, uint64_t blobSize,
++    uint64_t entitlementsSize, uint64_t derEntitlementsSize) {
++	if (state->version != DC_CS_STATE_VERSION)
++		return false;
++	if (state->cdhash_len > DC_CS_CDHASH_LEN)
++		return false;
++	if (state->teamid_len >= DC_CS_TEAMID_MAX || state->identity_len >= DC_CS_IDENTITY_MAX)
++		return false;
++	if (state->blob_len != blobSize || state->entitlements_len != entitlementsSize ||
++	    state->der_entitlements_len != derEntitlementsSize)
++		return false;
++	if (blobSize > DC_CS_MAX_BLOB || entitlementsSize > DC_CS_MAX_ENTITLEMENTS ||
++	    derEntitlementsSize > DC_CS_MAX_DER_ENTITLEMENTS)
++		return false;
++	if (memchr(state->teamid, '\0', sizeof(state->teamid)) == nullptr ||
++	    memchr(state->identity, '\0', sizeof(state->identity)) == nullptr ||
++	    memchr(state->image_path, '\0', sizeof(state->image_path)) == nullptr)
++		return false;
++	return true;
++}
++
++void DarlingServer::Call::SetCsState::processCall() {
++	int code = 0;
++	uint64_t generation = 0;
++
++	if (auto thread = _thread.lock()) {
++		if (auto process = thread->process()) {
++			struct dc_cs_state state;
++			if (_body.state == 0) {
++				code = -EINVAL;
++			} else if (!process->readMemory((uintptr_t) _body.state, &state, sizeof(state), &code)) {
++				code = -code;
++			} else if (!csStateLayoutValid(&state, _body.blob_size, _body.entitlements_size, _body.der_entitlements_size)) {
++				code = -EINVAL;
++			} else {
++				std::vector<uint8_t> blob(_body.blob_size);
++				std::vector<uint8_t> entitlements(_body.entitlements_size);
++				std::vector<uint8_t> derEntitlements(_body.der_entitlements_size);
++
++				if (!blob.empty() && !process->readMemory((uintptr_t) _body.blob, blob.data(), blob.size(), &code)) {
++					code = -code;
++				} else if (!entitlements.empty() && !process->readMemory((uintptr_t) _body.entitlements, entitlements.data(), entitlements.size(), &code)) {
++					code = -code;
++				} else if (!derEntitlements.empty() && !process->readMemory((uintptr_t) _body.der_entitlements, derEntitlements.data(), derEntitlements.size(), &code)) {
++					code = -code;
++				} else {
++					process->setCsState(state,
++					    blob.empty() ? nullptr : blob.data(), blob.size(),
++					    entitlements.empty() ? nullptr : entitlements.data(), entitlements.size(),
++					    derEntitlements.empty() ? nullptr : derEntitlements.data(), derEntitlements.size());
++					generation = process->eternalID();
++				}
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, generation);
++}
++
++void DarlingServer::Call::GetCsState::processCall() {
++	int code = 0;
++	uint64_t blobLen = 0;
++	uint64_t entitlementsLen = 0;
++	uint64_t derEntitlementsLen = 0;
++	struct dc_cs_state state = {};
++	state.version = DC_CS_STATE_VERSION;
++
++	if (auto callingThread = _thread.lock()) {
++		if (auto callingProcess = callingThread->process()) {
++			if (_body.state == 0) {
++				code = -EINVAL;
++			} else if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.pid)) {
++				auto targetProcess = *maybeTargetProcess;
++				std::vector<uint8_t> blob;
++				std::vector<uint8_t> entitlements;
++				std::vector<uint8_t> derEntitlements;
++				targetProcess->copyCsState(&state, &blob, &entitlements, &derEntitlements);
++				blobLen = blob.size();
++				entitlementsLen = entitlements.size();
++				derEntitlementsLen = derEntitlements.size();
++
++				if (!callingProcess->writeMemory((uintptr_t) _body.state, &state, sizeof(state), &code)) {
++					code = -code;
++				} else if (_body.blob != 0 && _body.blob_size > 0 && !blob.empty()) {
++					size_t len = std::min<size_t>(blob.size(), _body.blob_size);
++					if (!callingProcess->writeMemory((uintptr_t) _body.blob, blob.data(), len, &code)) {
++						code = -code;
++					}
++				}
++				if (code == 0 && _body.entitlements != 0 && _body.entitlements_size > 0 && !entitlements.empty()) {
++					size_t len = std::min<size_t>(entitlements.size(), _body.entitlements_size);
++					if (!callingProcess->writeMemory((uintptr_t) _body.entitlements, entitlements.data(), len, &code)) {
++						code = -code;
++					}
++				}
++				if (code == 0 && _body.der_entitlements != 0 && _body.der_entitlements_size > 0 && !derEntitlements.empty()) {
++					size_t len = std::min<size_t>(derEntitlements.size(), _body.der_entitlements_size);
++					if (!callingProcess->writeMemory((uintptr_t) _body.der_entitlements, derEntitlements.data(), len, &code)) {
++						code = -code;
++					}
++				}
++			} else {
++				// An unverified process is not the same thing as a missing one.
++				code = ESRCH;
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, blobLen, entitlementsLen, derEntitlementsLen);
++}
++
++void DarlingServer::Call::UpdateCsState::processCall() {
++	static constexpr uint32_t settableFlags =
++	    DC_CS_HARD | DC_CS_EXEC_SET_HARD | DC_CS_KILL | DC_CS_EXEC_SET_KILL |
++	    DC_CS_RESTRICT | DC_CS_REQUIRE_LV | DC_CS_ENFORCEMENT |
++	    DC_CS_EXEC_SET_ENFORCEMENT |
++	    /* Set internally by MARKINVALID/MARKKILL after the process is killed. */
++	    DC_CS_KILLED;
++	static constexpr uint32_t clearableFlags =
++	    DC_CS_VALID | DC_CS_INSTALLER | DC_CS_DATAVAULT_CONTROLLER |
++	    DC_CS_EXEC_INHERIT_SIP | DC_CS_REQUIRE_LV | DC_CS_FORCED_LV |
++	    DC_CS_KILLED;
++	int code = 0;
++	uint32_t flags = 0;
++
++	if ((_body.set_flags & ~settableFlags) != 0 ||
++	    (_body.clear_flags & ~clearableFlags) != 0 ||
++	    _body.valid < -1 || _body.valid > 0) {
++		_sendReply(-EINVAL, 0);
++		return;
++	}
++
++	if (auto thread = _thread.lock()) {
++		if (auto caller = thread->process()) {
++			if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.pid)) {
++				auto target = *maybeTargetProcess;
++				bool isSelf = (caller == target);
++				if (!isSelf) {
++					struct dc_cs_state targetState = {};
++					std::vector<uint8_t> blob;
++					std::vector<uint8_t> entitlements;
++					std::vector<uint8_t> derEntitlements;
++					target->copyCsState(&targetState, &blob, &entitlements, &derEntitlements);
++					if (caller->uid() != 0 &&
++					    (targetState.flags & DC_CS_GET_TASK_ALLOW) == 0) {
++						code = -EPERM;
++					}
++				}
++				if (code == 0)
++					flags = target->updateCsFlags(_body.set_flags, _body.clear_flags, _body.valid);
++			} else {
++				code = ESRCH;
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, flags);
++}
++
++void DarlingServer::Call::VerifyCsImage::processCall() {
++	int code = 0;
++	int valid = 0;
++	int lvOk = 1;
++	uint64_t coveredLength = 0;
++	uint32_t flags = 0;
++
++	if (auto thread = _thread.lock()) {
++		if (auto process = thread->process()) {
++			CsImageInfo target;
++			std::string error;
++			valid = verifyCsImageFd(_body.fd, _body.offset, &target, &error) ? 1 : 0;
++			/* Only report coverage actually verified by the parser. */
++			coveredLength = target.state.code_limit;
++			flags = target.state.flags;
++
++			if (_body.check_lv) {
++				struct dc_cs_state mainState = {};
++				std::vector<uint8_t> blob;
++				std::vector<uint8_t> mainEntitlements;
++				std::vector<uint8_t> derEntitlements;
++				process->copyCsState(&mainState, &blob, &mainEntitlements, &derEntitlements);
++				lvOk = csImageAllowsLibraryValidation(mainState, mainEntitlements, target, &error) ? 1 : 0;
++			}
++
++			if ((!valid || !lvOk) && _body.error_message != 0 && _body.error_message_size > 0) {
++				size_t len = std::min<size_t>(error.size() + 1, _body.error_message_size);
++				if (!process->writeMemory((uintptr_t) _body.error_message, error.c_str(), len, &code))
++					code = -code;
++			}
++		} else {
++			code = -ESRCH;
++		}
++	} else {
++		code = -ESRCH;
++	}
++
++	_sendReply(code, valid, lvOk, coveredLength, flags);
++}
++
+ void DarlingServer::Call::Groups::processCall() {
+ 	int code = 0;
+ 	std::vector<uint32_t> oldGroups;
 diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
 index f79f057..54c42aa 100644
 --- a/src/darlingserver.cpp
@@ -2393,14 +2773,15 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..180f372 100644
+index 9cd7b81..57320fa 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
-@@ -25,9 +25,15 @@
+@@ -25,9 +25,16 @@
  #include <darlingserver/logging.hpp>
  
  #include <fstream>
 +#include <atomic>
++#include <cstdlib>
  #include <regex>
 +#include <cstdio>
 +#include <cstring>
@@ -2412,7 +2793,62 @@ index 9cd7b81..180f372 100644
  
  static DarlingServer::Log processLog("process");
  
-@@ -109,6 +115,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -36,6 +43,7 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 	_nspid(nsid),
+ 	_architecture(architecture)
+ {
++	_csState.version = DC_CS_STATE_VERSION;
+ 	int pidfd = (pipe >= 0) ? pipe : syscall(SYS_pidfd_open, _pid, 0);
+ 	if (pidfd < 0) {
+ 		throw std::system_error(errno, std::generic_category(), "Failed to open pidfd for process");
+@@ -66,8 +74,15 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 				parentProcess = *maybeParentProcess;
+ 				_parentProcess = parentProcess;
+ 			}
+-
+-			break;
++		} else if (line.substr(0, sizeof("Uid") - 1) == "Uid") {
++			auto colon = line.find(':');
++			if (colon != line.npos) {
++				std::string rest = line.substr(colon + 1);
++				char* end = nullptr;
++				unsigned long parsed = strtoul(rest.c_str(), &end, 10);
++				if (end != rest.c_str())
++					_uid.store((uid_t) parsed);
++			}
+ 		}
+ 	}
+ 
+@@ -78,8 +93,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+ 		_vchrootDescriptor = parentProcess->_vchrootDescriptor;
+ 		_cachedVchrootPath = parentProcess->_cachedVchrootPath;
+ 
+-		// inherit groups from parent process
++		// inherit groups and credentials from parent process
+ 		_groups = parentProcess->_groups;
++		_uid.store(parentProcess->_uid.load());
++
++		// a fork inherits the parent's verified signing state; the child's
++		// generation is filled in by copyCsState()/setCsState()
++		{
++			std::shared_lock csLock(parentProcess->_csMutex);
++			_csState = parentProcess->_csState;
++			_csBlob = parentProcess->_csBlob;
++			_csEntitlements = parentProcess->_csEntitlements;
++			_csDerEntitlements = parentProcess->_csDerEntitlements;
++		}
+ 	}
+ 
+ 	// NOTE: see thread.cpp for why it's okay to use `this` here
+@@ -93,6 +119,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+ 	_pid(-1),
+ 	_nspid(0)
+ {
++	_csState.version = DC_CS_STATE_VERSION;
+ #if __x86_64__
+ 	_architecture = Architecture::x86_64;
+ #elif __i386__
+@@ -109,6 +136,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  
  DarlingServer::Process::~Process() {
  	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
@@ -2423,7 +2859,7 @@ index 9cd7b81..180f372 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -245,6 +255,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +276,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -2468,7 +2904,7 @@ index 9cd7b81..180f372 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -369,7 +417,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +438,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -2488,7 +2924,7 @@ index 9cd7b81..180f372 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +524,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +545,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -2596,7 +3032,7 @@ index 9cd7b81..180f372 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +631,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +652,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -2659,7 +3095,79 @@ index 9cd7b81..180f372 100644
  
  		info.protection = 0;
  
-@@ -657,27 +839,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -607,6 +810,71 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+ 	_executablePath = std::move(path);
+ };
+ 
++uid_t DarlingServer::Process::uid() const {
++	return _uid.load();
++};
++
++void DarlingServer::Process::setUid(uid_t uid) {
++	_uid.store(uid);
++};
++
++void DarlingServer::Process::setCsState(const struct dc_cs_state& state,
++    const uint8_t* blob, size_t blobLen,
++    const uint8_t* entitlements, size_t entitlementsLen,
++    const uint8_t* derEntitlements, size_t derEntitlementsLen) {
++	std::unique_lock lock(_csMutex);
++	_csState = state;
++	_csState.version = DC_CS_STATE_VERSION;
++	_csState.generation = eternalID();
++	_csState.blob_len = (uint32_t) blobLen;
++	_csState.entitlements_len = (uint32_t) entitlementsLen;
++	_csState.der_entitlements_len = (uint32_t) derEntitlementsLen;
++	if (blobLen > 0)
++		_csBlob.assign(blob, blob + blobLen);
++	else
++		_csBlob.clear();
++	if (entitlementsLen > 0)
++		_csEntitlements.assign(entitlements, entitlements + entitlementsLen);
++	else
++		_csEntitlements.clear();
++	if (derEntitlementsLen > 0)
++		_csDerEntitlements.assign(derEntitlements, derEntitlements + derEntitlementsLen);
++	else
++		_csDerEntitlements.clear();
++};
++
++void DarlingServer::Process::copyCsState(struct dc_cs_state* state,
++    std::vector<uint8_t>* blob,
++    std::vector<uint8_t>* entitlements,
++    std::vector<uint8_t>* derEntitlements) const {
++	std::shared_lock lock(_csMutex);
++	*state = _csState;
++	state->generation = eternalID();
++	*blob = _csBlob;
++	*entitlements = _csEntitlements;
++	*derEntitlements = _csDerEntitlements;
++};
++
++uint32_t DarlingServer::Process::updateCsFlags(uint32_t setFlags, uint32_t clearFlags, int valid) {
++	std::unique_lock lock(_csMutex);
++	uint32_t flags = (_csState.flags | setFlags) & ~clearFlags;
++
++	if (setFlags & DC_CS_REQUIRE_LV)
++		_csState.lv_required = 1;
++	if (clearFlags & (DC_CS_REQUIRE_LV | DC_CS_FORCED_LV))
++		_csState.lv_required = 0;
++	if (valid == 0) {
++		_csState.valid = 0;
++		flags &= ~DC_CS_VALID;
++	}
++	/* valid == 1 is intentionally ignored: only a verifier may restore
++	 * validity, never an update RPC. */
++	if (!_csState.valid || !_csState.verified)
++		flags &= ~DC_CS_VALID;
++	_csState.flags = flags;
++	return flags;
++};
++
+ uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
+ 	auto thread = _pickS2CThread();
+ 
+@@ -657,27 +925,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -2955,3 +3463,1208 @@ index e502e28..8d1cf2b 100644
 +		 * microthread must not throw. */
 +	}
  };
+diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
+new file mode 100644
+index 0000000..80259dd
+--- /dev/null
++++ b/include/darlingserver/cs_state.h
+@@ -0,0 +1,111 @@
++/*
++ * cs_state.h - code-signing state shared by mldr, libsystem_kernel and
++ * darlingserver.
++ *
++ * This is the M3 data model from
++ * docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md. The structure is deliberately
++ * packed and fixed-size so a 32-bit guest and the 64-bit server agree on the
++ * layout when it is copied through darlingserver's read/writeMemory helpers.
++ * Variable-length data (the SuperBlob and entitlements) lives outside the
++ * structure and is transferred separately.
++ */
++
++#ifndef _DARLINGSERVER_CS_STATE_H_
++#define _DARLINGSERVER_CS_STATE_H_
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define DC_CS_STATE_VERSION 1u
++
++#define DC_CS_CDHASH_LEN 20u
++#define DC_CS_TEAMID_MAX 64u
++#define DC_CS_IDENTITY_MAX 256u
++#define DC_CS_PATH_MAX 1024u
++
++#define DC_CS_MAX_BLOB (16u * 1024u * 1024u)
++#define DC_CS_MAX_ENTITLEMENTS (1024u * 1024u)
++#define DC_CS_MAX_DER_ENTITLEMENTS (1024u * 1024u)
++
++/* Apple's CS_* flag values (osfmk/kern/cs_blobs.h). */
++#define DC_CS_VALID 0x00000001u
++#define DC_CS_ADHOC 0x00000002u
++#define DC_CS_GET_TASK_ALLOW 0x00000004u
++#define DC_CS_INSTALLER 0x00000008u
++#define DC_CS_FORCED_LV 0x00000010u
++#define DC_CS_INVALID_ALLOWED 0x00000020u
++#define DC_CS_HARD 0x00000100u
++#define DC_CS_KILL 0x00000200u
++#define DC_CS_CHECK_EXPIRATION 0x00000400u
++#define DC_CS_RESTRICT 0x00000800u
++#define DC_CS_ENFORCEMENT 0x00001000u
++#define DC_CS_REQUIRE_LV 0x00002000u
++#define DC_CS_ENTITLEMENTS_VALIDATED 0x00004000u
++#define DC_CS_NVRAM_UNRESTRICTED 0x00008000u
++#define DC_CS_RUNTIME 0x00010000u
++#define DC_CS_LINKER_SIGNED 0x00020000u
++#define DC_CS_EXEC_SET_HARD 0x00100000u
++#define DC_CS_EXEC_SET_KILL 0x00200000u
++#define DC_CS_EXEC_SET_ENFORCEMENT 0x00400000u
++#define DC_CS_EXEC_INHERIT_SIP 0x00800000u
++#define DC_CS_KILLED 0x01000000u
++#define DC_CS_DYLD_PLATFORM 0x02000000u
++#define DC_CS_PLATFORM_BINARY 0x04000000u
++#define DC_CS_PLATFORM_PATH 0x08000000u
++#define DC_CS_DEBUGGED 0x10000000u
++#define DC_CS_SIGNED 0x20000000u
++#define DC_CS_DEV_CODE 0x40000000u
++#define DC_CS_DATAVAULT_CONTROLLER 0x80000000u
++
++/* Parsed entitlement bits (mldr is the only XML parser). */
++#define DC_CS_ENT_ALLOW_DYLD_ENV 0x00000001u
++#define DC_CS_ENT_DISABLE_LV 0x00000002u
++#define DC_CS_ENT_CLEAR_LV 0x00000004u
++
++struct dc_cs_state {
++	uint32_t version;
++	uint32_t verified; /* a verifier ran for this task */
++	uint32_t valid;    /* verification succeeded */
++	uint32_t flags;
++	uint32_t darling_entitlements; /* DC_CS_ENT_* */
++	uint32_t lv_required;          /* effective library-validation policy */
++
++	uint32_t hash_type;
++	uint32_t page_size_log2;
++	uint32_t cdhash_len;
++	uint32_t teamid_len;   /* strlen(teamid), 0 when absent */
++	uint32_t identity_len; /* strlen(identity), 0 when absent */
++	uint32_t blob_len;
++	uint32_t entitlements_len;
++	uint32_t der_entitlements_len;
++
++	uint64_t generation; /* darlingserver eternal ID for pid-reuse checks */
++	uint64_t code_limit;
++	uint64_t image_offset; /* active slice offset (CS_OPS_PIDOFFSET) */
++	uint64_t image_dev;
++	uint64_t image_ino;
++	uint64_t image_size;
++	uint64_t image_mtime;
++
++	uint8_t cdhash[DC_CS_CDHASH_LEN];
++	char teamid[DC_CS_TEAMID_MAX];
++	char identity[DC_CS_IDENTITY_MAX];
++	char image_path[DC_CS_PATH_MAX];
++} __attribute__((packed));
++
++/* mldr-only view: the fixed state plus pointers into mldr's address space. */
++struct dc_cs_local_state {
++	struct dc_cs_state state;
++	const uint8_t *blob;
++	const uint8_t *entitlements;
++	const uint8_t *der_entitlements;
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _DARLINGSERVER_CS_STATE_H_ */
+diff --git a/internal-include/darlingserver/cs_verify.hpp b/internal-include/darlingserver/cs_verify.hpp
+new file mode 100644
+index 0000000..6eedb66
+--- /dev/null
++++ b/internal-include/darlingserver/cs_verify.hpp
+@@ -0,0 +1,43 @@
++/*
++ * cs_verify.hpp - server-side Mach-O signature verification for dyld's
++ * F_ADDFILESIGS_RETURN / F_CHECK_LV preflight.
++ */
++
++#ifndef _DARLINGSERVER_CS_VERIFY_HPP_
++#define _DARLINGSERVER_CS_VERIFY_HPP_
++
++#include <darlingserver/cs_state.h>
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace DarlingServer {
++	struct CsImageInfo {
++		struct dc_cs_state state = {};
++		std::vector<uint8_t> entitlements;
++	};
++
++	/*
++	 * Verify the Mach-O slice at `offset` in `fd`. Returns true when the
++	 * signature parses and every code page matches. On failure, `error`
++	 * carries a stable reason (and the returned info has valid=0).
++	 */
++	bool verifyCsImageFd(int fd, uint64_t offset, CsImageInfo* info, std::string* error);
++
++	/* True when an XML entitlement key is present and set to <true/>. */
++	bool entitlementIsTrue(const std::vector<uint8_t>& xml, const char* key);
++
++	/*
++	 * Apply the CS_REQUIRE_LV / CS_RUNTIME policy. A target is acceptable
++	 * when the main executable does not require library validation, has the
++	 * disable-library-validation entitlement, shares its team ID, is a
++	 * platform binary, or both sides are ad-hoc with no team ID (Darling's
++	 * own runtime libraries).
++	 */
++	bool csImageAllowsLibraryValidation(const struct dc_cs_state& mainState,
++	    const std::vector<uint8_t>& mainEntitlements,
++	    const CsImageInfo& target, std::string* error);
++};
++
++#endif
+diff --git a/src/cs_verify.cpp b/src/cs_verify.cpp
+new file mode 100644
+index 0000000..04c210b
+--- /dev/null
++++ b/src/cs_verify.cpp
+@@ -0,0 +1,306 @@
++/**
++ * This file is part of Darling.
++ *
++ * Server-side Mach-O signature verification used by F_ADDFILESIGS_RETURN and
++ * F_CHECK_LV. The parser is the same bounded dc_codesign implementation used
++ * by mldr and tools/dc-codesign; darlingserver links OpenSSL for its digests.
++ */
++
++#include <darlingserver/cs_verify.hpp>
++#include <darlingserver/server.hpp>
++
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <limits.h>
++
++#include <cerrno>
++#include <cstdio>
++#include <cstring>
++#include <exception>
++#include <utility>
++#include <map>
++#include <mutex>
++
++extern "C" {
++#include "dc_codesign.h"
++}
++
++namespace {
++	struct CacheKey {
++		uint64_t dev;
++		uint64_t ino;
++		uint64_t size;
++		uint64_t mtime;
++		uint64_t ctime;
++		uint64_t offset;
++
++		bool operator<(const CacheKey& other) const {
++			if (dev != other.dev) return dev < other.dev;
++			if (ino != other.ino) return ino < other.ino;
++			if (size != other.size) return size < other.size;
++			if (mtime != other.mtime) return mtime < other.mtime;
++			if (ctime != other.ctime) return ctime < other.ctime;
++			return offset < other.offset;
++		}
++	};
++
++	std::mutex cacheMutex;
++	std::map<CacheKey, DarlingServer::CsImageInfo> cache;
++
++	const uint8_t* findBytes(const uint8_t* data, size_t len, const char* needle) {
++		size_t needleLen = strlen(needle);
++		size_t i;
++
++		if (needleLen == 0 || len < needleLen)
++			return nullptr;
++		for (i = 0; i + needleLen <= len; i++) {
++			if (memcmp(data + i, needle, needleLen) == 0)
++				return data + i;
++		}
++		return nullptr;
++	}
++
++	bool keyIsTrue(const uint8_t* data, size_t len, const char* key) {
++		char needle[320];
++		const char* match;
++		const char* end;
++		size_t needleLen;
++
++		if (data == nullptr || len == 0)
++			return false;
++		if (snprintf(needle, sizeof(needle), "<key>%s</key>", key) >= (int) sizeof(needle))
++			return false;
++		needleLen = strlen(needle);
++		match = (const char*) findBytes(data, len, needle);
++		if (match == nullptr)
++			return false;
++		match += needleLen;
++		end = (const char*) data + len;
++		while (match < end && (*match == ' ' || *match == '\t' || *match == '\r' || *match == '\n'))
++			match++;
++		return (end - match >= 7 && memcmp(match, "<true/>", 7) == 0) ||
++		       (end - match >= 8 && memcmp(match, "<true />", 8) == 0);
++	}
++
++	uint32_t flagsFromImage(const struct dc_image& img, bool valid) {
++		uint32_t flags = DC_CS_SIGNED;
++
++		if (valid)
++			flags |= DC_CS_VALID;
++		flags |= img.cd_flags & (DC_CS_ADHOC | DC_CS_HARD | DC_CS_KILL |
++		    DC_CS_CHECK_EXPIRATION | DC_CS_RESTRICT | DC_CS_ENFORCEMENT |
++		    DC_CS_REQUIRE_LV | DC_CS_RUNTIME | DC_CS_LINKER_SIGNED);
++		if (keyIsTrue(img.entitlements, img.entitlements_len, "get-task-allow") ||
++		    keyIsTrue(img.entitlements, img.entitlements_len, "com.apple.security.get-task-allow"))
++			flags |= DC_CS_GET_TASK_ALLOW;
++		if (keyIsTrue(img.entitlements, img.entitlements_len, "com.apple.private.security.installer"))
++			flags |= DC_CS_INSTALLER;
++		return flags;
++	}
++}
++
++bool DarlingServer::verifyCsImageFd(int fd, uint64_t offset, CsImageInfo* info, std::string* error) {
++	struct stat st;
++	CacheKey key;
++	std::vector<uint8_t> data;
++	struct dc_image img;
++	char err[512];
++	int result;
++
++	if (fd < 0) {
++		if (error) *error = "invalid file descriptor";
++		return false;
++	}
++	if (fstat(fd, &st) != 0 || st.st_size <= 0) {
++		if (error) *error = "cannot stat image";
++		return false;
++	}
++	if (offset >= (uint64_t) st.st_size) {
++		if (error) *error = "image offset is outside the file";
++		return false;
++	}
++
++	key.dev = (uint64_t) st.st_dev;
++	key.ino = (uint64_t) st.st_ino;
++	key.size = (uint64_t) st.st_size;
++	key.mtime = (uint64_t) st.st_mtim.tv_sec * 1000000000ull + (uint64_t) st.st_mtim.tv_nsec;
++	key.ctime = (uint64_t) st.st_ctim.tv_sec * 1000000000ull + (uint64_t) st.st_ctim.tv_nsec;
++	key.offset = offset;
++
++	{
++		std::lock_guard<std::mutex> lock(cacheMutex);
++		auto it = cache.find(key);
++		if (it != cache.end()) {
++			*info = it->second;
++			if (!info->state.valid && error)
++				*error = "cached signature verification failed";
++			return info->state.valid;
++		}
++	}
++
++	/* Read a private snapshot instead of mmap()ing the caller's file: a
++	 * concurrent truncate would otherwise deliver SIGBUS to the server. */
++	if ((uint64_t) st.st_size > 512ull * 1024ull * 1024ull) {
++		if (error) *error = "image is too large to verify";
++		return false;
++	}
++	try {
++		data.resize((size_t) st.st_size);
++	} catch (const std::exception&) {
++		if (error) *error = "cannot allocate image snapshot";
++		return false;
++	}
++	{
++		size_t done = 0;
++		while (done < data.size()) {
++			ssize_t got = pread(fd, data.data() + done, data.size() - done, (off_t) done);
++			if (got <= 0) {
++				if (error) *error = "cannot read image";
++				return false;
++			}
++			done += (size_t) got;
++		}
++	}
++
++	/* The descriptor may name a file that changed while it was read. */
++	{
++		struct stat after;
++		if (fstat(fd, &after) != 0 || after.st_size != st.st_size ||
++		    after.st_dev != st.st_dev || after.st_ino != st.st_ino ||
++		    after.st_mtim.tv_sec != st.st_mtim.tv_sec ||
++		    after.st_mtim.tv_nsec != st.st_mtim.tv_nsec ||
++		    after.st_ctim.tv_sec != st.st_ctim.tv_sec ||
++		    after.st_ctim.tv_nsec != st.st_ctim.tv_nsec) {
++			if (error) *error = "image changed while it was read";
++			return false;
++		}
++	}
++
++	err[0] = '\0';
++	result = dc_parse(data.data() + offset, data.size() - (size_t) offset,
++	    &img, err, sizeof(err));
++	if (result == 0)
++		result = dc_verify_pages(&img, err, sizeof(err));
++
++	CsImageInfo parsed = {};
++	parsed.state.version = DC_CS_STATE_VERSION;
++	parsed.state.verified = 1;
++	parsed.state.valid = (result == 0);
++	parsed.state.image_dev = (uint64_t) st.st_dev;
++	parsed.state.image_ino = (uint64_t) st.st_ino;
++	parsed.state.image_size = (uint64_t) st.st_size;
++	parsed.state.image_mtime = key.mtime;
++	parsed.state.image_offset = offset;
++	{
++		char linkPath[64];
++		char filePath[PATH_MAX];
++		ssize_t pathLen;
++		snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", fd);
++		pathLen = readlink(linkPath, filePath, sizeof(filePath) - 1);
++		if (pathLen > 0) {
++			filePath[pathLen] = '\0';
++			snprintf(parsed.state.image_path, sizeof(parsed.state.image_path), "%s", filePath);
++		}
++	}
++	if (result == 0) {
++		parsed.state.flags = flagsFromImage(img, true);
++		parsed.state.hash_type = img.hash_type;
++		parsed.state.page_size_log2 = img.page_size_log2;
++		parsed.state.code_limit = img.code_limit;
++		parsed.state.cdhash_len = DC_CS_CDHASH_LEN;
++		memcpy(parsed.state.cdhash, img.cdhash, DC_CS_CDHASH_LEN);
++		if (img.teamid[0] != '\0') {
++			parsed.state.teamid_len = strlen(img.teamid);
++			snprintf(parsed.state.teamid, sizeof(parsed.state.teamid), "%s", img.teamid);
++		}
++		if (img.identifier[0] != '\0') {
++			parsed.state.identity_len = strlen(img.identifier);
++			snprintf(parsed.state.identity, sizeof(parsed.state.identity), "%s", img.identifier);
++		}
++		if (img.entitlements_len > 0 && img.entitlements_len <= DC_CS_MAX_ENTITLEMENTS)
++			parsed.entitlements.assign(img.entitlements, img.entitlements + img.entitlements_len);
++	} else {
++		parsed.state.flags = 0;
++	}
++
++	{
++		std::lock_guard<std::mutex> lock(cacheMutex);
++		cache[key] = parsed;
++	}
++	*info = std::move(parsed);
++	if (result != 0) {
++		if (error) *error = err[0] ? err : "code signature verification failed";
++		return false;
++	}
++	return true;
++}
++
++bool DarlingServer::entitlementIsTrue(const std::vector<uint8_t>& xml, const char* key) {
++	return keyIsTrue(xml.empty() ? nullptr : xml.data(), xml.size(), key);
++}
++
++static bool startsWith(const char* path, const std::string& prefix) {
++	return prefix.size() <= strlen(path) &&
++	       strncmp(path, prefix.c_str(), prefix.size()) == 0;
++}
++
++static bool darlingRuntimePath(const char* path) {
++	/* Darling's own runtime libraries are ad-hoc signed. Trust only the
++	 * known library/framework locations, not every file under the prefix. */
++	static const char* const systemRoots[] = {
++		"/usr/local/libexec/darling/",
++		"/usr/libexec/darling/",
++	};
++	std::string prefix = DarlingServer::Server::sharedInstance().prefix();
++	size_t i;
++
++	for (i = 0; i < sizeof(systemRoots) / sizeof(systemRoots[0]); i++) {
++		std::string root = systemRoots[i];
++		if (startsWith(path, root + "usr/lib/") ||
++		    startsWith(path, root + "System/Library/Frameworks/") ||
++		    startsWith(path, root + "System/Library/PrivateFrameworks/"))
++			return true;
++	}
++	if (!prefix.empty()) {
++		prefix += '/';
++		if (startsWith(path, prefix + "usr/lib/") ||
++		    startsWith(path, prefix + "System/Library/Frameworks/") ||
++		    startsWith(path, prefix + "System/Library/PrivateFrameworks/"))
++			return true;
++		if (startsWith(path, prefix + "Users/") &&
++		    (strstr(path, "/RuntimeLibraries/") != nullptr ||
++		     strstr(path, "/RuntimeFrameworks/") != nullptr))
++			return true;
++	}
++	return false;
++}
++
++bool DarlingServer::csImageAllowsLibraryValidation(const struct dc_cs_state& mainState,
++    const std::vector<uint8_t>& mainEntitlements,
++    const CsImageInfo& target, std::string* error) {
++	if ((mainState.darling_entitlements & DC_CS_ENT_DISABLE_LV) ||
++	    entitlementIsTrue(mainEntitlements, "com.apple.security.cs.disable-library-validation"))
++		return true;
++
++	if (!mainState.lv_required)
++		return true;
++
++	if (!target.state.valid) {
++		if (error) *error = "target image is not validly signed";
++		return false;
++	}
++	if (target.state.flags & DC_CS_PLATFORM_BINARY)
++		return true;
++	if (target.state.valid && darlingRuntimePath(target.state.image_path))
++		return true;
++	if (mainState.teamid_len > 0 && target.state.teamid_len > 0 &&
++	    strcmp(mainState.teamid, target.state.teamid) == 0)
++		return true;
++	if (mainState.teamid_len == 0 && target.state.teamid_len == 0 &&
++	    (target.state.flags & DC_CS_ADHOC))
++		return true;
++
++	if (error) *error = "target image has a different team ID";
++	return false;
++}
+diff --git a/src/dc_codesign.c b/src/dc_codesign.c
+new file mode 100644
+index 0000000..d075704
+--- /dev/null
++++ b/src/dc_codesign.c
+@@ -0,0 +1,595 @@
++/*
++ * dc_codesign.c - bounded Mach-O code signature parser.
++ *
++ * See dc_codesign.h for scope. Every offset read from the file is validated
++ * against the containing blob before use; malformed input returns -1 with a
++ * reason instead of reading out of bounds.
++ */
++
++#include "dc_codesign.h"
++
++#include <openssl/evp.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <string.h>
++
++#define CD_MIN_SIZE 44u
++#define CD_V_SCATTER 0x20100u
++#define CD_V_TEAMID 0x20200u
++#define CD_V_CODELIMIT64 0x20300u
++#define CD_V_EXECSEG 0x20400u
++#define CD_V_RUNTIME 0x20500u
++
++static uint32_t be32(const uint8_t *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
++static uint64_t be64(const uint8_t *p)
++{
++	return ((uint64_t)be32(p) << 32) | be32(p + 4);
++}
++
++static uint32_t le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static uint32_t rd32(const struct dc_image *img, const uint8_t *p)
++{
++	return img->big_endian ? be32(p) : le32(p);
++}
++
++static bool in_range(uint64_t total, uint64_t off, uint64_t len)
++{
++	return off <= total && len <= total - off;
++}
++
++static int fail(char *err, size_t errlen, const char *fmt, ...)
++{
++	va_list ap;
++
++	if (err && errlen) {
++		va_start(ap, fmt);
++		vsnprintf(err, errlen, fmt, ap);
++		va_end(ap);
++	}
++	return -1;
++}
++
++const char *dc_hash_name(uint32_t hash_type)
++{
++	switch (hash_type) {
++	case DC_HASHTYPE_SHA1: return "sha1";
++	case DC_HASHTYPE_SHA256: return "sha256";
++	case DC_HASHTYPE_SHA256_TRUNCATED: return "sha256-truncated";
++	case DC_HASHTYPE_SHA384: return "sha384";
++	default: return "unknown";
++	}
++}
++
++const char *dc_blob_type_name(uint32_t type)
++{
++	switch (type) {
++	case DC_BLOB_CODEDIRECTORY: return "CodeDirectory";
++	case DC_BLOB_REQUIREMENTS: return "Requirements";
++	case DC_BLOB_ENTITLEMENTS: return "Entitlements";
++	case DC_BLOB_DER_ENTITLEMENTS: return "DEREntitlements";
++	case DC_BLOB_CMS: return "CMSSignature";
++	default: return "other";
++	}
++}
++
++void dc_flags_to_string(uint32_t flags, char *out, size_t outlen)
++{
++	static const struct { uint32_t bit; const char *name; } names[] = {
++		{ 0x00000001, "CS_VALID" },
++		{ 0x00000002, "CS_ADHOC" },
++		{ 0x00000004, "CS_GET_TASK_ALLOW" },
++		{ 0x00000008, "CS_INSTALLER" },
++		{ 0x00000100, "CS_HARD" },
++		{ 0x00000200, "CS_KILL" },
++		{ 0x00000400, "CS_CHECK_EXPIRATION" },
++		{ 0x00000800, "CS_RESTRICT" },
++		{ 0x00001000, "CS_ENFORCEMENT" },
++		{ 0x00002000, "CS_REQUIRE_LV" },
++		{ 0x00004000, "CS_ENTITLEMENTS_VALIDATED" },
++		{ 0x00010000, "CS_RUNTIME" },
++		{ 0x00020000, "CS_LINKER_SIGNED" },
++	};
++	size_t used = 0;
++
++	if (!outlen)
++		return;
++	out[0] = '\0';
++	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++		if (!(flags & names[i].bit))
++			continue;
++		int n = snprintf(out + used, outlen - used, "%s%s",
++				 used ? "," : "", names[i].name);
++		if (n < 0 || (size_t)n >= outlen - used)
++			break;
++		used += (size_t)n;
++	}
++	if (!used)
++		snprintf(out, outlen, "0x%08x", flags);
++}
++
++static int hash_data(uint32_t hash_type, const uint8_t *buf, size_t len,
++		     uint8_t *out, size_t outcap, size_t *outlen)
++{
++	const EVP_MD *md;
++	unsigned int mdlen = 0;
++	uint8_t tmp[EVP_MAX_MD_SIZE];
++
++	switch (hash_type) {
++	case DC_HASHTYPE_SHA1: md = EVP_sha1(); break;
++	case DC_HASHTYPE_SHA256:
++	case DC_HASHTYPE_SHA256_TRUNCATED: md = EVP_sha256(); break;
++	case DC_HASHTYPE_SHA384: md = EVP_sha384(); break;
++	default: return -1;
++	}
++
++	if (EVP_Digest(buf, len, tmp, &mdlen, md, NULL) != 1)
++		return -1;
++
++	size_t want = mdlen;
++	if (hash_type == DC_HASHTYPE_SHA256_TRUNCATED)
++		want = 20;
++	if (want > outcap)
++		return -1;
++	memcpy(out, tmp, want);
++	if (outlen)
++		*outlen = want;
++	return 0;
++}
++
++static int expected_hash_size(uint32_t hash_type, uint32_t *size)
++{
++	switch (hash_type) {
++	case DC_HASHTYPE_SHA1: *size = 20; return 0;
++	case DC_HASHTYPE_SHA256: *size = 32; return 0;
++	case DC_HASHTYPE_SHA256_TRUNCATED: *size = 20; return 0;
++	case DC_HASHTYPE_SHA384: *size = 48; return 0;
++	default: return -1;
++	}
++}
++
++static int find_signature(struct dc_image *img, uint64_t *off, uint64_t *len,
++			  char *err, size_t errlen)
++{
++	uint32_t magic;
++	size_t header_size;
++	uint32_t ncmds, sizeofcmds;
++	uint64_t p;
++	unsigned found = 0;
++
++	if (img->size < 4)
++		return fail(err, errlen, "file shorter than a Mach-O magic");
++
++	magic = le32(img->data);
++	switch (magic) {
++	case 0xfeedfacfu:
++		img->is_64 = true;
++		img->big_endian = false;
++		break;
++	case 0xcffaedfeu:
++		img->is_64 = true;
++		img->big_endian = true;
++		break;
++	case 0xfeedfaceu:
++		img->is_64 = false;
++		img->big_endian = false;
++		break;
++	case 0xcefaedfeu:
++		img->is_64 = false;
++		img->big_endian = true;
++		break;
++	default:
++		return fail(err, errlen, "not a thin Mach-O (magic 0x%08x)", magic);
++	}
++
++	header_size = img->is_64 ? 32 : 28;
++	if (img->size < header_size)
++		return fail(err, errlen, "truncated Mach-O header");
++
++	img->cputype = rd32(img, img->data + 4);
++	ncmds = rd32(img, img->data + 16);
++	sizeofcmds = rd32(img, img->data + 20);
++
++	if (!in_range(img->size, header_size, sizeofcmds))
++		return fail(err, errlen, "sizeofcmds runs past end of file");
++
++	p = header_size;
++	for (uint32_t i = 0; i < ncmds; i++) {
++		if (!in_range(img->size, p, 8))
++			return fail(err, errlen, "load command header out of range");
++
++		uint32_t cmd = rd32(img, img->data + p);
++		uint32_t cmdsize = rd32(img, img->data + p + 4);
++
++		if (cmdsize < 8 || !in_range(img->size, p, cmdsize))
++			return fail(err, errlen, "bad load command size %u", cmdsize);
++
++		if (cmd == DC_LC_CODE_SIGNATURE) {
++			if (cmdsize < 16)
++				return fail(err, errlen, "LC_CODE_SIGNATURE too small");
++			*off = rd32(img, img->data + p + 8);
++			*len = rd32(img, img->data + p + 12);
++			found++;
++		}
++		p += cmdsize;
++	}
++
++	if (!found)
++		return fail(err, errlen, "no LC_CODE_SIGNATURE (unsigned image)");
++	if (found > 1)
++		return fail(err, errlen, "multiple LC_CODE_SIGNATURE commands");
++
++	if (!in_range(img->size, *off, *len))
++		return fail(err, errlen, "signature range outside the file");
++	if (*len < 12)
++		return fail(err, errlen, "signature smaller than a SuperBlob header");
++
++	return 0;
++}
++
++static int parse_superblob(struct dc_image *img, char *err, size_t errlen)
++{
++	const uint8_t *sb = img->data + img->sig_offset;
++	uint32_t magic = be32(sb);
++	uint32_t length = be32(sb + 4);
++	uint32_t count = be32(sb + 8);
++	uint64_t index_end;
++
++	if (magic != DC_CSMAGIC_EMBEDDED_SIGNATURE)
++		return fail(err, errlen, "bad SuperBlob magic 0x%08x", magic);
++	if (length < 12 || length > img->sig_size)
++		return fail(err, errlen, "SuperBlob length %u outside signature", length);
++	if (count == 0 || count > DC_MAX_BLOBS)
++		return fail(err, errlen, "unsupported blob count %u", count);
++
++	index_end = 12ull + 8ull * count;
++	if (index_end > length)
++		return fail(err, errlen, "blob index runs past SuperBlob");
++
++	img->superblob_length = length;
++	img->blob_count = count;
++
++	for (uint32_t i = 0; i < count; i++) {
++		const uint8_t *e = sb + 12 + 8 * i;
++		uint32_t type = be32(e);
++		uint32_t off = be32(e + 4);
++		uint64_t blen;
++
++		if (off < index_end || !in_range(length, off, 8))
++			return fail(err, errlen, "blob %u offset out of range", i);
++
++		blen = be32(sb + off + 4);
++		if (blen < 8 || !in_range(length, off, blen))
++			return fail(err, errlen, "blob %u length out of range", i);
++
++		img->blobs[i].type = type;
++		img->blobs[i].offset = off;
++		img->blobs[i].length = (uint32_t)blen;
++		img->blobs[i].magic = be32(sb + off);
++	}
++	return 0;
++}
++
++static int verify_special_blob(struct dc_image *img, uint32_t blob_type,
++			       uint32_t slot, uint32_t magic,
++			       char *err, size_t errlen)
++{
++	const struct dc_blob *blob = NULL;
++	const uint8_t *blob_data;
++	const uint8_t *slot_hash;
++	uint8_t digest[EVP_MAX_MD_SIZE];
++	size_t digest_len = 0;
++	uint32_t i;
++
++	if (!img->cd)
++		return fail(err, errlen, "CodeDirectory not parsed");
++
++	for (i = 0; i < img->blob_count; i++) {
++		if (img->blobs[i].type != blob_type)
++			continue;
++		if (blob != NULL)
++			return fail(err, errlen, "duplicate blob type %u", blob_type);
++		blob = &img->blobs[i];
++	}
++
++	if (slot > img->n_special_slots) {
++		/* The CodeDirectory does not reserve this slot. */
++		return blob == NULL ? 0 : fail(err, errlen, "special slot -%u missing", slot);
++	}
++	if ((uint64_t)slot * img->hash_size > img->hash_off)
++		return fail(err, errlen, "special slot -%u outside hash area", slot);
++
++	slot_hash = img->cd + img->hash_off - slot * img->hash_size;
++	if (blob == NULL) {
++		for (i = 0; i < img->hash_size; i++) {
++			if (slot_hash[i] != 0)
++				return fail(err, errlen,
++					    "special slot -%u is set but the blob is absent", slot);
++		}
++		return 0;
++	}
++
++	if (blob->magic != magic)
++		return fail(err, errlen, "special blob type %u has magic 0x%08x",
++			    blob_type, blob->magic);
++	blob_data = img->data + img->sig_offset + blob->offset;
++	if (be32(blob_data + 4) != blob->length)
++		return fail(err, errlen, "special blob type %u length mismatch", blob_type);
++	if (hash_data(img->hash_type, blob_data, blob->length, digest,
++		      sizeof(digest), &digest_len) != 0 ||
++	    digest_len != img->hash_size ||
++	    memcmp(digest, slot_hash, img->hash_size) != 0)
++		return fail(err, errlen, "special slot -%u hash mismatch", slot);
++	return 0;
++}
++
++static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
++{
++	const uint8_t *cd = NULL;
++	uint32_t cd_len = 0;
++	uint64_t need;
++	uint32_t hash_off, ident_off, n_special, n_code;
++	uint32_t code_limit32 = 0;
++	uint64_t code_limit = 0;
++
++	for (uint32_t i = 0; i < img->blob_count; i++) {
++		if (img->blobs[i].type == DC_BLOB_CODEDIRECTORY) {
++			if (cd)
++				return fail(err, errlen, "multiple CodeDirectory blobs");
++			cd = img->data + img->sig_offset + img->blobs[i].offset;
++			cd_len = img->blobs[i].length;
++		}
++	}
++	if (!cd)
++		return fail(err, errlen, "no CodeDirectory blob");
++
++	if (cd_len < CD_MIN_SIZE)
++		return fail(err, errlen, "CodeDirectory shorter than v0 header");
++	if (be32(cd) != DC_CSMAGIC_CODEDIRECTORY)
++		return fail(err, errlen, "bad CodeDirectory magic");
++	if (be32(cd + 4) != cd_len)
++		return fail(err, errlen, "CodeDirectory length field mismatch");
++
++	img->cd = cd;
++	img->cd_len = cd_len;
++	img->cd_version = be32(cd + 8);
++	img->cd_flags = be32(cd + 12);
++	hash_off = be32(cd + 16);
++	ident_off = be32(cd + 20);
++	n_special = be32(cd + 24);
++	n_code = be32(cd + 28);
++	code_limit32 = be32(cd + 32);
++	img->hash_size = cd[36];
++	img->hash_type = cd[37];
++	img->hash_off = hash_off;
++	img->page_size_log2 = cd[39];
++	img->n_special_slots = n_special;
++	img->n_code_slots = n_code;
++	img->code_limit = code_limit32;
++
++	if (be32(cd + 40) != 0)
++		return fail(err, errlen, "spare2 is not zero");
++
++	need = CD_MIN_SIZE;
++	if (img->cd_version >= CD_V_SCATTER)
++		need += 4;
++	if (img->cd_version >= CD_V_TEAMID)
++		need += 4;
++	if (img->cd_version >= CD_V_CODELIMIT64)
++		need += 4 + 8;
++	if (img->cd_version >= CD_V_EXECSEG)
++		need += 8 + 8 + 8;
++	if (img->cd_version >= CD_V_RUNTIME)
++		need += 4 + 4;
++	if (cd_len < need)
++		return fail(err, errlen, "CodeDirectory v0x%x truncated (need %llu)",
++			    img->cd_version, (unsigned long long)need);
++
++	if (img->hash_type == 0)
++		return fail(err, errlen, "unknown hash type %u", img->hash_type);
++	{
++		uint32_t want = 0;
++		if (expected_hash_size(img->hash_type, &want) != 0)
++			return fail(err, errlen, "unknown hash type %u", img->hash_type);
++		if (img->hash_size != want)
++			return fail(err, errlen, "hash size %u does not match type %s",
++				    img->hash_size, dc_hash_name(img->hash_type));
++	}
++
++	if (img->page_size_log2 < 9 || img->page_size_log2 > 30)
++		return fail(err, errlen, "invalid page size 2^%u", img->page_size_log2);
++
++	if (img->cd_version >= CD_V_CODELIMIT64) {
++		uint64_t limit64 = be64(cd + 56);
++		if (limit64)
++			code_limit = limit64;
++	}
++	if (code_limit == 0)
++		code_limit = code_limit32;
++	if (code_limit == 0)
++		return fail(err, errlen, "code limit is zero (no signed executable content)");
++	if (code_limit > img->size)
++		return fail(err, errlen, "code limit %llu beyond file size %zu",
++			    (unsigned long long)code_limit, img->size);
++	img->code_limit = code_limit;
++
++	if (ident_off == 0 || ident_off >= cd_len)
++		return fail(err, errlen, "identifier offset out of range");
++	{
++		size_t n = strnlen((const char *)cd + ident_off, cd_len - ident_off);
++		if (n == cd_len - ident_off)
++			return fail(err, errlen, "identifier is not NUL-terminated");
++		if (n >= sizeof(img->identifier))
++			return fail(err, errlen, "identifier too long");
++		memcpy(img->identifier, cd + ident_off, n + 1);
++	}
++
++	img->teamid[0] = '\0';
++	if (img->cd_version >= CD_V_TEAMID) {
++		uint32_t team_off = be32(cd + 48);
++		if (team_off) {
++			if (team_off >= cd_len)
++				return fail(err, errlen, "team id offset out of range");
++			size_t n = strnlen((const char *)cd + team_off, cd_len - team_off);
++			if (n == cd_len - team_off)
++				return fail(err, errlen, "team id is not NUL-terminated");
++			if (n >= sizeof(img->teamid))
++				return fail(err, errlen, "team id too long");
++			memcpy(img->teamid, cd + team_off, n + 1);
++		}
++	}
++
++	if ((uint64_t)n_special * img->hash_size > hash_off)
++		return fail(err, errlen, "special slots overlap header");
++	if (hash_off > cd_len ||
++	    (uint64_t)hash_off + (uint64_t)n_code * img->hash_size > cd_len)
++		return fail(err, errlen, "code slots run past CodeDirectory");
++
++	{
++		uint64_t page = 1ull << img->page_size_log2;
++		uint64_t want_slots = code_limit ? (code_limit + page - 1) / page : 0;
++		if (want_slots != n_code)
++			return fail(err, errlen,
++				    "slot count %u does not match code limit %llu / page %llu",
++				    n_code, (unsigned long long)code_limit,
++				    (unsigned long long)page);
++	}
++
++	{
++		uint8_t full[EVP_MAX_MD_SIZE];
++		size_t flen = 0;
++
++		if (hash_data(img->hash_type, cd, cd_len, full, sizeof(full), &flen) != 0 ||
++		    flen < DC_CDHASH_LEN) {
++			return fail(err, errlen, "failed to hash CodeDirectory");
++		}
++		memcpy(img->cdhash, full, DC_CDHASH_LEN);
++	}
++	if (hash_data(DC_HASHTYPE_SHA1, cd, cd_len, img->cd_sha1,
++		      sizeof(img->cd_sha1), NULL) != 0)
++		return fail(err, errlen, "failed to compute SHA-1 of CodeDirectory");
++	if (hash_data(DC_HASHTYPE_SHA256, cd, cd_len, img->cd_sha256,
++		      sizeof(img->cd_sha256), NULL) != 0)
++		return fail(err, errlen, "failed to compute SHA-256 of CodeDirectory");
++
++	/* Special slots bind requirements and entitlement blobs to the
++	 * CodeDirectory. Verify the complete blob (including its 8-byte
++	 * generic header) and reject a non-zero slot with no blob. */
++	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
++				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
++				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
++				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
++		return -1;
++
++	/* Embedded entitlements, both XML (type 5) and DER (type 7). */
++	for (uint32_t i = 0; i < img->blob_count; i++) {
++		const struct dc_blob *b = &img->blobs[i];
++		if (b->type != DC_BLOB_ENTITLEMENTS && b->type != DC_BLOB_DER_ENTITLEMENTS)
++			continue;
++		if (b->length <= 8)
++			return fail(err, errlen, "empty entitlements blob");
++		if (b->type == DC_BLOB_ENTITLEMENTS) {
++			if (b->magic != DC_CSMAGIC_EMBEDDED_ENTITLEMENTS)
++				return fail(err, errlen, "bad entitlements magic 0x%08x", b->magic);
++			img->entitlements = img->data + img->sig_offset + b->offset + 8;
++			img->entitlements_len = b->length - 8;
++		} else {
++			if (b->magic != DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS)
++				return fail(err, errlen, "bad DER entitlements magic 0x%08x", b->magic);
++			img->der_entitlements = img->data + img->sig_offset + b->offset + 8;
++			img->der_entitlements_len = b->length - 8;
++		}
++	}
++
++	return 0;
++}
++
++int dc_parse(const uint8_t *data, size_t size, struct dc_image *img,
++	     char *err, size_t errlen)
++{
++	int r;
++
++	if (!data || !img)
++		return fail(err, errlen, "null argument");
++	memset(img, 0, sizeof(*img));
++	img->data = data;
++	img->size = size;
++
++	r = find_signature(img, &img->sig_offset, &img->sig_size, err, errlen);
++	if (r != 0)
++		return r;
++	r = parse_superblob(img, err, errlen);
++	if (r != 0)
++		return r;
++	return parse_codedirectory(img, err, errlen);
++}
++
++int dc_verify_pages(struct dc_image *img, char *err, size_t errlen)
++{
++	uint64_t page_size;
++	uint32_t hash_off;
++
++	if (!img || !img->cd)
++		return fail(err, errlen, "image not parsed");
++
++	/* Re-check the special slots here as well: callers that parse once and
++	 * verify later must not use entitlements that are not bound to the
++	 * CodeDirectory. */
++	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
++				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
++				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
++				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
++		return -1;
++
++	page_size = 1ull << img->page_size_log2;
++	hash_off = be32(img->cd + 16);
++
++	img->pages_total = img->n_code_slots;
++	img->pages_failed = 0;
++	img->first_bad_page = 0;
++
++	for (uint32_t i = 0; i < img->n_code_slots; i++) {
++		uint64_t off = (uint64_t)i * page_size;
++		uint64_t remain;
++		size_t len;
++		uint8_t digest[64];
++		size_t dlen = 0;
++		const uint8_t *want = img->cd + hash_off + (size_t)i * img->hash_size;
++
++		if (off >= img->code_limit) {
++			img->pages_failed++;
++			if (!img->first_bad_page)
++				img->first_bad_page = i + 1;
++			continue;
++		}
++		remain = img->code_limit - off;
++		len = remain > page_size ? (size_t)page_size : (size_t)remain;
++		if (hash_data(img->hash_type, img->data + off, len,
++			      digest, sizeof(digest), &dlen) != 0 ||
++		    dlen != img->hash_size ||
++		    memcmp(digest, want, img->hash_size) != 0) {
++			img->pages_failed++;
++			if (!img->first_bad_page)
++				img->first_bad_page = i + 1;
++		}
++	}
++
++	img->pages_verified = true;
++	if (img->pages_failed)
++		return fail(err, errlen, "%u of %u code pages failed verification (first: %u)",
++			    img->pages_failed, img->pages_total, img->first_bad_page);
++	return 0;
++}
+diff --git a/src/dc_codesign.h b/src/dc_codesign.h
+new file mode 100644
+index 0000000..f272720
+--- /dev/null
++++ b/src/dc_codesign.h
+@@ -0,0 +1,120 @@
++/*
++ * dc_codesign.h - bounded parser for Mach-O code signatures.
++ *
++ * Part of the phase-M1 work in docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md.
++ * The parser is deliberately read-only and allocation-free: it points into the
++ * caller's file buffer and validates every offset before use.
++ *
++ * Hashing uses OpenSSL here. When this code moves into libsystem_kernel the
++ * hash backend must be swapped for CommonCrypto/corecrypto; the parser and the
++ * validation rules stay the same.
++ */
++
++#ifndef DC_CODESIGN_H
++#define DC_CODESIGN_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define DC_CDHASH_LEN 20
++#define DC_MAX_BLOBS 64
++#define DC_IDENT_MAX 256
++#define DC_TEAMID_MAX 64
++
++/* CS_SuperBlob magics (big-endian on disk). */
++#define DC_CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0u
++#define DC_CSMAGIC_CODEDIRECTORY 0xfade0c02u
++#define DC_CSMAGIC_REQUIREMENTS 0xfade0c01u
++#define DC_CSMAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171u
++#define DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172u
++#define DC_CSMAGIC_BLOBWRAPPER 0xfade0b01u
++
++/* SuperBlob slot types. */
++#define DC_BLOB_CODEDIRECTORY 0u
++#define DC_BLOB_REQUIREMENTS 2u
++#define DC_BLOB_ENTITLEMENTS 5u
++#define DC_BLOB_DER_ENTITLEMENTS 7u
++#define DC_BLOB_CMS 0x10000u
++
++/* Mach-O. */
++#define DC_LC_CODE_SIGNATURE 0x1du
++
++/* CodeDirectory hash types. */
++#define DC_HASHTYPE_SHA1 1u
++#define DC_HASHTYPE_SHA256 2u
++#define DC_HASHTYPE_SHA256_TRUNCATED 3u
++#define DC_HASHTYPE_SHA384 4u
++
++struct dc_blob {
++	uint32_t type;
++	uint32_t offset;
++	uint32_t length;
++	uint32_t magic;
++};
++
++struct dc_image {
++	const uint8_t *data;
++	size_t size;
++
++	bool is_64;
++	bool big_endian;
++	uint32_t cputype;
++
++	uint64_t sig_offset;
++	uint64_t sig_size;
++	uint32_t superblob_length;
++	uint32_t blob_count;
++	struct dc_blob blobs[DC_MAX_BLOBS];
++
++	/* CodeDirectory, pointing into the file buffer. */
++	const uint8_t *cd;
++	size_t cd_len;
++	uint32_t cd_version;
++	uint32_t cd_flags;
++	uint32_t hash_type;
++	uint32_t hash_size;
++	uint32_t hash_off;
++	uint32_t page_size_log2;
++	uint32_t n_special_slots;
++	uint32_t n_code_slots;
++	uint64_t code_limit;
++	char identifier[DC_IDENT_MAX];
++	char teamid[DC_TEAMID_MAX];
++
++	/* Digests of the CodeDirectory blob. */
++	uint8_t cdhash[DC_CDHASH_LEN];
++	uint8_t cd_sha1[20];
++	uint8_t cd_sha256[32];
++
++	/* Embedded entitlements (type 5) and DER entitlements (type 7). */
++	const uint8_t *entitlements;
++	size_t entitlements_len;
++	const uint8_t *der_entitlements;
++	size_t der_entitlements_len;
++
++	/* Page-hash verification (filled by dc_verify_pages). */
++	bool pages_verified;
++	uint32_t pages_total;
++	uint32_t pages_failed;
++	uint32_t first_bad_page;
++};
++
++/*
++ * Parse a Mach-O image and its embedded signature. Returns 0 on success,
++ * -1 on error (err is always NUL-terminated).
++ */
++int dc_parse(const uint8_t *data, size_t size, struct dc_image *img,
++	     char *err, size_t errlen);
++
++/*
++ * Verify every code page hash against the CodeDirectory. Requires a parsed
++ * image. Returns 0 when all pages match, -1 otherwise.
++ */
++int dc_verify_pages(struct dc_image *img, char *err, size_t errlen);
++
++const char *dc_hash_name(uint32_t hash_type);
++const char *dc_blob_type_name(uint32_t type);
++void dc_flags_to_string(uint32_t flags, char *out, size_t outlen);
++
++#endif /* DC_CODESIGN_H */

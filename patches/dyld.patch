@@ -1,0 +1,68 @@
+diff --git a/src/dyld2.cpp b/src/dyld2.cpp
+index 3710870..2a6f6bd 100644
+--- a/src/dyld2.cpp
++++ b/src/dyld2.cpp
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include <stdint.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <unistd.h>
+ #include <errno.h>
+@@ -101,7 +102,40 @@
+ 	};
+ 	extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
+ #ifdef DARLING
+-    int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags) { *output_flags = 0x3F; return 0; }
++	static bool sDarlingStripDyldEnv = false;
++
++	int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags) {
++		const uint64_t allPolicy =
++		    AMFI_DYLD_OUTPUT_ALLOW_AT_PATH |
++		    AMFI_DYLD_OUTPUT_ALLOW_PATH_VARS |
++		    AMFI_DYLD_OUTPUT_ALLOW_CUSTOM_SHARED_CACHE |
++		    AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS |
++		    AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS |
++		    AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION |
++		    AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING;
++		uint32_t flags = 0;
++
++		(void)input_flags;
++		if (csops(0, CS_OPS_STATUS, &flags, sizeof(flags)) != 0) {
++			*output_flags = allPolicy;
++			return 0;
++		}
++		uint32_t darlingEntitlements = 0;
++		/* Darling-private read-only csops extension; avoid copying the
++		 * entitlement blob while dyld is still bootstrapping. 0x100 is not
++		 * an Apple CS_OPS_* value (0..15). */
++		if (csops(0, 0x100, &darlingEntitlements, sizeof(darlingEntitlements)) != 0)
++			darlingEntitlements = 0;
++		sDarlingStripDyldEnv = (flags & CS_RUNTIME) &&
++		    !(darlingEntitlements & 1u);
++		/* Keep the normal path policy. Darling still resolves its runtime
++		 * overlays with @paths and fallbacks; disabling those AMFI output
++		 * bits made dyld crash before main on the x86-64 runtime. The
++		 * hardened-runtime environment filtering is done in
++		 * checkEnvironmentVariables(). */
++		*output_flags = allPolicy;
++		return 0;
++	}
+ #endif
+ #else
+ 	#include <libamfi.h>
+@@ -2514,6 +2548,13 @@ static void checkEnvironmentVariables(const char* envp[])
+ 				key[keyLen] = '\0';
+ 				if ( (strncmp(key, "DYLD_PRINT_", 11) == 0) && !gLinkContext.allowEnvVarsPrint )
+ 					continue;
++#ifdef DARLING
++				/* Darling keeps path/root variables because its runtime
++				 * overlays depend on them, but a hardened process must not
++				 * accept code injection through the environment. */
++				if ( sDarlingStripDyldEnv && strcmp(key, "DYLD_INSERT_LIBRARIES") == 0 )
++					continue;
++#endif
+ 				processDyldEnvironmentVariable(key, value, NULL);
+ 			}
+ 		}
