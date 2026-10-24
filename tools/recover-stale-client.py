@@ -183,6 +183,61 @@ def client_pids(prefix, proc_root=Path('/proc')):
     return sorted(found)
 
 
+def parent_pid(proc):
+    """PPID from /proc/<pid>/stat, coping with a comm field with spaces."""
+    try:
+        return int((proc / 'stat').read_text().rsplit(')', 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def termination_order(identities, proc_root=Path('/proc')):
+    """Deepest processes first, so a live parent can reap its own children."""
+    depth = {}
+
+    def measure(pid, seen):
+        if pid in depth:
+            return depth[pid]
+        if pid in seen:
+            return 0
+        seen.add(pid)
+        parent = parent_pid(proc_root / str(pid))
+        value = 0 if parent in (None, pid) or parent not in identities else measure(parent, seen) + 1
+        depth[pid] = value
+        return value
+
+    for pid in identities:
+        measure(pid, set())
+    return sorted(identities, key=lambda pid: (-depth[pid], pid))
+
+
+def _signal_tree(prefix, identities, order, signum, kill, proc_root):
+    for pid in order:
+        if client_identity(prefix, pid, proc_root) != identities[pid]:
+            continue
+        try:
+            kill(pid, signum)
+        except OSError:
+            pass
+
+
+def wait_for_exit(prefix, identities, proc_root=Path('/proc'), sleep=time.sleep,
+                  attempts=5):
+    """Wait briefly for the tree to leave the process table; return leftovers."""
+    leftovers = []
+    for attempt in range(attempts):
+        leftovers = [
+            pid for pid, start_ticks in identities.items()
+            if client_identity(prefix, pid, proc_root) == start_ticks
+            or process_state(proc_root / str(pid)) is not None
+        ]
+        if not leftovers:
+            break
+        if attempt != attempts - 1:
+            sleep(1)
+    return leftovers
+
+
 def recover(prefix, proc_root=Path('/proc'), window_check=visible_client_window,
             kill=os.kill, sleep=time.sleep, out=sys.stdout):
     if not server_running(proc_root):
@@ -207,21 +262,17 @@ def recover(prefix, proc_root=Path('/proc'), window_check=visible_client_window,
         return 0
     print('recover-stale-client: stale client tree without a window; '
           'terminating %d process(es)' % len(identities), file=out, flush=True)
-    for pid, start_ticks in identities.items():
-        if client_identity(prefix, pid, proc_root) != start_ticks:
-            continue
-        try:
-            kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    order = termination_order(identities, proc_root)
+    _signal_tree(prefix, identities, order, signal.SIGTERM, kill, proc_root)
     sleep(4)
-    for pid, start_ticks in identities.items():
-        if client_identity(prefix, pid, proc_root) != start_ticks:
-            continue
-        try:
-            kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+    _signal_tree(prefix, identities, order, signal.SIGKILL, kill, proc_root)
+    leftovers = wait_for_exit(prefix, identities, proc_root, sleep)
+    if leftovers:
+        parents = sorted({parent_pid(proc_root / str(pid)) for pid in leftovers} - {None})
+        print('recover-stale-client: %d process(es) still present after SIGKILL '
+              '(parent PID(s): %s); the guest launchd reaps untracked zombies within '
+              'seconds' % (len(leftovers), ', '.join(str(p) for p in parents) or 'unknown'),
+              file=out, flush=True)
     return 0
 
 

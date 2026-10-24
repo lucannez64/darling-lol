@@ -27,7 +27,7 @@ class RecoverStaleClientTests(unittest.TestCase):
         (self.proc / 'uptime').write_text('1000 0\n')
         self.prefix = self.root / '.darling'
 
-    def process(self, pid, comm, argv, env=None, executable=None, age=120):
+    def process(self, pid, comm, argv, env=None, executable=None, age=120, ppid=0):
         folder = self.proc / str(pid)
         folder.mkdir()
         (folder / 'comm').write_text(comm + '\n')
@@ -35,7 +35,7 @@ class RecoverStaleClientTests(unittest.TestCase):
             (argv[0] if executable is None else executable).encode() + b'\0' +
             b''.join(arg.encode() + b'\0' for arg in argv[1:]))
         ticks = os.sysconf('SC_CLK_TCK')
-        fields = ['S'] + ['0'] * 18 + [str(int((1000 - age) * ticks))]
+        fields = ['S', str(ppid)] + ['0'] * 17 + [str(int((1000 - age) * ticks))]
         (folder / 'stat').write_text(f'{pid} ({comm}) ' + ' '.join(fields) + '\n')
         if env is not None:
             (folder / 'environ').write_bytes(env)
@@ -121,6 +121,35 @@ class RecoverStaleClientTests(unittest.TestCase):
         result, killed, _output = self.run_recover(on_kill=reuse_pid)
         self.assertEqual(result, 0)
         self.assertEqual(killed, [(12, recover_stale_client.signal.SIGTERM)])
+
+    def test_children_are_terminated_before_their_parents(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+        self.process(13, 'mldr', ['/Applications/League of Legends.app/Contents/MacOS/LeagueClientUx'], self.client_env(), ppid=12)
+        self.process(14, 'CrUtilityMain', ['/Applications/Riot Client.app/Contents/Frameworks/CrUtilityMain'], self.client_env(), ppid=13)
+        result, killed, output = self.run_recover()
+        self.assertEqual(result, 0)
+        self.assertEqual(killed, [
+            (14, recover_stale_client.signal.SIGTERM),
+            (13, recover_stale_client.signal.SIGTERM),
+            (12, recover_stale_client.signal.SIGTERM),
+            (14, recover_stale_client.signal.SIGKILL),
+            (13, recover_stale_client.signal.SIGKILL),
+            (12, recover_stale_client.signal.SIGKILL),
+        ])
+        self.assertIn('terminating 3 process(es)', output)
+
+    def test_leftover_processes_are_reported(self):
+        self.process(10, 'darlingserver', ['darlingserver'])
+        self.process(12, 'mldr', [CLIENT], self.client_env())
+
+        def survivor(pid, signum):
+            pass
+
+        result, killed, output = self.run_recover(on_kill=survivor)
+        self.assertEqual(result, 0)
+        self.assertIn('still present after SIGKILL', output)
+        self.assertIn('parent PID(s): 0', output)
 
     def test_young_client_is_preserved(self):
         self.process(10, 'darlingserver', ['darlingserver'])

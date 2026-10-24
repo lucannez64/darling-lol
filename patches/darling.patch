@@ -11368,3 +11368,100 @@ index 87db50d12..01a7b2a3e 100644
  	// std::ofstream m_dump;
  };
  
+diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
+index a68739ff..5c8eb836 100644
+--- a/src/launchd/src/core.c
++++ b/src/launchd/src/core.c
+@@ -463,6 +463,9 @@ static job_t job_mig_intran2(jobmgr_t jm, mach_port_t mport, pid_t upid);
+ static job_t jobmgr_lookup_per_user_context_internal(job_t j, uid_t which_user, mach_port_t *mp);
+ static void job_export_all2(jobmgr_t jm, launch_data_t where);
+ static void jobmgr_callback(void *obj, struct kevent *kev);
++
++static char stray_reap_timer;
++void jobmgr_reap_orphaned_children(void);
+ static void jobmgr_setup_env_from_other_jobs(jobmgr_t jm);
+ static void jobmgr_export_env_from_other_jobs(jobmgr_t jm, launch_data_t dict);
+ static struct machservice *jobmgr_lookup_service(jobmgr_t jm, const char *name, bool check_parent, pid_t target_pid);
+@@ -4312,6 +4315,8 @@ jobmgr_callback(void *obj, struct kevent *kev)
+ 		} else if (kev->ident == (uintptr_t)jm) {
+ 			jobmgr_log(jm, LOG_DEBUG, "Shutdown timer firing.");
+ 			jobmgr_still_alive_with_check(jm);
++		} else if (kev->ident == (uintptr_t)&stray_reap_timer) {
++			jobmgr_reap_orphaned_children();
+ 		} else if (kev->ident == (uintptr_t)&jm->reboot_flags) {
+ 			jobmgr_do_garbage_collection(jm);
+ 		} else if (kev->ident == (uintptr_t)&launchd_runtime_busy_time) {
+@@ -6702,6 +6707,65 @@ jobmgr_do_garbage_collection(jobmgr_t jm)
+ 	return jm;
+ }
+ 
++void
++jobmgr_reap_orphaned_children(void)
++{
++	/* Darling: when a process's parent dies, the kernel reparents it to
++	 * launchd, and the job manager never learns about it, so nothing ever
++	 * waits on it and it lingers as a zombie until shutdown. Reap those
++	 * zombies here, leaving tracked jobs alone so their exit status is still
++	 * available to job_reap().
++	 *
++	 * proc_listpids() is not implemented yet, so enumerate the guest PID
++	 * namespace through /proc. */
++	DIR *dir;
++	struct dirent *de;
++	pid_t self = getpid();
++
++	if (root_jobmgr == NULL) {
++		return;
++	}
++
++	dir = opendir("/proc");
++	if (dir == NULL) {
++		jobmgr_log(root_jobmgr, LOG_DEBUG, "Unable to enumerate /proc: %d: %s", errno, strerror(errno));
++		return;
++	}
++
++	while ((de = readdir(dir)) != NULL) {
++		struct proc_bsdshortinfo proc;
++		char *end = NULL;
++		long value = strtol(de->d_name, &end, 10);
++		pid_t pid;
++		int status;
++
++		if (end == de->d_name || *end != '\0' || value <= 0) {
++			continue;
++		}
++		pid = (pid_t)value;
++
++		memset(&proc, 0, sizeof(proc));
++		if (proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 1, &proc, PROC_PIDT_SHORTBSDINFO_SIZE) == 0) {
++			continue;
++		}
++		if (proc.pbsi_ppid != self) {
++			continue;
++		}
++		if (proc.pbsi_status != SZOMB) {
++			continue;
++		}
++		if (jobmgr_find_by_pid(root_jobmgr, pid, false) != NULL) {
++			continue;
++		}
++
++		if (waitpid(pid, &status, WNOHANG) == pid) {
++			jobmgr_log(root_jobmgr, LOG_DEBUG, "Reaped orphaned zombie child PID %u.", pid);
++		}
++	}
++
++	closedir(dir);
++}
++
+ void
+ jobmgr_kill_stray_children(jobmgr_t jm, pid_t *p, size_t np)
+ {
+@@ -11796,6 +11860,7 @@ jobmgr_init(bool sflag)
+ 		}
+ 	}
+ 	s_no_hang_fd = _fd(s_no_hang_fd);
++	(void)jobmgr_assumes_zero_p(root_jobmgr, kevent_mod((uintptr_t)&stray_reap_timer, EVFILT_TIMER, EV_ADD, NOTE_SECONDS, 5, root_jobmgr));
+ }
+ 
+ size_t
