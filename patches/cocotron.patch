@@ -126,7 +126,7 @@ index d543e329..e320a3af 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSApplication.m b/AppKit/NSApplication.m
-index 8e7508e2..5abc49b7 100644
+index 8e7508e..dbc72de 100644
 --- a/AppKit/NSApplication.m
 +++ b/AppKit/NSApplication.m
 @@ -17,6 +17,9 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -318,6 +318,18 @@ index 8e7508e2..5abc49b7 100644
          NS_DURING [NSClassFromString(@"Win32RunningCopyPipe")
                  performSelector: @selector(createRunningCopyPipe)];
  
+@@ -926,7 +1019,10 @@ NSApplication *NSApp = nil;
+ }
+ 
+ - (void) activateIgnoringOtherApps: (BOOL) flag {
+-    NSUnimplementedMethod();
++    for (NSWindow *window in _windows) {
++        if ([window isVisible])
++            [window orderFront: nil];
++    }
+ }
+ 
+ - (void) deactivate {
 diff --git a/AppKit/NSBitmapImageRep.m b/AppKit/NSBitmapImageRep.m
 index 9a3f6a5d..dafb0cbe 100644
 --- a/AppKit/NSBitmapImageRep.m
@@ -1274,7 +1286,7 @@ index 359607fc..2d365b8f 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSSpellChecker.m b/AppKit/NSSpellChecker.m
-index 8fecc9d6..1b1a5783 100644
+index 8fecc9d..a9c8324 100644
 --- a/AppKit/NSSpellChecker.m
 +++ b/AppKit/NSSpellChecker.m
 @@ -28,6 +28,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1322,6 +1334,14 @@ index 8fecc9d6..1b1a5783 100644
  }
  #endif
  
+@@ -547,7 +565,6 @@ static NSSpellChecker *shared = nil;
+ }
+ 
+ - (void) dismissCorrectionIndicatorForView: (NSView *) view {
+-    NSUnimplementedMethod();
+ }
+ 
+ #pragma mark -
 diff --git a/AppKit/NSTextInput.m b/AppKit/NSTextInput.m
 index 9177a986..9c3c5ca3 100644
 --- a/AppKit/NSTextInput.m
@@ -1690,7 +1710,7 @@ index 8ac2bbdc..a0fb4f37 100644
  
  - (BOOL) performDragOperation: (id<NSDraggingInfo>) sender {
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120a..1920e594 100644
+index d545120..0f44069 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
 @@ -27,6 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1926,7 +1946,15 @@ index d545120a..1920e594 100644
  
      if (didSize) {
          [self resetCursorRects];
-@@ -1025,7 +1188,34 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1009,7 +1172,6 @@ static BOOL _allowsAutomaticWindowTabbing;
+ 
+ - (void) setContentMinSize: (NSSize) value {
+     _contentMinSize = value;
+-    NSUnimplementedMethod();
+ }
+ 
+ - (void) setContentMaxSize: (NSSize) value {
+@@ -1025,7 +1187,34 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setMovable: (BOOL) movable {
@@ -1962,7 +1990,7 @@ index d545120a..1920e594 100644
  }
  
  - (void) setBackingType: (NSBackingStoreType) value {
-@@ -1234,6 +1424,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1234,6 +1423,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setIgnoresMouseEvents: (BOOL) value {
      _ignoresMouseEvents = value;
@@ -1970,7 +1998,24 @@ index d545120a..1920e594 100644
  }
  
  - (void) setAspectRatio: (NSSize) value {
-@@ -1413,8 +1604,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1254,7 +1444,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+ }
+ 
+ - (void) setCollectionBehavior: (NSWindowCollectionBehavior) behavior {
+-    NSUnimplementedMethod();
++    _collectionBehavior = behavior;
+ }
+ 
+ - (void) setLevel: (NSInteger) value {
+@@ -1291,7 +1481,6 @@ static BOOL _allowsAutomaticWindowTabbing;
+ 
+ - (void) setShowsResizeIndicator: (BOOL) value {
+     _showsResizeIndicator = value;
+-    NSUnimplementedMethod();
+ }
+ 
+ - (void) setShowsToolbarButton: (BOOL) value {
+@@ -1413,8 +1602,14 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSButton *) standardWindowButton: (NSWindowButton) value {
@@ -1987,7 +2032,7 @@ index d545120a..1920e594 100644
  }
  
  - (NSButtonCell *) defaultButtonCell {
-@@ -1425,6 +1622,17 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1425,6 +1620,17 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_sheetContext sheet];
  }
  
@@ -2005,7 +2050,15 @@ index d545120a..1920e594 100644
  - (id) windowController {
      return _windowController;
  }
-@@ -1511,10 +1719,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1473,7 +1679,6 @@ static BOOL _allowsAutomaticWindowTabbing;
+ }
+ 
+ - (BOOL) isOnActiveSpace {
+-    NSUnimplementedMethod();
+     return YES;
+ }
+ 
+@@ -1511,10 +1716,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_platformWindow isMiniaturized];
  }
  
@@ -2017,7 +2070,17 @@ index d545120a..1920e594 100644
  
  - (BOOL) inLiveResize {
      return _isInLiveResize;
-@@ -1561,6 +1766,123 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1539,8 +1741,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+ }
+ 
+ - (NSWindowCollectionBehavior) collectionBehavior {
+-    NSUnimplementedMethod();
+-    return 0;
++    return _collectionBehavior;
+ }
+ 
+ - (NSPoint) convertBaseToScreen: (NSPoint) point {
+@@ -1561,6 +1762,123 @@ static BOOL _allowsAutomaticWindowTabbing;
      return point;
  }
  
@@ -2141,7 +2204,7 @@ index d545120a..1920e594 100644
  - (NSRect) frameRectForContentRect: (NSRect) contentRect {
      // hasMainMenu is an instance method so we can't just use the class method
      //  frameRectForContentRect:styleMask:
-@@ -1580,6 +1902,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1580,6 +1898,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSRect) contentRectForFrameRect: (NSRect) frameRect {
@@ -2152,7 +2215,16 @@ index d545120a..1920e594 100644
      NSRect result = [[NSDisplay currentDisplay] insetRect: frameRect
                             forNativeWindowBorderWithStyle: [self styleMask]];
  
-@@ -2155,6 +2481,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1818,7 +2140,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+ }
+ 
+ - (NSSelectionDirection) keyViewSelectionDirection {
+-    NSUnimplementedMethod();
++    // NSSelectionDirection is an int here; 0 is NSDirectSelection.
+     return 0;
+ }
+ 
+@@ -2155,6 +2477,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  - (void) orderWindow: (NSWindowOrderingMode) place
            relativeTo: (NSInteger) relativeTo
  {
@@ -2160,7 +2232,7 @@ index d545120a..1920e594 100644
      // The move notifications are sent under unknown conditions around
      // orderFront: in the Apple AppKit, we do them all the time here until it's
      // figured out. I suspect it is a side effect of off-screen windows being at
-@@ -2208,6 +2535,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2208,6 +2531,8 @@ static BOOL _allowsAutomaticWindowTabbing;
          break;
      }
  
@@ -2169,7 +2241,7 @@ index d545120a..1920e594 100644
      [self postNotificationName: NSWindowDidMoveNotification];
  }
  
-@@ -2257,6 +2586,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2257,6 +2582,12 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -2182,7 +2254,7 @@ index d545120a..1920e594 100644
      // Some events can cause our window to be destroyed
      // So make sure self lives at least through this current run loop...
      [[self retain] autorelease];
-@@ -2300,6 +2635,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2300,6 +2631,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  
      case NSLeftMouseDown: {
          NSView *view = [_backgroundView hitTest: [event locationInWindow]];
@@ -2193,7 +2265,7 @@ index d545120a..1920e594 100644
  
          if ([view acceptsFirstResponder]) {
              if ([view needsPanelToBecomeKey]) {
-@@ -2307,6 +2646,27 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2307,6 +2642,27 @@ static BOOL _allowsAutomaticWindowTabbing;
              }
          }
  
@@ -2221,7 +2293,7 @@ index d545120a..1920e594 100644
          // Event goes to view, not first responder.
          [view mouseDown: event];
          _mouseDownLocationInWindow = [event locationInWindow];
-@@ -2330,6 +2690,31 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2330,6 +2686,31 @@ static BOOL _allowsAutomaticWindowTabbing;
          _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
          break;
  
@@ -2253,7 +2325,7 @@ index d545120a..1920e594 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2478,6 +2863,197 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2478,6 +2859,197 @@ static BOOL _allowsAutomaticWindowTabbing;
      _draggedTypes = nil;
  }
  
@@ -2451,7 +2523,7 @@ index d545120a..1920e594 100644
  - (void) dragImage: (NSImage *) image
                  at: (NSPoint) location
              offset: (NSSize) offset
-@@ -2486,6 +3062,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2486,6 +3058,10 @@ static BOOL _allowsAutomaticWindowTabbing;
              source: (id) source
           slideBack: (BOOL) slideBack
  {
@@ -2462,7 +2534,7 @@ index d545120a..1920e594 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2527,15 +3107,19 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2527,15 +3103,19 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setIsVisible: (BOOL) visible {
@@ -2483,7 +2555,7 @@ index d545120a..1920e594 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3064,6 +3648,13 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3064,6 +3644,13 @@ static BOOL _allowsAutomaticWindowTabbing;
      if (didSize) {
          // Don't redraw everything unless we really have to.
          [_backgroundView setFrameSize: _frame.size];
@@ -2497,7 +2569,7 @@ index d545120a..1920e594 100644
          [_backgroundView setNeedsDisplay: YES];
          [self resetCursorRects];
          [self saveFrameUsingName: _autosaveFrameName];
-@@ -3260,8 +3851,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3847,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -2507,7 +2579,7 @@ index d545120a..1920e594 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +4049,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +4045,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -6693,10 +6765,18 @@ index edb45627..581991d1 100644
  - (NSSize) convertSize: (NSSize) size toView: (NSView *) viewOrNil;
  - (NSRect) convertRect: (NSRect) rect fromView: (NSView *) viewOrNil;
 diff --git a/AppKit/include/AppKit/NSWindow.h b/AppKit/include/AppKit/NSWindow.h
-index a83c4d75..575c3581 100644
+index a83c4d7..0eb69cb 100644
 --- a/AppKit/include/AppKit/NSWindow.h
 +++ b/AppKit/include/AppKit/NSWindow.h
-@@ -188,6 +188,16 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -157,6 +157,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+     NSSize _maxSize;
+     NSSize _contentMinSize;
+     NSSize _contentMaxSize;
++    NSWindowCollectionBehavior _collectionBehavior;
+ 
+     NSWindow *_parentWindow;
+     NSMutableArray<NSWindow *> *_childWindows;
+@@ -188,6 +189,16 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      int _cursorRectsDisabled;
      int _flushDisabled;
  
@@ -6713,7 +6793,7 @@ index a83c4d75..575c3581 100644
      BOOL _isOpaque;
      BOOL _isVisible;
      BOOL _isDocumentEdited;
-@@ -217,6 +227,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -217,6 +228,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      BOOL _showsToolbarButton;
      BOOL _ignoresMouseEvents;
      BOOL _isMovableByWindowBackground;
@@ -6721,7 +6801,7 @@ index a83c4d75..575c3581 100644
      BOOL _allowsToolTipsWhenApplicationIsInactive;
      BOOL _defaultButtonCellKeyEquivalentDisabled;
      BOOL _autorecalculatesKeyViewLoop;
-@@ -240,6 +251,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -240,6 +252,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      NSMutableArray *_drawers;
      NSToolbar *_toolbar;
      NSWindowAnimationContext *_animationContext;
@@ -6729,7 +6809,7 @@ index a83c4d75..575c3581 100644
  
      NSRect _savedFrame;
      NSPoint _mouseDownLocationInWindow;
-@@ -425,6 +437,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -425,6 +438,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (NSButton *) standardWindowButton: (NSWindowButton) value;
  - (NSButtonCell *) defaultButtonCell;
  - (NSWindow *) attachedSheet;
@@ -6737,7 +6817,7 @@ index a83c4d75..575c3581 100644
  
  - (id) windowController;
  - (NSArray *) drawers;
-@@ -450,6 +463,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -450,6 +464,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (BOOL) isMainWindow;
  - (BOOL) isMiniaturized;
  - (BOOL) isMovable;
@@ -6745,7 +6825,7 @@ index a83c4d75..575c3581 100644
  - (BOOL) inLiveResize;
  - (BOOL) canBecomeKeyWindow;
  - (BOOL) canBecomeMainWindow;
-@@ -458,6 +472,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -458,6 +473,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  
  - (NSPoint) convertBaseToScreen: (NSPoint) point;
  - (NSPoint) convertScreenToBase: (NSPoint) point;
