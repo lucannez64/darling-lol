@@ -1,0 +1,166 @@
+"""Crash/hang bundle: process table, log tails, redaction; never starts anything."""
+import importlib.util
+import io
+import json
+import os
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / 'tools/crash-report.py'
+SPEC = importlib.util.spec_from_file_location('crash_report', SCRIPT)
+crash_report = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(crash_report)
+
+
+def make_process(proc, pid, ppid, state, comm, argv):
+    folder = Path(proc) / str(pid)
+    folder.mkdir(parents=True)
+    (folder / 'stat').write_text('%d (%s) %s %d 0 0 0\n' % (pid, comm, state, ppid))
+    (folder / 'comm').write_text(comm + '\n')
+    (folder / 'cmdline').write_bytes(b'\0'.join(part.encode() for part in argv) + b'\0')
+    return folder
+
+
+class ProcessSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.proc = Path(self.folder.name)
+        make_process(self.proc, 100, 1, 'S', 'systemd', ['/usr/lib/systemd/systemd', '--user'])
+        make_process(self.proc, 101, 100, 'S', 'mldr', ['/Volumes/mldr', 'RiotClientServices'])
+        make_process(self.proc, 102, 101, 'Z', 'League of Legends', ['/game/League of Legends'])
+        (self.proc / 'self').mkdir()
+        (self.proc / 'uptime').write_text('1.0 2.0\n')
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def test_snapshot_parses_stat_with_spaces_in_comm(self):
+        rows = crash_report.process_snapshot(self.proc)
+        self.assertEqual([row['pid'] for row in rows], [100, 101, 102])
+        game = rows[-1]
+        self.assertEqual(game['comm'], 'League of Legends')
+        self.assertEqual(game['ppid'], 101)
+        self.assertEqual(game['state'], 'Z')
+        self.assertIn('League of Legends', game['argv'])
+
+    def test_relevant_selects_runtime_client_and_zombies(self):
+        rows = crash_report.process_snapshot(self.proc)
+        relevant = crash_report.relevant_processes(rows)
+        self.assertEqual([row['pid'] for row in relevant], [101, 102])
+
+    def test_format_has_both_sections(self):
+        rows = crash_report.process_snapshot(self.proc)
+        text = crash_report.format_processes(rows, crash_report.relevant_processes(rows))
+        self.assertIn('# all processes owned by this user', text)
+        self.assertIn('# runtime, client and zombie processes', text)
+        self.assertIn('101\t100\tS\tmldr', text)
+
+
+class HelperTests(unittest.TestCase):
+    def test_scrub_replaces_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            text = '%s/secret joe on desktop-1' % home
+            cleaned = crash_report.scrub(text, home=home, username='joe', hostname='desktop-1')
+            self.assertEqual(cleaned, '~/secret <user> on <host>')
+            self.assertEqual(crash_report.scrub('', home=home), '')
+
+    def test_read_tail_keeps_last_lines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log = Path(folder) / 'dserver.log'
+            log.write_text(''.join('line %d\n' % index for index in range(10)))
+            text, error = crash_report.read_tail(log, limit=3)
+            self.assertIsNone(error)
+            self.assertEqual(text, 'line 7\nline 8\nline 9\n')
+
+    def test_read_tail_reports_missing_file(self):
+        text, error = crash_report.read_tail('/nonexistent/dserver.log')
+        self.assertIsNone(text)
+        self.assertIn('No such file', error)
+
+    def test_human_size(self):
+        self.assertEqual(crash_report.human_size(512), '512 B')
+        self.assertEqual(crash_report.human_size(2048), '2 KiB')
+        self.assertEqual(crash_report.human_size(3 * 1024 ** 2), '3 MiB')
+
+    def test_bundle_name_has_label(self):
+        name = crash_report.bundle_name('hang')
+        self.assertTrue(name.startswith('lol-report-'))
+        self.assertTrue(name.endswith('-hang.tar.gz'))
+
+
+class BuildTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.root = Path(self.folder.name)
+        self.prefix = self.root / 'prefix'
+        self.proc = self.root / 'proc'
+        self.out = self.root / 'reports'
+        self.proc.mkdir()
+        make_process(self.proc, 200, 1, 'S', 'darlingserver', ['/usr/libexec/darlingserver'])
+        make_process(self.proc, 201, 200, 'Z', 'mldr', ['/mldr'])
+        log = self.prefix / 'private/var/log/dserver.log'
+        log.parent.mkdir(parents=True)
+        log.write_text(str(Path.home()) + '/.darling running\nsecret marker\n')
+        self.launch = self.root / 'launch.log'
+        self.launch.write_text('launcher line\n')
+        self.env = {'USER': 'joe', 'HOME': str(Path.home()), 'SECRET_TOKEN': 'do-not-publish'}
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def build(self, **overrides):
+        options = dict(prefix=self.prefix, out_dir=self.out, launch_log=self.launch,
+                       proc_root=self.proc, which=lambda name: None, env=self.env)
+        options.update(overrides)
+        return crash_report.build(**options)
+
+    def test_bundle_contains_expected_files_and_summary(self):
+        archive, manifest = self.build()
+        self.assertTrue(archive.is_file())
+        self.assertEqual(manifest['processes'], {'total': 2, 'relevant': 2, 'zombies': 1})
+        self.assertEqual(manifest['redacted'], True)
+        self.assertEqual(manifest['prefix'], '<prefix>')
+        with tarfile.open(archive) as tar:
+            names = set(tar.getnames())
+            self.assertIn('lol-report/README.txt', names)
+            self.assertIn('lol-report/report.json', names)
+            self.assertIn('lol-report/processes.txt', names)
+            self.assertIn('lol-report/logs/dserver.log.tail', names)
+            self.assertIn('lol-report/logs/kernel.txt', names)
+            self.assertIn('lol-report/coredumps.txt', names)
+            report = json.loads(tar.extractfile('lol-report/report.json').read())
+            self.assertEqual(report['doctor']['checks'][0]['id'], 'kernel')
+
+    def test_bundle_redacts_home_and_secrets(self):
+        archive, _ = self.build()
+        with tarfile.open(archive) as tar:
+            combined = ''
+            for member in tar.getmembers():
+                if member.isfile():
+                    combined += tar.extractfile(member).read().decode()
+        self.assertNotIn(str(Path.home()), combined)
+        self.assertNotIn('do-not-publish', combined)
+        self.assertIn('~/.darling running', combined)
+
+    def test_no_redact_keeps_paths(self):
+        archive, manifest = self.build(redact=False)
+        self.assertEqual(manifest['redacted'], False)
+        self.assertEqual(manifest['prefix'], str(self.prefix))
+        with tarfile.open(archive) as tar:
+            text = tar.extractfile('lol-report/logs/dserver.log.tail').read().decode()
+        self.assertIn(str(Path.home()), text)
+
+    def test_missing_logs_are_explained(self):
+        archive, manifest = self.build(launch_log=None)
+        self.assertIn('logs/launch.log.tail', manifest['files'])
+        with tarfile.open(archive) as tar:
+            text = tar.extractfile('lol-report/logs/launch.log.tail').read().decode()
+        self.assertIn('no launcher log', text)
+
+
+if __name__ == '__main__':
+    unittest.main()

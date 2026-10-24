@@ -15,6 +15,20 @@ if [ -z "${DPREFIX:-}" ] && [ -f "$WORKSPACE/build/config.json" ]; then
     "$WORKSPACE/build/config.json" 2>/dev/null) || DPREFIX=
 fi
 export DPREFIX="${DPREFIX:-$HOME/.darling}"
+# Read-only host tools. They run here rather than in the namespace so they can
+# see the real process table, kernel messages and display, and so a crash report
+# still works while a session holds the workspace lock.
+host_tool() {
+  local tool="$SHARE_DIR/tools/$1.py"
+  shift
+  [ -f "$tool" ] || tool="$(dirname -- "$0")/tools/$(basename -- "${tool}")"
+  exec python3 "$tool" "$@"
+}
+case "${1:-}" in
+  --doctor) shift; host_tool doctor "$@";;
+  --report) shift; host_tool crash-report "$@";;
+  --perf) shift; host_tool perf-baseline "$@";;
+esac
 if [ "${1:-}" = --set-prefix ]; then
   [ $# -eq 2 ] || { echo 'Usage: darling-lol --set-prefix PATH' >&2; exit 2; }
   # Resolve here: the namespace starts in the workspace, not in this directory.

@@ -23,7 +23,7 @@
 
 If someone else wants to contact me know that i'm open to jobs, part-time remote only as a employee and full time remote as a freelancer for a mission
 
-A short manual ARAM run and the current compatibility status are documented in [docs/STATUS.md](docs/STATUS.md).
+A short manual ARAM run and the current compatibility status are documented in [docs/STATUS.md](docs/STATUS.md). Real machines that have played, and their measured frame times, are listed in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md); `darling-lol --doctor` and `darling-lol --perf` produce the data for a new row.
 
 Experimental source patches and tools for running the **macOS League of Legends client on x86-64 Linux through Darling**.
 
