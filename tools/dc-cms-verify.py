@@ -108,8 +108,18 @@ def split_superblob(superblob):
     return code_directory, cms
 
 
+OPENSSL_TIMEOUT = 60
+
+
 def run_openssl(args):
-    return subprocess.run(args, capture_output=True, text=True)
+    try:
+        return subprocess.run(
+            args, capture_output=True, text=True, timeout=OPENSSL_TIMEOUT
+        )
+    except FileNotFoundError:
+        fail("openssl not found")
+    except subprocess.TimeoutExpired:
+        fail(f"openssl timed out after {OPENSSL_TIMEOUT}s")
 
 
 def signer_fingerprint(cert_path):

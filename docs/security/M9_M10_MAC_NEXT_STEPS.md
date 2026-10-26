@@ -66,12 +66,16 @@ where `stapler` stores the ticket. A short note in
 `tests/security/fixtures/macos/README.md` explaining exactly where the ticket
 was found is the key deliverable.
 
-Do the same once with a quarantine xattr:
+Do the same once with a quarantine xattr. Work on a disposable copy so the
+fixture's original quarantine state is never overwritten or removed:
 
 ```sh
-xattr -w com.apple.quarantine '0081;00000000;Probe;00000000-0000-0000-0000-000000000000' "$FIXTURE"
-# launch/assess and record what macOS reports; then clear it
-xattr -d com.apple.quarantine "$FIXTURE"
+quarantine_dir=$(mktemp -d)
+quarantine_copy="$quarantine_dir/$(basename "$FIXTURE")"
+cp -R "$FIXTURE" "$quarantine_copy"
+xattr -w com.apple.quarantine '0081;00000000;Probe;00000000-0000-0000-0000-000000000000' "$quarantine_copy"
+# launch/assess and record what macOS reports; then discard the copy
+rm -rf "$quarantine_dir"
 ```
 
 ### 3. Establish CMS content binding

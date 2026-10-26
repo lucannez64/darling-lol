@@ -39,6 +39,11 @@ if ! command -v clang >/dev/null 2>&1; then
 	finish
 	exit $?
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+	miss "python3 not found; cannot probe mseal(2) support"
+	finish
+	exit $?
+fi
 if [ ! -f "$SDK/usr/include/stdio.h" ]; then
 	miss "no SDK headers under $SDK"
 	finish
@@ -88,6 +93,36 @@ if ! "$RCODESIGN" sign --binary-identifier m5-target "$target" >/dev/null 2>&1; 
 	exit $?
 fi
 
+mseal_probe=$(python3 - <<'PY'
+import ctypes
+import errno
+import mmap
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+mapping = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
+ctypes.set_errno(0)
+result = libc.syscall(462, ctypes.c_void_p(address), ctypes.c_size_t(4096), 0)
+if result == 0:
+    print("supported")
+else:
+    error = ctypes.get_errno()
+    print("enotsup" if error == errno.ENOSYS else f"error:{error}")
+PY
+)
+case "$mseal_probe" in
+supported) ;;
+enotsup)
+	miss "mseal(2) is not available on this kernel"
+	finish
+	exit $? ;;
+*)
+	bad "mseal(2) support probe failed: $mseal_probe"
+	finish
+	exit $? ;;
+esac
+
 guest_root=/Volumes/SystemRoot
 outfile=$tmp/out
 DARLING_CODESIGN_ENFORCE=enforce timeout 120 "$DARLING" shell \
@@ -98,7 +133,7 @@ case "$out" in
 *"SEAL_OK"*)
 	ok "main and library __TEXT ranges reject mprotect(PROT_WRITE)" ;;
 *"main mprotect r=0"*|*"library mprotect r=0"*)
-	miss "mseal(2) is not enforced by this kernel: $out" ;;
+	bad "mseal(2) is supported but mprotect(PROT_WRITE) succeeded: $out" ;;
 *)
 	bad "M5 probe failed: $out" ;;
 esac

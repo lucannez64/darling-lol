@@ -435,20 +435,24 @@ in `tests/security/fixtures/README.md`:
   `F_CHECK_LV` fcntl path is wired to a new `verify_cs_image` RPC. The server
   maps the file descriptor, parses the slice at the supplied fat offset with
   the same `dc_codesign` parser, verifies page hashes and caches by
-  `(dev, ino, size, mtime, offset)`. Library validation allows a target when
-  the main executable does not require it, has
-  `disable-library-validation`, shares its team ID, is a platform image, or
-  both sides are ad-hoc with no team ID. Darling's own SDK/prefix libraries
-  must be present in the M6 local trust store; the old broad runtime-path
+  `(dev, ino, size, mtime, offset)`. A hardened-runtime (`CS_RUNTIME`) main
+  executable enables library validation by default, unless it carries
+  `disable-library-validation`; `CS_OPS_CLEAR_LV` still clears the effective
+  policy. Library validation allows a target when the main executable does not
+  require it, has `disable-library-validation`, shares its team ID, is a
+  platform image, or both sides are ad-hoc with no team ID. Darling's own
+  SDK/prefix libraries must be present in the M6 local trust store; the old
+  broad runtime-path
   exemption has been removed.
   Hardened-runtime handling is in dyld: `DYLD_INSERT_LIBRARIES` is ignored
   unless the process carries `allow-dyld-environment-variables`; Darling's
   root/library path variables remain available so the runtime can load its
   own overlays.
-  `tests/security/test_lv_runtime.sh` covers unsigned refusal, ad-hoc and
-  same-team loads, different-team refusal, `disable-library-validation`, and
-  `DYLD_INSERT_LIBRARIES` with and without the entitlement, and
-  `CS_OPS_CLEAR_LV` followed by a different-team load: 14/14 passing.
+  `tests/security/test_lv_runtime.sh` covers unsigned refusal (including a
+  runtime-only main), ad-hoc and same-team loads, different-team refusal,
+  `disable-library-validation`, `DYLD_INSERT_LIBRARIES` with and without the
+  entitlement, and `CS_OPS_CLEAR_LV` followed by a different-team load: 16/16
+  passing.
   Known limits: CMS/Developer ID chains are not verified yet (M1 open item),
   and `DYLD_*` path/root variables remain usable in hardened processes to keep
   Darling's runtime loadable. The signer populates the runtime cdhashes into
@@ -565,14 +569,16 @@ in `tests/security/fixtures/README.md`:
   append), `unlinkat`, `mkdirat`, `renameat`, `fchmodat`/`fchmod`,
   `fchownat`/`fchown`/`lchown`, `utimes`/`futimes`, `setxattr`/`fsetxattr`,
   `truncate`/`ftruncate`, `linkat`, `symlinkat`, `rmdir` and writable
-  file-backed `mmap` call a shared path/fd policy. The policy allows
+  shared (`MAP_SHARED`) file-backed `mmap` call a shared path/fd policy. The
+  policy allows
   `/usr/local` and rejects resolved `/System`, `/bin`, `/sbin`, `/usr`,
   `/private/etc`, `/private/var/db` and `/Library/Apple` paths. Protected
   inodes are recorded by `(dev, ino)` and writable fd/path operations compare
   against that set, so an outside hardlink to a protected file is refused once
   the protected inode has been observed. `tests/security/test_sip.sh` covers
   off/on, protected writes, `/usr/local`, `..`, symlink, the mutating wrappers,
-  writable `mmap` and a seeded hardlink escape: 3/3 passing.
+  writable shared (`MAP_SHARED`) `mmap` and a seeded hardlink escape: 3/3
+  passing.
   Known limits: policy is a per-process environment flag, not a prefix
   `security.plist` or root-only `csrctl` setter; the inode registry has 4096
   slots and only learns a protected inode when a protected path is inspected,

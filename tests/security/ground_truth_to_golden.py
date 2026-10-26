@@ -113,8 +113,13 @@ def parse_env(artifact_dir):
         m = re.search(r"System Integrity Protection status:\s*(\w+)", text)
         sip = m.group(1) if m else "unknown"
 
-        flags = int(probe["self"]["status"]["flags"], 16)
-        child_flags = int(probe["child_query"]["status"]["flags"], 16)
+        self_status = probe["self"]["status"]
+        child_query = probe.get("child_query", {})
+        child_status = child_query.get("status", {})
+        self_ok = self_status.get("rc") == 0
+        child_ok = child_status.get("rc") == 0
+        flags = int(self_status["flags"], 16) if self_ok else None
+        child_flags = int(child_status["flags"], 16) if child_ok else None
         entitlements = probe["self"]["entitlements"]
 
         envs.append(
@@ -133,8 +138,10 @@ def parse_env(artifact_dir):
                     "check_debugger": probe["csr_check"]["debugger"],
                 },
                 "probe": {
-                    "status_flags": probe["self"]["status"]["flags"],
-                    "flag_names": flag_names(flags),
+                    "status_rc": self_status.get("rc"),
+                    "status_errno": self_status.get("errno", 0),
+                    "status_flags": self_status.get("flags") if self_ok else None,
+                    "flag_names": flag_names(flags) if self_ok else [],
                     "teamid": {
                         "rc": probe["self"]["teamid"]["rc"],
                         "errno": probe["self"]["teamid"]["errno"],
@@ -146,8 +153,11 @@ def parse_env(artifact_dir):
                     },
                     "entitlements_length": entitlements.get("length"),
                     "pidoffset": probe["self"]["pidoffset"]["value"],
-                    "child_status_flags": probe["child_query"]["status"]["flags"],
-                    "child_matches_self": child_flags == flags,
+                    "child_fork_errno": child_query.get("fork_errno"),
+                    "child_status_rc": child_status.get("rc"),
+                    "child_status_errno": child_status.get("errno", 0),
+                    "child_status_flags": child_status.get("flags") if child_ok else None,
+                    "child_matches_self": (flags == child_flags) if self_ok and child_ok else None,
                 },
                 "binaries": parse_codesign(text),
             }
@@ -206,10 +216,23 @@ def render_markdown(golden):
             ents = f"{p['entitlements_length']} bytes"
         else:
             ents = "unavailable"
-        child = "matches self" if p["child_matches_self"] else "differs"
+        status_failed = p.get("status_rc") not in (None, 0)
+        if status_failed:
+            status = f"unavailable (rc={p['status_rc']} errno={p.get('status_errno', 0)})"
+            decoded = "(unavailable)"
+        else:
+            status = f"`{p.get('status_flags')}`"
+            decoded = ", ".join(p.get("flag_names") or []) or "(none)"
+        if p.get("child_matches_self") is None:
+            child = "unavailable"
+            if p.get("child_status_rc") not in (None, 0):
+                child += f" (rc={p['child_status_rc']} errno={p.get('child_status_errno', 0)})"
+            elif p.get("child_fork_errno") is not None:
+                child += f" (fork errno={p['child_fork_errno']})"
+        else:
+            child = "matches self" if p["child_matches_self"] else "differs"
         out.append(
-            f"| {e['runner']} | `{p['status_flags']}` | "
-            f"{', '.join(p['flag_names']) or '(none)'} | {team} | {ents} | {child} |"
+            f"| {e['runner']} | {status} | {decoded} | {team} | {ents} | {child} |"
         )
     out.append("")
     out.append(

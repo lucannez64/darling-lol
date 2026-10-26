@@ -84,6 +84,12 @@ run enforce "$tmp/signed.dylib" "$tmp/enforce-signed.log"
 expect "enforce: signed image verifies" "$tmp/enforce-signed.log" "codesign ok"
 reject "enforce: signed image not refused" "$tmp/enforce-signed.log" "refusing to load"
 
+# enforce: follows a symlink to the signed image, like execve does.
+ln -s signed.dylib "$tmp/signed-link.dylib"
+run enforce "$tmp/signed-link.dylib" "$tmp/enforce-symlink.log"
+expect "enforce: signed symlink verifies" "$tmp/enforce-symlink.log" "codesign ok"
+reject "enforce: signed symlink not refused" "$tmp/enforce-symlink.log" "refusing to load"
+
 # enforce: rejects a modified page.
 run enforce "$tmp/tampered.dylib" "$tmp/enforce-tampered.log"
 expect "enforce: tampered page rejected" "$tmp/enforce-tampered.log" "failed verification"

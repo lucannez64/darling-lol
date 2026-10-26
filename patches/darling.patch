@@ -8645,7 +8645,7 @@ index 6617ef82..6e557c08 100644
 +	state->signing_enforce = enforce ? 1 : 0;
 +	verbose = !quiet && getenv("DARLING_CODESIGN_VERBOSE") != NULL;
 +
-+	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
++	fd = open(path, O_RDONLY | O_CLOEXEC);
 +	if (fd < 0) {
 +		if (!quiet)
 +			fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, strerror(errno));
@@ -8721,7 +8721,7 @@ index 6617ef82..6e557c08 100644
 +				state->entitlements_len = (uint32_t) total;
 +			}
 +		}
-+		state->lv_required = (img.cd_flags & (DC_CS_REQUIRE_LV | DC_CS_FORCED_LV)) != 0;
++		state->lv_required = (img.cd_flags & (DC_CS_REQUIRE_LV | DC_CS_FORCED_LV | DC_CS_RUNTIME)) != 0;
 +		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.security.cs.allow-dyld-environment-variables"))
 +			state->darling_entitlements |= DC_CS_ENT_ALLOW_DYLD_ENV;
 +		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.security.cs.disable-library-validation"))

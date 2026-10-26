@@ -73,6 +73,7 @@ target_c=$repo/tests/security/test_lv_target.c
 insert_c=$repo/tests/security/test_lv_insert.c
 main_unsigned=$tmp/main-unsigned
 main_plain=$tmp/main-plain
+main_runtime=$tmp/main-runtime
 main_hard=$tmp/main-hard
 main_nolv=$tmp/main-nolv
 main_allowenv=$tmp/main-allowenv
@@ -101,6 +102,7 @@ if ! build "$insert_c" "$insert" -dynamiclib; then
 fi
 
 cp "$main_unsigned" "$main_plain"
+cp "$main_unsigned" "$main_runtime"
 cp "$main_unsigned" "$main_hard"
 cp "$main_unsigned" "$main_nolv"
 cp "$main_unsigned" "$main_allowenv"
@@ -141,6 +143,11 @@ sign() { # label output extra...
 
 if ! sign --binary-identifier lv-main-plain "$main_plain"; then
 	miss "failed to sign the plain main"
+	finish
+	exit $?
+fi
+if ! sign --binary-identifier lv-main-runtime --code-signature-flags runtime "$main_runtime"; then
+	miss "failed to sign the runtime-only main"
 	finish
 	exit $?
 fi
@@ -234,6 +241,10 @@ reject() { # label output needle
 
 out=$(run_guest "$guest_root$main_plain" "$guest_root$target_unsigned")
 expect "plain process loads an unsigned dylib" "$out" "DLOPEN_OK"
+
+out=$(run_guest "$guest_root$main_runtime" "$guest_root$target_unsigned")
+expect "runtime-only process refuses an unsigned dylib" "$out" "DLOPEN_FAIL"
+expect "runtime-only refusal names library validation" "$out" "Library Validation"
 
 out=$(run_guest "$guest_root$main_hard" "$guest_root$target_unsigned")
 expect "hardened process refuses an unsigned dylib" "$out" "DLOPEN_FAIL"

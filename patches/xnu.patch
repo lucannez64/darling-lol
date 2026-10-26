@@ -6778,7 +6778,7 @@ index 49bac54..eb1fcdb 100644
 +			    message, sizeof(message), &valid, &lv_ok, &covered_length, &flags);
 +			if (ret != 0)
 +				return ret;
-+			if (!lv_ok) {
++			if (!lv_ok && dc_cs_signing_enforce()) {
 +				if (lv->lv_error_message != NULL && lv->lv_error_message_size > 0) {
 +					size_t len = strlen(message);
 +					if (len >= lv->lv_error_message_size)
@@ -7233,7 +7233,7 @@ index 282a5a1..7c6c5e0 100644
  
  	linux_prot = prot_bsd_to_linux(prot);
  
-+	if ((prot & PROT_WRITE) && !(flags & MAP_ANON) && fd >= 0) {
++	if ((prot & PROT_WRITE) && (flags & MAP_SHARED) && !(flags & MAP_ANON) && fd >= 0) {
 +		int sip = dc_sip_check_fd(fd);
 +		if (sip != 0)
 +			return (void*)(long) sip;

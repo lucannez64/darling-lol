@@ -78,9 +78,22 @@ static int test_vfs(void) {
 	rc = fsetxattr(fd, "user.sip-test", "x", 1, 0, 0); error = errno;
 	failures += expect_eperm("fsetxattr", rc, error);
 	{
+		/* A writable MAP_PRIVATE mapping is copy-on-write and does not
+		 * modify the protected file, so SIP must allow it. */
 		void* mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
 		error = errno;
-		failures += expect_eperm("mmap-write", mapping == MAP_FAILED ? -1 : 0, error);
+		if (mapping == MAP_FAILED) {
+			printf("VFS_FAIL mmap-private rc=-1 errno=%d\n", error);
+			failures++;
+		} else {
+			munmap(mapping, 4096);
+		}
+
+		/* MAP_SHARED can modify the protected file, so SIP must refuse it
+		 * before the kernel returns its own EACCES for the read-only fd. */
+		mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		error = errno;
+		failures += expect_eperm("mmap-shared", mapping == MAP_FAILED ? -1 : 0, error);
 		if (mapping != MAP_FAILED)
 			munmap(mapping, 4096);
 	}

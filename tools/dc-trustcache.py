@@ -60,11 +60,18 @@ def key_paths(store, key=None, pub=None):
             Path(pub) if pub else store.with_suffix(store.suffix + ".pub"))
 
 
+OPENSSL_TIMEOUT = 60
+
+
 def run(args):
     try:
-        return subprocess.run(args, check=True, capture_output=True)
+        return subprocess.run(
+            args, check=True, capture_output=True, timeout=OPENSSL_TIMEOUT
+        )
     except FileNotFoundError:
         fail("openssl not found")
+    except subprocess.TimeoutExpired:
+        fail(f"openssl timed out after {OPENSSL_TIMEOUT}s")
     except subprocess.CalledProcessError as error:
         fail(error.stderr.decode(errors="replace").strip() or "openssl failed")
 
