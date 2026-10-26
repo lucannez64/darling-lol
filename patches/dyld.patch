@@ -1,5 +1,5 @@
 diff --git a/src/ImageLoaderMachO.cpp b/src/ImageLoaderMachO.cpp
-index 9242278..09af4cd 100644
+index 9242278..c91f49a 100644
 --- a/src/ImageLoaderMachO.cpp
 +++ b/src/ImageLoaderMachO.cpp
 @@ -29,6 +29,8 @@
@@ -31,9 +31,9 @@ index 9242278..09af4cd 100644
 +	/* M5: seal signed read-only ranges in this image. The helper lives in
 +	 * libsystem_kernel and uses Linux mseal(2) when available. */
 +	const char* sealPolicy = _simple_getenv(context.envp, "DARLING_MSEAL");
-+	bool sealEnabled = !(sealPolicy != NULL &&
-+	    (strcmp(sealPolicy, "0") == 0 || strcmp(sealPolicy, "off") == 0 ||
-+	     strcmp(sealPolicy, "false") == 0 || strcmp(sealPolicy, "no") == 0));
++	bool sealEnabled = sealPolicy != NULL &&
++	    (strcmp(sealPolicy, "1") == 0 || strcmp(sealPolicy, "on") == 0 ||
++	     strcmp(sealPolicy, "true") == 0 || strcmp(sealPolicy, "yes") == 0);
 +	for (unsigned int i = 0, e = segmentCount(); sealEnabled && i < e; ++i) {
 +		if (segWriteable(i))
 +			continue;

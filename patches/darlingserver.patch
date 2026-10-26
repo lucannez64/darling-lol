@@ -2846,7 +2846,7 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..419cf60 100644
+index 9cd7b81..1258def 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,17 +25,34 @@
@@ -2942,14 +2942,18 @@ index 9cd7b81..419cf60 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -221,6 +261,16 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -221,6 +261,20 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  		return false;
  	}
  
 +	if (isWrite) {
 +		auto thread = DarlingServer::Thread::currentThread();
 +		auto caller = thread ? thread->process() : nullptr;
-+		if (caller && caller.get() != this && !allowsDebugFrom(*caller, false)) {
++		/* Kernel microthreads perform server-internal writes (e.g. Mach
++		 * receive and kqueue copyout); they are not guest debuggers. */
++		if (caller && caller.get() != this &&
++		    caller.get() != Process::kernelProcess().get() &&
++		    !allowsDebugFrom(*caller, false)) {
 +			if (errorCode)
 +				*errorCode = EPERM;
 +			return false;
@@ -2959,7 +2963,7 @@ index 9cd7b81..419cf60 100644
  	local.iov_base = localBuffer;
  	local.iov_len = length;
  
-@@ -245,6 +295,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +299,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -3004,7 +3008,7 @@ index 9cd7b81..419cf60 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -283,6 +371,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -283,6 +375,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  
  	bool didExec = _pendingReplacement;
  
@@ -3017,7 +3021,7 @@ index 9cd7b81..419cf60 100644
  	if (didExec) {
  		// exec case
  
-@@ -369,7 +463,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +467,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -3037,7 +3041,7 @@ index 9cd7b81..419cf60 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +570,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +574,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -3145,7 +3149,7 @@ index 9cd7b81..419cf60 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +677,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +681,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -3208,7 +3212,7 @@ index 9cd7b81..419cf60 100644
  
  		info.protection = 0;
  
-@@ -607,6 +835,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +839,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
@@ -3335,7 +3339,7 @@ index 9cd7b81..419cf60 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +1005,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +1009,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -3825,10 +3829,10 @@ index 0000000..6eedb66
 +#endif
 diff --git a/src/cs_verify.cpp b/src/cs_verify.cpp
 new file mode 100644
-index 0000000..b01c717
+index 0000000..137572a
 --- /dev/null
 +++ b/src/cs_verify.cpp
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,486 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -3847,13 +3851,17 @@ index 0000000..b01c717
 +#include <limits.h>
 +#include <cstdlib>
 +
++#include <algorithm>
 +#include <cerrno>
 +#include <cstdio>
 +#include <cstring>
 +#include <exception>
++#include <memory>
++#include <new>
 +#include <utility>
 +#include <map>
 +#include <mutex>
++#include <vector>
 +
 +extern "C" {
 +#include "dc_codesign.h"
@@ -3878,8 +3886,15 @@ index 0000000..b01c717
 +		}
 +	};
 +
++	struct CacheEntry {
++		DarlingServer::CsImageInfo info;
++		uint64_t lastUse;
++	};
++
++	constexpr size_t MAX_CACHE_ENTRIES = 64;
 +	std::mutex cacheMutex;
-+	std::map<CacheKey, DarlingServer::CsImageInfo> cache;
++	std::map<CacheKey, CacheEntry> cache;
++	uint64_t cacheClock = 0;
 +
 +	const uint8_t* findBytes(const uint8_t* data, size_t len, const char* needle) {
 +		size_t needleLen = strlen(needle);
@@ -3931,13 +3946,185 @@ index 0000000..b01c717
 +			flags |= DC_CS_INSTALLER;
 +		return flags;
 +	}
++
++	bool readExact(int fd, uint64_t fileOffset, void* buffer, size_t length) {
++		uint8_t* out = static_cast<uint8_t*>(buffer);
++		size_t done = 0;
++
++		while (done < length) {
++			ssize_t got = pread(fd, out + done, length - done, (off_t) (fileOffset + done));
++			if (got <= 0)
++				return false;
++			done += (size_t) got;
++		}
++		return true;
++	}
++
++	uint32_t readLE32(const uint8_t* p) {
++		return (uint32_t) p[0] | ((uint32_t) p[1] << 8) |
++		    ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
++	}
++
++	uint32_t readBE32(const uint8_t* p) {
++		return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) |
++		    ((uint32_t) p[2] << 8) | (uint32_t) p[3];
++	}
++
++	uint64_t readBE64(const uint8_t* p) {
++		return ((uint64_t) readBE32(p) << 32) | readBE32(p + 4);
++	}
++
++	uint32_t readWord(const uint8_t* p, bool bigEndian) {
++		return bigEndian ? readBE32(p) : readLE32(p);
++	}
++
++	bool findSignatureRange(int fd, uint64_t offset, uint64_t sliceSize,
++	    std::vector<uint8_t>* prefix, uint64_t* signatureOffset,
++	    uint64_t* signatureSize, std::string* error) {
++		static constexpr uint64_t MAX_LOAD_COMMANDS = 64ull * 1024ull * 1024ull;
++		uint8_t header[32];
++		uint32_t magic, ncmds, sizeofcmds;
++		bool is64, bigEndian;
++		size_t headerSize;
++		uint64_t p, found = 0;
++
++		if (sliceSize < 4) {
++			if (error) *error = "image is too small to be a Mach-O";
++			return false;
++		}
++		if (!readExact(fd, offset, header, 4)) {
++			if (error) *error = "cannot read image header";
++			return false;
++		}
++		magic = readLE32(header);
++		switch (magic) {
++		case 0xfeedfacfu:
++			is64 = true; bigEndian = false; break;
++		case 0xcffaedfeu:
++			is64 = true; bigEndian = true; break;
++		case 0xfeedfaceu:
++			is64 = false; bigEndian = false; break;
++		case 0xcefaedfeu:
++			is64 = false; bigEndian = true; break;
++		default:
++			if (error) *error = "not a thin Mach-O image";
++			return false;
++		}
++		headerSize = is64 ? 32 : 28;
++		if (sliceSize < headerSize) {
++			if (error) *error = "truncated Mach-O header";
++			return false;
++		}
++		if (!readExact(fd, offset, header, headerSize)) {
++			if (error) *error = "cannot read image header";
++			return false;
++		}
++		ncmds = readWord(header + 16, bigEndian);
++		sizeofcmds = readWord(header + 20, bigEndian);
++		if ((uint64_t) headerSize + sizeofcmds > sliceSize ||
++		    sizeofcmds > MAX_LOAD_COMMANDS) {
++			if (error) *error = "load commands are out of range";
++			return false;
++		}
++
++		try {
++			prefix->resize(headerSize + sizeofcmds);
++		} catch (const std::exception&) {
++			if (error) *error = "cannot allocate load commands";
++			return false;
++		}
++		memcpy(prefix->data(), header, headerSize);
++		if (sizeofcmds > 0 &&
++		    !readExact(fd, offset + headerSize, prefix->data() + headerSize, sizeofcmds)) {
++			if (error) *error = "cannot read load commands";
++			return false;
++		}
++
++		p = headerSize;
++		for (uint32_t i = 0; i < ncmds; i++) {
++			uint32_t cmd, cmdsize;
++
++			if (p + 8 > prefix->size()) {
++				if (error) *error = "load command header is out of range";
++				return false;
++			}
++			cmd = readWord(prefix->data() + p, bigEndian);
++			cmdsize = readWord(prefix->data() + p + 4, bigEndian);
++			if (cmdsize < 8 || p + cmdsize > prefix->size()) {
++				if (error) *error = "invalid load command size";
++				return false;
++			}
++			if (cmd == DC_LC_CODE_SIGNATURE) {
++				if (cmdsize < 16) {
++					if (error) *error = "LC_CODE_SIGNATURE is too small";
++					return false;
++				}
++				*signatureOffset = readWord(prefix->data() + p + 8, bigEndian);
++				*signatureSize = readWord(prefix->data() + p + 12, bigEndian);
++				found++;
++			}
++			p += cmdsize;
++		}
++		if (found != 1) {
++			if (error) *error = found ? "multiple LC_CODE_SIGNATURE commands"
++			    : "no LC_CODE_SIGNATURE (unsigned image)";
++			return false;
++		}
++		if (*signatureOffset > sliceSize || *signatureSize > sliceSize - *signatureOffset ||
++		    *signatureSize < 12) {
++			if (error) *error = "signature range is outside the image";
++			return false;
++		}
++		return true;
++	}
++
++	uint64_t codeLimitFromSignature(const std::vector<uint8_t>& signature) {
++		static constexpr uint32_t CD_VERSION_CODELIMIT64 = 0x20300u;
++		const uint8_t* data = signature.data();
++		uint64_t limit = 0;
++		uint32_t length, count;
++
++		if (signature.size() < 12 || readBE32(data) != DC_CSMAGIC_EMBEDDED_SIGNATURE)
++			return 0;
++		length = readBE32(data + 4);
++		count = readBE32(data + 8);
++		if (length > signature.size() || 12ull + (uint64_t) count * 8 > length)
++			return 0;
++		for (uint32_t i = 0; i < count; i++) {
++			uint32_t type = readBE32(data + 12 + i * 8);
++			uint32_t blobOffset = readBE32(data + 16 + i * 8);
++			uint32_t cdLength, version;
++			uint64_t candidate;
++			const uint8_t* cd;
++
++			if (type != DC_BLOB_CODEDIRECTORY || blobOffset > length ||
++			    length - blobOffset < 44)
++				continue;
++			cd = data + blobOffset;
++			if (readBE32(cd) != DC_CSMAGIC_CODEDIRECTORY)
++				continue;
++			cdLength = readBE32(cd + 4);
++			if (cdLength < 44 || cdLength > length - blobOffset)
++				continue;
++			version = readBE32(cd + 8);
++			candidate = readBE32(cd + 32);
++			if (version >= CD_VERSION_CODELIMIT64 && cdLength >= 64) {
++				uint64_t candidate64 = readBE64(cd + 56);
++				if (candidate64)
++					candidate = candidate64;
++			}
++			if (candidate > limit)
++				limit = candidate;
++		}
++		return limit;
++	}
 +}
 +
 +bool DarlingServer::verifyCsImageFd(int fd, uint64_t offset, CsImageInfo* info, std::string* error) {
 +	struct stat st;
 +	CacheKey key;
-+	std::vector<uint8_t> data;
 +	struct dc_image img;
++	std::unique_ptr<uint8_t[]> snapshot;
 +	char err[512];
 +	int result;
 +
@@ -3965,56 +4152,79 @@ index 0000000..b01c717
 +		std::lock_guard<std::mutex> lock(cacheMutex);
 +		auto it = cache.find(key);
 +		if (it != cache.end()) {
-+			*info = it->second;
++			it->second.lastUse = ++cacheClock;
++			*info = it->second.info;
 +			if (!info->state.valid && error)
 +				*error = "cached signature verification failed";
 +			return info->state.valid;
 +		}
 +	}
 +
-+	/* Read a private snapshot instead of mmap()ing the caller's file: a
-+	 * concurrent truncate would otherwise deliver SIGBUS to the server. */
-+	if ((uint64_t) st.st_size > 512ull * 1024ull * 1024ull) {
-+		if (error) *error = "image is too large to verify";
-+		return false;
-+	}
-+	try {
-+		data.resize((size_t) st.st_size);
-+	} catch (const std::exception&) {
-+		if (error) *error = "cannot allocate image snapshot";
-+		return false;
-+	}
++	/* Read only the Mach-O metadata, signature, and hashed pages through
++	 * code_limit. The gap between code_limit and the signature is left
++	 * uninitialized because the parser never reads it. */
 +	{
-+		size_t done = 0;
-+		while (done < data.size()) {
-+			ssize_t got = pread(fd, data.data() + done, data.size() - done, (off_t) done);
-+			if (got <= 0) {
-+				if (error) *error = "cannot read image";
-+				return false;
-+			}
-+			done += (size_t) got;
-+		}
-+	}
++		static constexpr uint64_t MAX_IMAGE_BYTES = 512ull * 1024ull * 1024ull;
++		std::vector<uint8_t> prefix;
++		std::vector<uint8_t> signature;
++		uint64_t signatureOffset = 0, signatureSize = 0;
++		uint64_t sliceSize = (uint64_t) st.st_size - offset;
++		uint64_t signatureEnd, codeLimit, extent;
 +
-+	/* The descriptor may name a file that changed while it was read. */
-+	{
-+		struct stat after;
-+		if (fstat(fd, &after) != 0 || after.st_size != st.st_size ||
-+		    after.st_dev != st.st_dev || after.st_ino != st.st_ino ||
-+		    after.st_mtim.tv_sec != st.st_mtim.tv_sec ||
-+		    after.st_mtim.tv_nsec != st.st_mtim.tv_nsec ||
-+		    after.st_ctim.tv_sec != st.st_ctim.tv_sec ||
-+		    after.st_ctim.tv_nsec != st.st_ctim.tv_nsec) {
-+			if (error) *error = "image changed while it was read";
++		if (!findSignatureRange(fd, offset, sliceSize, &prefix, &signatureOffset,
++			&signatureSize, error))
++			return false;
++		try {
++			signature.resize((size_t) signatureSize);
++		} catch (const std::exception&) {
++			if (error) *error = "cannot allocate signature buffer";
 +			return false;
 +		}
-+	}
++		if (!readExact(fd, offset + signatureOffset, signature.data(), signature.size())) {
++			if (error) *error = "cannot read signature";
++			return false;
++		}
++		signatureEnd = signatureOffset + signatureSize;
++		codeLimit = codeLimitFromSignature(signature);
++		if (codeLimit == 0 || codeLimit > sliceSize)
++			codeLimit = signatureEnd;
++		extent = std::max(codeLimit, signatureEnd);
++		extent = std::max<uint64_t>(extent, prefix.size());
++		if (extent > MAX_IMAGE_BYTES) {
++			if (error) *error = "image is too large to verify";
++			return false;
++		}
++		snapshot.reset(new (std::nothrow) uint8_t[(size_t) extent]);
++		if (!snapshot) {
++			if (error) *error = "cannot allocate image snapshot";
++			return false;
++		}
++		if (codeLimit > 0 && !readExact(fd, offset, snapshot.get(), (size_t) codeLimit)) {
++			if (error) *error = "cannot read image";
++			return false;
++		}
++		memcpy(snapshot.get(), prefix.data(), prefix.size());
++		memcpy(snapshot.get() + signatureOffset, signature.data(), signature.size());
 +
-+	err[0] = '\0';
-+	result = dc_parse(data.data() + offset, data.size() - (size_t) offset,
-+	    &img, err, sizeof(err));
-+	if (result == 0)
-+		result = dc_verify_pages(&img, err, sizeof(err));
++		/* The descriptor may name a file that changed while it was read. */
++		{
++			struct stat after;
++			if (fstat(fd, &after) != 0 || after.st_size != st.st_size ||
++			    after.st_dev != st.st_dev || after.st_ino != st.st_ino ||
++			    after.st_mtim.tv_sec != st.st_mtim.tv_sec ||
++			    after.st_mtim.tv_nsec != st.st_mtim.tv_nsec ||
++			    after.st_ctim.tv_sec != st.st_ctim.tv_sec ||
++			    after.st_ctim.tv_nsec != st.st_ctim.tv_nsec) {
++				if (error) *error = "image changed while it was read";
++				return false;
++			}
++		}
++
++		err[0] = '\0';
++		result = dc_parse(snapshot.get(), (size_t) extent, &img, err, sizeof(err));
++		if (result == 0)
++			result = dc_verify_pages(&img, err, sizeof(err));
++	}
 +
 +	CsImageInfo parsed = {};
 +	parsed.state.version = DC_CS_STATE_VERSION;
@@ -4059,7 +4269,15 @@ index 0000000..b01c717
 +
 +	{
 +		std::lock_guard<std::mutex> lock(cacheMutex);
-+		cache[key] = parsed;
++		if (cache.size() >= MAX_CACHE_ENTRIES) {
++			auto oldest = cache.begin();
++			for (auto it = cache.begin(); it != cache.end(); ++it) {
++				if (it->second.lastUse < oldest->second.lastUse)
++					oldest = it;
++			}
++			cache.erase(oldest);
++		}
++		cache[key] = CacheEntry{parsed, ++cacheClock};
 +	}
 +	*info = std::move(parsed);
 +	if (result != 0) {

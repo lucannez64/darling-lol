@@ -12452,7 +12452,7 @@ index 00000000..f2727207
 +
 +#endif /* DC_CODESIGN_H */
 diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
-index 1e9ec25d..4cae4d8e 100644
+index 1e9ec25d..2e7fefbe 100644
 --- a/src/startup/mldr/loader.c
 +++ b/src/startup/mldr/loader.c
 @@ -6,13 +6,14 @@
@@ -12481,9 +12481,9 @@ index 1e9ec25d..4cae4d8e 100644
 +#ifdef __NR_mseal
 +				{
 +					const char* sealPolicy = getenv("DARLING_MSEAL");
-+					bool sealEnabled = !(sealPolicy != NULL &&
-+					    (strcmp(sealPolicy, "0") == 0 || strcmp(sealPolicy, "off") == 0 ||
-+					     strcmp(sealPolicy, "false") == 0 || strcmp(sealPolicy, "no") == 0));
++					bool sealEnabled = sealPolicy != NULL &&
++					    (strcmp(sealPolicy, "1") == 0 || strcmp(sealPolicy, "on") == 0 ||
++					     strcmp(sealPolicy, "true") == 0 || strcmp(sealPolicy, "yes") == 0);
 +					if (sealEnabled && (seg->initprot & PROT_WRITE) == 0 &&
 +					    (strcmp(seg->segname, "__TEXT") == 0 ||
 +					     strcmp(seg->segname, "__LINKEDIT") == 0)) {

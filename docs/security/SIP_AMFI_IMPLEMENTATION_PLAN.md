@@ -480,8 +480,9 @@ in `tests/security/fixtures/README.md`:
   `mmap(MAP_FIXED)` over those ranges on Linux ≥ 6.10.
   `tests/security/test_m5_seal.sh` checks the main image and a `dlopen()`ed
   dylib: both reject `mprotect(PROT_WRITE)` and `mmap(MAP_FIXED)`: 1/1 passing
-  on the 7.3 test host. `DARLING_MSEAL=0` opts out for the main image and
-  dyld-loaded images without a rebuild.
+  on the 7.3 test host. Sealing is opt-in: set `DARLING_MSEAL=1` (or `on`,
+  `true`, `yes`) for the main image and dyld-loaded images; unset or any other
+  value leaves sealing disabled without a rebuild.
   Known limits: there is no registry fallback on kernels without `mseal`;
   sealing errors are logged but do not currently abort the image (best-effort
   prototype, not fail-closed); JIT allocations are not sealed; `dlclose()`
@@ -771,7 +772,7 @@ requirement matrix.
 | M2 loader gate | `off`, then `warn` | config to `off` |
 | M3 csops | on (truthful state) | state reports zero flags (old behavior was worse) |
 | M4 library validation | `warn` | config to `off` |
-| M5 page sealing | on when `mseal(2)` exists; `DARLING_MSEAL=0` opts out | `DARLING_MSEAL=0` |
+| M5 page sealing | opt-in via `DARLING_MSEAL=1`; not on by default | unset `DARLING_MSEAL` |
 | M6 trust cache | store populated by signing/install; required for runtime LV | **recovery, not rollback:** restore the store and re-run the signer. Removing it disables runtime LV; there is no no-rebuild M6 opt-out. |
 | M7 SIP | `off` (`DARLING_SIP_ENFORCE`) | unset or set to `off` |
 | M8 AMFI/debug | unknown AMFI `ENOTSUP`; debug gate active under `enforce` | use `off`/`warn` or self/root |

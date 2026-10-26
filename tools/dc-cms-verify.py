@@ -166,7 +166,10 @@ def main(argv=None):
                 "-signer", str(signer_path), "-out", "/dev/null",
             ]
             if args.ca is not None:
-                command += ["-CAfile", str(args.ca)]
+                command += [
+                    "-CAfile", str(args.ca),
+                    "-no-CAfile", "-no-CApath", "-no-CAstore",
+                ]
             else:
                 command += ["-noverify"]
             verified = run_openssl(command)

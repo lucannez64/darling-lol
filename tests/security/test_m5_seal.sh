@@ -125,8 +125,8 @@ esac
 
 guest_root=/Volumes/SystemRoot
 outfile=$tmp/out
-DARLING_CODESIGN_ENFORCE=enforce timeout 120 "$DARLING" shell \
-    "$guest_root$main" "$guest_root$target" >"$outfile" 2>&1
+DARLING_CODESIGN_ENFORCE=enforce DARLING_MSEAL=1 timeout 120 "$DARLING" shell \
+    env DARLING_MSEAL=1 "$guest_root$main" "$guest_root$target" >"$outfile" 2>&1
 out=$(cat "$outfile")
 
 case "$out" in

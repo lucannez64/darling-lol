@@ -44,6 +44,7 @@ fi
 cleanup() {
 	rm -f "$prefix/private/tmp/sip-link" "$prefix/usr/local/sip-test" "$prefix/private/etc/sip-test"
 	rm -f "$prefix/private/etc/sip-file" "$prefix/private/etc/sip-inode" "$prefix/private/etc/sip-newlink" "$prefix/private/tmp/sip-hardlink" "$prefix/private/tmp/sip-inode-link"
+	rmdir "$prefix/private/etc/sip-newdir" 2>/dev/null || true
 	rm -rf "$tmp"
 	if [ "$started" -eq 1 ]; then
 		started=0
@@ -67,7 +68,11 @@ fi
 
 # Create the symlink inside the guest so its absolute target is resolved by
 # Darling's vchroot, not by the host.
-timeout 60 "$DARLING" shell /bin/ln -sfn /private/etc /private/tmp/sip-link >/dev/null 2>&1 || true
+if ! timeout 60 "$DARLING" shell /bin/ln -sfn /private/etc /private/tmp/sip-link >/dev/null 2>&1; then
+	miss "could not create the guest symlink fixture"
+	finish
+	exit $?
+fi
 
 # Files used by the inode/hardlink and VFS probes. The hardlink is created
 # while SIP is off, outside the protected tree, then used by the "vfs" run.

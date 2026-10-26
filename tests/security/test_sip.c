@@ -19,17 +19,19 @@
 
 static int try_mkdir(const char* path) {
 	int rc = mkdir(path, 0700);
-	printf("mkdir %s rc=%d errno=%d\n", path, rc, errno);
+	int error = errno;
+	printf("mkdir %s rc=%d errno=%d\n", path, rc, error);
 	if (rc == 0)
 		rmdir(path);
-	return rc;
+	return rc == 0 ? 0 : error;
 }
 
 static int try_write(const char* path) {
 	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0) {
-		printf("write %s rc=-1 errno=%d\n", path, errno);
-		return -1;
+		int error = errno;
+		printf("write %s rc=-1 errno=%d\n", path, error);
+		return error;
 	}
 	close(fd);
 	printf("write %s rc=0\n", path);
@@ -140,7 +142,7 @@ int main(int argc, char** argv) {
 		return test_vfs();
 	}
 
-	protected_mkdir = try_mkdir("/private/etc");
+	protected_mkdir = try_mkdir("/private/etc/sip-newdir");
 	protected_write = try_write("/private/etc/sip-test");
 	local_write = try_write("/usr/local/sip-test");
 	dotdot_write = try_write("/private/etc/../etc/sip-test");
@@ -151,14 +153,21 @@ int main(int argc, char** argv) {
 	unlink("/private/etc/sip-test");
 
 	if (config == 0) {
-		if (protected_write == 0 || protected_mkdir == 0 || dotdot_write == 0 || localdotdot_write == 0 || symlink_write == 0 || local_write != 0) {
-			printf("SIP_FAIL\n");
+		if (protected_write != 0 || protected_mkdir != 0 || dotdot_write != 0 ||
+		    localdotdot_write != 0 || symlink_write != 0 || local_write != 0) {
+			printf("SIP_FAIL protected=%d mkdir=%d dotdot=%d localdotdot=%d symlink=%d local=%d\n",
+			    protected_write, protected_mkdir, dotdot_write,
+			    localdotdot_write, symlink_write, local_write);
 			return 1;
 		}
 		printf("SIP_ON_OK\n");
 	} else {
-		if (protected_write != 0 || dotdot_write != 0 || symlink_write != 0 || local_write != 0) {
-			printf("SIP_FAIL\n");
+		if (protected_write != EPERM || protected_mkdir != EPERM ||
+		    dotdot_write != EPERM || localdotdot_write != EPERM ||
+		    symlink_write != EPERM || local_write != 0) {
+			printf("SIP_FAIL protected=%d mkdir=%d dotdot=%d localdotdot=%d symlink=%d local=%d\n",
+			    protected_write, protected_mkdir, dotdot_write,
+			    localdotdot_write, symlink_write, local_write);
 			return 1;
 		}
 		printf("SIP_OFF_OK\n");
