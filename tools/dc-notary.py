@@ -49,25 +49,30 @@ def quarantine_clear(path):
 
 
 def find_ticket(path):
-    data = Path(path).read_bytes()
-    start = max(0, len(data) - SCAN_BYTES)
-    position = len(data) - TRAILER.size
-    while position >= start:
-        if data[position:position + 4] == MAGIC:
+    with open(path, "rb") as source:
+        source.seek(0, os.SEEK_END)
+        size = source.tell()
+        start = max(0, size - SCAN_BYTES)
+        source.seek(start)
+        data = source.read()
+    position = data.rfind(MAGIC)
+    while position >= 0:
+        if position + TRAILER.size <= len(data):
             magic, version, kind, length, reserved = TRAILER.unpack_from(data, position)
-            if kind == TRAILER_TICKET and position >= length:
+            absolute_position = start + position
+            if kind == TRAILER_TICKET and absolute_position >= length:
                 return {
                     "present": True,
                     "kind": "ticket",
                     "version": version,
                     "length": length,
-                    "offset": position - length,
+                    "offset": absolute_position - length,
                     "validated": False,
                     "notarized": False,
                 }
             if kind == TRAILER_TERMINATOR:
                 break
-        position -= 1
+        position = data.rfind(MAGIC, 0, position)
     return {
         "present": False,
         "kind": "none",
