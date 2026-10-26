@@ -11368,3 +11368,598 @@ index 87db50d12..01a7b2a3e 100644
  	// std::ofstream m_dump;
  };
  
+diff --git a/src/frameworks/CMakeLists.txt b/src/frameworks/CMakeLists.txt
+index ea2f9c07..d486fbb0 100644
+--- a/src/frameworks/CMakeLists.txt
++++ b/src/frameworks/CMakeLists.txt
+@@ -63,6 +63,8 @@ if (COMPONENT_dev_gui_stubs_common)
+ 	add_subdirectory(ScriptingBridge)
+ 	add_subdirectory(SecurityInterface)
+ 	add_subdirectory(ServiceManagement)
++	add_subdirectory(QuickLookUI)
++	add_subdirectory(Accessibility)
+ 	add_subdirectory(Quartz)
+ 	add_subdirectory(QuickLook)
+ 	add_subdirectory(SceneKit)
+@@ -115,6 +117,9 @@ if (COMPONENT_gui_stubs)
+ 	add_subdirectory(IOBluetoothUI)
+ 	add_subdirectory(MapKit)
+ 	add_subdirectory(MediaAccessibility)
++	add_subdirectory(MediaPlayer)
++	add_subdirectory(CoreHaptics)
++	add_subdirectory(CoreML)
+ 	add_subdirectory(MediaToolbox)
+     add_subdirectory(Message)
+ 	add_subdirectory(ModelIO)
+diff --git a/src/frameworks/Quartz/CMakeLists.txt b/src/frameworks/Quartz/CMakeLists.txt
+index 30bbc82c..c1e7b2bf 100644
+--- a/src/frameworks/Quartz/CMakeLists.txt
++++ b/src/frameworks/Quartz/CMakeLists.txt
+@@ -32,8 +32,6 @@ add_framework(Quartz
+ 
+ 	SOURCES
+ 		src/Quartz.c
+-		QuickLookUI/src/QLPreviewPanel.m
+-		QuickLookUI/src/QLPreviewView.m
+ 
+ 	DEPENDENCIES
+ 		system
+@@ -55,7 +53,7 @@ else()
+ 	set(QuartzCore_BUILD ${CMAKE_BINARY_DIR}/src/frameworks/dev-stubs/QuartzCore/QuartzCore)
+ endif()
+ 
+-# Ideally would be done through a nested QuickLookUI framework
++reexport(Quartz QuickLookUI ${CMAKE_BINARY_DIR}/src/frameworks/QuickLookUI/QuickLookUI)
+ reexport(Quartz QuickLook ${QuickLook_BUILD})
+ reexport(Quartz ImageKit ${ImageKit_BUILD})
+ reexport(Quartz QuartzComposer ${QuartzComposer_BUILD})
+diff --git a/src/frameworks/Accessibility/CMakeLists.txt b/src/frameworks/Accessibility/CMakeLists.txt
+new file mode 100644
+index 00000000..130425d2
+--- /dev/null
++++ b/src/frameworks/Accessibility/CMakeLists.txt
+@@ -0,0 +1,22 @@
++project(Accessibility)
++
++set(FRAMEWORK_VERSION "A")
++
++add_framework(Accessibility
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++    TARGET_NAME AccessibilityFramework
++
++    SOURCES
++        src/Accessibility.c
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
++
++# The AXUIElement/AXObserver APIs live in ApplicationServices/HIServices.
++# Re-export them under the framework name newer Electron builds link against.
++reexport(AccessibilityFramework ApplicationServices ${CMAKE_BINARY_DIR}/src/frameworks/ApplicationServices/ApplicationServices)
+diff --git a/src/frameworks/Accessibility/src/Accessibility.c b/src/frameworks/Accessibility/src/Accessibility.c
+new file mode 100644
+index 00000000..122ac8ad
+--- /dev/null
++++ b/src/frameworks/Accessibility/src/Accessibility.c
+@@ -0,0 +1,9 @@
++/*
++ * Accessibility.framework compatibility shim.
++ *
++ * Darling implements the AXUIElement and AXObserver entry points in
++ * ApplicationServices/HIServices. This framework re-exports them under the
++ * name newer macOS applications link against.
++ */
++
++int __darling_accessibility_compatibility = 0;
+diff --git a/src/frameworks/MediaPlayer/CMakeLists.txt b/src/frameworks/MediaPlayer/CMakeLists.txt
+new file mode 100644
+index 00000000..a943c269
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/CMakeLists.txt
+@@ -0,0 +1,22 @@
++project(MediaPlayer)
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(MediaPlayer
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/MediaPlayer"
++)
++
++add_framework(MediaPlayer
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/MediaPlayer.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
+diff --git a/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
+new file mode 100644
+index 00000000..652b3820
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
+@@ -0,0 +1,27 @@
++#ifndef _MEDIAPLAYER_H_
++#define _MEDIAPLAYER_H_
++
++#import <Foundation/Foundation.h>
++
++extern NSString * const MPMediaItemPropertyAlbumTitle;
++extern NSString * const MPMediaItemPropertyArtist;
++extern NSString * const MPMediaItemPropertyArtwork;
++extern NSString * const MPMediaItemPropertyPlaybackDuration;
++extern NSString * const MPMediaItemPropertyTitle;
++extern NSString * const MPNowPlayingInfoPropertyCurrentPlaybackDate;
++extern NSString * const MPNowPlayingInfoPropertyElapsedPlaybackTime;
++extern NSString * const MPNowPlayingInfoPropertyPlaybackRate;
++
++@interface MPMediaItemArtwork : NSObject
++@end
++
++@interface MPNowPlayingInfoCenter : NSObject
+++ (instancetype)defaultCenter;
++@property (nonatomic, copy) NSDictionary *nowPlayingInfo;
++@end
++
++@interface MPRemoteCommandCenter : NSObject
+++ (instancetype)sharedCommandCenter;
++@end
++
++#endif /* _MEDIAPLAYER_H_ */
+diff --git a/src/frameworks/MediaPlayer/src/MediaPlayer.m b/src/frameworks/MediaPlayer/src/MediaPlayer.m
+new file mode 100644
+index 00000000..c16e82ba
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/src/MediaPlayer.m
+@@ -0,0 +1,51 @@
++/*
++ * Minimal MediaPlayer.framework compatibility surface used by Electron.
++ * The client only needs the now-playing metadata constants and classes.
++ */
++
++#import <Foundation/Foundation.h>
++
++NSString * const MPMediaItemPropertyAlbumTitle = @"MPMediaItemPropertyAlbumTitle";
++NSString * const MPMediaItemPropertyArtist = @"MPMediaItemPropertyArtist";
++NSString * const MPMediaItemPropertyArtwork = @"MPMediaItemPropertyArtwork";
++NSString * const MPMediaItemPropertyPlaybackDuration = @"MPMediaItemPropertyPlaybackDuration";
++NSString * const MPMediaItemPropertyTitle = @"MPMediaItemPropertyTitle";
++NSString * const MPNowPlayingInfoPropertyCurrentPlaybackDate = @"MPNowPlayingInfoPropertyCurrentPlaybackDate";
++NSString * const MPNowPlayingInfoPropertyElapsedPlaybackTime = @"MPNowPlayingInfoPropertyElapsedPlaybackTime";
++NSString * const MPNowPlayingInfoPropertyPlaybackRate = @"MPNowPlayingInfoPropertyPlaybackRate";
++
++@interface MPMediaItemArtwork : NSObject
++@end
++@interface MPNowPlayingInfoCenter : NSObject
+++ (instancetype)defaultCenter;
++@end
++@interface MPRemoteCommandCenter : NSObject
+++ (instancetype)sharedCommandCenter;
++@end
++
++@implementation MPMediaItemArtwork
++@end
++
++@implementation MPNowPlayingInfoCenter
++
+++ (instancetype)defaultCenter {
++	static MPNowPlayingInfoCenter *center;
++	static dispatch_once_t once;
++
++	dispatch_once(&once, ^{ center = [MPNowPlayingInfoCenter new]; });
++	return center;
++}
++
++@end
++
++@implementation MPRemoteCommandCenter
++
+++ (instancetype)sharedCommandCenter {
++	static MPRemoteCommandCenter *center;
++	static dispatch_once_t once;
++
++	dispatch_once(&once, ^{ center = [MPRemoteCommandCenter new]; });
++	return center;
++}
++
++@end
+diff --git a/src/frameworks/CoreHaptics/CMakeLists.txt b/src/frameworks/CoreHaptics/CMakeLists.txt
+new file mode 100644
+index 00000000..d83c39cc
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/CMakeLists.txt
+@@ -0,0 +1,22 @@
++project(CoreHaptics)
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(CoreHaptics
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/CoreHaptics"
++)
++
++add_framework(CoreHaptics
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/CoreHaptics.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
+diff --git a/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h b/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h
+new file mode 100644
+index 00000000..8d6d3e29
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h
+@@ -0,0 +1,24 @@
++#ifndef _COREHAPTICS_H_
++#define _COREHAPTICS_H_
++
++#import <Foundation/Foundation.h>
++
++extern NSString * const CHHapticDynamicParameterIDHapticIntensityControl;
++extern NSString * const CHHapticDynamicParameterIDHapticSharpnessControl;
++extern NSString * const CHHapticEventParameterIDHapticIntensity;
++extern NSString * const CHHapticEventParameterIDHapticSharpness;
++extern NSString * const CHHapticEventTypeHapticContinuous;
++
++@interface CHHapticDynamicParameter : NSObject
++@end
++
++@interface CHHapticEvent : NSObject
++@end
++
++@interface CHHapticEventParameter : NSObject
++@end
++
++@interface CHHapticPattern : NSObject
++@end
++
++#endif /* _COREHAPTICS_H_ */
+diff --git a/src/frameworks/CoreHaptics/src/CoreHaptics.m b/src/frameworks/CoreHaptics/src/CoreHaptics.m
+new file mode 100644
+index 00000000..ea7f0c15
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/src/CoreHaptics.m
+@@ -0,0 +1,33 @@
++/*
++ * Minimal CoreHaptics.framework compatibility surface used by Electron.
++ * Haptic playback is intentionally a no-op under Darling.
++ */
++
++#import <Foundation/Foundation.h>
++
++NSString * const CHHapticDynamicParameterIDHapticIntensityControl = @"CHHapticDynamicParameterIDHapticIntensityControl";
++NSString * const CHHapticDynamicParameterIDHapticSharpnessControl = @"CHHapticDynamicParameterIDHapticSharpnessControl";
++NSString * const CHHapticEventParameterIDHapticIntensity = @"CHHapticEventParameterIDHapticIntensity";
++NSString * const CHHapticEventParameterIDHapticSharpness = @"CHHapticEventParameterIDHapticSharpness";
++NSString * const CHHapticEventTypeHapticContinuous = @"CHHapticEventTypeHapticContinuous";
++
++@interface CHHapticDynamicParameter : NSObject
++@end
++@interface CHHapticEvent : NSObject
++@end
++@interface CHHapticEventParameter : NSObject
++@end
++@interface CHHapticPattern : NSObject
++@end
++
++@implementation CHHapticDynamicParameter
++@end
++
++@implementation CHHapticEvent
++@end
++
++@implementation CHHapticEventParameter
++@end
++
++@implementation CHHapticPattern
++@end
+diff --git a/src/frameworks/CoreML/CMakeLists.txt b/src/frameworks/CoreML/CMakeLists.txt
+new file mode 100644
+index 00000000..9b17784c
+--- /dev/null
++++ b/src/frameworks/CoreML/CMakeLists.txt
+@@ -0,0 +1,22 @@
++project(CoreML)
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(CoreML
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/CoreML"
++)
++
++add_framework(CoreML
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/CoreML.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
+diff --git a/src/frameworks/CoreML/include/CoreML/CoreML.h b/src/frameworks/CoreML/include/CoreML/CoreML.h
+new file mode 100644
+index 00000000..b11a4bfa
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/CoreML.h
+@@ -0,0 +1,33 @@
++#ifndef _COREML_H_
++#define _COREML_H_
++
++#import <Foundation/Foundation.h>
++
++@interface MLComputePlan : NSObject
++@end
++
++@interface MLCPUComputeDevice : NSObject
++@end
++
++@interface MLFeatureValue : NSObject
++@end
++
++@interface MLGPUComputeDevice : NSObject
++@end
++
++@interface MLModel : NSObject
++@end
++
++@interface MLModelConfiguration : NSObject
++@end
++
++@interface MLMultiArray : NSObject
++@end
++
++@interface MLNeuralEngineComputeDevice : NSObject
++@end
++
++@interface MLPredictionOptions : NSObject
++@end
++
++#endif /* _COREML_H_ */
+diff --git a/src/frameworks/CoreML/src/CoreML.m b/src/frameworks/CoreML/src/CoreML.m
+new file mode 100644
+index 00000000..92b97672
+--- /dev/null
++++ b/src/frameworks/CoreML/src/CoreML.m
+@@ -0,0 +1,53 @@
++/*
++ * Minimal CoreML.framework compatibility surface used by Electron.
++ * Model execution is unavailable under Darling; these objects exist so the
++ * frameworks that weakly probe CoreML can load and bind.
++ */
++
++#import <Foundation/Foundation.h>
++
++@interface MLComputePlan : NSObject
++@end
++@interface MLCPUComputeDevice : NSObject
++@end
++@interface MLFeatureValue : NSObject
++@end
++@interface MLGPUComputeDevice : NSObject
++@end
++@interface MLModel : NSObject
++@end
++@interface MLModelConfiguration : NSObject
++@end
++@interface MLMultiArray : NSObject
++@end
++@interface MLNeuralEngineComputeDevice : NSObject
++@end
++@interface MLPredictionOptions : NSObject
++@end
++
++@implementation MLComputePlan
++@end
++
++@implementation MLCPUComputeDevice
++@end
++
++@implementation MLFeatureValue
++@end
++
++@implementation MLGPUComputeDevice
++@end
++
++@implementation MLModel
++@end
++
++@implementation MLModelConfiguration
++@end
++
++@implementation MLMultiArray
++@end
++
++@implementation MLNeuralEngineComputeDevice
++@end
++
++@implementation MLPredictionOptions
++@end
+diff --git a/src/frameworks/QuickLookUI/CMakeLists.txt b/src/frameworks/QuickLookUI/CMakeLists.txt
+new file mode 100644
+index 00000000..c5b0d39f
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/CMakeLists.txt
+@@ -0,0 +1,26 @@
++project(QuickLookUI)
++
++set(FRAMEWORK_VERSION "A")
++
++include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
++
++generate_sdk_framework(QuickLookUI
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/QuickLookUI"
++)
++
++add_framework(QuickLookUI
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/QLPreviewPanel.m
++        src/QLPreviewView.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++        AppKit
++)
+diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h
+new file mode 100644
+index 00000000..9a96a849
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h
+@@ -0,0 +1,12 @@
++#ifndef _QUICKLOOKUI_H_
++#define _QUICKLOOKUI_H_
++
++#import <AppKit/AppKit.h>
++
++@interface QLPreviewPanel : NSPanel
++@end
++
++@interface QLPreviewView : NSView
++@end
++
++#endif /* _QUICKLOOKUI_H_ */
+diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h
+new file mode 100644
+index 00000000..c12753f6
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AppKit/AppKit.h>
++
++@interface QLPreviewPanel : NSPanel
++@end
+diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h
+new file mode 100644
+index 00000000..5e251f27
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AppKit/AppKit.h>
++
++@interface QLPreviewView : NSView
++@end
+diff --git a/src/frameworks/QuickLookUI/src/QLPreviewPanel.m b/src/frameworks/QuickLookUI/src/QLPreviewPanel.m
+new file mode 100644
+index 00000000..5221fb66
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/src/QLPreviewPanel.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <QuickLookUI/QLPreviewPanel.h>
++
++@implementation QLPreviewPanel
++@end
+diff --git a/src/frameworks/QuickLookUI/src/QLPreviewView.m b/src/frameworks/QuickLookUI/src/QLPreviewView.m
+new file mode 100644
+index 00000000..f247d608
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/src/QLPreviewView.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <QuickLookUI/QLPreviewView.h>
++
++@implementation QLPreviewView
++@end

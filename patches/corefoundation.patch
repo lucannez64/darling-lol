@@ -321,3 +321,61 @@ index a3da56a..4678733 100644
  - (NSArray *)keysSortedByValueUsingSelector:(SEL)comparator
  {
      return [[self allKeys] sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 27864ad..4678f3c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -124,6 +124,7 @@ set(cf_sources
+ 	NSCalendar.m
+ 	NSCFType.m
+ 	NSConstantString.m
++	NSConstantObjects.m
+ 	NSData.m
+ 	NSDateComponents.m
+ 	NSDate.m
+diff --git a/CFRuntime.c b/CFRuntime.c
+index 6b55812..7343a8f 100644
+--- a/CFRuntime.c
++++ b/CFRuntime.c
+@@ -138,6 +138,7 @@ extern void __HALT(void);
+ 
+ static CFTypeID __kCFNotATypeTypeID = _kCFRuntimeNotATypeID;
+ id __NSDictionary0__, __NSArray0__;
++id __NSArray0__struct;
+ 
+ #if !defined (__cplusplus)
+ static const CFRuntimeClass __CFNotATypeClass = {
+@@ -1171,6 +1172,7 @@ void __CFInitialize(void) {
+         selInit = sel_registerName("init");
+         __NSDictionary0__ = objc_msgSend(objc_msgSend(clsDict, selAlloc), selInit);
+         __NSArray0__ = objc_msgSend(objc_msgSend(clsArray, selAlloc), selInit);
++        __NSArray0__struct = __NSArray0__;
+ 
+         __CFInitializing = 0;
+         __CFInitialized = 1;
+diff --git a/NSConstantObjects.m b/NSConstantObjects.m
+new file mode 100644
+index 0000000..5689a5a
+--- /dev/null
++++ b/NSConstantObjects.m
+@@ -0,0 +1,20 @@
++//
++//  NSConstantObjects.m
++//  CoreFoundation
++//
++//  Compatibility classes for the constant object symbols emitted by newer
++//  Clang versions for Objective-C collection literals.
++//
++
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++
++@interface NSConstantArray : NSArray
++@end
++@interface NSConstantDictionary : NSDictionary
++@end
++
++@implementation NSConstantArray
++@end
++@implementation NSConstantDictionary
++@end

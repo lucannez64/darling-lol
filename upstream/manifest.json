@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 89,
+      "modified_files": 91,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -25,7 +25,24 @@
         "src/frameworks/OpenGL/CGLAsyncPresent.inc",
         "src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h",
         "src/startup/mldr/commpage-cpu-caps.h",
-        "src/shellspawn/shellspawn-fds.h"
+        "src/shellspawn/shellspawn-fds.h",
+        "src/frameworks/Accessibility/CMakeLists.txt",
+        "src/frameworks/Accessibility/src/Accessibility.c",
+        "src/frameworks/MediaPlayer/CMakeLists.txt",
+        "src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h",
+        "src/frameworks/MediaPlayer/src/MediaPlayer.m",
+        "src/frameworks/CoreHaptics/CMakeLists.txt",
+        "src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h",
+        "src/frameworks/CoreHaptics/src/CoreHaptics.m",
+        "src/frameworks/CoreML/CMakeLists.txt",
+        "src/frameworks/CoreML/include/CoreML/CoreML.h",
+        "src/frameworks/CoreML/src/CoreML.m",
+        "src/frameworks/QuickLookUI/CMakeLists.txt",
+        "src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h",
+        "src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h",
+        "src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h",
+        "src/frameworks/QuickLookUI/src/QLPreviewPanel.m",
+        "src/frameworks/QuickLookUI/src/QLPreviewView.m"
       ]
     },
     {
@@ -92,8 +109,10 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 5,
-      "new_files": []
+      "modified_files": 7,
+      "new_files": [
+        "NSConstantObjects.m"
+      ]
     },
     {
       "path": "src/external/curl",
@@ -118,8 +137,10 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 4,
-      "new_files": []
+      "modified_files": 5,
+      "new_files": [
+        "src/NSConstantIntegerNumber.m"
+      ]
     },
     {
       "path": "src/external/iokitd",
