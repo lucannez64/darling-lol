@@ -334,41 +334,83 @@ index 27864ad..4678f3c 100644
  	NSDateComponents.m
  	NSDate.m
 diff --git a/CFRuntime.c b/CFRuntime.c
-index 6b55812..7343a8f 100644
+index 6b55812..e6ce4b7 100644
 --- a/CFRuntime.c
 +++ b/CFRuntime.c
-@@ -138,6 +138,7 @@ extern void __HALT(void);
- 
+@@ -139,6 +139,23 @@ extern void __HALT(void);
  static CFTypeID __kCFNotATypeTypeID = _kCFRuntimeNotATypeID;
  id __NSDictionary0__, __NSArray0__;
-+id __NSArray0__struct;
  
++/* Clang emits references to these symbols as the address of an object with
++ * the same layout as its NSConstantArray/NSConstantDictionary objects. */
++struct dc_constant_empty_array {
++	void *isa;
++	unsigned long count;
++	void *objects;
++};
++struct dc_constant_empty_dictionary {
++	void *isa;
++	unsigned long hashOptions;
++	unsigned long count;
++	void *keys;
++	void *objects;
++};
++struct dc_constant_empty_array __NSArray0__struct;
++struct dc_constant_empty_dictionary __NSDictionary0__struct;
++
  #if !defined (__cplusplus)
  static const CFRuntimeClass __CFNotATypeClass = {
-@@ -1171,6 +1172,7 @@ void __CFInitialize(void) {
-         selInit = sel_registerName("init");
+     0,
+@@ -1172,6 +1189,15 @@ void __CFInitialize(void) {
          __NSDictionary0__ = objc_msgSend(objc_msgSend(clsDict, selAlloc), selInit);
          __NSArray0__ = objc_msgSend(objc_msgSend(clsArray, selAlloc), selInit);
-+        __NSArray0__struct = __NSArray0__;
  
++        __NSArray0__struct.isa = (void *) objc_lookUpClass("NSConstantArray");
++        __NSArray0__struct.count = 0;
++        __NSArray0__struct.objects = NULL;
++        __NSDictionary0__struct.isa = (void *) objc_lookUpClass("NSConstantDictionary");
++        __NSDictionary0__struct.hashOptions = 0;
++        __NSDictionary0__struct.count = 0;
++        __NSDictionary0__struct.keys = NULL;
++        __NSDictionary0__struct.objects = NULL;
++
          __CFInitializing = 0;
          __CFInitialized = 1;
+     }
 diff --git a/NSConstantObjects.m b/NSConstantObjects.m
 new file mode 100644
-index 0000000..5689a5a
+index 0000000..70f31ff
 --- /dev/null
 +++ b/NSConstantObjects.m
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,84 @@
 +//
 +//  NSConstantObjects.m
 +//  CoreFoundation
 +//
-+//  Compatibility classes for the constant object symbols emitted by newer
-+//  Clang versions for Objective-C collection literals.
++//  Compatibility classes for the constant collection objects emitted by newer
++//  Clang versions for Objective-C collection literals. The layouts match
++//  clang/lib/CodeGen/CGObjCMac.cpp.
 +//
 +
 +#import <Foundation/NSArray.h>
 +#import <Foundation/NSDictionary.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSString.h>
++
++struct dc_constant_array {
++	void *isa;
++	NSUInteger count;
++	id *objects;
++};
++
++struct dc_constant_dictionary {
++	void *isa;
++	NSUInteger hashOptions;
++	NSUInteger count;
++	id *keys;
++	id *objects;
++};
 +
 +@interface NSConstantArray : NSArray
 +@end
@@ -376,6 +418,52 @@ index 0000000..5689a5a
 +@end
 +
 +@implementation NSConstantArray
++
++- (NSUInteger)count
++{
++	return ((struct dc_constant_array *) self)->count;
++}
++
++- (id)objectAtIndex:(NSUInteger)index
++{
++	struct dc_constant_array *array = (struct dc_constant_array *) self;
++
++	if (index >= array->count)
++		[NSException raise:NSRangeException format:@"index %lu beyond bounds %lu",
++		    (unsigned long) index, (unsigned long) array->count];
++	return array->objects[index];
++}
++
 +@end
++
 +@implementation NSConstantDictionary
++
++- (NSUInteger)count
++{
++	return ((struct dc_constant_dictionary *) self)->count;
++}
++
++- (id)objectForKey:(id)key
++{
++	struct dc_constant_dictionary *dictionary = (struct dc_constant_dictionary *) self;
++	NSUInteger index;
++
++	for (index = 0; index < dictionary->count; index++) {
++		if ([dictionary->keys[index] isEqual:key])
++			return dictionary->objects[index];
++	}
++	return nil;
++}
++
++- (NSEnumerator *)keyEnumerator
++{
++	struct dc_constant_dictionary *dictionary = (struct dc_constant_dictionary *) self;
++	NSMutableArray *keys = [NSMutableArray arrayWithCapacity:dictionary->count];
++	NSUInteger index;
++
++	for (index = 0; index < dictionary->count; index++)
++		[keys addObject:dictionary->keys[index]];
++	return [keys objectEnumerator];
++}
++
 +@end

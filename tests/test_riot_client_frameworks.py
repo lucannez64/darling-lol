@@ -55,6 +55,23 @@ class RiotClientFrameworkTests(unittest.TestCase):
         for name in DARLING_FRAMEWORKS['src/frameworks/QuickLookUI/CMakeLists.txt']:
             self.assertIn(name, source)
 
+    def test_quicklookui_umbrella_imports_the_class_headers(self):
+        section = patch_section('patches/darling.patch',
+                                'src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h')
+        self.assertIsNotNone(section)
+        source = added_lines(section)
+        self.assertIn('#import <QuickLookUI/QLPreviewPanel.h>', source)
+        self.assertIn('#import <QuickLookUI/QLPreviewView.h>', source)
+        self.assertNotIn('@interface QLPreviewPanel', source)
+
+    def test_mediaplayer_implements_now_playing_info(self):
+        section = patch_section('patches/darling.patch',
+                                'src/frameworks/MediaPlayer/src/MediaPlayer.m')
+        self.assertIsNotNone(section)
+        source = added_lines(section)
+        self.assertIn('@synthesize nowPlayingInfo', source)
+        self.assertIn('#import <MediaPlayer/MediaPlayer.h>', source)
+
     def test_accessibility_reexports_application_services(self):
         section = patch_section('patches/darling.patch', 'src/frameworks/Accessibility/CMakeLists.txt')
         self.assertIsNotNone(section)
@@ -82,16 +99,23 @@ class RiotClientFrameworkTests(unittest.TestCase):
         foundation_source = added_lines(foundation)
         for name in ('NSConstantIntegerNumber', 'NSConstantFloatNumber', 'NSConstantDoubleNumber'):
             self.assertIn(name, foundation_source)
+        for method in ('objCType', 'longLongValue', 'doubleValue', 'getValue:'):
+            self.assertIn(method, foundation_source)
 
         corefoundation = patch_section('patches/corefoundation.patch', COREFOUNDATION_NEW)
         self.assertIsNotNone(corefoundation)
         corefoundation_source = added_lines(corefoundation)
         for name in ('NSConstantArray', 'NSConstantDictionary'):
             self.assertIn(name, corefoundation_source)
+        for method in ('count', 'objectAtIndex:', 'objectForKey:', 'keyEnumerator'):
+            self.assertIn(method, corefoundation_source)
 
         runtime = patch_section('patches/corefoundation.patch', 'CFRuntime.c')
         self.assertIsNotNone(runtime)
-        self.assertIn('__NSArray0__struct', added_lines(runtime))
+        runtime_source = added_lines(runtime)
+        self.assertIn('struct dc_constant_empty_array', runtime_source)
+        self.assertIn('struct dc_constant_empty_dictionary', runtime_source)
+        self.assertNotIn('id __NSArray0__struct;', runtime_source)
 
     def test_manifest_lists_constant_object_sources(self):
         manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())

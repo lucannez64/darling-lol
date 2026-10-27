@@ -11458,13 +11458,15 @@ index 00000000..122ac8ad
 +int __darling_accessibility_compatibility = 0;
 diff --git a/src/frameworks/MediaPlayer/CMakeLists.txt b/src/frameworks/MediaPlayer/CMakeLists.txt
 new file mode 100644
-index 00000000..a943c269
+index 00000000..bad7eb2e
 --- /dev/null
 +++ b/src/frameworks/MediaPlayer/CMakeLists.txt
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,24 @@
 +project(MediaPlayer)
 +
 +set(FRAMEWORK_VERSION "A")
++
++include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 +
 +generate_sdk_framework(MediaPlayer
 +    VERSION ${FRAMEWORK_VERSION}
@@ -11519,16 +11521,17 @@ index 00000000..652b3820
 +#endif /* _MEDIAPLAYER_H_ */
 diff --git a/src/frameworks/MediaPlayer/src/MediaPlayer.m b/src/frameworks/MediaPlayer/src/MediaPlayer.m
 new file mode 100644
-index 00000000..c16e82ba
+index 00000000..ea48d712
 --- /dev/null
 +++ b/src/frameworks/MediaPlayer/src/MediaPlayer.m
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,55 @@
 +/*
 + * Minimal MediaPlayer.framework compatibility surface used by Electron.
 + * The client only needs the now-playing metadata constants and classes.
 + */
 +
 +#import <Foundation/Foundation.h>
++#import <MediaPlayer/MediaPlayer.h>
 +
 +NSString * const MPMediaItemPropertyAlbumTitle = @"MPMediaItemPropertyAlbumTitle";
 +NSString * const MPMediaItemPropertyArtist = @"MPMediaItemPropertyArtist";
@@ -11539,19 +11542,22 @@ index 00000000..c16e82ba
 +NSString * const MPNowPlayingInfoPropertyElapsedPlaybackTime = @"MPNowPlayingInfoPropertyElapsedPlaybackTime";
 +NSString * const MPNowPlayingInfoPropertyPlaybackRate = @"MPNowPlayingInfoPropertyPlaybackRate";
 +
-+@interface MPMediaItemArtwork : NSObject
-+@end
-+@interface MPNowPlayingInfoCenter : NSObject
-++ (instancetype)defaultCenter;
-+@end
-+@interface MPRemoteCommandCenter : NSObject
-++ (instancetype)sharedCommandCenter;
++@interface MPNowPlayingInfoCenter () {
++	NSDictionary *_nowPlayingInfo;
++}
 +@end
 +
 +@implementation MPMediaItemArtwork
 +@end
 +
 +@implementation MPNowPlayingInfoCenter
++
++@synthesize nowPlayingInfo = _nowPlayingInfo;
++
++- (void)dealloc {
++	[_nowPlayingInfo release];
++	[super dealloc];
++}
 +
 ++ (instancetype)defaultCenter {
 +	static MPNowPlayingInfoCenter *center;
@@ -11831,20 +11837,15 @@ index 00000000..c5b0d39f
 +)
 diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h
 new file mode 100644
-index 00000000..9a96a849
+index 00000000..8466c1a3
 --- /dev/null
 +++ b/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,7 @@
 +#ifndef _QUICKLOOKUI_H_
 +#define _QUICKLOOKUI_H_
 +
-+#import <AppKit/AppKit.h>
-+
-+@interface QLPreviewPanel : NSPanel
-+@end
-+
-+@interface QLPreviewView : NSView
-+@end
++#import <QuickLookUI/QLPreviewPanel.h>
++#import <QuickLookUI/QLPreviewView.h>
 +
 +#endif /* _QUICKLOOKUI_H_ */
 diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h
