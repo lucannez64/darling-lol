@@ -117,6 +117,22 @@ class RiotClientFrameworkTests(unittest.TestCase):
         self.assertIn('struct dc_constant_empty_dictionary', runtime_source)
         self.assertNotIn('id __NSArray0__struct;', runtime_source)
 
+    def test_darwin_rlimit_infinity_is_translated(self):
+        header = patch_section('patches/xnu.patch',
+                               'darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h')
+        self.assertIsNotNone(header)
+        self.assertIn('DARLING_RLIM_INFINITY 0x7fffffffffffffffULL', added_lines(header))
+
+        for path in (
+            'darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c',
+            'darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c',
+        ):
+            section = patch_section('patches/xnu.patch', path)
+            self.assertIsNotNone(section)
+            source = added_lines(section)
+            self.assertIn('DARLING_RLIM_INFINITY', source)
+            self.assertIn('~0ULL', source)
+
     def test_manifest_lists_constant_object_sources(self):
         manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
         by_patch = {c['patch']: c for c in manifest['components']}

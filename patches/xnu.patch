@@ -6200,3 +6200,71 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root = prefix_path;
  								ctxt->current_root_len = prefix_path_len;
  							}
+diff --git a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+index 24a5f01..05b22c6 100644
+--- a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
++++ b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+@@ -1,6 +1,9 @@
+ #ifndef DARLING_CONVERSION_MISC_GETRLIMIT
+ #define DARLING_CONVERSION_MISC_GETRLIMIT
+ 
++/* Darwin uses a signed 64-bit maximum for RLIM_INFINITY; Linux uses ULLONG_MAX. */
++#define DARLING_RLIM_INFINITY 0x7fffffffffffffffULL
++
+ struct xnu_rlimit
+ {
+ 	unsigned long long rlim_cur;
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+index 01d4670..8cf3b79 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+@@ -16,13 +16,22 @@ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, 0, rlp);
+ 	if (ret < 0)
++	{
+ 		ret = errno_linux_to_bsd(ret);
++		return ret;
++	}
+ 
+-	if (which == LINUX_RLIMIT_NOFILE)
+-	{
++	/* Darwin's RLIM_INFINITY is INT64_MAX, not Linux's ULLONG_MAX.
++	 * Chromium checked_cast<int64_t>()s rlim_cur and traps on ULLONG_MAX. */
++	if (rlp->rlim_cur == ~0ULL)
++		rlp->rlim_cur = DARLING_RLIM_INFINITY;
++	else if (which == LINUX_RLIMIT_NOFILE && rlp->rlim_cur > 0)
+ 		rlp->rlim_cur--;
++
++	if (rlp->rlim_max == ~0ULL)
++		rlp->rlim_max = DARLING_RLIM_INFINITY;
++	else if (which == LINUX_RLIMIT_NOFILE && rlp->rlim_max > 0)
+ 		rlp->rlim_max--;
+-	}
+ 
+ 	return ret;
+ }
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+index 352c739..eb37626 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+@@ -15,11 +15,16 @@ long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
+ 	if (which == -1)
+ 		return -EINVAL;
+ 
+-	if (which == LINUX_RLIMIT_NOFILE)
+-	{
++	/* Darwin's infinity is INT64_MAX; Linux expects ULLONG_MAX. */
++	if (lim.rlim_cur == DARLING_RLIM_INFINITY)
++		lim.rlim_cur = ~0ULL;
++	else if (which == LINUX_RLIMIT_NOFILE)
+ 		lim.rlim_cur++;
++
++	if (lim.rlim_max == DARLING_RLIM_INFINITY)
++		lim.rlim_max = ~0ULL;
++	else if (which == LINUX_RLIMIT_NOFILE)
+ 		lim.rlim_max++;
+-	}
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, &lim, 0);
+ 	if (ret < 0)
