@@ -292,6 +292,11 @@ class RiotClientRuntimeTests(unittest.TestCase):
                 self.assertIn('rclolStubSignature(SEL sel)', source, path)
                 self.assertIn('rclolStubSignature(sel)', source, path)
                 self.assertNotIn('signatureWithObjCTypes:"@@:"]', source, path)
+        # Known selectors with scalar arguments keep their declared types.
+        for path, entry in (('AppKit/NSAccessibility.m', '{ "configurationWithPointSize:weight:scale:", "@@:ddq" }'),
+                            ('QuartzCore/CALayer.m',
+                             '{ "HDR10MetadataWithDisplayInfo:contentInfo:opticalOutputScale:", "@@:@@f" }')):
+            self.assertIn(entry, added_lines(patch_section('patches/cocotron.patch', path)))
         player = added_lines(patch_section('patches/darling.patch', 'src/frameworks/MediaPlayer/src/MediaPlayer.m'))
         self.assertIn('@synthesize nowPlayingInfo = _nowPlayingInfo;', player)
         self.assertIn('@synthesize playbackState = _playbackState;', player)
