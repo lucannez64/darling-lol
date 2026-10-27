@@ -189,10 +189,11 @@ if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
   ln -sfn "/Volumes/SystemRoot$host_ipc/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
  done) || echo 'discord-rpc: could not link the Discord IPC sockets; continuing without them' >&2
 else
- # Only links this launcher made: they point through /Volumes/SystemRoot.
- for n in 0 1 2 3 4 5 6 7 8 9; do
-  case $(readlink "$guest_ipc/discord-ipc-$n" 2>/dev/null) in
-   /Volumes/SystemRoot/*) rm -f "$guest_ipc/discord-ipc-$n" ;;
+ # Only links this launcher made: they point through /Volumes/SystemRoot. The guest searches
+ # its XDG_RUNTIME_DIR and TMPDIR, so links elsewhere (an old runtime dir) are unreachable.
+ for link in "$guest_ipc"/discord-ipc-[0-9] "$prefix"/private/tmp/discord-ipc-[0-9]; do
+  case $(readlink "$link" 2>/dev/null) in
+   /Volumes/SystemRoot/*) rm -f "$link" ;;
   esac
  done
 fi

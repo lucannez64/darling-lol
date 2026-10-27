@@ -136,9 +136,13 @@ with open({str(log)!r}, "a") as output:
         # Discord Rich Presence: the guest's XDG_RUNTIME_DIR must lead out to the host socket.
         assert os.readlink(prefix / "run/user/offline-check/discord-ipc-0") == \
             "/Volumes/SystemRoot/run/user/offline-check/discord-ipc-0", "Discord IPC link missing"
-        # Opting out removes the links an earlier launch left behind.
+        # Opting out removes the links an earlier launch left behind, including the TMPDIR
+        # fallback (/private/tmp) left by a launch without XDG_RUNTIME_DIR.
+        (prefix / "private/tmp").mkdir(parents=True)
+        (prefix / "private/tmp/discord-ipc-0").symlink_to("/Volumes/SystemRoot/tmp/discord-ipc-0")
         subprocess.run(["sh", str(launcher)], env={**env, "RCLOL_DISCORD_RPC": "0"}, check=True, capture_output=True, text=True)
-        assert not any(os.path.lexists(prefix / f"run/user/offline-check/discord-ipc-{n}") for n in range(10)), \
+        assert not any(os.path.lexists(prefix / directory / f"discord-ipc-{n}")
+                       for directory in ("run/user/offline-check", "private/tmp") for n in range(10)), \
             "stale Discord IPC link kept"
         # An inherited injection must also be absent for first-time installation.
         env["RIOT_LAUNCHER_HOST"] = str(folder / "Install Riot.app/Contents/MacOS/RiotClientServices")
