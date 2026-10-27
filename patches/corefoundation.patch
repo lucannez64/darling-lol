@@ -282,7 +282,7 @@ index 162403a..b9ad8a0 100644
 +    return kCFNotFound;
 +}
 diff --git a/NSArray.m b/NSArray.m
-index 30ac9df..b389210 100644
+index 30ac9df..3111ad1 100644
 --- a/NSArray.m
 +++ b/NSArray.m
 @@ -1232,6 +1232,15 @@ SINGLETON_RR()
@@ -301,10 +301,37 @@ index 30ac9df..b389210 100644
  - (void)makeObjectsPerformSelector:(SEL)sel
  {
      [self makeObjectsPerformSelector:sel withObject:nil];
+@@ -1730,7 +1739,7 @@ SINGLETON_RR()
+ + (instancetype)arrayWithContentsOfURL:(NSURL *)url error:(NSError**)error
+ {
+     NSArray* tmp = [self arrayWithContentsOfURL:url];
+-    if (tmp == nil) {
++    if (tmp == nil && error != NULL) {
+         *error = [NSError errorWithDomain:@"NSArrayErrorDomain" code:-1 userInfo:nil];
+     }
+     return tmp;
 diff --git a/NSDictionary.m b/NSDictionary.m
-index a3da56a..4678733 100644
+index a3da56a..64caf09 100644
 --- a/NSDictionary.m
 +++ b/NSDictionary.m
+@@ -509,7 +509,7 @@ SINGLETON_RR()
+     // TODO: we should actually pass along any error we get to the user so they have more info
+     // this is just a quick and dirty implementation
+     NSDictionary* tmp = [self dictionaryWithContentsOfURL:url];
+-    if (tmp == nil) {
++    if (tmp == nil && error != NULL) {
+         *error = [NSError errorWithDomain:@"NSDictionaryErrorDomain" code:-1 userInfo:nil];
+     }
+     return tmp;
+@@ -732,7 +732,7 @@ SINGLETON_RR()
+ - (id)initWithContentsOfURL:(NSURL *)url error:(NSError **)error
+ {
+     NSDictionary* tmp = [self initWithContentsOfURL:url];
+-    if (tmp == nil) {
++    if (tmp == nil && error != NULL) {
+         *error = [NSError errorWithDomain:@"NSDictionaryErrorDomain" code:-1 userInfo:nil];
+     }
+     return tmp;
 @@ -986,6 +986,15 @@ static NSString *_getDescription(id obj, id locale, int level)
      return success;
  }
@@ -321,3 +348,244 @@ index a3da56a..4678733 100644
  - (NSArray *)keysSortedByValueUsingSelector:(SEL)comparator
  {
      return [[self allKeys] sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 27864ad..4678f3c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -124,6 +124,7 @@ set(cf_sources
+ 	NSCalendar.m
+ 	NSCFType.m
+ 	NSConstantString.m
++	NSConstantObjects.m
+ 	NSData.m
+ 	NSDateComponents.m
+ 	NSDate.m
+diff --git a/NSConstantObjects.m b/NSConstantObjects.m
+new file mode 100644
+index 0000000..e2d2b36
+--- /dev/null
++++ b/NSConstantObjects.m
+@@ -0,0 +1,149 @@
++//
++//  NSConstantObjects.m
++//  CoreFoundation
++//
++//  Collections that newer Clang versions emit at compile time for Objective-C
++//  literals (-fobjc-constant-literals), and the empty array and dictionary
++//  objects such code references directly. The objects live in the binary that
++//  uses them, so they are never allocated, retained or freed.
++//
++
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++#import <objc/runtime.h>
++
++// The layouts Clang emits.
++struct NSConstantArrayLayout {
++    Class isa;
++    NSUInteger count;
++    const id *objects;
++};
++
++struct NSConstantDictionaryLayout {
++    Class isa;
++    NSUInteger options; // 1: keys are sorted and unique
++    NSUInteger count;
++    const id *keys;
++    const id *objects;
++};
++
++#define CONSTANT_ARRAY(object) ((const struct NSConstantArrayLayout *)(object))
++#define CONSTANT_DICTIONARY(object) ((const struct NSConstantDictionaryLayout *)(object))
++
++@interface NSConstantArray : NSArray
++@end
++
++@interface NSConstantDictionary : NSDictionary
++@end
++
++@implementation NSConstantArray
++
++- (NSUInteger)count
++{
++    return CONSTANT_ARRAY(self)->count;
++}
++
++- (id)objectAtIndex:(NSUInteger)index
++{
++    if (index >= CONSTANT_ARRAY(self)->count)
++    {
++        [NSException raise:NSRangeException format:@"*** -[NSConstantArray objectAtIndex:]: index %lu beyond bounds [0 .. %lu]",
++            (unsigned long)index, (unsigned long)CONSTANT_ARRAY(self)->count];
++    }
++    return CONSTANT_ARRAY(self)->objects[index];
++}
++
++- (id)copyWithZone:(NSZone *)zone
++{
++    return self;
++}
++
++- (id)retain
++{
++    return self;
++}
++
++- (oneway void)release
++{
++}
++
++- (id)autorelease
++{
++    return self;
++}
++
++- (NSUInteger)retainCount
++{
++    return NSUIntegerMax;
++}
++
++- (void)dealloc
++{
++}
++
++@end
++
++@implementation NSConstantDictionary
++
++- (NSUInteger)count
++{
++    return CONSTANT_DICTIONARY(self)->count;
++}
++
++- (id)objectForKey:(id)key
++{
++    if (key == nil)
++        return nil;
++    const struct NSConstantDictionaryLayout *dictionary = CONSTANT_DICTIONARY(self);
++    for (NSUInteger i = 0; i < dictionary->count; i++)
++    {
++        if (dictionary->keys[i] == key || [dictionary->keys[i] isEqual:key])
++            return dictionary->objects[i];
++    }
++    return nil;
++}
++
++- (NSEnumerator *)keyEnumerator
++{
++    const struct NSConstantDictionaryLayout *dictionary = CONSTANT_DICTIONARY(self);
++    return [[NSArray arrayWithObjects:dictionary->keys count:dictionary->count] objectEnumerator];
++}
++
++- (id)copyWithZone:(NSZone *)zone
++{
++    return self;
++}
++
++- (id)retain
++{
++    return self;
++}
++
++- (oneway void)release
++{
++}
++
++- (id)autorelease
++{
++    return self;
++}
++
++- (NSUInteger)retainCount
++{
++    return NSUIntegerMax;
++}
++
++- (void)dealloc
++{
++}
++
++@end
++
++// Code built with constant literals references these objects for @[] and @{}.
++extern char NSConstantArrayClass __asm__("_OBJC_CLASS_$_NSConstantArray");
++extern char NSConstantDictionaryClass __asm__("_OBJC_CLASS_$_NSConstantDictionary");
++
++struct NSConstantArrayLayout __NSArray0__struct = { (Class)&NSConstantArrayClass, 0, NULL };
++struct NSConstantDictionaryLayout __NSDictionary0__struct = { (Class)&NSConstantDictionaryClass, 1, 0, NULL, NULL };
+diff --git a/NSURL.m b/NSURL.m
+index 1a020de..375c67f 100644
+--- a/NSURL.m
++++ b/NSURL.m
+@@ -38,6 +38,8 @@ NSString *const NSURLHasHiddenExtensionKey = @"NSURLHasHiddenExtensionKey";
+ NSString *const NSURLCreationDateKey = @"NSURLCreationDateKey";
+ NSString *const NSURLContentAccessDateKey = @"NSURLContentAccessDateKey";
+ NSString *const NSURLContentModificationDateKey = @"NSURLContentModificationDateKey";
++/* darling-lol: linked by the current Riot Client. */
++NSString *const NSURLContentTypeKey = @"NSURLContentTypeKey";
+ NSString *const NSURLAttributeModificationDateKey = @"NSURLAttributeModificationDateKey";
+ NSString *const NSURLLinkCountKey = @"NSURLLinkCountKey";
+ NSString *const NSURLParentDirectoryURLKey = @"NSURLParentDirectoryURLKey";
+@@ -1117,3 +1119,28 @@ Boolean CFURLResourceIsReachable(CFURLRef url, CFErrorRef *error)
+ }
+ 
+ @end
++
++/* darling-lol: file security accessors linked by the current Riot Client's
++ * updater (ShipIt). Darling creates no CFFileSecurity objects, so there is never
++ * a mode to read and no change is applied. */
++#import <CoreFoundation/CFFileSecurity.h>
++
++Boolean CFFileSecurityGetMode(CFFileSecurityRef fileSec, mode_t *mode)
++{
++    return false;
++}
++
++Boolean CFFileSecuritySetMode(CFFileSecurityRef fileSec, mode_t mode)
++{
++    return false;
++}
++
++Boolean CFFileSecuritySetOwner(CFFileSecurityRef fileSec, uid_t owner)
++{
++    return false;
++}
++
++Boolean CFFileSecuritySetGroup(CFFileSecurityRef fileSec, gid_t group)
++{
++    return false;
++}
+diff --git a/CFForwardingPrep.S b/CFForwardingPrep.S
+index a399c43..f1a440f 100644
+--- a/CFForwardingPrep.S
++++ b/CFForwardingPrep.S
+@@ -217,7 +217,10 @@ __CF_forwarding_prep_1:
+     .cfi_def_cfa_register rbp
+ 
+     // Copy args from regs into a stack var
+-    subq   $0xd0, %rsp
++    // darling-lol: 0xc0-0xef holds the return registers (rax, rdx, xmm0,
++    // xmm1); the frame used to end at 0xd0, so the xmm slots overlapped the
++    // saved rbp and the return address.
++    subq   $0xf0, %rsp
+     movq   %rax, 0xb0(%rsp)
+     movapd %xmm7, 0xa0(%rsp)
+     movapd %xmm6, 0x90(%rsp)
+@@ -234,6 +237,15 @@ __CF_forwarding_prep_1:
+     movq   %rsi, 8(%rsp)
+     movq   %rdi, (%rsp)
+ 
++    // darling-lol: clear the return storage first, as the i386 path does. A
++    // -forwardInvocation: that sets no return value (Darling's "v@:" stubs)
++    // then returns nil/0 instead of whatever was on the stack.
++    xorps  %xmm0, %xmm0
++    movapd %xmm0, 0xc0(%rsp)
++    movapd %xmm0, 0xd0(%rsp)
++    movapd %xmm0, 0xe0(%rsp)
++    movapd 0x30(%rsp), %xmm0
++
+     movq   %rsp, %rdi
+     leaq   0xc0(%rsp), %rsi
+     call   ____forwarding___ // call through

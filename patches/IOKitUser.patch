@@ -1,8 +1,16 @@
 diff --git a/IOKitLib.c b/IOKitLib.c
-index 81ed8f7..3120abb 100644
+index 81ed8f7..fd964ee 100644
 --- a/IOKitLib.c
 +++ b/IOKitLib.c
-@@ -884,6 +884,15 @@ IONotificationPortGetRunLoopSource(
+@@ -110,6 +110,7 @@ gIOKitLibSerializeOptions = kIOCFSerializeToBinary;
+ 
+ extern 	mach_port_t 	mach_task_self();
+ const 	mach_port_t 	kIOMasterPortDefault = MACH_PORT_NULL;
++const 	mach_port_t 	kIOMainPortDefault = MACH_PORT_NULL; /* darling-lol: macOS 12 name, linked by the current Riot Client */
+ 
+ static mach_port_t
+ __IOGetDefaultMasterPort()
+@@ -884,6 +885,15 @@ IONotificationPortGetRunLoopSource(
      CFMachPortContext 	    context;
      Boolean		            cfReusedPort = false;
  
@@ -18,7 +26,7 @@ index 81ed8f7..3120abb 100644
      if (notify->source)
          return (notify->source);
      
-@@ -934,6 +943,11 @@ mach_port_t
+@@ -934,6 +944,11 @@ mach_port_t
  IONotificationPortGetMachPort(
  	IONotificationPortRef	notify )
  {

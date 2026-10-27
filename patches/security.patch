@@ -238,3 +238,44 @@ index f6d166e2..fb7ae819 100644
  #include <utilities/SecCFWrappers.h>
  #include <utilities/SecFileLocations.h>
  
+diff --git a/OSX/sec/Security/SecTrust.c b/OSX/sec/Security/SecTrust.c
+index ee5aea2..d8495bc 100644
+--- a/OSX/sec/Security/SecTrust.c
++++ b/OSX/sec/Security/SecTrust.c
+@@ -1918,6 +1918,24 @@ SecCertificateRef SecTrustGetCertificateAtIndex(SecTrustRef trust,
+     return cert;
+ }
+ 
++/* darling-lol: macOS 12 API linked by the current Riot Client. Returns the
++ * evaluated chain, leaf first, or NULL when evaluation produced none, as Apple's
++ * does (unlike SecTrustGetCertificateAtIndex, it does not fall back to the
++ * leaf). */
++CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust) {
++    if (!trust) {
++        return NULL;
++    }
++    SecTrustEvaluateIfNecessary(trust);
++    __block CFArrayRef chain = NULL;
++    dispatch_sync(trust->_trustQueue, ^{
++        if (trust->_chain) {
++            chain = CFArrayCreateCopy(NULL, trust->_chain);
++        }
++    });
++    return chain;
++}
++
+ CFDictionaryRef SecTrustCopyInfo(SecTrustRef trust) {
+     if (!trust) {
+         return NULL;
+diff --git a/OSX/sec/Security/SecExports.exp-in b/OSX/sec/Security/SecExports.exp-in
+index 116367d..c022218 100644
+--- a/OSX/sec/Security/SecExports.exp-in
++++ b/OSX/sec/Security/SecExports.exp-in
+@@ -245,6 +245,7 @@ _SecTrustEvaluateWithError
+ _SecTrustFlushResponseCache
+ _SecTrustGetAssetVersionNumber
+ _SecTrustGetCertificateAtIndex
++_SecTrustCopyCertificateChain
+ _SecTrustGetCertificateCount
+ _SecTrustGetDetails
+ _SecTrustGetKeychainsAllowed

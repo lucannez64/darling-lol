@@ -20,7 +20,7 @@ index 393a1eb3..6a47ac89 100644
  		xkbfile
  )
 diff --git a/AppKit/MacWorkspace.m b/AppKit/MacWorkspace.m
-index ba52cd3b..d566b946 100644
+index ba52cd3..abd7971 100644
 --- a/AppKit/MacWorkspace.m
 +++ b/AppKit/MacWorkspace.m
 @@ -13,6 +13,32 @@
@@ -56,7 +56,7 @@ index ba52cd3b..d566b946 100644
  - (NSImage *) iconForFile: (NSString *) path {
      // TODO: call GetIconRefFromFileInfo()
      NSUnimplementedMethod();
-@@ -95,9 +121,9 @@
+@@ -95,9 +121,22 @@
  }
  
  - (BOOL) openURL: (NSURL *) url {
@@ -66,14 +66,34 @@ index ba52cd3b..d566b946 100644
 +    if (url == nil)
 +        return NO;
 +    return LSOpenCFURLRef((CFURLRef) url, NULL) == noErr;
++}
++
++// darling-lol: Electron asks which application opens a URL (the Riot Client
++// does after sign-in); Launch Services knows the default handler.
++- (NSURL *) URLForApplicationToOpenURL: (NSURL *) url {
++    if (url == nil)
++        return nil;
++    return [(NSURL *) LSCopyDefaultApplicationURLForURL((CFURLRef) url, kLSRolesAll, NULL) autorelease];
++}
++
++- (NSArray<NSURL *> *) URLsForApplicationsToOpenURL: (NSURL *) url {
++    NSURL *application = [self URLForApplicationToOpenURL: url];
++    return application ? [NSArray arrayWithObject: application] : [NSArray array];
  }
  
  - (BOOL) selectFile: (NSString *) path
 diff --git a/AppKit/NSAccessibility.m b/AppKit/NSAccessibility.m
-index 39d1b104..3662bc4b 100644
+index 39d1b10..c29ab96 100644
 --- a/AppKit/NSAccessibility.m
 +++ b/AppKit/NSAccessibility.m
-@@ -13,6 +13,8 @@ NSString *const NSAccessibilityEnabledAttribute =
+@@ -1,4 +1,6 @@
+ #import <AppKit/AppKitExport.h>
++#import <objc/runtime.h>
++#include <string.h>
+ #import <Foundation/NSString.h>
+ #import <AppKit/NSAccessibilityConstants.h>
+ #import <AppKit/NSView.h>
+@@ -13,6 +15,8 @@ NSString *const NSAccessibilityEnabledAttribute =
          @"NSAccessibilityEnabledAttribute";
  NSString *const NSAccessibilityFocusedAttribute =
          @"NSAccessibilityFocusedAttribute";
@@ -82,6 +102,73 @@ index 39d1b104..3662bc4b 100644
  NSString *const NSAccessibilityHelpAttribute = @"NSAccessibilityHelpAttribute";
  NSString *const NSAccessibilityMaxValueAttribute =
          @"NSAccessibilityMaxValueAttribute";
+@@ -618,3 +622,66 @@ void NSAccessibilityPostNotificationWithUserInfo(id element,
+ {
+     printf("STUB %s\n", __PRETTY_FUNCTION__);
+ }
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++/* Known selectors with scalar arguments keep their declared types, so an
++ * invocation built from the signature never treats a number as an object. */
++static const struct { const char *selector; const char *types; } rclolStubTypes[] = {
++	{ "configurationWithPointSize:weight:scale:", "@@:ddq" }, /* NSImageSymbolConfiguration: CGFloat, NSFontWeight, NSImageSymbolScale */
++};
++
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	const char *name = sel_getName(sel);
++	for (size_t i = 0; i < sizeof(rclolStubTypes) / sizeof(rclolStubTypes[0]); ++i) {
++		if (strcmp(name, rclolStubTypes[i].selector) == 0)
++			return [NSMethodSignature signatureWithObjCTypes:rclolStubTypes[i].types];
++	}
++
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = name; *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: accessibility and color-sampler symbols linked by the current
++ * Riot Client. There are no localized action descriptions, so the action name
++ * describes itself. */
++NSString *NSAccessibilityActionDescription(NSString *action)
++{
++	return action;
++}
++
++RCLOL_NIL_STUB_CLASS(NSAccessibilityCustomAction)
++RCLOL_NIL_STUB_CLASS(NSColorSampler)
++RCLOL_NIL_STUB_CLASS(NSImageSymbolConfiguration)
 diff --git a/AppKit/NSAccessibilityRemoteUIElement.m b/AppKit/NSAccessibilityRemoteUIElement.m
 index d543e329..e320a3af 100644
 --- a/AppKit/NSAccessibilityRemoteUIElement.m
@@ -126,7 +213,7 @@ index d543e329..e320a3af 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSApplication.m b/AppKit/NSApplication.m
-index 8e7508e..dbc72de 100644
+index 8e7508e..d62f380 100644
 --- a/AppKit/NSApplication.m
 +++ b/AppKit/NSApplication.m
 @@ -17,6 +17,9 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -318,7 +405,7 @@ index 8e7508e..dbc72de 100644
          NS_DURING [NSClassFromString(@"Win32RunningCopyPipe")
                  performSelector: @selector(createRunningCopyPipe)];
  
-@@ -926,7 +1019,10 @@ NSApplication *NSApp = nil;
+@@ -926,13 +1019,26 @@ NSApplication *NSApp = nil;
  }
  
  - (void) activateIgnoringOtherApps: (BOOL) flag {
@@ -330,6 +417,22 @@ index 8e7508e..dbc72de 100644
  }
  
  - (void) deactivate {
+     NSUnimplementedMethod();
+ }
+ 
++// darling-lol: cooperative activation (macOS 14). The window server cannot
++// hand activation to another application, so there is nothing to yield.
++- (void) yieldActivationToApplicationWithBundleIdentifier: (NSString *) bundleIdentifier {
++    (void) bundleIdentifier;
++}
++
++- (void) yieldActivationToApplication: (NSRunningApplication *) application {
++    (void) application;
++}
++
+ - (NSWindow *) modalWindow {
+     return [[_modalStack lastObject] modalWindow];
+ }
 diff --git a/AppKit/NSBitmapImageRep.m b/AppKit/NSBitmapImageRep.m
 index 9a3f6a5d..dafb0cbe 100644
 --- a/AppKit/NSBitmapImageRep.m
@@ -347,7 +450,7 @@ index 9a3f6a5d..dafb0cbe 100644
      if (![self hasAlpha])
          result |= kCGImageAlphaNone;
 diff --git a/AppKit/NSColor.subproj/NSColor.m b/AppKit/NSColor.subproj/NSColor.m
-index fb72c982..6a80b13f 100644
+index fb72c98..37abab1 100644
 --- a/AppKit/NSColor.subproj/NSColor.m
 +++ b/AppKit/NSColor.subproj/NSColor.m
 @@ -21,6 +21,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -371,7 +474,109 @@ index fb72c982..6a80b13f 100644
  - (void) encodeWithCoder: (NSCoder *) coder {
  
      if ([coder allowsKeyedCoding]) {
-@@ -916,6 +923,39 @@ static void releasePatternInfo(void *info) {
+@@ -474,6 +481,101 @@ NSNotificationName const NSSystemColorsDidChangeNotification = @"NSSystemColorsD
+     return [NSColor colorWithCatalogName: @"System" colorName: @"linkColor"];
+ }
+ 
++/* darling-lol: system and semantic colors the current Riot Client's Electron
++ * reads for its theme. They are not in the System color list, so use the light
++ * (Aqua) values. */
+++ (NSColor *) systemRedColor {
++    return [NSColor colorWithCalibratedRed: 1.0 green: 0.231 blue: 0.188 alpha: 1];
++}
++
+++ (NSColor *) systemOrangeColor {
++    return [NSColor colorWithCalibratedRed: 1.0 green: 0.584 blue: 0.0 alpha: 1];
++}
++
+++ (NSColor *) systemYellowColor {
++    return [NSColor colorWithCalibratedRed: 1.0 green: 0.8 blue: 0.0 alpha: 1];
++}
++
+++ (NSColor *) systemGreenColor {
++    return [NSColor colorWithCalibratedRed: 0.157 green: 0.804 blue: 0.255 alpha: 1];
++}
++
+++ (NSColor *) systemMintColor {
++    return [NSColor colorWithCalibratedRed: 0.0 green: 0.78 blue: 0.745 alpha: 1];
++}
++
+++ (NSColor *) systemTealColor {
++    return [NSColor colorWithCalibratedRed: 0.349 green: 0.678 blue: 0.769 alpha: 1];
++}
++
+++ (NSColor *) systemCyanColor {
++    return [NSColor colorWithCalibratedRed: 0.333 green: 0.745 blue: 0.941 alpha: 1];
++}
++
+++ (NSColor *) systemBlueColor {
++    return [NSColor colorWithCalibratedRed: 0.0 green: 0.478 blue: 1.0 alpha: 1];
++}
++
+++ (NSColor *) systemIndigoColor {
++    return [NSColor colorWithCalibratedRed: 0.345 green: 0.337 blue: 0.839 alpha: 1];
++}
++
+++ (NSColor *) systemPurpleColor {
++    return [NSColor colorWithCalibratedRed: 0.686 green: 0.322 blue: 0.871 alpha: 1];
++}
++
+++ (NSColor *) systemPinkColor {
++    return [NSColor colorWithCalibratedRed: 1.0 green: 0.176 blue: 0.333 alpha: 1];
++}
++
+++ (NSColor *) systemBrownColor {
++    return [NSColor colorWithCalibratedRed: 0.635 green: 0.518 blue: 0.369 alpha: 1];
++}
++
+++ (NSColor *) systemGrayColor {
++    return [NSColor colorWithCalibratedRed: 0.557 green: 0.557 blue: 0.576 alpha: 1];
++}
++
+++ (NSColor *) controlAccentColor {
++    return [NSColor colorWithCalibratedRed: 0.0 green: 0.478 blue: 1.0 alpha: 1];
++}
++
+++ (NSColor *) secondaryLabelColor {
++    return [NSColor colorWithCalibratedRed: 0 green: 0 blue: 0 alpha: 0.5];
++}
++
+++ (NSColor *) tertiaryLabelColor {
++    return [NSColor colorWithCalibratedRed: 0 green: 0 blue: 0 alpha: 0.26];
++}
++
+++ (NSColor *) quaternaryLabelColor {
++    return [NSColor colorWithCalibratedRed: 0 green: 0 blue: 0 alpha: 0.1];
++}
++
+++ (NSColor *) placeholderTextColor {
++    return [NSColor colorWithCalibratedRed: 0 green: 0 blue: 0 alpha: 0.25];
++}
++
+++ (NSColor *) separatorColor {
++    return [NSColor colorWithCalibratedRed: 0 green: 0 blue: 0 alpha: 0.1];
++}
++
+++ (NSColor *) findHighlightColor {
++    return [NSColor colorWithCalibratedRed: 1.0 green: 1.0 blue: 0.0 alpha: 1];
++}
++
+++ (NSColor *) underPageBackgroundColor {
++    return [NSColor colorWithCalibratedRed: 0.588 green: 0.588 blue: 0.588 alpha: 1];
++}
++
+++ (NSColor *) windowFrameTextColor {
++    return [NSColor colorWithCalibratedRed: 0 green: 0 blue: 0 alpha: 0.85];
++}
++
+++ (NSColor *) scrubberTexturedBackgroundColor {
++    return [NSColor colorWithCalibratedRed: 0.2 green: 0.2 blue: 0.2 alpha: 1];
++}
++
+ + (NSColor *) selectedContentBackgroundColor {
+     return [NSColor colorWithCatalogName: @"System"
+                                colorName: @"selectedContentBackgroundColor"];
+@@ -916,6 +1018,39 @@ static void releasePatternInfo(void *info) {
      return nil;
  }
  
@@ -1065,7 +1270,7 @@ index fd488111..cdb66811 100644
      [_onStateImage release];
      _onStateImage = [image retain];
 diff --git a/AppKit/NSResponder.m b/AppKit/NSResponder.m
-index f102391d..8ea0778f 100644
+index f102391..425cb49 100644
 --- a/AppKit/NSResponder.m
 +++ b/AppKit/NSResponder.m
 @@ -30,6 +30,24 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1093,7 +1298,49 @@ index f102391d..8ea0778f 100644
  - (void) encodeWithCoder: (NSCoder *) coder {
      if (coder.allowsKeyedCoding) {
          [coder encodeObject: _nextResponder forKey: @"NSNextResponder"];
-@@ -286,6 +304,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -262,6 +280,41 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     [_nextResponder performSelector: _cmd withObject: event];
+ }
+ 
++/* darling-lol: gesture events pass up the responder chain like the other
++ * events. Electron also swaps in its own -swipeWithEvent: on the window's frame
++ * view and requires the method to exist there. */
++- (void) swipeWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
++- (void) magnifyWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
++- (void) rotateWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
++- (void) smartMagnifyWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
++- (void) beginGestureWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
++- (void) endGestureWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
++- (void) pressureChangeWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
++- (void) quickLookWithEvent: (NSEvent *) event {
++    [_nextResponder performSelector: _cmd withObject: event];
++}
++
+ - (void) mouseUp: (NSEvent *) event {
+     [_nextResponder performSelector: _cmd withObject: event];
+ }
+@@ -286,6 +339,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      [_nextResponder performSelector: _cmd withObject: event];
  }
  
@@ -1111,7 +1358,7 @@ index f102391d..8ea0778f 100644
      [_nextResponder performSelector: _cmd withObject: event];
  }
 diff --git a/AppKit/NSRunningApplication.m b/AppKit/NSRunningApplication.m
-index 6c3d2688..2a7d078a 100644
+index 6c3d268..de49da9 100644
 --- a/AppKit/NSRunningApplication.m
 +++ b/AppKit/NSRunningApplication.m
 @@ -1,4 +1,10 @@
@@ -1125,7 +1372,7 @@ index 6c3d2688..2a7d078a 100644
  
  // DUMMY
  
-@@ -19,6 +25,38 @@
+@@ -19,6 +25,42 @@
  
  @implementation NSRunningApplication
  
@@ -1139,6 +1386,10 @@ index 6c3d2688..2a7d078a 100644
 +    if (processIdentifier <= 0 || (kill(processIdentifier, 0) != 0 && errno == ESRCH))
 +        return nil;
 +    return [[[self alloc] initWithProcessIdentifier: processIdentifier] autorelease];
++}
++
+++ (NSRunningApplication *) currentApplication {
++    return [self runningApplicationWithProcessIdentifier: getpid()];
 +}
 +
 +- (pid_t) processIdentifier {
@@ -1165,7 +1416,7 @@ index 6c3d2688..2a7d078a 100644
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return [NSArray array];
 diff --git a/AppKit/NSScreen.m b/AppKit/NSScreen.m
-index 5ca58772..54b60ef5 100644
+index 5ca5877..75daec8 100644
 --- a/AppKit/NSScreen.m
 +++ b/AppKit/NSScreen.m
 @@ -22,6 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1196,7 +1447,7 @@ index 5ca58772..54b60ef5 100644
  - (id) description {
      return [NSString stringWithFormat: @"< %@ - frame %@, visible %@ >",
                                         [super description],
-@@ -76,7 +90,12 @@ NSNotificationName const NSScreenColorSpaceDidChangeNotification = @"NSScreenCol
+@@ -76,7 +90,69 @@ NSNotificationName const NSScreenColorSpaceDidChangeNotification = @"NSScreenCol
  }
  
  - (NSDictionary<NSDeviceDescriptionKey, id> *) deviceDescription {
@@ -1207,6 +1458,63 @@ index 5ca58772..54b60ef5 100644
 +    if (_directDisplayID != 0)
 +        return @{ @"NSScreenNumber": [NSNumber numberWithUnsignedInt: _directDisplayID] };
 +    return @{ @"NSScreenNumber": [NSNumber numberWithUnsignedInt: 1] };
++}
++
++/* darling-lol: display properties the current Riot Client's Electron reads
++ * (ui/display). Screens here are SDR, have no notch or safe-area insets, and
++ * refresh at the rate of the current display mode. */
++- (CGFloat) maximumExtendedDynamicRangeColorComponentValue {
++    return 1.0;
++}
++
++- (CGFloat) maximumPotentialExtendedDynamicRangeColorComponentValue {
++    return 1.0;
++}
++
++- (CGFloat) maximumReferenceExtendedDynamicRangeColorComponentValue {
++    return 0.0;
++}
++
++- (NSString *) localizedName {
++    return [NSString stringWithFormat: @"Display %u", (unsigned) (_directDisplayID != 0 ? _directDisplayID : 1)];
++}
++
++- (NSEdgeInsets) safeAreaInsets {
++    return NSEdgeInsetsMake(0, 0, 0, 0);
++}
++
++- (NSRect) auxiliaryTopLeftArea {
++    return NSZeroRect;
++}
++
++- (NSRect) auxiliaryTopRightArea {
++    return NSZeroRect;
++}
++
++- (NSInteger) maximumFramesPerSecond {
++    double rate = 0;
++    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(_directDisplayID != 0 ? _directDisplayID : CGMainDisplayID());
++    if (mode != NULL) {
++        rate = CGDisplayModeGetRefreshRate(mode);
++        CGDisplayModeRelease(mode);
++    }
++    return rate >= 1.0 ? (NSInteger) (rate + 0.5) : 60;
++}
++
++- (NSTimeInterval) minimumRefreshInterval {
++    return 1.0 / [self maximumFramesPerSecond];
++}
++
++- (NSTimeInterval) maximumRefreshInterval {
++    return 1.0 / [self maximumFramesPerSecond];
++}
++
++- (NSTimeInterval) displayUpdateGranularity {
++    return 0.0;
++}
++
++- (NSTimeInterval) lastDisplayUpdateTimestamp {
++    return 0.0;
  }
  
  @end
@@ -1468,10 +1776,18 @@ index c3f5d056..dbd93174 100644
          @"NSTouchBarItemIdentifierCharacterPicker";
  
 diff --git a/AppKit/NSView.m b/AppKit/NSView.m
-index 8ac2bbdc..a0fb4f37 100644
+index 8ac2bbd..977b8ad 100644
 --- a/AppKit/NSView.m
 +++ b/AppKit/NSView.m
-@@ -46,6 +46,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -37,6 +37,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ #import <AppKit/NSRaise.h>
+ #import <AppKit/NSScrollView.h>
+ #import <AppKit/NSTrackingArea.h>
++#import <AppKit/NSToolTipWindow.h>
+ #import <AppKit/NSView.h>
+ #import <AppKit/NSViewBackingLayer.h>
+ #import <AppKit/NSWindow-Private.h>
+@@ -46,6 +47,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <QuartzCore/CALayerContext.h>
  #import <QuartzCore/CATransaction.h>
  #import <AppKit/NSLayoutConstraint.h>
@@ -1484,15 +1800,95 @@ index 8ac2bbdc..a0fb4f37 100644
  
  @class IBMetricsTable;
  
-@@ -66,6 +72,7 @@ const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPresentationOptio
+@@ -66,8 +73,87 @@ const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPresentationOptio
  - (CGAffineTransform) transformToWindow;
  - (CGAffineTransform) transformToLayer;
  - (void) _trackingAreasChanged;
 +- (void) _darlingSetFrame: (NSRect) frame;
  @end
  
++/* darling-lol: AppKit registers each tool tip rect through
++ * -addTrackingRect:owner:userData:assumeInside: with its tool tip manager as
++ * the owner. Chromium overrides that method to capture the owner, then shows
++ * and hides its tool tip itself by sending the owner mouseEntered: and
++ * mouseExited: whenever the text changes. Without an owner its tool tips only
++ * went away when the pointer left the whole web view. */
++@interface NSToolTipRectOwner : NSObject
+++ (NSToolTipRectOwner *) sharedOwner;
++@end
++
++@implementation NSToolTipRectOwner
++
+++ (NSToolTipRectOwner *) sharedOwner {
++    static NSToolTipRectOwner *owner;
++    if (owner == nil)
++        owner = [[NSToolTipRectOwner alloc] init];
++    return owner;
++}
++
++- (void) _hideToolTip {
++    NSToolTipWindow *toolTipWindow = [NSToolTipWindow sharedToolTipWindow];
++
++    [NSObject cancelPreviousPerformRequestsWithTarget: toolTipWindow
++                                             selector: @selector(orderFront:)
++                                               object: nil];
++    [toolTipWindow orderOut: nil];
++    [toolTipWindow _setTrackingArea: nil];
++}
++
++- (void) mouseEntered: (NSEvent *) event {
++    NSTrackingArea *area = (NSTrackingArea *) [event userData];
++    NSView *view = [area _view];
++    id owner = [area owner];
++    NSString *toolTip = nil;
++
++    [self _hideToolTip];
++    if (area == nil || view == nil)
++        return;
++
++    if ([owner respondsToSelector: @selector(view:stringForToolTip:point:userData:)]) {
++        NSPoint point = [view convertPoint: [[view window] mouseLocationOutsideOfEventStream]
++                                  fromView: nil];
++        toolTip = [owner view: view
++             stringForToolTip: area
++                        point: point
++                     userData: [area userInfo]];
++    } else {
++        toolTip = [owner description];
++    }
++    if ([toolTip length] == 0)
++        return;
++
++    NSToolTipWindow *toolTipWindow = [NSToolTipWindow sharedToolTipWindow];
++    NSTimeInterval delay = (NSTimeInterval) [[NSUserDefaults standardUserDefaults]
++                                   integerForKey: @"NSInitialToolTipDelay"] / 1000.;
++
++    [toolTipWindow setToolTip: toolTip];
++    [toolTipWindow _setTrackingArea: area];
++    [toolTipWindow performSelector: @selector(orderFront:)
++                        withObject: nil
++                        afterDelay: delay > 0. ? delay : 2.];
++}
++
++- (void) mouseExited: (NSEvent *) event {
++    (void) event;
++    [self _hideToolTip];
++}
++
++@end
++
++/* A removed tool tip rect cannot report the pointer leaving it any more. */
++static void hideToolTipOfArea(NSTrackingArea *area) {
++    NSToolTipWindow *toolTipWindow = [NSToolTipWindow sharedToolTipWindow];
++
++    if ([toolTipWindow _trackingArea] == area)
++        [[NSToolTipRectOwner sharedOwner] _hideToolTip];
++}
++
  @implementation NSView
-@@ -955,6 +962,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+ 
+ @synthesize identifier = _identifier;
+@@ -955,6 +1041,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              CGPointApplyAffineTransform(point, toWindow), fromWindow);
  }
  
@@ -1547,7 +1943,27 @@ index 8ac2bbdc..a0fb4f37 100644
  - (NSSize) convertSize: (NSSize) size fromView: (NSView *) viewOrNil {
      NSView *fromView =
              (viewOrNil != nil) ? viewOrNil : [[self window] _backgroundView];
-@@ -1029,6 +1084,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1019,6 +1153,19 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+                       point2.y - point1.y);
+ }
+ 
++// darling-lol: struct-returning methods Electron sends; a missing one crashes
++// in Darling's forwarding, which has no stret path. The backing scale is 1.
++- (NSRect) backingAlignedRect: (NSRect) rect options: (NSAlignmentOptions) options {
++    (void) options;
++    return [self centerScanRect: rect];
++}
++
++- (NSRect) accessibilityFrame {
++    NSRect rect = [self convertRect: [self bounds] toView: nil];
++    NSWindow *window = [self window];
++    return window ? [window convertRectToScreen: rect] : rect;
++}
++
+ - (NSRect) centerScanRect: (NSRect) rect {
+     CGFloat minx = floor(NSMinX(rect) + 0.5);
+     CGFloat miny = floor(NSMinY(rect) + 0.5);
+@@ -1029,6 +1176,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (void) setFrame: (NSRect) frame {
@@ -1564,7 +1980,7 @@ index 8ac2bbdc..a0fb4f37 100644
      // Cocoa does not post the notification if the frames are equal
      // Possible that resizeSubviewsWithOldSize is not called if the sizes are
      // equal
-@@ -1052,6 +1117,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1052,6 +1209,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      }
      _frame = frame;
  
@@ -1577,7 +1993,7 @@ index 8ac2bbdc..a0fb4f37 100644
      [_window invalidateCursorRectsForView: self]; // this also invalidates
                                                    // tracking areas
  
-@@ -1068,6 +1139,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1068,6 +1231,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
      invalidateTransform(self);
  
@@ -1592,7 +2008,7 @@ index 8ac2bbdc..a0fb4f37 100644
      if (_postsNotificationOnFrameChange)
          [[NSNotificationCenter defaultCenter]
                  postNotificationName: NSViewFrameDidChangeNotification
-@@ -1078,14 +1157,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1078,14 +1249,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      NSRect frame = _frame;
  
      frame.size = size;
@@ -1609,7 +2025,7 @@ index 8ac2bbdc..a0fb4f37 100644
  }
  
  - (void) setFrameRotation: (CGFloat) angle {
-@@ -1100,6 +1179,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1100,6 +1271,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
      if (!NSEqualRects(bounds, _bounds)) {
          _bounds = bounds;
          invalidateTransform(self);
@@ -1617,7 +2033,7 @@ index 8ac2bbdc..a0fb4f37 100644
  
          [_window invalidateCursorRectsForView: self]; // this also invalidates
                                                        // tracking areas
-@@ -1254,7 +1334,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1254,7 +1426,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
                   (NSComparisonResult (*)(id, id, void *)) compareFunction
                             context: (void *) context
  {
@@ -1630,7 +2046,40 @@ index 8ac2bbdc..a0fb4f37 100644
  }
  
  - (void) didAddSubview: (NSView *) subview {
-@@ -1511,8 +1595,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1342,10 +1518,19 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+ 
+     [self _trackingAreasChanged];
+ 
++    SEL trackingRect = @selector(addTrackingRect:owner:userData:assumeInside:);
++    if ([[self class] instanceMethodForSelector: trackingRect] !=
++        [NSView instanceMethodForSelector: trackingRect])
++        [self addTrackingRect: rect
++                        owner: [NSToolTipRectOwner sharedOwner]
++                     userData: area
++                 assumeInside: NO];
++
+     return area;
+ }
+ 
+ - (void) removeToolTip: (NSToolTipTag) tag {
++    hideToolTipOfArea(tag);
+     [self removeTrackingArea: tag];
+ }
+ 
+@@ -1353,8 +1538,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+     NSInteger count = [_trackingAreas count];
+ 
+     while (--count >= 0) {
+-        if ([[_trackingAreas objectAtIndex: count] _isToolTip] == YES)
++        NSTrackingArea *area = [_trackingAreas objectAtIndex: count];
++        if ([area _isToolTip] == YES) {
++            hideToolTipOfArea(area);
+             [_trackingAreas removeObjectAtIndex: count];
++        }
+     }
+ 
+     [self _trackingAreasChanged];
+@@ -1511,8 +1699,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (NSTextInputContext *) inputContext {
@@ -1649,7 +2098,7 @@ index 8ac2bbdc..a0fb4f37 100644
  }
  
  - (void) registerForDraggedTypes: (NSArray *) types {
-@@ -1819,15 +1911,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1819,15 +2015,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
  - (void) _createLayerContextIfNeeded {
      if ([_superview layer] == nil) {
@@ -1673,7 +2122,7 @@ index 8ac2bbdc..a0fb4f37 100644
      [[_superview layer] addSublayer: _layer];
      [self _createLayerContextIfNeeded];
  }
-@@ -1905,6 +2003,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1905,6 +2107,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              [[_superview layer] replaceSublayer: _layer with: value];
              [_layer release];
              _layer = value;
@@ -1681,7 +2130,7 @@ index 8ac2bbdc..a0fb4f37 100644
          }
  
          [_subviews
-@@ -2687,6 +2786,17 @@ static NSView *viewBeingPrinted = nil;
+@@ -2687,6 +2890,17 @@ static NSView *viewBeingPrinted = nil;
           slideBack: (BOOL) slideBack
  {
      location = [self convertPoint: location toView: nil];
@@ -1699,7 +2148,7 @@ index 8ac2bbdc..a0fb4f37 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2783,7 +2893,8 @@ static NSView *viewBeingPrinted = nil;
+@@ -2783,7 +2997,8 @@ static NSView *viewBeingPrinted = nil;
  }
  
  - (BOOL) prepareForDragOperation: (id<NSDraggingInfo>) sender {
@@ -1710,7 +2159,7 @@ index 8ac2bbdc..a0fb4f37 100644
  
  - (BOOL) performDragOperation: (id<NSDraggingInfo>) sender {
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120..0f44069 100644
+index d545120..d9eb339 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
 @@ -27,6 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -1902,7 +2351,48 @@ index d545120..0f44069 100644
      [[NSNotificationCenter defaultCenter] removeObserver: self];
      [_childWindows release];
      [_title release];
-@@ -934,6 +1070,22 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -539,6 +675,40 @@ static BOOL _allowsAutomaticWindowTabbing;
+     return _frame;
+ }
+ 
++// darling-lol: struct-returning methods Electron sends on mouse events. A
++// missing one crashes in Darling's forwarding, which has no stret path. The
++// backing scale is 1, so aligning rounds each edge to a whole pixel, and the
++// content layout rect is the area below the title bar and toolbar, in window
++// coordinates.
++- (NSRect) backingAlignedRect: (NSRect) rect options: (NSAlignmentOptions) options {
++    (void) options;
++    CGFloat minx = floor(NSMinX(rect) + 0.5);
++    CGFloat miny = floor(NSMinY(rect) + 0.5);
++    CGFloat maxx = floor(NSMaxX(rect) + 0.5);
++    CGFloat maxy = floor(NSMaxY(rect) + 0.5);
++
++    return NSMakeRect(minx, miny, maxx - minx, maxy - miny);
++}
++
++- (NSRect) accessibilityFrame {
++    return _frame;
++}
++
++// darling-lol: private AppKit method. Electron asks it on a mouse down in a
++// frameless window and drags the window when the answer is -1 (no resize
++// edge); there is no edge resizing here.
++- (NSInteger) _resizeDirectionForMouseLocation: (NSPoint) location {
++    (void) location;
++    return -1;
++}
++
++- (NSRect) contentLayoutRect {
++    NSRect result = [self contentRectForFrameRect: _frame];
++    result.origin.x -= _frame.origin.x;
++    result.origin.y -= _frame.origin.y;
++    return result;
++}
++
+ - (NSWindowStyleMask) styleMask {
+     return _styleMask;
+ }
+@@ -934,6 +1104,22 @@ static BOOL _allowsAutomaticWindowTabbing;
      return _animationContext;
  }
  
@@ -1925,7 +2415,7 @@ index d545120..0f44069 100644
  - (void) setFrame: (NSRect) newFrame
            display: (BOOL) display
            animate: (BOOL) animate
-@@ -944,8 +1096,19 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -944,8 +1130,19 @@ static BOOL _allowsAutomaticWindowTabbing;
      _frame = newFrame;
      _makeSureIsOnAScreen = YES;
  
@@ -1946,7 +2436,7 @@ index d545120..0f44069 100644
  
      if (didSize) {
          [self resetCursorRects];
-@@ -1009,7 +1172,6 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1009,7 +1206,6 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setContentMinSize: (NSSize) value {
      _contentMinSize = value;
@@ -1954,7 +2444,7 @@ index d545120..0f44069 100644
  }
  
  - (void) setContentMaxSize: (NSSize) value {
-@@ -1025,7 +1187,34 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1025,7 +1221,34 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setMovable: (BOOL) movable {
@@ -1990,7 +2480,7 @@ index d545120..0f44069 100644
  }
  
  - (void) setBackingType: (NSBackingStoreType) value {
-@@ -1234,6 +1423,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1234,6 +1457,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setIgnoresMouseEvents: (BOOL) value {
      _ignoresMouseEvents = value;
@@ -1998,7 +2488,7 @@ index d545120..0f44069 100644
  }
  
  - (void) setAspectRatio: (NSSize) value {
-@@ -1254,7 +1444,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1254,7 +1478,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setCollectionBehavior: (NSWindowCollectionBehavior) behavior {
@@ -2007,7 +2497,7 @@ index d545120..0f44069 100644
  }
  
  - (void) setLevel: (NSInteger) value {
-@@ -1291,7 +1481,6 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1291,7 +1515,6 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setShowsResizeIndicator: (BOOL) value {
      _showsResizeIndicator = value;
@@ -2015,7 +2505,7 @@ index d545120..0f44069 100644
  }
  
  - (void) setShowsToolbarButton: (BOOL) value {
-@@ -1413,8 +1602,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1413,8 +1636,14 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSButton *) standardWindowButton: (NSWindowButton) value {
@@ -2032,7 +2522,7 @@ index d545120..0f44069 100644
  }
  
  - (NSButtonCell *) defaultButtonCell {
-@@ -1425,6 +1620,17 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1425,6 +1654,17 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_sheetContext sheet];
  }
  
@@ -2050,7 +2540,7 @@ index d545120..0f44069 100644
  - (id) windowController {
      return _windowController;
  }
-@@ -1473,7 +1679,6 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1473,7 +1713,6 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (BOOL) isOnActiveSpace {
@@ -2058,7 +2548,7 @@ index d545120..0f44069 100644
      return YES;
  }
  
-@@ -1511,10 +1716,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1511,10 +1750,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_platformWindow isMiniaturized];
  }
  
@@ -2070,7 +2560,7 @@ index d545120..0f44069 100644
  
  - (BOOL) inLiveResize {
      return _isInLiveResize;
-@@ -1539,8 +1741,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1539,8 +1775,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSWindowCollectionBehavior) collectionBehavior {
@@ -2080,7 +2570,7 @@ index d545120..0f44069 100644
  }
  
  - (NSPoint) convertBaseToScreen: (NSPoint) point {
-@@ -1561,6 +1762,123 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1561,6 +1796,123 @@ static BOOL _allowsAutomaticWindowTabbing;
      return point;
  }
  
@@ -2204,7 +2694,7 @@ index d545120..0f44069 100644
  - (NSRect) frameRectForContentRect: (NSRect) contentRect {
      // hasMainMenu is an instance method so we can't just use the class method
      //  frameRectForContentRect:styleMask:
-@@ -1580,6 +1898,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1580,6 +1932,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSRect) contentRectForFrameRect: (NSRect) frameRect {
@@ -2215,7 +2705,7 @@ index d545120..0f44069 100644
      NSRect result = [[NSDisplay currentDisplay] insetRect: frameRect
                             forNativeWindowBorderWithStyle: [self styleMask]];
  
-@@ -1818,7 +2140,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1818,7 +2174,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSSelectionDirection) keyViewSelectionDirection {
@@ -2224,7 +2714,7 @@ index d545120..0f44069 100644
      return 0;
  }
  
-@@ -2155,6 +2477,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2155,6 +2511,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  - (void) orderWindow: (NSWindowOrderingMode) place
            relativeTo: (NSInteger) relativeTo
  {
@@ -2232,7 +2722,7 @@ index d545120..0f44069 100644
      // The move notifications are sent under unknown conditions around
      // orderFront: in the Apple AppKit, we do them all the time here until it's
      // figured out. I suspect it is a side effect of off-screen windows being at
-@@ -2208,6 +2531,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2208,6 +2565,8 @@ static BOOL _allowsAutomaticWindowTabbing;
          break;
      }
  
@@ -2241,7 +2731,7 @@ index d545120..0f44069 100644
      [self postNotificationName: NSWindowDidMoveNotification];
  }
  
-@@ -2257,6 +2582,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2257,6 +2616,12 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -2254,7 +2744,7 @@ index d545120..0f44069 100644
      // Some events can cause our window to be destroyed
      // So make sure self lives at least through this current run loop...
      [[self retain] autorelease];
-@@ -2300,6 +2631,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2300,6 +2665,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  
      case NSLeftMouseDown: {
          NSView *view = [_backgroundView hitTest: [event locationInWindow]];
@@ -2265,7 +2755,7 @@ index d545120..0f44069 100644
  
          if ([view acceptsFirstResponder]) {
              if ([view needsPanelToBecomeKey]) {
-@@ -2307,6 +2642,27 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2307,6 +2676,27 @@ static BOOL _allowsAutomaticWindowTabbing;
              }
          }
  
@@ -2293,7 +2783,7 @@ index d545120..0f44069 100644
          // Event goes to view, not first responder.
          [view mouseDown: event];
          _mouseDownLocationInWindow = [event locationInWindow];
-@@ -2330,6 +2686,31 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2330,6 +2720,31 @@ static BOOL _allowsAutomaticWindowTabbing;
          _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
          break;
  
@@ -2325,7 +2815,7 @@ index d545120..0f44069 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2478,6 +2859,197 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2478,6 +2893,197 @@ static BOOL _allowsAutomaticWindowTabbing;
      _draggedTypes = nil;
  }
  
@@ -2523,7 +3013,7 @@ index d545120..0f44069 100644
  - (void) dragImage: (NSImage *) image
                  at: (NSPoint) location
              offset: (NSSize) offset
-@@ -2486,6 +3058,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2486,6 +3092,10 @@ static BOOL _allowsAutomaticWindowTabbing;
              source: (id) source
           slideBack: (BOOL) slideBack
  {
@@ -2534,7 +3024,7 @@ index d545120..0f44069 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2527,15 +3103,19 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2527,15 +3137,19 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setIsVisible: (BOOL) visible {
@@ -2555,7 +3045,7 @@ index d545120..0f44069 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3064,6 +3644,13 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3064,6 +3678,13 @@ static BOOL _allowsAutomaticWindowTabbing;
      if (didSize) {
          // Don't redraw everything unless we really have to.
          [_backgroundView setFrameSize: _frame.size];
@@ -2569,7 +3059,7 @@ index d545120..0f44069 100644
          [_backgroundView setNeedsDisplay: YES];
          [self resetCursorRects];
          [self saveFrameUsingName: _autosaveFrameName];
-@@ -3260,8 +3847,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3881,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -2579,7 +3069,7 @@ index d545120..0f44069 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +4045,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +4079,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -2589,7 +3079,7 @@ index d545120..0f44069 100644
  
  + (BOOL) allowsAutomaticWindowTabbing {
 diff --git a/AppKit/NSWorkspace.m b/AppKit/NSWorkspace.m
-index ad5e4f9d..6e9cb1c9 100644
+index ad5e4f9..cde31bc 100644
 --- a/AppKit/NSWorkspace.m
 +++ b/AppKit/NSWorkspace.m
 @@ -20,9 +20,58 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -2693,24 +3183,70 @@ index ad5e4f9d..6e9cb1c9 100644
  - (BOOL) selectFile: (NSString *) path
          inFileViewerRootedAtPath: (NSString *) rootedAtPath
  {
-@@ -317,16 +401,3 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
+@@ -308,25 +392,50 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
+     return nil;
+ }
+ 
+-@end
++/* darling-lol: accessibility settings Chromium reads and observes with KVO.
++ * Darling has no assistive technologies or display accommodations. */
++- (BOOL) isVoiceOverEnabled {
++    return NO;
++}
+ 
+-@implementation NSWorkspace (CocotronAdditions)
++- (BOOL) voiceOverEnabled {
++    return NO;
++}
+ 
+-- (BOOL) isFileHiddenAtPath: (NSString *) path {
++- (BOOL) isSwitchControlEnabled {
++    return NO;
++}
++
++- (BOOL) switchControlEnabled {
++    return NO;
++}
++
++- (BOOL) accessibilityDisplayShouldDifferentiateWithoutColor {
++    return NO;
++}
++
++- (BOOL) accessibilityDisplayShouldIncreaseContrast {
++    return NO;
++}
++
++- (BOOL) accessibilityDisplayShouldInvertColors {
++    return NO;
++}
++
++- (BOOL) accessibilityDisplayShouldReduceMotion {
++    return NO;
++}
++
++- (BOOL) accessibilityDisplayShouldReduceTransparency {
+     return NO;
  }
  
  @end
--
+ 
 -static dispatch_once_t _initOnceNsWorkspaceOpenConfig;
 -static NSWorkspaceOpenConfiguration* _singletonNsWorkspaceOpenConfig;
--
++@implementation NSWorkspace (CocotronAdditions)
+ 
 -@implementation NSWorkspaceOpenConfiguration
 -+ (instancetype)configuration {
 -    dispatch_once(&_initOnceNsWorkspaceOpenConfig, ^{
 -        _singletonNsWorkspaceOpenConfig = [[NSWorkspaceOpenConfiguration alloc] init];
 -    });
 -    return _singletonNsWorkspaceOpenConfig;
--}
--
++- (BOOL) isFileHiddenAtPath: (NSString *) path {
++    return NO;
+ }
+ 
 -@end
 \ No newline at end of file
++@end
 diff --git a/AppKit/X11.backend/CarbonKeys.h b/AppKit/X11.backend/CarbonKeys.h
 index e999cbf2..14f9cb6a 100644
 --- a/AppKit/X11.backend/CarbonKeys.h
@@ -6401,7 +6937,7 @@ index 282312de..03c75b2b 100644
  APPKIT_EXPORT NSString *const NSAccessibilityMaxValueAttribute;
  APPKIT_EXPORT NSString *const NSAccessibilityMinValueAttribute;
 diff --git a/AppKit/include/AppKit/NSApplication.h b/AppKit/include/AppKit/NSApplication.h
-index a13138ae..32b97211 100644
+index a13138a..c455d73 100644
 --- a/AppKit/include/AppKit/NSApplication.h
 +++ b/AppKit/include/AppKit/NSApplication.h
 @@ -140,6 +140,7 @@ typedef NS_OPTIONS(NSUInteger, NSApplicationPresentationOptions) {
@@ -6420,6 +6956,14 @@ index a13138ae..32b97211 100644
  
  - (NSWindow *) makeWindowsPerform: (SEL) selector inOrder: (BOOL) inOrder;
  - (void) miniaturizeAll: sender;
+@@ -216,6 +218,7 @@ typedef NS_OPTIONS(NSUInteger, NSApplicationPresentationOptions) {
+ - (void) updateWindows;
+ 
+ - (void) activateIgnoringOtherApps: (BOOL) flag;
++- (void) yieldActivationToApplicationWithBundleIdentifier: (NSString *) bundleIdentifier;
+ - (void) deactivate;
+ 
+ - (NSWindow *) modalWindow;
 diff --git a/AppKit/include/AppKit/NSColor.h b/AppKit/include/AppKit/NSColor.h
 index b5ae3a65..6d555f60 100644
 --- a/AppKit/include/AppKit/NSColor.h
@@ -6615,7 +7159,7 @@ index ff3f2d6f..40729e09 100644
  
  @end
 diff --git a/AppKit/include/AppKit/NSResponder.h b/AppKit/include/AppKit/NSResponder.h
-index 11dfac87..b595625e 100644
+index 11dfac8..34878c3 100644
 --- a/AppKit/include/AppKit/NSResponder.h
 +++ b/AppKit/include/AppKit/NSResponder.h
 @@ -24,9 +24,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -6631,7 +7175,22 @@ index 11dfac87..b595625e 100644
  
  - (NSMenu *) menu;
  - (NSUndoManager *) undoManager;
-@@ -69,6 +72,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -61,6 +64,14 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ 
+ - (void) cursorUpdate: (NSEvent *) event;
+ - (void) scrollWheel: (NSEvent *) event;
++- (void) swipeWithEvent: (NSEvent *) event;
++- (void) magnifyWithEvent: (NSEvent *) event;
++- (void) rotateWithEvent: (NSEvent *) event;
++- (void) smartMagnifyWithEvent: (NSEvent *) event;
++- (void) beginGestureWithEvent: (NSEvent *) event;
++- (void) endGestureWithEvent: (NSEvent *) event;
++- (void) pressureChangeWithEvent: (NSEvent *) event;
++- (void) quickLookWithEvent: (NSEvent *) event;
+ 
+ - (void) mouseUp: (NSEvent *) event;
+ - (void) mouseDown: (NSEvent *) event;
+@@ -69,6 +80,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  - (void) mouseExited: (NSEvent *) event;
  - (void) mouseDragged: (NSEvent *) event;
  
@@ -6642,7 +7201,7 @@ index 11dfac87..b595625e 100644
  - (void) rightMouseDown: (NSEvent *) event;
  - (void) rightMouseDragged: (NSEvent *) event;
 diff --git a/AppKit/include/AppKit/NSRunningApplication.h b/AppKit/include/AppKit/NSRunningApplication.h
-index c577764b..d8bb21cc 100644
+index c577764..9a1586e 100644
 --- a/AppKit/include/AppKit/NSRunningApplication.h
 +++ b/AppKit/include/AppKit/NSRunningApplication.h
 @@ -18,6 +18,7 @@
@@ -6653,7 +7212,7 @@ index c577764b..d8bb21cc 100644
  
  typedef enum {
      NSApplicationActivationPolicyRegular,
-@@ -26,7 +27,14 @@ typedef enum {
+@@ -26,7 +27,15 @@ typedef enum {
  } NSApplicationActivationPolicy;
  
  @interface NSRunningApplication : NSObject
@@ -6663,6 +7222,7 @@ index c577764b..d8bb21cc 100644
  
  + (NSArray<NSRunningApplication *> *) runningApplicationsWithBundleIdentifier: (NSString *) bundleIdentifier;
 ++ (NSRunningApplication *) runningApplicationWithProcessIdentifier: (pid_t) processIdentifier;
+++ (NSRunningApplication *) currentApplication;
 +- (pid_t) processIdentifier;
 +- (BOOL) isTerminated;
 +- (BOOL) activateWithOptions: (NSUInteger) options;
@@ -6746,7 +7306,7 @@ index 956712e1..528e7418 100644
  @interface NSTouchBarItem : NSObject <NSCoding>
  
 diff --git a/AppKit/include/AppKit/NSView.h b/AppKit/include/AppKit/NSView.h
-index edb45627..581991d1 100644
+index edb4562..dc6faec 100644
 --- a/AppKit/include/AppKit/NSView.h
 +++ b/AppKit/include/AppKit/NSView.h
 @@ -139,6 +139,12 @@ APPKIT_EXPORT const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPre
@@ -6762,7 +7322,7 @@ index edb45627..581991d1 100644
  }
  
  @property(class, readonly) BOOL requiresConstraintBasedLayout;
-@@ -213,6 +219,18 @@ APPKIT_EXPORT const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPre
+@@ -213,11 +219,24 @@ APPKIT_EXPORT const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPre
  
  - (NSPoint) convertPoint: (NSPoint) point fromView: (NSView *) viewOrNil;
  - (NSPoint) convertPoint: (NSPoint) point toView: (NSView *) viewOrNil;
@@ -6781,8 +7341,14 @@ index edb45627..581991d1 100644
  - (NSSize) convertSize: (NSSize) size fromView: (NSView *) viewOrNil;
  - (NSSize) convertSize: (NSSize) size toView: (NSView *) viewOrNil;
  - (NSRect) convertRect: (NSRect) rect fromView: (NSView *) viewOrNil;
+ - (NSRect) convertRect: (NSRect) rect toView: (NSView *) viewOrNil;
+ - (NSRect) centerScanRect: (NSRect) rect;
++- (NSRect) backingAlignedRect: (NSRect) rect options: (NSAlignmentOptions) options;
+ 
+ - (void) setFrame: (NSRect) frame;
+ - (void) setFrameSize: (NSSize) size;
 diff --git a/AppKit/include/AppKit/NSWindow.h b/AppKit/include/AppKit/NSWindow.h
-index a83c4d7..0eb69cb 100644
+index a83c4d7..a451a5e 100644
 --- a/AppKit/include/AppKit/NSWindow.h
 +++ b/AppKit/include/AppKit/NSWindow.h
 @@ -157,6 +157,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
@@ -6826,7 +7392,16 @@ index a83c4d7..0eb69cb 100644
  
      NSRect _savedFrame;
      NSPoint _mouseDownLocationInWindow;
-@@ -425,6 +438,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -297,6 +310,8 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+ - (NSWindowLevel) level;
+ @property(readonly) NSRect frame;
+ - (NSRect) frame;
++@property(readonly) NSRect contentLayoutRect;
++- (NSRect) backingAlignedRect: (NSRect) rect options: (NSAlignmentOptions) options;
+ - (NSWindowStyleMask) styleMask;
+ - (NSBackingStoreType) backingType;
+ - (NSWindowBackingLocation) preferredBackingLocation;
+@@ -425,6 +440,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (NSButton *) standardWindowButton: (NSWindowButton) value;
  - (NSButtonCell *) defaultButtonCell;
  - (NSWindow *) attachedSheet;
@@ -6834,7 +7409,7 @@ index a83c4d7..0eb69cb 100644
  
  - (id) windowController;
  - (NSArray *) drawers;
-@@ -450,6 +464,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -450,6 +466,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (BOOL) isMainWindow;
  - (BOOL) isMiniaturized;
  - (BOOL) isMovable;
@@ -6842,7 +7417,7 @@ index a83c4d7..0eb69cb 100644
  - (BOOL) inLiveResize;
  - (BOOL) canBecomeKeyWindow;
  - (BOOL) canBecomeMainWindow;
-@@ -458,6 +473,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -458,6 +475,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  
  - (NSPoint) convertBaseToScreen: (NSPoint) point;
  - (NSPoint) convertScreenToBase: (NSPoint) point;
@@ -6935,7 +7510,7 @@ index aaeca762..0c04444e 100644
 +    return CGRectMake(minX, minY, maxX - minX, maxY - minY);
  }
 diff --git a/CoreGraphics/CGColorSpace.m b/CoreGraphics/CGColorSpace.m
-index c84a2f75..e0ca9572 100644
+index c84a2f7..a3d61b5 100644
 --- a/CoreGraphics/CGColorSpace.m
 +++ b/CoreGraphics/CGColorSpace.m
 @@ -37,6 +37,8 @@ const CFStringRef kCGColorSpaceACESCGLinear =
@@ -6947,17 +7522,158 @@ index c84a2f75..e0ca9572 100644
  const CFStringRef kCGColorSpaceROMMRGB = CFSTR("kCGColorSpaceROMMRGB");
  const CFStringRef kCGColorSpaceDCIP3 = CFSTR("kCGColorSpaceDCIP3");
  const CFStringRef kCGColorSpaceExtendedSRGB =
-@@ -85,3 +87,11 @@ size_t CGColorSpaceGetNumberOfComponents(CGColorSpaceRef self) {
+@@ -85,3 +87,152 @@ size_t CGColorSpaceGetNumberOfComponents(CGColorSpaceRef self) {
  CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef name) {
      return (CGColorSpaceRef) O2ColorSpaceCreateWithName(name);
  }
 +
++/* darling-lol: there is no ICC profile store, so RGB spaces report a minimal
++ * ICC v4 sRGB profile (D50-adapted primaries, parametric sRGB curves), which
++ * is what -[NSScreen colorSpace] stands for. Chromium's GPU process crashes
++ * when the sRGB space has no ICC data. */
++static void iccPut32(uint8_t *p, uint32_t value) {
++    p[0] = value >> 24;
++    p[1] = value >> 16;
++    p[2] = value >> 8;
++    p[3] = value;
++}
++
++static uint32_t iccFixed(double value) {
++    return (uint32_t)(int32_t)(value * 65536.0 + (value < 0 ? -0.5 : 0.5));
++}
++
++static uint32_t iccSig(const char *sig) {
++    return ((uint32_t)sig[0] << 24) | ((uint32_t)sig[1] << 16) |
++           ((uint32_t)sig[2] << 8) | (uint32_t)sig[3];
++}
++
++static CFDataRef createSRGBProfileData(void) {
++    enum {
++        tagCount = 8,
++        tagTableEnd = 128 + 4 + tagCount * 12,
++        descOffset = tagTableEnd,
++        descSize = 28 + 8,
++        wtptOffset = descOffset + descSize,
++        xyzSize = 20,
++        rXYZOffset = wtptOffset + xyzSize,
++        gXYZOffset = rXYZOffset + xyzSize,
++        bXYZOffset = gXYZOffset + xyzSize,
++        trcOffset = bXYZOffset + xyzSize,
++        trcSize = 32,
++        profileSize = trcOffset + trcSize,
++    };
++    static const struct {
++        const char *sig;
++        uint32_t offset, size;
++    } tags[tagCount] = {
++        { "desc", descOffset, descSize },
++        { "wtpt", wtptOffset, xyzSize },
++        { "rXYZ", rXYZOffset, xyzSize },
++        { "gXYZ", gXYZOffset, xyzSize },
++        { "bXYZ", bXYZOffset, xyzSize },
++        { "rTRC", trcOffset, trcSize },
++        { "gTRC", trcOffset, trcSize },
++        { "bTRC", trcOffset, trcSize },
++    };
++    static const double xyz[4][3] = {
++        { 0.9642, 1.0, 0.8249 },
++        { 0.436065674, 0.222488403, 0.013916016 },
++        { 0.385147095, 0.716873169, 0.097076416 },
++        { 0.143066406, 0.060607910, 0.714096069 },
++    };
++    static const double trc[5] = { 2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045 };
++    static const char name[] = "sRGB";
++    uint8_t data[profileSize] = { 0 };
++    int i, j;
++
++    iccPut32(data, profileSize);
++    iccPut32(data + 8, 0x04300000);
++    iccPut32(data + 12, iccSig("mntr"));
++    iccPut32(data + 16, iccSig("RGB "));
++    iccPut32(data + 20, iccSig("XYZ "));
++    iccPut32(data + 36, iccSig("acsp"));
++    iccPut32(data + 40, iccSig("APPL"));
++    for (j = 0; j < 3; j++)
++        iccPut32(data + 68 + j * 4, iccFixed(xyz[0][j]));
++
++    iccPut32(data + 128, tagCount);
++    for (i = 0; i < tagCount; i++) {
++        iccPut32(data + 132 + i * 12, iccSig(tags[i].sig));
++        iccPut32(data + 136 + i * 12, tags[i].offset);
++        iccPut32(data + 140 + i * 12, tags[i].size);
++    }
++
++    iccPut32(data + descOffset, iccSig("mluc"));
++    iccPut32(data + descOffset + 8, 1);
++    iccPut32(data + descOffset + 12, 12);
++    iccPut32(data + descOffset + 16, iccSig("enUS"));
++    iccPut32(data + descOffset + 20, (sizeof(name) - 1) * 2);
++    iccPut32(data + descOffset + 24, 28);
++    for (i = 0; name[i] != '\0'; i++)
++        data[descOffset + 28 + i * 2 + 1] = name[i];
++
++    for (i = 0; i < 4; i++) {
++        uint8_t *tag = data + wtptOffset + i * xyzSize;
++        iccPut32(tag, iccSig("XYZ "));
++        for (j = 0; j < 3; j++)
++            iccPut32(tag + 8 + j * 4, iccFixed(xyz[i][j]));
++    }
++
++    iccPut32(data + trcOffset, iccSig("para"));
++    iccPut32(data + trcOffset + 8, 3 << 16);
++    for (i = 0; i < 5; i++)
++        iccPut32(data + trcOffset + 12 + i * 4, iccFixed(trc[i]));
++
++    return CFDataCreate(NULL, data, sizeof(data));
++}
++
 +CFDataRef CGColorSpaceCopyICCData(CGColorSpaceRef self) {
-+    /* No ICC profile store in Darling yet; callers (e.g. Chromium display
-+     * setup) treat NULL as "use default sRGB", consistent with what
-+     * -[NSScreen colorSpace] reports. */
-+    (void)self;
-+    return NULL;
++    static CFDataRef sRGBProfile;
++    static dispatch_once_t once;
++
++    if (self == NULL || CGColorSpaceGetModel(self) != kCGColorSpaceModelRGB)
++        return NULL;
++    dispatch_once(&once, ^{
++        sRGBProfile = createSRGBProfileData();
++    });
++    return sRGBProfile ? CFRetain(sRGBProfile) : NULL;
++}
++
++/* darling-lol: color space calls linked by the current Riot Client. */
++#import <CoreGraphics/CGDataProvider.h>
++
++const CFStringRef kCGColorSpaceExtendedLinearITUR_2020 = CFSTR("kCGColorSpaceExtendedLinearITUR_2020");
++
++/* Spaces are not named here; report the named space each device model stands for. */
++CFStringRef CGColorSpaceCopyName(CGColorSpaceRef space) {
++    if (space == NULL)
++        return NULL;
++    switch (CGColorSpaceGetModel(space)) {
++    case kCGColorSpaceModelRGB:
++        return CFRetain(kCGColorSpaceSRGB);
++    case kCGColorSpaceModelMonochrome:
++        return CFRetain(kCGColorSpaceGenericGray);
++    default:
++        return NULL;
++    }
++}
++
++/* There are no ICC profiles here: use the alternate space, or the device space
++ * with the same number of components. */
++CGColorSpaceRef CGColorSpaceCreateICCBased(size_t nComponents, const CGFloat *range,
++        CGDataProviderRef profile, CGColorSpaceRef alternate) {
++    if (alternate != NULL)
++        return CGColorSpaceRetain(alternate);
++    switch (nComponents) {
++    case 1:
++        return CGColorSpaceCreateDeviceGray();
++    case 3:
++        return CGColorSpaceCreateDeviceRGB();
++    case 4:
++        return CGColorSpaceCreateDeviceCMYK();
++    default:
++        return NULL;
++    }
 +}
 diff --git a/CoreGraphics/CGContext.m b/CoreGraphics/CGContext.m
 index db8869c8..6fea5107 100644
@@ -6980,7 +7696,7 @@ index db8869c8..6fea5107 100644
 +    CGContextSetTextPosition(c, savedPosition.x, savedPosition.y);
  }
 diff --git a/CoreGraphics/CGDirectDisplay.m b/CoreGraphics/CGDirectDisplay.m
-index e213b066..9dc3da02 100644
+index e213b06..8b0fedf 100644
 --- a/CoreGraphics/CGDirectDisplay.m
 +++ b/CoreGraphics/CGDirectDisplay.m
 @@ -53,6 +53,29 @@ static NSDisplay *currentDisplay(void) {
@@ -7223,7 +7939,7 @@ index e213b066..9dc3da02 100644
      return kCGErrorSuccess;
  }
  
-@@ -500,3 +547,38 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
+@@ -500,3 +547,76 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
  size_t CGDisplayModeGetPixelWidth(CGDisplayModeRef mode) {
      return 0;
  }
@@ -7261,6 +7977,44 @@ index e213b066..9dc3da02 100644
 +
 +bool CGRequestScreenCaptureAccess(void) {
 +    return false;
++}
++
++/* darling-lol: linked by the current Riot Client (ANGLE). Every display is
++ * driven by the system default Metal device. Metal is looked up at run time
++ * because CoreGraphics does not link it. */
++#include <dlfcn.h>
++
++id CGDirectDisplayCopyCurrentMetalDevice(CGDirectDisplayID display) {
++    id (*createDevice)(void) = (id (*)(void)) dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
++    return createDevice != NULL ? createDevice() : nil;
++}
++
++/* darling-lol: display streams (screen capture) are not supported. */
++typedef struct CGDisplayStream *CGDisplayStreamRef;
++typedef struct CGDisplayStreamUpdate *CGDisplayStreamUpdateRef;
++
++CGDisplayStreamRef CGDisplayStreamCreate(CGDirectDisplayID display, size_t outputWidth,
++        size_t outputHeight, int32_t pixelFormat, CFDictionaryRef properties, void *handler) {
++    return NULL;
++}
++
++CFRunLoopSourceRef CGDisplayStreamGetRunLoopSource(CGDisplayStreamRef displayStream) {
++    return NULL;
++}
++
++CGError CGDisplayStreamStart(CGDisplayStreamRef displayStream) {
++    return kCGErrorFailure;
++}
++
++CGError CGDisplayStreamStop(CGDisplayStreamRef displayStream) {
++    return kCGErrorFailure;
++}
++
++const CGRect *CGDisplayStreamUpdateGetRects(CGDisplayStreamUpdateRef updateRef,
++        int32_t rectType, size_t *rectCount) {
++    if (rectCount != NULL)
++        *rectCount = 0;
++    return NULL;
 +}
 diff --git a/CoreGraphics/CGDisplayStream.m b/CoreGraphics/CGDisplayStream.m
 index a9457e73..f9adca0d 100644
@@ -7302,10 +8056,10 @@ index 537c67ae..0bffcd36 100644
 +    return 0;
 +}
 diff --git a/CoreGraphics/CGFont.m b/CoreGraphics/CGFont.m
-index bcd822fd..51e89ae2 100644
+index bcd822f..f275a89 100644
 --- a/CoreGraphics/CGFont.m
 +++ b/CoreGraphics/CGFont.m
-@@ -96,11 +96,27 @@ CFDataRef CGFontCopyTableForTag(CGFontRef self, uint32_t tag) {
+@@ -96,11 +96,32 @@ CFDataRef CGFontCopyTableForTag(CGFontRef self, uint32_t tag) {
  
  CGFontRef _Nullable CGFontCreateWithDataProvider(CGDataProviderRef _Nullable provider)
  {
@@ -7334,6 +8088,11 @@ index bcd822fd..51e89ae2 100644
 +    if (self == NULL)
 +        return (CFStringRef) CFRetain(CFSTR("DarlingSans"));
 +    return (CFStringRef)[(O2Font *)self copyPostScriptName];
++}
++
++/* darling-lol: linked by the current Riot Client; font smoothing is not disabled. */
++bool CGFontRenderingGetFontSmoothingDisabled(void) {
++    return false;
 +}
 diff --git a/CoreGraphics/CGSConnection.m b/CoreGraphics/CGSConnection.m
 index 99826d19..0b75047b 100644
@@ -8350,7 +9109,7 @@ index 94ddabf9..fa018d3d 100644
  
  CFTypeID CTFontGetTypeID(void)
 diff --git a/CoreText/CTFontDescriptor.m b/CoreText/CTFontDescriptor.m
-index 8866ce59..62dcf226 100644
+index 8866ce5..7d52297 100644
 --- a/CoreText/CTFontDescriptor.m
 +++ b/CoreText/CTFontDescriptor.m
 @@ -1,6 +1,7 @@
@@ -8362,7 +9121,7 @@ index 8866ce59..62dcf226 100644
  
  const CFStringRef kCTFontURLAttribute = CFSTR("NSCTFontFileURLAttribute");
  const CFStringRef kCTFontNameAttribute = CFSTR("NSFontNameAttribute");
-@@ -24,9 +25,103 @@ const CFStringRef kCTFontEnabledAttribute = CFSTR("NSCTFontEnabledAttribute");
+@@ -24,9 +25,124 @@ const CFStringRef kCTFontEnabledAttribute = CFSTR("NSCTFontEnabledAttribute");
  const CFStringRef kCTFontFormatAttribute = CFSTR("NSCTFontFormatAttribute");
  const CFStringRef kCTFontRegistrationScopeAttribute = CFSTR("NSCTFontRegistrationScopeAttribute");
  const CFStringRef kCTFontPriorityAttribute = CFSTR("NSCTFontPriorityAttribute");
@@ -8467,6 +9226,27 @@ index 8866ce59..62dcf226 100644
 +     * A NULL language output is valid (Chromium uses it for family names). */
 +    if (language) *language = NULL;
 +    return CTFontDescriptorCopyAttribute(descriptor, attribute);
++}
++
++/* darling-lol: descriptor calls linked by the current Riot Client. A descriptor
++ * is its attribute dictionary, so these are exact. */
++const CFStringRef kCTFontVariationAxesAttribute = CFSTR("NSCTFontVariationAxesAttribute");
++
++CFDictionaryRef CTFontDescriptorCopyAttributes(CTFontDescriptorRef descriptor)
++{
++    if (!descriptor)
++        return NULL;
++    return CFDictionaryCreateCopy(NULL, (CFDictionaryRef)descriptor);
++}
++
++CFTypeID CTFontDescriptorGetTypeID(void)
++{
++    return CFDictionaryGetTypeID();
++}
++
++bool CTFontDescriptorIsSystemUIFont(CTFontDescriptorRef descriptor)
++{
++    return false;
  }
 diff --git a/CoreText/CTFontManager.m b/CoreText/CTFontManager.m
 index 943e1b78..049665fb 100644
@@ -9191,11 +9971,13 @@ index 039d8c94..b518c961 100644
  #import <fontconfig/fontconfig.h>
  
 diff --git a/QuartzCore/CALayer.m b/QuartzCore/CALayer.m
-index 5dcac115..5de4f03f 100644
+index 5dcac11..83b3c9e 100644
 --- a/QuartzCore/CALayer.m
 +++ b/QuartzCore/CALayer.m
-@@ -1,8 +1,243 @@
+@@ -1,8 +1,245 @@
  #import <Foundation/NSDictionary.h>
++#import <objc/runtime.h>
++#include <string.h>
 +#import <Foundation/NSInvocation.h>
 +#import <Foundation/NSMethodSignature.h>
  #import <QuartzCore/CAAnimation.h>
@@ -9438,7 +10220,7 @@ index 5dcac115..5de4f03f 100644
  
  NSString *const kCAFilterLinear = @"linear";
  NSString *const kCAFilterNearest = @"nearest";
-@@ -61,13 +296,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -61,13 +298,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) setSublayers: (NSArray *) sublayers {
@@ -9462,7 +10244,7 @@ index 5dcac115..5de4f03f 100644
  }
  
  - (id<CALayerDelegate>) delegate {
-@@ -117,6 +361,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -117,6 +363,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
              [self addAnimation: action forKey: @"bounds"];
      }
  
@@ -9474,7 +10256,7 @@ index 5dcac115..5de4f03f 100644
      _bounds = value;
  }
  
-@@ -171,14 +420,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -171,14 +422,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _opaque = value;
  }
  
@@ -9548,7 +10330,7 @@ index 5dcac115..5de4f03f 100644
  }
  
  - (CATransform3D) transform {
-@@ -186,6 +494,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -186,6 +496,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) setTransform: (CATransform3D) value {
@@ -9560,7 +10342,7 @@ index 5dcac115..5de4f03f 100644
      _transform = value;
  }
  
-@@ -236,6 +549,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -236,6 +551,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) dealloc {
@@ -9571,7 +10353,7 @@ index 5dcac115..5de4f03f 100644
      [_sublayers release];
      [_animations release];
      [_minificationFilter release];
-@@ -258,6 +575,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -258,6 +577,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [self setSublayers: [_sublayers arrayByAddingObject: layer]];
  }
  
@@ -9605,7 +10387,7 @@ index 5dcac115..5de4f03f 100644
  - (void) replaceSublayer: (CALayer *) layer with: (CALayer *) other {
      NSMutableArray *layers = [_sublayers mutableCopy];
      NSUInteger index = [_sublayers indexOfObjectIdenticalTo: layer];
-@@ -298,9 +642,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -298,9 +644,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) removeFromSuperlayer {
@@ -9621,7 +10403,7 @@ index 5dcac115..5de4f03f 100644
  }
  
  - (void) setNeedsDisplay {
-@@ -319,6 +668,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -319,6 +670,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [_context startTimerIfNeeded];
  }
  
@@ -9641,7 +10423,7 @@ index 5dcac115..5de4f03f 100644
  - (CAAnimation *) animationForKey: (NSString *) key {
      return [_animations objectForKey: key];
  }
-@@ -364,4 +726,119 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -364,4 +728,173 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _textureId = value;
  }
  
@@ -9761,6 +10543,60 @@ index 5dcac115..5de4f03f 100644
 +- (void) layoutSublayers { }
 +
  @end
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++/* Known selectors with scalar arguments keep their declared types, so an
++ * invocation built from the signature never treats a number as an object. */
++static const struct { const char *selector; const char *types; } rclolStubTypes[] = {
++	{ "HDR10MetadataWithDisplayInfo:contentInfo:opticalOutputScale:", "@@:@@f" }, /* CAEDRMetadata: NSData, NSData, float */
++};
++
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	const char *name = sel_getName(sel);
++	for (size_t i = 0; i < sizeof(rclolStubTypes) / sizeof(rclolStubTypes[0]); ++i) {
++		if (strcmp(name, rclolStubTypes[i].selector) == 0)
++			return [NSMethodSignature signatureWithObjCTypes:rclolStubTypes[i].types];
++	}
++
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = name; *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: EDR metadata (HDR) is not supported. */
++RCLOL_NIL_STUB_CLASS(CAEDRMetadata)
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
@@ -11831,3 +12667,391 @@ index 65b63a3e..e5b913b1 100644
  }
  
  - initWithParentWindow: (X11Window *) parent frame: (CGRect) frame;
+diff --git a/CoreGraphics/CGColor.m b/CoreGraphics/CGColor.m
+index 742f244..53080ea 100644
+--- a/CoreGraphics/CGColor.m
++++ b/CoreGraphics/CGColor.m
+@@ -102,3 +102,24 @@ CGColorRef CGColorGetConstantColor(CFStringRef colorName) {
+ const CFStringRef kCGColorWhite = CFSTR("kCGColorWhite");
+ const CFStringRef kCGColorBlack = CFSTR("kCGColorBlack");
+ const CFStringRef kCGColorClear = CFSTR("kCGColorClear");
++
++/* darling-lol: linked by the current Riot Client. Colors are not converted
++ * between spaces here, so matching returns a copy of the color. */
++CGColorRef CGColorCreateCopyByMatchingToColorSpace(CGColorSpaceRef space,
++        CGColorRenderingIntent intent, CGColorRef color, CFDictionaryRef options) {
++    if (color == NULL)
++        return NULL;
++    return CGColorCreateCopy(color);
++}
++
++/* The type CFGetTypeID reports for a color, so the comparison callers make holds. */
++CFTypeID CGColorGetTypeID(void) {
++    static CFTypeID typeID;
++    static dispatch_once_t once;
++    dispatch_once(&once, ^{
++        CGColorRef color = CGColorCreateGenericGray(0, 1);
++        typeID = CFGetTypeID(color);
++        CGColorRelease(color);
++    });
++    return typeID;
++}
+diff --git a/CoreGraphics/CGPDFPage.m b/CoreGraphics/CGPDFPage.m
+index 612defa..2df0920 100644
+--- a/CoreGraphics/CGPDFPage.m
++++ b/CoreGraphics/CGPDFPage.m
+@@ -46,3 +46,8 @@ CGAffineTransform CGPDFPageGetDrawingTransform(CGPDFPageRef self, CGPDFBox box,
+     return CGAffineTransformFromO2(O2PDFPageGetDrawingTransform(
+             (O2PDFPageRef)self, box, rect, clockwiseDegrees, preserveAspectRatio));
+ }
++
++/* darling-lol: linked by the current Riot Client; pages are never rotated here. */
++int CGPDFPageGetRotationAngle(CGPDFPageRef page) {
++    return 0;
++}
+diff --git a/CoreGraphics/CGS.m b/CoreGraphics/CGS.m
+index 813e44e..b8d7f75 100644
+--- a/CoreGraphics/CGS.m
++++ b/CoreGraphics/CGS.m
+@@ -405,3 +405,32 @@ CGError CGSRemoveNotifyProc(CGSNotifyProcPtr proc, CGSNotificationType notificat
+ 
+ 	return kCGSErrorSuccess;
+ }
++
++/* darling-lol: window server calls linked by the current Riot Client. The X11
++ * backend has no per-window alpha, transform, warp or capture exclusion, so
++ * these succeed without effect; regions are not created, which callers treat
++ * as no region. */
++void *CGRegionCreateWithRect(CGRect rect)
++{
++	return NULL;
++}
++
++CGError CGSSetWindowAlpha(CGSConnectionID cid, CGSWindowID wid, float alpha)
++{
++	return kCGSErrorSuccess;
++}
++
++CGError CGSSetWindowCaptureExcludeShape(CGSConnectionID cid, CGSWindowID wid, void *region)
++{
++	return kCGSErrorSuccess;
++}
++
++CGError CGSSetWindowTransform(CGSConnectionID cid, CGSWindowID wid, CGAffineTransform transform)
++{
++	return kCGSErrorSuccess;
++}
++
++CGError CGSSetWindowWarp(CGSConnectionID cid, CGSWindowID wid, int width, int height, void *mesh)
++{
++	return kCGSErrorSuccess;
++}
+diff --git a/CoreGraphics/CGWindow.m b/CoreGraphics/CGWindow.m
+index 083e5cf..067ff4d 100644
+--- a/CoreGraphics/CGWindow.m
++++ b/CoreGraphics/CGWindow.m
+@@ -204,3 +204,14 @@ const CFStringRef kCGWindowIsOnscreen = CFSTR("kCGWindowIsOnscreen");
+ }
+ 
+ @end
++
++/* darling-lol: linked by the current Riot Client. Windows cannot be described or
++ * captured by identifier here: descriptions are empty and there is no image. */
++CFArrayRef CGWindowListCreateDescriptionFromArray(CFArrayRef windowArray) {
++    return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
++}
++
++CGImageRef CGWindowListCreateImageFromArray(CGRect screenBounds, CFArrayRef windowArray,
++        CGWindowImageOption imageOption) {
++    return NULL;
++}
+diff --git a/CoreText/CTFontCollection.m b/CoreText/CTFontCollection.m
+index 585cb49..2ecda8a 100644
+--- a/CoreText/CTFontCollection.m
++++ b/CoreText/CTFontCollection.m
+@@ -1,4 +1,5 @@
+ #import <CoreText/CTFontCollection.h>
++#import <CoreText/CTFontDescriptor.h>
+ 
+ CTFontCollectionRef CTFontCollectionCreateFromAvailableFonts(CFDictionaryRef options)
+ {
+@@ -18,3 +19,22 @@ CTFontCollectionRef CTFontCollectionCreateWithFontDescriptors(CFArrayRef _Nullab
+     printf("STUB %s\n", __PRETTY_FUNCTION__);
+     return nil;
+ }
++
++/* darling-lol: linked by the current Riot Client (Chromium font enumeration).
++ * Collections are not tracked, so match the family against every installed font. */
++CFArrayRef _Nullable CTFontCollectionCreateMatchingFontDescriptorsForFamily(CTFontCollectionRef collection,
++                                                                            CFStringRef familyName,
++                                                                            CFDictionaryRef _Nullable options)
++{
++    if (!familyName)
++        return NULL;
++    const void *keys[] = { kCTFontFamilyNameAttribute };
++    const void *values[] = { familyName };
++    CFDictionaryRef attributes = CFDictionaryCreate(NULL, keys, values, 1,
++        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++    CTFontDescriptorRef query = CTFontDescriptorCreateWithAttributes(attributes);
++    CFRelease(attributes);
++    CFArrayRef matches = CTFontDescriptorCreateMatchingFontDescriptors(query, NULL);
++    CFRelease(query);
++    return matches;
++}
+diff --git a/QuartzCore/CATransform3D.m b/QuartzCore/CATransform3D.m
+index 32c5f41..4a1279c 100644
+--- a/QuartzCore/CATransform3D.m
++++ b/QuartzCore/CATransform3D.m
+@@ -1,4 +1,13 @@
+ #import <QuartzCore/CATransform3D.h>
+ 
+ const CATransform3D CATransform3DIdentity = {1, 0, 0, 0, 0, 1, 0, 0,
+-                                             0, 0, 1, 0, 0, 0, 0, 1};
+\ No newline at end of file
++                                             0, 0, 1, 0, 0, 0, 0, 1};
++
++/* darling-lol: linked by the current Riot Client. */
++CATransform3D CATransform3DMakeTranslation(CGFloat tx, CGFloat ty, CGFloat tz) {
++    CATransform3D transform = CATransform3DIdentity;
++    transform.m41 = tx;
++    transform.m42 = ty;
++    transform.m43 = tz;
++    return transform;
++}
+diff --git a/AppKit/NSAppearance.m b/AppKit/NSAppearance.m
+index acb1985..9631d8c 100644
+--- a/AppKit/NSAppearance.m
++++ b/AppKit/NSAppearance.m
+@@ -40,11 +40,84 @@ NSString *const NSAppearanceNameAccessibilityHighContrastVibrantDark =
+ NSString *const NSAppearanceNameControlStrip =
+         @"NSAppearanceNameControlStrip"; // Undocumented
+ 
+-@implementation NSAppearance
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSView.h>
++#import <AppKit/NSWindow.h>
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSKeyValueObserving.h>
++#import <Foundation/NSSet.h>
++#import <objc/runtime.h>
++
++/* darling-lol: named appearances, as Chromium reads them to choose between the
++ * light and dark themes. Darling draws Aqua; an application may select another
++ * appearance (Electron's nativeTheme.themeSource), which is reported back. */
++@implementation NSAppearance {
++    NSAppearanceName _name;
++}
++
++static NSAppearance *currentAppearance;
+ 
+ + (NSAppearance *) appearanceNamed: (NSAppearanceName) name {
+-    printf("STUB %s\n", __PRETTY_FUNCTION__);
+-    return [NSAppearance alloc];
++    static NSMutableDictionary *appearances;
++    static dispatch_once_t once;
++    dispatch_once(&once, ^{
++        appearances = [NSMutableDictionary new];
++    });
++    if (name == nil)
++        return nil;
++    @synchronized (appearances) {
++        NSAppearance *appearance = [appearances objectForKey: name];
++        if (appearance == nil) {
++            appearance = [[NSAppearance alloc] init];
++            appearance->_name = [name copy];
++            [appearances setObject: appearance forKey: name];
++            [appearance release];
++        }
++        return appearance;
++    }
++}
++
+++ (NSAppearance *) currentAppearance {
++    return currentAppearance ?: [NSApp effectiveAppearance];
++}
++
+++ (void) setCurrentAppearance: (NSAppearance *) appearance {
++    currentAppearance = appearance;
++}
++
+++ (NSAppearance *) currentDrawingAppearance {
++    return [self currentAppearance];
++}
++
++- (NSAppearanceName) name {
++    return _name;
++}
++
++- (BOOL) allowsVibrancy {
++    return NO;
++}
++
++- (BOOL) _isDark {
++    return [_name rangeOfString: @"Dark"].location != NSNotFound;
++}
++
++- (NSAppearanceName) bestMatchFromAppearancesWithNames: (NSArray<NSAppearanceName> *) appearances {
++    if ([appearances containsObject: _name])
++        return _name;
++    BOOL dark = [self _isDark];
++    for (NSAppearanceName candidate in appearances) {
++        if (([candidate rangeOfString: @"Dark"].location != NSNotFound) == dark)
++            return candidate;
++    }
++    return nil;
++}
++
++- (void) performAsCurrentDrawingAppearance: (void (^)(void)) block {
++    NSAppearance *previous = currentAppearance;
++    currentAppearance = self;
++    block();
++    currentAppearance = previous;
+ }
+ 
+ - (void) encodeWithCoder: (NSCoder *) aCoder {
+@@ -62,3 +135,60 @@ NSString *const NSAppearanceNameControlStrip =
+ }
+ 
+ @end
++
++/* darling-lol: appearance and effectiveAppearance on the application, windows
++ * and views, observable with KVO. Stored as associated objects so the classes'
++ * layouts do not change. */
++static char appearanceKey;
++
++@implementation NSApplication (DarlingAppearance)
++
++- (NSAppearance *) appearance {
++    return objc_getAssociatedObject(self, &appearanceKey);
++}
++
++- (void) setAppearance: (NSAppearance *) appearance {
++    objc_setAssociatedObject(self, &appearanceKey, appearance, OBJC_ASSOCIATION_RETAIN);
++}
++
++- (NSAppearance *) effectiveAppearance {
++    return [self appearance] ?: [NSAppearance appearanceNamed: NSAppearanceNameAqua];
++}
++
+++ (NSSet *) keyPathsForValuesAffectingEffectiveAppearance {
++    return [NSSet setWithObject: @"appearance"];
++}
++
++@end
++
++@implementation NSWindow (DarlingAppearance)
++
++- (NSAppearance *) appearance {
++    return objc_getAssociatedObject(self, &appearanceKey);
++}
++
++- (void) setAppearance: (NSAppearance *) appearance {
++    objc_setAssociatedObject(self, &appearanceKey, appearance, OBJC_ASSOCIATION_RETAIN);
++}
++
++- (NSAppearance *) effectiveAppearance {
++    return [self appearance] ?: [NSApp effectiveAppearance];
++}
++
+++ (NSSet *) keyPathsForValuesAffectingEffectiveAppearance {
++    return [NSSet setWithObject: @"appearance"];
++}
++
++@end
++
++@implementation NSView (DarlingAppearance)
++
++- (NSAppearance *) effectiveAppearance {
++    return [self appearance] ?: [[self window] effectiveAppearance] ?: [NSApp effectiveAppearance];
++}
++
+++ (NSSet *) keyPathsForValuesAffectingEffectiveAppearance {
++    return [NSSet setWithObject: @"appearance"];
++}
++
++@end
+diff --git a/AppKit/include/AppKit/NSAppearance.h b/AppKit/include/AppKit/NSAppearance.h
+index f88e56c..d5fe98c 100644
+--- a/AppKit/include/AppKit/NSAppearance.h
++++ b/AppKit/include/AppKit/NSAppearance.h
+@@ -40,6 +40,15 @@ APPKIT_EXPORT NSString *const NSAppearanceNameControlStrip; // Undocumented
+ @interface NSAppearance : NSObject <NSSecureCoding>
+ 
+ + (NSAppearance *) appearanceNamed: (NSAppearanceName) name;
+++ (NSAppearance *) currentAppearance;
+++ (void) setCurrentAppearance: (NSAppearance *) appearance;
+++ (NSAppearance *) currentDrawingAppearance;
++
++@property (readonly, copy) NSAppearanceName name;
++@property (readonly) BOOL allowsVibrancy;
++
++- (NSAppearanceName) bestMatchFromAppearancesWithNames: (NSArray<NSAppearanceName> *) appearances;
++- (void) performAsCurrentDrawingAppearance: (void (^)(void)) block;
+ 
+ @end
+ 
+diff --git a/Onyx2D/O2ColorSpace.m b/Onyx2D/O2ColorSpace.m
+index d1b260c..e93576b 100644
+--- a/Onyx2D/O2ColorSpace.m
++++ b/Onyx2D/O2ColorSpace.m
+@@ -144,6 +144,46 @@ O2ColorSpaceRef O2ColorSpaceCreateWithName(CFStringRef name) {
+         cs->_type = kO2ColorSpaceModelRGB;
+         return cs;
+     }
++    /* darling-lol: there is no color management, so the other RGB and gray
++     * spaces are device spaces (Chromium creates colors in ExtendedSRGB and
++     * crashes on a NULL space). */
++    static const CFStringRef rgbNames[] = {
++        CFSTR("kCGColorSpaceGenericRGB"),
++        CFSTR("kCGColorSpaceGenericRGBLinear"),
++        CFSTR("kCGColorSpaceAdobeRGB1998"),
++        CFSTR("kCGColorSpaceExtendedSRGB"),
++        CFSTR("kCGColorSpaceLinearSRGB"),
++        CFSTR("kCGColorSpaceExtendedLinearSRGB"),
++        CFSTR("kCGColorSpaceDCIP3"),
++        CFSTR("kCGColorSpaceITUR_709"),
++        CFSTR("kCGColorSpaceITUR_2020"),
++        CFSTR("kCGColorSpaceITUR_2100_HLG"),
++        CFSTR("kCGColorSpaceITUR_2100_PQ"),
++        CFSTR("kCGColorSpaceExtendedLinearITUR_2020"),
++        CFSTR("kCGColorSpaceROMMRGB"),
++        CFSTR("kCGColorSpaceACESCGLinear"),
++    };
++    static const CFStringRef grayNames[] = {
++        CFSTR("kCGColorSpaceGenericGray"),
++        CFSTR("kCGColorSpaceGenericGrayGamma2_2"),
++        CFSTR("kCGColorSpaceExtendedGray"),
++        CFSTR("kCGColorSpaceLinearGray"),
++        CFSTR("kCGColorSpaceExtendedLinearGray"),
++    };
++    for (size_t i = 0; i < sizeof(rgbNames) / sizeof(rgbNames[0]); i++) {
++        if (CFStringCompare(name, rgbNames[i], 0) == kCFCompareEqualTo) {
++            O2ColorSpaceRef cs = [[O2ColorSpace alloc] initWithDeviceRGB];
++            cs->_name = rgbNames[i];
++            return cs;
++        }
++    }
++    for (size_t i = 0; i < sizeof(grayNames) / sizeof(grayNames[0]); i++) {
++        if (CFStringCompare(name, grayNames[i], 0) == kCFCompareEqualTo) {
++            O2ColorSpaceRef cs = [[O2ColorSpace alloc] initWithDeviceGray];
++            cs->_name = grayNames[i];
++            return cs;
++        }
++    }
+     printf("unknown color space name\n");
+     CFShow(name);
+     return NULL;
+diff --git a/AppKit/include/AppKit/NSWorkspace.h b/AppKit/include/AppKit/NSWorkspace.h
+index bf84986..9f0b463 100644
+--- a/AppKit/include/AppKit/NSWorkspace.h
++++ b/AppKit/include/AppKit/NSWorkspace.h
+@@ -137,6 +137,8 @@ typedef NSUInteger NSWorkspaceIconCreationOptions;
+ - (NSURL *) URLForApplicationWithBundleIdentifier:
+         (NSString *) bundleIdentifier;
+ - (NSString *) fullPathForApplication: (NSString *) appName;
++- (NSURL *) URLForApplicationToOpenURL: (NSURL *) url;
++- (NSArray<NSURL *> *) URLsForApplicationsToOpenURL: (NSURL *) url;
+ 
+ @end
+ 

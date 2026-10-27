@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..40308eb 100644
+index 5b2e765..1dc9483 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -68,7 +68,15 @@ index 5b2e765..40308eb 100644
  	src/xnu_syscall/bsd/impl/misc/proc_info.c
  	src/xnu_syscall/bsd/impl/misc/ptrace.c
  	src/xnu_syscall/bsd/impl/misc/reboot.c
-@@ -359,6 +360,11 @@ set(emulation_sources
+@@ -162,6 +163,7 @@ set(xnu_syscall_bsd_sources
+ 	src/xnu_syscall/bsd/impl/misc/syscall.c
+ 	src/xnu_syscall/bsd/impl/misc/sysctl.c
+ 	src/xnu_syscall/bsd/impl/misc/thread_selfid.c
++	src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+ 	src/xnu_syscall/bsd/impl/mman/madvise.c
+ 	src/xnu_syscall/bsd/impl/mman/mman.c
+ 	src/xnu_syscall/bsd/impl/mman/msync.c
+@@ -359,6 +361,11 @@ set(emulation_sources
  	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
  )
  
@@ -1822,7 +1830,7 @@ index 8c6d5d9..6fd1acf 100644
  }
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
-index 7d5ef80..46debb8 100644
+index 7d5ef80..c8672bb 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 @@ -24,6 +24,7 @@
@@ -1841,7 +1849,15 @@ index 7d5ef80..46debb8 100644
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/proc_info.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/ptrace.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/reboot.h>
-@@ -427,6 +429,7 @@ void* __bsd_syscall_table[600] = {
+@@ -53,6 +55,7 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/syscall.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/sysctl.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfid.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfusage.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/madvise.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/msync.h>
+@@ -427,6 +430,7 @@ void* __bsd_syscall_table[600] = {
  	[369] = sys_kevent64,
  	[372] = sys_thread_selfid,
  	[374] = sys_kevent_qos,
@@ -1849,7 +1865,7 @@ index 7d5ef80..46debb8 100644
  	[394] = sys_pselect,
  	[395] = sys_pselect_nocancel,
  	[396] = sys_read_nocancel,
-@@ -462,6 +465,7 @@ void* __bsd_syscall_table[600] = {
+@@ -462,6 +466,7 @@ void* __bsd_syscall_table[600] = {
  	[441] = sys_guarded_open_np,
  	[442] = sys_guarded_close_np,
  	[443] = sys_guarded_kqueue_np,
@@ -1857,7 +1873,12 @@ index 7d5ef80..46debb8 100644
  	[461] = sys_getattrlistbulk,
  	[462] = sys_clonefileat,
  	[463] = sys_openat,
-@@ -483,6 +487,7 @@ void* __bsd_syscall_table[600] = {
+@@ -479,10 +484,12 @@ void* __bsd_syscall_table[600] = {
+ 	[475] = sys_mkdirat,
+ 	[476] = sys_getattrlistat,
+ 	[478] = sys_bsdthread_ctl,
++	[482] = sys_thread_selfusage,
+ 	[483] = sys_csrctl,
  	[500] = sys_getentropy,
  	[515] = sys_ulock_wait,
  	[516] = sys_ulock_wake,
@@ -2206,10 +2227,34 @@ index f273989..058b985 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..83ad15c 100644
+index bd9cdc2..61fe056 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -139,18 +139,23 @@ sysctl_handler(handle_boottime)
+@@ -23,6 +23,7 @@
+ enum {
+ 	_KERN_MSGBUF = 1000,
+ 	_KERN_OSPRODUCTVERSION,
++	_KERN_HV_VMM_PRESENT,
+ 
+ 	_KERN_SEMMNS = 1000,
+ };
+@@ -46,6 +47,7 @@ static sysctl_handler(handle_usrstack64);
+ static sysctl_handler(handle_sysv_semmns);
+ static sysctl_handler(handle_osproductversion);
+ static sysctl_handler(handle_osrevision);
++static sysctl_handler(handle_hv_vmm_present);
+ 
+ extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
+ extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
+@@ -76,6 +78,7 @@ const struct known_sysctl sysctls_kern[] = {
+ 	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
+ 	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
+ 	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
++	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
+ 	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
+ 	{ .oid = -1 }
+ };
+@@ -139,18 +142,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -2239,6 +2284,26 @@ index bd9cdc2..83ad15c 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
+@@ -342,3 +350,19 @@ static sysctl_handler(handle_osrevision) {
+ 	*oldlen = sizeof(*ovalue);
+ 	return 0;
+ }
++
++// Whether the host runs under a hypervisor, from the CPUID hypervisor bit
++// (leaf 1, ECX bit 31), as XNU reports it. Chromium's renderer CHECKs that this
++// sysctl exists.
++static sysctl_handler(handle_hv_vmm_present) {
++	int value = 0;
++
++	sysctl_handle_size(sizeof(int));
++#if defined(__i386__) || defined(__x86_64__)
++	unsigned int eax = 1, ebx, ecx = 0, edx;
++	__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
++	value = (ecx >> 31) & 1;
++#endif
++	*((int*) old) = value;
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 index 4319355..122ad3a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
@@ -3412,12 +3477,14 @@ index 10f39a5..29747d4 100644
  		current = next;
  		token = strtok_r(NULL, ".", &saveptr);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-index 10c412b..adb7e24 100644
+index 10c412b..c9d8b8d 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-@@ -4,23 +4,97 @@
+@@ -3,27 +3,125 @@
+ #include <sys/errno.h>
  
  #include <darling/emulation/conversion/errno.h>
++#include <darling/emulation/conversion/duct_errno.h>
  #include <darling/emulation/common/base.h>
 +#include <darling/emulation/common/simple.h>
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
@@ -3473,6 +3540,16 @@ index 10c412b..adb7e24 100644
 +	__atomic_store_n(&thp_mode, mode, __ATOMIC_RELEASE);
 +	return mode;
 +}
++
++// Linux before 5.14 does not know MADV_POPULATE_WRITE and rejects it even for
++// an empty range, which a kernel that knows it accepts.
++static int populate_write_supported(void)
++{
++	static int supported = -1;
++	if (supported < 0)
++		supported = LINUX_SYSCALL(__NR_madvise, NULL, 0, LINUX_MADV_POPULATE_WRITE) == 0;
++	return supported;
++}
  
  long sys_madvise(void* addr, unsigned long len, int advice)
  {
@@ -3510,6 +3587,8 @@ index 10c412b..adb7e24 100644
 +		// range is no longer lazily reclaimable when REUSE returns, and a
 +		// caller may reuse a page range that an earlier free hint marked.
 +		// Only a write-prefault of that particular page cancels its laziness.
++		if (((unsigned long) addr & 4095) != 0)
++			return -EINVAL;
 +		advice = LINUX_MADV_POPULATE_WRITE;
 +	} else if (advice >= 5) {
 +		// Other OS X/BSD-specific hints do not share Linux's numeric values.
@@ -3517,6 +3596,20 @@ index 10c412b..adb7e24 100644
 +	}
  
  	ret = LINUX_SYSCALL(__NR_madvise, addr, len, advice);
+ 
++	// darling-lol: Darwin accepts REUSE on any mapped range, and allocators
++	// check the result (Chromium's PartitionAlloc treats a failure as out of
++	// memory). Linux refuses to write-prefault a range that is not writable
++	// (PROT_NONE or read-only reservations). Such a range has no dirty page
++	// left to reclaim lazily, so there is nothing to cancel: report success.
++	// The address was checked above, so EINVAL here means such a range, unless
++	// the kernel does not support the prefault at all; then the error stands.
++	if (advice == LINUX_MADV_POPULATE_WRITE && (ret == -LINUX_EFAULT || ret == -LINUX_EPERM ||
++	    (ret == -LINUX_EINVAL && populate_write_supported())))
++		ret = 0;
++
+ 	if (ret < 0)
+ 		ret = errno_linux_to_bsd(ret);
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/accept.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/accept.c
 index 4daa631..5aeedd0 100644
@@ -6294,3 +6387,162 @@ index f890ab2..8969577 100644
  	}
  	return IOCTL_PASS;
  }
+diff --git a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+index 24a5f01..08292b5 100644
+--- a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
++++ b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+@@ -40,6 +40,12 @@ enum {
+ 	BSD_RLIMIT_POSIX = 0x1000
+ };
+ 
++// darling-lol: the value each kernel uses for an unlimited resource.
++#define LINUX_RLIM_INFINITY (~0ULL)
++#define BSD_RLIM_INFINITY 0x7fffffffffffffffULL
++
+ unsigned int rlimit_bsd_to_linux(unsigned int which);
++unsigned long long rlimit_linux_to_bsd_value(unsigned long long value);
++unsigned long long rlimit_bsd_to_linux_value(unsigned long long value);
+ 
+ #endif // DARLING_CONVERSION_MISC_GETRLIMIT
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+index a26ae39..0fb6d6a 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+@@ -11,6 +11,9 @@ Lentry_hook:
+ 	movq	(%r10,%rax,8), %r10
+ 	test	%r10, %r10
+ 	jz		.no_sys
++	# pipe() returns its second descriptor in %rdx (see sys_pipe)
++	cmpq	$42, %rax
++	je		.keep_rdx
+ 	# Re-push possible 7th and 8th arg
+ 	movq	24(%rsp), %r11
+ 	pushq	%r11
+@@ -18,6 +21,17 @@ Lentry_hook:
+ 	pushq	%r11
+ 	call	*%r10
+ 	addq	$16, %rsp
++	# XNU returns the second result value in %rdx, which is zero for every
++	# other syscall; callers such as Chromium's sendto wrapper check it
++	xorl	%edx, %edx
++	jmp		.std_ret
++.keep_rdx:
++	movq	24(%rsp), %r11
++	pushq	%r11
++	movq	24(%rsp), %r11
++	pushq	%r11
++	call	*%r10
++	addq	$16, %rsp
+ .std_ret:
+ Lexit_hook:
+ 	.space 13, 0x90
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+index 01d4670..cf51b8d 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+@@ -16,17 +16,35 @@ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, 0, rlp);
+ 	if (ret < 0)
+-		ret = errno_linux_to_bsd(ret);
++		return errno_linux_to_bsd(ret);
++
++	// darling-lol: Linux reports an unlimited resource as ~0, which Darwin
++	// callers read as a negative limit (rlim_t is signed in practice: Chromium
++	// aborts on RLIMIT_DATA). Darwin's RLIM_INFINITY is INT64_MAX.
++	rlp->rlim_cur = rlimit_linux_to_bsd_value(rlp->rlim_cur);
++	rlp->rlim_max = rlimit_linux_to_bsd_value(rlp->rlim_max);
+ 
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		rlp->rlim_cur--;
+-		rlp->rlim_max--;
++		if (rlp->rlim_cur != BSD_RLIM_INFINITY)
++			rlp->rlim_cur--;
++		if (rlp->rlim_max != BSD_RLIM_INFINITY)
++			rlp->rlim_max--;
+ 	}
+ 
+ 	return ret;
+ }
+ 
++unsigned long long rlimit_linux_to_bsd_value(unsigned long long value)
++{
++	return value > BSD_RLIM_INFINITY ? BSD_RLIM_INFINITY : value;
++}
++
++unsigned long long rlimit_bsd_to_linux_value(unsigned long long value)
++{
++	return value >= BSD_RLIM_INFINITY ? LINUX_RLIM_INFINITY : value;
++}
++
+ unsigned int rlimit_bsd_to_linux(unsigned int which)
+ {
+ 	which &= ~BSD_RLIMIT_POSIX;
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+index 352c739..0398dec 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+@@ -9,7 +9,8 @@
+ long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
+ {
+ 	int ret;
+-	struct xnu_rlimit lim = { rlp->rlim_cur, rlp->rlim_max };
++	// darling-lol: Darwin's RLIM_INFINITY (INT64_MAX) is a finite value to Linux.
++	struct xnu_rlimit lim = { rlimit_bsd_to_linux_value(rlp->rlim_cur), rlimit_bsd_to_linux_value(rlp->rlim_max) };
+ 
+ 	which = rlimit_bsd_to_linux(which);
+ 	if (which == -1)
+@@ -17,8 +18,10 @@ long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
+ 
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		lim.rlim_cur++;
+-		lim.rlim_max++;
++		if (lim.rlim_cur != LINUX_RLIM_INFINITY)
++			lim.rlim_cur++;
++		if (lim.rlim_max != LINUX_RLIM_INFINITY)
++			lim.rlim_max++;
+ 	}
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, &lim, 0);
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
+new file mode 100644
+index 0000000..ca3afa3
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
+@@ -0,0 +1,6 @@
++#ifndef LINUX_THREAD_SELFUSAGE_H
++#define LINUX_THREAD_SELFUSAGE_H
++
++long sys_thread_selfusage(void);
++
++#endif // LINUX_THREAD_SELFUSAGE_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+new file mode 100644
+index 0000000..85e0663
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+@@ -0,0 +1,22 @@
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfusage.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/conversion/errno.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++#define LINUX_CLOCK_THREAD_CPUTIME_ID 3
++
++// The calling thread's CPU time in mach absolute time units, which are
++// nanoseconds here (mach_timebase_info reports 1/1).
++VISIBLE // made visible for xtrace
++long sys_thread_selfusage(void)
++{
++	struct { long tv_sec; long tv_nsec; } ts;
++	int ret;
++
++	ret = LINUX_SYSCALL(__NR_clock_gettime, LINUX_CLOCK_THREAD_CPUTIME_ID, &ts);
++	if (ret < 0)
++		return 0;
++
++	return ts.tv_sec * 1000000000L + ts.tv_nsec;
++}

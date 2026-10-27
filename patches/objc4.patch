@@ -23,3 +23,20 @@ index 73f77a8..a9c3905 100644
 +
 +__ZdlPvm
 +__ZdaPvm
+diff --git a/runtime/objc-runtime-new.mm b/runtime/objc-runtime-new.mm
+index df3f9fa..e550421 100644
+--- a/runtime/objc-runtime-new.mm
++++ b/runtime/objc-runtime-new.mm
+@@ -2590,7 +2590,11 @@ static void validateAlreadyRealizedClass(Class cls) {
+ 
+     // Note: this check will need some adjustment if class_rw_t's
+     // size changes to not match the malloc bucket.
+-    if (rwSize != sizeof(class_rw_t))
++    // darling-lol: class_rw_t comes from calloc in the default zone, which an
++    // application may replace (Chromium installs PartitionAlloc's zone). Such
++    // a zone reports a larger usable size for the same request, so only a
++    // pointer malloc does not own (size 0) or a smaller block is corrupt.
++    if (rwSize < sizeof(class_rw_t))
+         _objc_fatal("realized class %p has corrupt data pointer %p", cls, rw);
+ #endif
+ }

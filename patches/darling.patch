@@ -1266,17 +1266,25 @@ index f74d9b0c3..655e90d51 100644
  #endif /* AUDIOHARDWAREIMPL_H */
 -
 diff --git a/src/CoreAudio/CoreAudio/CMakeLists.txt b/src/CoreAudio/CoreAudio/CMakeLists.txt
-index 5f10c2f92..089c94127 100644
+index 5f10c2f9..c595a9e7 100644
 --- a/src/CoreAudio/CoreAudio/CMakeLists.txt
 +++ b/src/CoreAudio/CoreAudio/CMakeLists.txt
-@@ -8,6 +8,7 @@ set(coreaudio_sources
+@@ -8,6 +8,8 @@ set(coreaudio_sources
  	AudioHardware.cpp
      AudioHardwareImpl.cpp
      HostTime.mm
++    AudioHardwareBlocks.mm
 +    AudioConverterShim.c
      pulse/AudioHardwareImplPA.cpp
      pulse/AudioHardwareImplPAInput.cpp
      pulse/AudioHardwareImplPAOutput.cpp
+@@ -30,5 +32,6 @@ add_framework(CoreAudio
+         system
+         cxx
+         CoreFoundation
++        objc
+         pulse
+ )
 diff --git a/src/CoreAudio/CoreAudio/HostTime.mm b/src/CoreAudio/CoreAudio/HostTime.mm
 index 879fb48a1..fb99e99d1 100644
 --- a/src/CoreAudio/CoreAudio/HostTime.mm
@@ -3675,7 +3683,7 @@ index 0b927c40e..d186494e7 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/src/frameworks/CoreMedia/src/CoreMedia.c b/src/frameworks/CoreMedia/src/CoreMedia.c
-index 3d76e8103..4a975959c 100644
+index 3d76e810..a1d5c9af 100644
 --- a/src/frameworks/CoreMedia/src/CoreMedia.c
 +++ b/src/frameworks/CoreMedia/src/CoreMedia.c
 @@ -26,6 +26,32 @@
@@ -3711,6 +3719,13 @@ index 3d76e8103..4a975959c 100644
  static int verbose = 0;
  
  __attribute__((constructor))
+@@ -8082,3 +8108,6 @@ void* fig_post_a_symptom_guts(void) {
+     if (verbose) puts("STUB: fig_post_a_symptom_guts called");
+     return NULL;
+ }
++
++/* darling-lol: linked by the current Riot Client. */
++const CFStringRef kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding = CFSTR("ResetDecoderBeforeDecoding");
 diff --git a/src/frameworks/CoreServices/CMakeLists.txt b/src/frameworks/CoreServices/CMakeLists.txt
 index 3fac3be55..aae2c7435 100644
 --- a/src/frameworks/CoreServices/CMakeLists.txt
@@ -4062,7 +4077,7 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..99e0a5494 100644
+index 3e9cba22..cfe16ed2 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 @@ -1,38 +1,887 @@
@@ -5145,8 +5160,33 @@ index 3e9cba226..99e0a5494 100644
  	return kCVReturnSuccess;
  }
  
+@@ -150,3 +1109,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
+ 	CGDisplayModeRelease(mode);
+ 	return time;
+ }
++
++// darling-lol: linked by the current Riot Client. Report the current host time
++// on the same 60 Hz video timeline the output callback uses.
++CVReturn CVDisplayLinkGetCurrentTime(CVDisplayLinkRef displayLink, CVTimeStamp* outTime)
++{
++	if (displayLink == NULL || outTime == NULL)
++		return kCVReturnInvalidArgument;
++	struct mach_timebase_info timebase;
++	mach_timebase_info(&timebase);
++	uint64_t periodMach = (1000000000ull / 60ull) * timebase.denom / timebase.numer;
++	uint64_t hostTime = mach_absolute_time();
++	memset(outTime, 0, sizeof(*outTime));
++	outTime->hostTime = hostTime;
++	outTime->videoTime = hostTime / periodMach;
++	outTime->videoTimeScale = 60;
++	outTime->videoRefreshPeriod = 1;
++	outTime->rateScalar = 1.0;
++	outTime->flags = kCVTimeStampHostTimeValid | kCVTimeStampVideoTimeValid |
++	    kCVTimeStampVideoRefreshPeriodValid | kCVTimeStampRateScalarValid;
++	return kCVReturnSuccess;
++}
 diff --git a/src/frameworks/CoreVideo/src/constants.c b/src/frameworks/CoreVideo/src/constants.c
-index 02f06704e..5d4fd4b2d 100644
+index 02f06704..1bb9021e 100644
 --- a/src/frameworks/CoreVideo/src/constants.c
 +++ b/src/frameworks/CoreVideo/src/constants.c
 @@ -42,6 +42,11 @@ const CFStringRef kCVImageBufferTransferFunction_Linear = CFSTR("Linear");
@@ -5161,6 +5201,15 @@ index 02f06704e..5d4fd4b2d 100644
  
  const CFStringRef kCVPixelBufferIOSurfacePropertiesKey = CFSTR("IOSurfaceProperties");
  const CFStringRef kCVPixelBufferOpenGLCompatibilityKey = CFSTR("OpenGLCompatibility");
+@@ -53,3 +58,8 @@ const CFStringRef kCVPixelBufferWidthKey = CFSTR("Width");
+ const CFStringRef kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey = CFSTR("IOSurfaceOpenGLTextureCompatibility");
+ const CFStringRef kCVPixelBufferPoolMaximumBufferAgeKey = CFSTR("MaximumBufferAge");
+ const CFStringRef kCVPixelBufferPoolMinimumBufferCountKey = CFSTR("MinimumBufferCount");
++
++/* darling-lol: linked by the current Riot Client. */
++const CFStringRef kCVImageBufferAmbientViewingEnvironmentKey = CFSTR("AmbientViewingEnvironment");
++const CFStringRef kCVImageBufferColorPrimaries_DCI_P3 = CFSTR("DCI_P3");
++const CFStringRef kCVImageBufferColorPrimaries_P3_D65 = CFSTR("P3_D65");
 diff --git a/src/frameworks/CryptoTokenKit/CMakeLists.txt b/src/frameworks/CryptoTokenKit/CMakeLists.txt
 index 6260e9b35..c02096039 100644
 --- a/src/frameworks/CryptoTokenKit/CMakeLists.txt
@@ -7763,10 +7812,10 @@ index 68242ee34..a9108c9c1 100644
 +
  #endif
 diff --git a/src/frameworks/VideoToolbox/src/VTCompressionProperties.c b/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
-index 9e363904e..774557a64 100644
+index 9e363904..c019a74b 100644
 --- a/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
 +++ b/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
-@@ -30,3 +30,9 @@ const CFStringRef kVTCompressionPropertyKey_MaxFrameDelayCount = CFSTR("MaxFrame
+@@ -30,3 +30,14 @@ const CFStringRef kVTCompressionPropertyKey_MaxFrameDelayCount = CFSTR("MaxFrame
  const CFStringRef kVTCompressionPropertyKey_ExpectedFrameRate = CFSTR("ExpectedFrameRate");
  
  const CFStringRef kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = CFSTR("RequireHardwareAcceleratedVideoEncoder");
@@ -7776,6 +7825,11 @@ index 9e363904e..774557a64 100644
 +const CFStringRef kVTCompressionPropertyKey_TransferFunction = CFSTR("TransferFunction");
 +const CFStringRef kVTCompressionPropertyKey_YCbCrMatrix = CFSTR("YCbCrMatrix");
 +const CFStringRef kVTVideoEncoderSpecification_EnableLowLatencyRateControl = CFSTR("EnableLowLatencyRateControl");
++
++/* darling-lol: linked by the current Riot Client. */
++const CFStringRef kVTCompressionPropertyKey_EncoderID = CFSTR("EncoderID");
++const CFStringRef kVTEncodeFrameOptionKey_BaseFrameQP = CFSTR("BaseFrameQP");
++const CFStringRef kVTProfileLevel_HEVC_Main_AutoLevel = CFSTR("HEVC_Main_AutoLevel");
 diff --git a/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h b/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h
 index 62d827aa2..15383581b 100644
 --- a/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h
@@ -7837,7 +7891,7 @@ index 9a489b386..9fe56cc3f 100644
  
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
 diff --git a/src/libsandbox/src/sandbox.c b/src/libsandbox/src/sandbox.c
-index 5af5298aa..fb59ee5d1 100644
+index 5af5298a..13f72be5 100644
 --- a/src/libsandbox/src/sandbox.c
 +++ b/src/libsandbox/src/sandbox.c
 @@ -21,6 +21,8 @@
@@ -7849,7 +7903,7 @@ index 5af5298aa..fb59ee5d1 100644
  
  static int verbose = 0;
  
-@@ -29,63 +31,105 @@ static void initme(void) {
+@@ -29,66 +31,140 @@ static void initme(void) {
      verbose = getenv("STUB_VERBOSE") != NULL;
  }
  
@@ -7857,76 +7911,102 @@ index 5af5298aa..fb59ee5d1 100644
 +/* darling-lol: SeatbeltExtensions token family. Chromium's seatbelt client
 + * issues/consumes/releases these around sandboxed child setup; without
 + * enforcement we hand out dummy nonzero tokens and accept everything.
-+ * (These live in libsandbox.dylib on macOS, hence here and not in
-+ * libsystem_sandbox.) */
-+static int64_t sandbox_extension_next_token = 1;
-+
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags)
++ * Issuing returns a token the caller frees, consuming returns a positive
++ * handle. Older clients link these from libsandbox, newer ones from
++ * libsystem_sandbox, which has the same functions (see sandbox.h). */
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
  {
 -    if (verbose) puts("STUB: sandbox_apply called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_extension_issue_file called");
-+    (void)path; (void)flags;
-+    return sandbox_extension_next_token++;
++    (void)extension_class; (void)path; (void)flags;
++    return strdup("darling-lol-sandbox-extension");
  }
  
 -void* sandbox_apply_container(void)
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags)
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags)
  {
 -    if (verbose) puts("STUB: sandbox_apply_container called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_extension_issue_mach called");
-+    (void)name; (void)flags;
-+    return sandbox_extension_next_token++;
++    (void)extension_class; (void)name; (void)flags;
++    return strdup("darling-lol-sandbox-extension");
  }
  
 -void* sandbox_compile_entitlements(void)
-+int sandbox_extension_consume(int64_t token)
++int64_t sandbox_extension_consume(const char *extension_token)
  {
 -    if (verbose) puts("STUB: sandbox_compile_entitlements called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_extension_consume called");
-+    (void)token;
-+    return 0;
- }
- 
--void* sandbox_compile_file(void)
-+int sandbox_extension_release(int64_t token)
++    return extension_token != NULL ? 1 : -1;
++}
++
++int sandbox_extension_release(int64_t extension_handle)
 +{
 +    if (verbose) puts("STUB: sandbox_extension_release called");
-+    (void)token;
++    (void)extension_handle;
 +    return 0;
 +}
 +
 +/* darling-lol: compile/apply family. No seatbelt compiler exists, so
-+ * "compiling" a profile yields a dummy handle and applying succeeds.
-+ * Signatures match Apple's (the old stubs had wrong shapes). */
++ * "compiling" a profile yields a placeholder and applying succeeds.
++ * Signatures match Apple's (the old stubs had wrong shapes), including the
++ * parameter set the compile calls take.
++ *
++ * A compiled profile has Apple's layout: Chromium compiles the policy in the
++ * browser, copies data/size into the message to the child and frees the
++ * profile. The old stub returned a short string, so that copy read past it and
++ * took heap contents as the size. */
++struct darling_sandbox_profile {
++    char *builtin;
++    unsigned char *data;
++    size_t size;
++};
 +
-+void* sandbox_compile_string(const char *profile, char **errorbuf)
++static const char darling_compiled_profile[] = "darling-sandbox-stub";
++
++static void *darling_sandbox_profile_create(void)
++{
++    struct darling_sandbox_profile *profile = calloc(1, sizeof(*profile));
++    if (profile == NULL)
++        return NULL;
++    profile->data = malloc(sizeof(darling_compiled_profile));
++    if (profile->data == NULL) {
++        free(profile);
++        return NULL;
++    }
++    memcpy(profile->data, darling_compiled_profile, sizeof(darling_compiled_profile));
++    profile->size = sizeof(darling_compiled_profile);
++    return profile;
++}
++
++void* sandbox_compile_string(const char *profile, void *params, char **errorbuf)
 +{
 +    if (verbose) puts("STUB: sandbox_compile_string called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)profile;
-+    return strdup("darling-sandbox-stub");
-+}
-+
-+void* sandbox_compile_file(const char *path, char **errorbuf)
++    (void)profile; (void)params;
++    return darling_sandbox_profile_create();
+ }
+ 
+-void* sandbox_compile_file(void)
++void* sandbox_compile_file(const char *path, void *params, char **errorbuf)
  {
      if (verbose) puts("STUB: sandbox_compile_file called");
 -    return NULL;
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)path;
-+    return strdup("darling-sandbox-stub");
++    (void)path; (void)params;
++    return darling_sandbox_profile_create();
  }
  
 -void* sandbox_compile_named(void)
-+void* sandbox_compile_named(const char *name, char **errorbuf)
++void* sandbox_compile_named(const char *name, void *params, char **errorbuf)
  {
      if (verbose) puts("STUB: sandbox_compile_named called");
 -    return NULL;
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)name;
-+    return strdup("darling-sandbox-stub");
++    (void)name; (void)params;
++    return darling_sandbox_profile_create();
  }
  
 -void* sandbox_compile_string(void)
@@ -7937,7 +8017,7 @@ index 5af5298aa..fb59ee5d1 100644
 +    if (verbose) puts("STUB: sandbox_compile_entitlements called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
 +    (void)entitlements;
-+    return strdup("darling-sandbox-stub");
++    return darling_sandbox_profile_create();
  }
  
 -void* sandbox_container_paths_iterate_items(void)
@@ -7954,32 +8034,66 @@ index 5af5298aa..fb59ee5d1 100644
 +void sandbox_free_profile(void *handle)
  {
 -    if (verbose) puts("STUB: sandbox_create_params called");
+-    return NULL;
 +    if (verbose) puts("STUB: sandbox_free_profile called");
-+    free(handle);
-+}
-+
++    struct darling_sandbox_profile *profile = handle;
++    if (profile != NULL)
++        free(profile->data);
++    free(profile);
+ }
+ 
+-void* sandbox_free_params(void)
 +void* sandbox_apply_container(void)
-+{
+ {
+-    if (verbose) puts("STUB: sandbox_free_params called");
 +    if (verbose) puts("STUB: sandbox_apply_container called");
      return NULL;
  }
  
--void* sandbox_free_params(void)
+-void* sandbox_free_profile(void)
 +void* sandbox_container_paths_iterate_items(void)
  {
--    if (verbose) puts("STUB: sandbox_free_params called");
+-    if (verbose) puts("STUB: sandbox_free_profile called");
 +    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
      return NULL;
  }
  
--void* sandbox_free_profile(void)
++/* darling-lol: profile parameters (Chromium's seatbelt passes them to
++ * sandbox_compile_string). Nothing reads them, but a NULL parameter set is a
++ * failure to the caller, so hand out an empty one. */
 +void* sandbox_create_params(void)
- {
--    if (verbose) puts("STUB: sandbox_free_profile called");
++{
 +    if (verbose) puts("STUB: sandbox_create_params called");
++    return calloc(1, sizeof(void *));
++}
++
+ void* sandbox_inspect_pid(void)
+ {
+     if (verbose) puts("STUB: sandbox_inspect_pid called");
+@@ -101,10 +177,11 @@ void* sandbox_inspect_smemory(void)
      return NULL;
  }
  
+-void* sandbox_set_param(void)
++int sandbox_set_param(void *params, const char *key, const char *value)
+ {
+     if (verbose) puts("STUB: sandbox_set_param called");
+-    return NULL;
++    (void)key; (void)value;
++    return params != NULL ? 0 : -1;
+ }
+ 
+ void* sandbox_set_user_state_item(void)
+@@ -136,3 +213,9 @@ void* sandbox_user_state_iterate_items(void)
+     if (verbose) puts("STUB: sandbox_user_state_iterate_items called");
+     return NULL;
+ }
++
++void sandbox_free_params(void *params)
++{
++    if (verbose) puts("STUB: sandbox_free_params called");
++    free(params);
++}
 diff --git a/src/libsystem_coreservices/dirhelper.c b/src/libsystem_coreservices/dirhelper.c
 index f22f8213d..e7fbdc92e 100644
 --- a/src/libsystem_coreservices/dirhelper.c
@@ -8028,7 +8142,7 @@ index f22f8213d..e7fbdc92e 100644
  				snprintf(p, limit, "%s/.cache/%s%s", home, dir_suffix ? dir_suffix : "", dir_suffix ? "/" : "");
  			else
 diff --git a/src/sandbox/sandbox.c b/src/sandbox/sandbox.c
-index f48cceb9e..9afa967db 100644
+index f48cceb9..a41829d9 100644
 --- a/src/sandbox/sandbox.c
 +++ b/src/sandbox/sandbox.c
 @@ -10,7 +10,13 @@ const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT = SANDBOX_FILTER_NONE;
@@ -8161,21 +8275,57 @@ index f48cceb9e..9afa967db 100644
  	return -1;
  }
  
+@@ -173,4 +213,34 @@ int rootless_check_datavault_flag(const char* path, const char* storage_class) {
+ 
+ int sandbox_query_approval_policy_for_path(const char* query, const char* path, char **approval) {
+ 	return -1;
+-}
+\ No newline at end of file
++}
++
++/* darling-lol: Chromium's seatbelt extension calls, with the libsystem_sandbox
++ * signatures it links against. Nothing is enforced: issuing returns a token
++ * the caller frees, consuming returns a positive handle. */
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
++{
++	return strdup("darling-lol-sandbox-extension");
++}
++
++int64_t sandbox_extension_consume(const char *extension_token)
++{
++	return extension_token != NULL ? 1 : -1;
++}
++
++int sandbox_extension_release(int64_t extension_handle)
++{
++	return 0;
++}
++
++/* darling-lol: process responsibility (libquarantine on macOS). Every process is
++ * responsible for itself here. */
++pid_t responsibility_get_pid_responsible_for_pid(pid_t pid)
++{
++	return pid;
++}
++
++int responsibility_spawnattrs_setdisclaim(void *attrs, int disclaim)
++{
++	return 0;
++}
 diff --git a/src/sandbox/sandbox.h b/src/sandbox/sandbox.h
-index 6fa2d088c..655554284 100644
+index 6fa2d088..90c3b5fe 100644
 --- a/src/sandbox/sandbox.h
 +++ b/src/sandbox/sandbox.h
-@@ -161,6 +161,14 @@ int sandbox_note(const char *note);
+@@ -161,6 +161,13 @@ int sandbox_note(const char *note);
  int sandbox_suspend(pid_t pid);
  int sandbox_unsuspend(void);
  
-+/* darling-lol: SeatbeltExtensions token family (used by Chromium).
-+ * No enforcement exists, so issue dummy nonzero tokens and accept
-+ * consume/release as no-ops. */
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags);
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags);
-+int sandbox_extension_consume(int64_t token);
-+int sandbox_extension_release(int64_t token);
++/* darling-lol: SeatbeltExtensions token family (used by Chromium), with the
++ * signatures Chromium links against from libSystem. No enforcement exists. */
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags);
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags);
++int64_t sandbox_extension_consume(const char *extension_token);
++int sandbox_extension_release(int64_t extension_handle);
 +
  int sandbox_issue_extension(const char *path, char **ext_token);
  int sandbox_issue_fs_extension(const char *path, uint64_t flags, char **ext_token);
@@ -11465,3 +11615,1496 @@ index a68739ff..5c8eb836 100644
  }
  
  size_t
+diff --git a/src/frameworks/CMakeLists.txt b/src/frameworks/CMakeLists.txt
+index ea2f9c07..d486fbb0 100644
+--- a/src/frameworks/CMakeLists.txt
++++ b/src/frameworks/CMakeLists.txt
+@@ -63,6 +63,8 @@ if (COMPONENT_dev_gui_stubs_common)
+ 	add_subdirectory(ScriptingBridge)
+ 	add_subdirectory(SecurityInterface)
+ 	add_subdirectory(ServiceManagement)
++	add_subdirectory(QuickLookUI)
++	add_subdirectory(Accessibility)
+ 	add_subdirectory(Quartz)
+ 	add_subdirectory(QuickLook)
+ 	add_subdirectory(SceneKit)
+@@ -115,6 +117,9 @@ if (COMPONENT_gui_stubs)
+ 	add_subdirectory(IOBluetoothUI)
+ 	add_subdirectory(MapKit)
+ 	add_subdirectory(MediaAccessibility)
++	add_subdirectory(MediaPlayer)
++	add_subdirectory(CoreHaptics)
++	add_subdirectory(CoreML)
+ 	add_subdirectory(MediaToolbox)
+     add_subdirectory(Message)
+ 	add_subdirectory(ModelIO)
+diff --git a/src/frameworks/Quartz/CMakeLists.txt b/src/frameworks/Quartz/CMakeLists.txt
+index 30bbc82c..c1e7b2bf 100644
+--- a/src/frameworks/Quartz/CMakeLists.txt
++++ b/src/frameworks/Quartz/CMakeLists.txt
+@@ -32,8 +32,6 @@ add_framework(Quartz
+ 
+ 	SOURCES
+ 		src/Quartz.c
+-		QuickLookUI/src/QLPreviewPanel.m
+-		QuickLookUI/src/QLPreviewView.m
+ 
+ 	DEPENDENCIES
+ 		system
+@@ -55,7 +53,7 @@ else()
+ 	set(QuartzCore_BUILD ${CMAKE_BINARY_DIR}/src/frameworks/dev-stubs/QuartzCore/QuartzCore)
+ endif()
+ 
+-# Ideally would be done through a nested QuickLookUI framework
++reexport(Quartz QuickLookUI ${CMAKE_BINARY_DIR}/src/frameworks/QuickLookUI/QuickLookUI)
+ reexport(Quartz QuickLook ${QuickLook_BUILD})
+ reexport(Quartz ImageKit ${ImageKit_BUILD})
+ reexport(Quartz QuartzComposer ${QuartzComposer_BUILD})
+diff --git a/src/frameworks/Accessibility/CMakeLists.txt b/src/frameworks/Accessibility/CMakeLists.txt
+new file mode 100644
+index 00000000..41326a47
+--- /dev/null
++++ b/src/frameworks/Accessibility/CMakeLists.txt
+@@ -0,0 +1,23 @@
++project(Accessibility)
++
++set(FRAMEWORK_VERSION "A")
++
++add_framework(Accessibility
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++    TARGET_NAME AccessibilityFramework
++
++    SOURCES
++        src/Accessibility.c
++        src/AXCustomContent.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
++
++# The AXUIElement/AXObserver APIs live in ApplicationServices/HIServices.
++# Re-export them under the framework name newer Electron builds link against.
++reexport(AccessibilityFramework ApplicationServices ${CMAKE_BINARY_DIR}/src/frameworks/ApplicationServices/ApplicationServices)
+diff --git a/src/frameworks/Accessibility/src/Accessibility.c b/src/frameworks/Accessibility/src/Accessibility.c
+new file mode 100644
+index 00000000..122ac8ad
+--- /dev/null
++++ b/src/frameworks/Accessibility/src/Accessibility.c
+@@ -0,0 +1,9 @@
++/*
++ * Accessibility.framework compatibility shim.
++ *
++ * Darling implements the AXUIElement and AXObserver entry points in
++ * ApplicationServices/HIServices. This framework re-exports them under the
++ * name newer macOS applications link against.
++ */
++
++int __darling_accessibility_compatibility = 0;
+diff --git a/src/frameworks/MediaPlayer/CMakeLists.txt b/src/frameworks/MediaPlayer/CMakeLists.txt
+new file mode 100644
+index 00000000..a943c269
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/CMakeLists.txt
+@@ -0,0 +1,22 @@
++project(MediaPlayer)
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(MediaPlayer
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/MediaPlayer"
++)
++
++add_framework(MediaPlayer
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/MediaPlayer.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
+diff --git a/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
+new file mode 100644
+index 00000000..1b13bcf1
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
+@@ -0,0 +1,28 @@
++#ifndef _MEDIAPLAYER_H_
++#define _MEDIAPLAYER_H_
++
++#import <Foundation/Foundation.h>
++
++extern NSString * const MPMediaItemPropertyAlbumTitle;
++extern NSString * const MPMediaItemPropertyArtist;
++extern NSString * const MPMediaItemPropertyArtwork;
++extern NSString * const MPMediaItemPropertyPlaybackDuration;
++extern NSString * const MPMediaItemPropertyTitle;
++extern NSString * const MPNowPlayingInfoPropertyCurrentPlaybackDate;
++extern NSString * const MPNowPlayingInfoPropertyElapsedPlaybackTime;
++extern NSString * const MPNowPlayingInfoPropertyPlaybackRate;
++
++@interface MPMediaItemArtwork : NSObject
++@end
++
++@interface MPNowPlayingInfoCenter : NSObject
+++ (instancetype)defaultCenter;
++@property (nonatomic, copy) NSDictionary *nowPlayingInfo;
++@property (nonatomic) NSUInteger playbackState;
++@end
++
++@interface MPRemoteCommandCenter : NSObject
+++ (instancetype)sharedCommandCenter;
++@end
++
++#endif /* _MEDIAPLAYER_H_ */
+diff --git a/src/frameworks/MediaPlayer/src/MediaPlayer.m b/src/frameworks/MediaPlayer/src/MediaPlayer.m
+new file mode 100644
+index 00000000..0d6b8269
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/src/MediaPlayer.m
+@@ -0,0 +1,100 @@
++/*
++ * Minimal MediaPlayer.framework compatibility surface used by Electron.
++ * The client only needs the now-playing metadata constants and classes.
++ */
++
++#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
++
++/* darling-lol: a message these classes do not implement returns nil or 0
++ * instead of raising, so callers that probe the frameworks keep running. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_FORWARDING \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); }
++
++NSString * const MPMediaItemPropertyAlbumTitle = @"MPMediaItemPropertyAlbumTitle";
++NSString * const MPMediaItemPropertyArtist = @"MPMediaItemPropertyArtist";
++NSString * const MPMediaItemPropertyArtwork = @"MPMediaItemPropertyArtwork";
++NSString * const MPMediaItemPropertyPlaybackDuration = @"MPMediaItemPropertyPlaybackDuration";
++NSString * const MPMediaItemPropertyTitle = @"MPMediaItemPropertyTitle";
++NSString * const MPNowPlayingInfoPropertyCurrentPlaybackDate = @"MPNowPlayingInfoPropertyCurrentPlaybackDate";
++NSString * const MPNowPlayingInfoPropertyElapsedPlaybackTime = @"MPNowPlayingInfoPropertyElapsedPlaybackTime";
++NSString * const MPNowPlayingInfoPropertyPlaybackRate = @"MPNowPlayingInfoPropertyPlaybackRate";
++
++@interface MPMediaItemArtwork : NSObject
++@end
++@interface MPNowPlayingInfoCenter : NSObject
+++ (instancetype)defaultCenter;
++@property (nonatomic, copy) NSDictionary *nowPlayingInfo;
++@property (nonatomic) NSUInteger playbackState;
++@end
++@interface MPRemoteCommandCenter : NSObject
+++ (instancetype)sharedCommandCenter;
++@end
++
++@implementation MPMediaItemArtwork
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MPNowPlayingInfoCenter
++
++RCLOL_NIL_FORWARDING
++
++/* Electron publishes media metadata here; nothing displays it, so the
++ * properties only keep what was set. */
++@synthesize nowPlayingInfo = _nowPlayingInfo;
++@synthesize playbackState = _playbackState;
++
+++ (instancetype)defaultCenter {
++	static MPNowPlayingInfoCenter *center;
++	static dispatch_once_t once;
++
++	dispatch_once(&once, ^{ center = [MPNowPlayingInfoCenter new]; });
++	return center;
++}
++
++@end
++
++@implementation MPRemoteCommandCenter
++
++RCLOL_NIL_FORWARDING
++
+++ (instancetype)sharedCommandCenter {
++	static MPRemoteCommandCenter *center;
++	static dispatch_once_t once;
++
++	dispatch_once(&once, ^{ center = [MPRemoteCommandCenter new]; });
++	return center;
++}
++
++@end
+diff --git a/src/frameworks/CoreHaptics/CMakeLists.txt b/src/frameworks/CoreHaptics/CMakeLists.txt
+new file mode 100644
+index 00000000..d83c39cc
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/CMakeLists.txt
+@@ -0,0 +1,22 @@
++project(CoreHaptics)
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(CoreHaptics
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/CoreHaptics"
++)
++
++add_framework(CoreHaptics
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/CoreHaptics.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
+diff --git a/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h b/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h
+new file mode 100644
+index 00000000..8d6d3e29
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h
+@@ -0,0 +1,24 @@
++#ifndef _COREHAPTICS_H_
++#define _COREHAPTICS_H_
++
++#import <Foundation/Foundation.h>
++
++extern NSString * const CHHapticDynamicParameterIDHapticIntensityControl;
++extern NSString * const CHHapticDynamicParameterIDHapticSharpnessControl;
++extern NSString * const CHHapticEventParameterIDHapticIntensity;
++extern NSString * const CHHapticEventParameterIDHapticSharpness;
++extern NSString * const CHHapticEventTypeHapticContinuous;
++
++@interface CHHapticDynamicParameter : NSObject
++@end
++
++@interface CHHapticEvent : NSObject
++@end
++
++@interface CHHapticEventParameter : NSObject
++@end
++
++@interface CHHapticPattern : NSObject
++@end
++
++#endif /* _COREHAPTICS_H_ */
+diff --git a/src/frameworks/CoreHaptics/src/CoreHaptics.m b/src/frameworks/CoreHaptics/src/CoreHaptics.m
+new file mode 100644
+index 00000000..f1b0a625
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/src/CoreHaptics.m
+@@ -0,0 +1,77 @@
++/*
++ * Minimal CoreHaptics.framework compatibility surface used by Electron.
++ * Haptic playback is intentionally a no-op under Darling.
++ */
++
++#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
++
++/* darling-lol: a message these classes do not implement returns nil or 0
++ * instead of raising, so callers that probe the frameworks keep running. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_FORWARDING \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); }
++
++NSString * const CHHapticDynamicParameterIDHapticIntensityControl = @"CHHapticDynamicParameterIDHapticIntensityControl";
++NSString * const CHHapticDynamicParameterIDHapticSharpnessControl = @"CHHapticDynamicParameterIDHapticSharpnessControl";
++NSString * const CHHapticEventParameterIDHapticIntensity = @"CHHapticEventParameterIDHapticIntensity";
++NSString * const CHHapticEventParameterIDHapticSharpness = @"CHHapticEventParameterIDHapticSharpness";
++NSString * const CHHapticEventTypeHapticContinuous = @"CHHapticEventTypeHapticContinuous";
++
++@interface CHHapticDynamicParameter : NSObject
++@end
++@interface CHHapticEvent : NSObject
++@end
++@interface CHHapticEventParameter : NSObject
++@end
++@interface CHHapticPattern : NSObject
++@end
++
++@implementation CHHapticDynamicParameter
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation CHHapticEvent
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation CHHapticEventParameter
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation CHHapticPattern
++
++RCLOL_NIL_FORWARDING
++@end
+diff --git a/src/frameworks/CoreML/CMakeLists.txt b/src/frameworks/CoreML/CMakeLists.txt
+new file mode 100644
+index 00000000..9b17784c
+--- /dev/null
++++ b/src/frameworks/CoreML/CMakeLists.txt
+@@ -0,0 +1,22 @@
++project(CoreML)
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(CoreML
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/CoreML"
++)
++
++add_framework(CoreML
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/CoreML.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++)
+diff --git a/src/frameworks/CoreML/include/CoreML/CoreML.h b/src/frameworks/CoreML/include/CoreML/CoreML.h
+new file mode 100644
+index 00000000..b11a4bfa
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/CoreML.h
+@@ -0,0 +1,33 @@
++#ifndef _COREML_H_
++#define _COREML_H_
++
++#import <Foundation/Foundation.h>
++
++@interface MLComputePlan : NSObject
++@end
++
++@interface MLCPUComputeDevice : NSObject
++@end
++
++@interface MLFeatureValue : NSObject
++@end
++
++@interface MLGPUComputeDevice : NSObject
++@end
++
++@interface MLModel : NSObject
++@end
++
++@interface MLModelConfiguration : NSObject
++@end
++
++@interface MLMultiArray : NSObject
++@end
++
++@interface MLNeuralEngineComputeDevice : NSObject
++@end
++
++@interface MLPredictionOptions : NSObject
++@end
++
++#endif /* _COREML_H_ */
+diff --git a/src/frameworks/CoreML/src/CoreML.m b/src/frameworks/CoreML/src/CoreML.m
+new file mode 100644
+index 00000000..d6ffd197
+--- /dev/null
++++ b/src/frameworks/CoreML/src/CoreML.m
+@@ -0,0 +1,107 @@
++/*
++ * Minimal CoreML.framework compatibility surface used by Electron.
++ * Model execution is unavailable under Darling; these objects exist so the
++ * frameworks that weakly probe CoreML can load and bind.
++ */
++
++#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
++
++/* darling-lol: a message these classes do not implement returns nil or 0
++ * instead of raising, so callers that probe the frameworks keep running. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_FORWARDING \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); }
++
++@interface MLComputePlan : NSObject
++@end
++@interface MLCPUComputeDevice : NSObject
++@end
++@interface MLFeatureValue : NSObject
++@end
++@interface MLGPUComputeDevice : NSObject
++@end
++@interface MLModel : NSObject
++@end
++@interface MLModelConfiguration : NSObject
++@end
++@interface MLMultiArray : NSObject
++@end
++@interface MLNeuralEngineComputeDevice : NSObject
++@end
++@interface MLPredictionOptions : NSObject
++@end
++
++@implementation MLComputePlan
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLCPUComputeDevice
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLFeatureValue
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLGPUComputeDevice
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLModel
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLModelConfiguration
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLMultiArray
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLNeuralEngineComputeDevice
++
++RCLOL_NIL_FORWARDING
++@end
++
++@implementation MLPredictionOptions
++
++RCLOL_NIL_FORWARDING
++@end
+diff --git a/src/frameworks/QuickLookUI/CMakeLists.txt b/src/frameworks/QuickLookUI/CMakeLists.txt
+new file mode 100644
+index 00000000..c5b0d39f
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/CMakeLists.txt
+@@ -0,0 +1,26 @@
++project(QuickLookUI)
++
++set(FRAMEWORK_VERSION "A")
++
++include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
++
++generate_sdk_framework(QuickLookUI
++    VERSION ${FRAMEWORK_VERSION}
++    HEADER "include/QuickLookUI"
++)
++
++add_framework(QuickLookUI
++    FAT
++    CURRENT_VERSION
++    VERSION ${FRAMEWORK_VERSION}
++
++    SOURCES
++        src/QLPreviewPanel.m
++        src/QLPreviewView.m
++
++    DEPENDENCIES
++        system
++        objc
++        Foundation
++        AppKit
++)
+diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h
+new file mode 100644
+index 00000000..9a96a849
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/include/QuickLookUI/QuickLookUI.h
+@@ -0,0 +1,12 @@
++#ifndef _QUICKLOOKUI_H_
++#define _QUICKLOOKUI_H_
++
++#import <AppKit/AppKit.h>
++
++@interface QLPreviewPanel : NSPanel
++@end
++
++@interface QLPreviewView : NSView
++@end
++
++#endif /* _QUICKLOOKUI_H_ */
+diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h
+new file mode 100644
+index 00000000..c12753f6
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewPanel.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AppKit/AppKit.h>
++
++@interface QLPreviewPanel : NSPanel
++@end
+diff --git a/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h
+new file mode 100644
+index 00000000..5e251f27
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/include/QuickLookUI/QLPreviewView.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AppKit/AppKit.h>
++
++@interface QLPreviewView : NSView
++@end
+diff --git a/src/frameworks/QuickLookUI/src/QLPreviewPanel.m b/src/frameworks/QuickLookUI/src/QLPreviewPanel.m
+new file mode 100644
+index 00000000..5221fb66
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/src/QLPreviewPanel.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <QuickLookUI/QLPreviewPanel.h>
++
++@implementation QLPreviewPanel
++@end
+diff --git a/src/frameworks/QuickLookUI/src/QLPreviewView.m b/src/frameworks/QuickLookUI/src/QLPreviewView.m
+new file mode 100644
+index 00000000..f247d608
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/src/QLPreviewView.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2019 Lubos Dolezel
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <QuickLookUI/QLPreviewView.h>
++
++@implementation QLPreviewView
++@end
+diff --git a/src/frameworks/AVFAudio/src/AVFAudio.m b/src/frameworks/AVFAudio/src/AVFAudio.m
+index e9910360..9bbab444 100644
+--- a/src/frameworks/AVFAudio/src/AVFAudio.m
++++ b/src/frameworks/AVFAudio/src/AVFAudio.m
+@@ -21,6 +21,7 @@
+ #include <AVFAudio/AVFAudio.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -28,3 +29,50 @@ __attribute__((constructor))
+ static void initme(void) {
+     verbose = getenv("STUB_VERBOSE") != NULL;
+ }
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: speech synthesis symbols linked by the current Riot Client. */
++const float AVSpeechUtteranceDefaultSpeechRate = 0.5f;
++const float AVSpeechUtteranceMaximumSpeechRate = 1.0f;
++
++RCLOL_NIL_STUB_CLASS(AVSpeechSynthesisVoice)
++RCLOL_NIL_STUB_CLASS(AVSpeechSynthesizer)
++RCLOL_NIL_STUB_CLASS(AVSpeechUtterance)
+diff --git a/src/frameworks/AVFoundation/src/AVFoundation.m b/src/frameworks/AVFoundation/src/AVFoundation.m
+index 0c962881..e10101bd 100644
+--- a/src/frameworks/AVFoundation/src/AVFoundation.m
++++ b/src/frameworks/AVFoundation/src/AVFoundation.m
+@@ -21,6 +21,7 @@
+ #include <AVFoundation/AVFoundation.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -93,3 +94,51 @@ void* NSArrayGetRGBAComponents(void) {
+     if (verbose) puts("STUB: NSArrayGetRGBAComponents called");
+     return NULL;
+ }
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: capture symbols linked by the current Riot Client. */
++NSString * const AVCaptureDeviceTypeBuiltInWideAngleCamera = @"AVCaptureDeviceTypeBuiltInWideAngleCamera";
++NSString * const AVCaptureDeviceTypeExternalUnknown = @"AVCaptureDeviceTypeExternalUnknown";
++NSString * const AVVideoCodecTypeJPEG = @"jpeg";
++
++RCLOL_NIL_STUB_CLASS(AVCaptureDeviceDiscoverySession)
++RCLOL_NIL_STUB_CLASS(AVCapturePhotoOutput)
++RCLOL_NIL_STUB_CLASS(AVCapturePhotoSettings)
+diff --git a/src/frameworks/AuthenticationServices/src/ASAuthorization.m b/src/frameworks/AuthenticationServices/src/ASAuthorization.m
+index 4383fef8..cce980d9 100644
+--- a/src/frameworks/AuthenticationServices/src/ASAuthorization.m
++++ b/src/frameworks/AuthenticationServices/src/ASAuthorization.m
+@@ -32,3 +32,10 @@
+ }
+ 
+ @end
++
++/* darling-lol: WebAuthn constants linked by the current Riot Client. */
++NSString * const ASAuthorizationErrorDomain = @"com.apple.AuthenticationServices.AuthorizationError";
++NSString * const ASAuthorizationPublicKeyCredentialAttestationKindNone = @"none";
++NSString * const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceDiscouraged = @"discouraged";
++NSString * const ASAuthorizationPublicKeyCredentialUserVerificationPreferencePreferred = @"preferred";
++NSString * const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceRequired = @"required";
+diff --git a/src/frameworks/Carbon/src/Carbon.c b/src/frameworks/Carbon/src/Carbon.c
+index a49d8c33..a389c5e4 100644
+--- a/src/frameworks/Carbon/src/Carbon.c
++++ b/src/frameworks/Carbon/src/Carbon.c
+@@ -162,3 +162,10 @@ void GetKeys (KeyMap theKeys)
+ {
+ 
+ }
++
++/* darling-lol: linked by the current Riot Client. Darling has no Apple event
++ * dispatch, so report the event as not handled (eventNotHandledErr). */
++OSStatus AEProcessEvent(EventRef inEvent)
++{
++	return -9874;
++}
+diff --git a/src/frameworks/CoreServices/src/AE/stub.c b/src/frameworks/CoreServices/src/AE/stub.c
+index f01373ea..638ce74d 100644
+--- a/src/frameworks/CoreServices/src/AE/stub.c
++++ b/src/frameworks/CoreServices/src/AE/stub.c
+@@ -25,3 +25,47 @@ OSErr AEInstallEventHandler(
+     if (verbose) puts("STUB: AEInstallEventHandler called");
+     return noErr;
+ }
++
++/* darling-lol: Apple event calls linked by the current Riot Client. Darling has
++ * no Apple event transport: events are created empty, carry no parameters and
++ * cannot be sent. */
++static void rclolNullDesc(AEDesc* desc)
++{
++	if (desc != NULL) {
++		desc->descriptorType = 'null';
++		desc->dataHandle = NULL;
++	}
++}
++
++OSErr AECreateAppleEvent(AEEventClass theAEEventClass, AEEventID theAEEventID,
++		const AEAddressDesc* target, AEReturnID returnID, AETransactionID transactionID,
++		AppleEvent* result)
++{
++	rclolNullDesc(result);
++	return -1708; /* errAEEventNotHandled */
++}
++
++OSErr AEGetParamDesc(const AppleEvent* theAppleEvent, AEKeyword theAEKeyword,
++		DescType desiredType, AEDesc* result)
++{
++	rclolNullDesc(result);
++	return -1701; /* errAEDescNotFound */
++}
++
++OSErr AEPutParamDesc(AppleEvent* theAppleEvent, AEKeyword theAEKeyword, const AEDesc* theAEDesc)
++{
++	return noErr;
++}
++
++OSErr AERemoveEventHandler(AEEventClass theAEEventClass, AEEventID theAEEventID,
++		AEEventHandlerUPP handler, Boolean isSysHandler)
++{
++	return noErr;
++}
++
++OSStatus AESendMessage(const AppleEvent* event, AppleEvent* reply, AESendMode sendMode,
++		long timeOutInTicks)
++{
++	rclolNullDesc(reply);
++	return -600; /* procNotFound */
++}
+diff --git a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+index 44c8ac7a..4556baab 100644
+--- a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
++++ b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+@@ -104,3 +104,10 @@ void FSEventStreamUnscheduleFromRunLoop(FSEventStreamRef streamRef, CFRunLoopRef
+ 	[((FSEventsImpl*) streamRef) unscheduleWithRunLoop: runLoop
+ 												mode: runLoopMode];
+ }
++
++/* darling-lol: linked by the current Riot Client. Streams start "now" here,
++ * so report the sentinel that means the same thing to FSEventStreamCreate. */
++FSEventStreamEventId FSEventsGetCurrentEventId(void)
++{
++	return kFSEventStreamEventIdSinceNow;
++}
+diff --git a/src/frameworks/CoreServices/src/SharedFileList/constants.c b/src/frameworks/CoreServices/src/SharedFileList/constants.c
+index 3e1f4fb5..d33431b3 100644
+--- a/src/frameworks/CoreServices/src/SharedFileList/constants.c
++++ b/src/frameworks/CoreServices/src/SharedFileList/constants.c
+@@ -23,3 +23,45 @@ struct OpaqueLSSharedFileListItemRef {};
+ static struct OpaqueLSSharedFileListItemRef _insertItemLast = { };
+ 
+ LSSharedFileListItemRef kLSSharedFileListItemLast = &_insertItemLast;
++
++/* darling-lol: login-item list calls linked by the current Riot Client. Darling
++ * has no shared file lists: creation fails, which callers already handle. */
++typedef struct OpaqueLSSharedFileListRef *LSSharedFileListRef;
++
++LSSharedFileListRef LSSharedFileListCreate(CFAllocatorRef inAllocator, CFStringRef inListType,
++		CFTypeRef listOptions)
++{
++	return NULL;
++}
++
++CFArrayRef LSSharedFileListCopySnapshot(LSSharedFileListRef inList, UInt32* outSnapshotSeed)
++{
++	if (outSnapshotSeed != NULL)
++		*outSnapshotSeed = 0;
++	return NULL;
++}
++
++LSSharedFileListItemRef LSSharedFileListInsertItemURL(LSSharedFileListRef inList,
++		LSSharedFileListItemRef insertAfterThisItem, CFStringRef inDisplayName, void* inIconRef,
++		CFURLRef inURL, CFDictionaryRef inPropertiesToSet, CFArrayRef inPropertiesToClear)
++{
++	return NULL;
++}
++
++CFTypeRef LSSharedFileListItemCopyProperty(LSSharedFileListItemRef inItem, CFStringRef inPropertyName)
++{
++	return NULL;
++}
++
++CFURLRef LSSharedFileListItemCopyResolvedURL(LSSharedFileListItemRef inItem, UInt32 inFlags,
++		CFErrorRef* outError)
++{
++	if (outError != NULL)
++		*outError = NULL;
++	return NULL;
++}
++
++OSStatus LSSharedFileListItemRemove(LSSharedFileListRef inList, LSSharedFileListItemRef inItem)
++{
++	return -10810; /* kLSUnknownErr */
++}
+diff --git a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+index 5883ade5..ee5fb077 100644
+--- a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
++++ b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+@@ -9,3 +9,7 @@ Boolean _CSCheckFix(CFStringRef str)
+ 	return 0;
+ }
+ 
++// darling-lol: linked by the current Riot Client; there are no fixes to disable.
++extern "C" void _CSCheckFixDisable(void)
++{
++}
+diff --git a/src/frameworks/CoreVideo/src/stubs.c b/src/frameworks/CoreVideo/src/stubs.c
+index f82aadb0..a9e61c2f 100644
+--- a/src/frameworks/CoreVideo/src/stubs.c
++++ b/src/frameworks/CoreVideo/src/stubs.c
+@@ -64,3 +64,101 @@ void* CVPixelBufferUnlockBaseAddress(void)
+ 	printf("STUB: %s\n", __PRETTY_FUNCTION__);
+ 	return NULL;
+ }
++
++/* darling-lol: pixel buffer calls linked by the current Riot Client. Darling
++ * creates no pixel buffers or pools, so creation reports kCVReturnUnsupported and
++ * the accessors describe an empty buffer. */
++#include <stdint.h>
++#include <stdbool.h>
++
++#define RCLOL_CV_UNSUPPORTED (-6663)
++
++struct rclol_cgrect { double x, y, width, height; };
++
++const void* CVBufferCopyAttachment(const void* buffer, const void* key, uint32_t* attachmentMode)
++{
++	if (attachmentMode != NULL)
++		*attachmentMode = 0;
++	return NULL;
++}
++
++bool CVBufferHasAttachment(const void* buffer, const void* key)
++{
++	return false;
++}
++
++void CVBufferSetAttachment(const void* buffer, const void* key, const void* value, uint32_t attachmentMode)
++{
++}
++
++struct rclol_cgrect CVImageBufferGetCleanRect(const void* imageBuffer)
++{
++	struct rclol_cgrect rect = { 0, 0, 0, 0 };
++	return rect;
++}
++
++int32_t CVPixelBufferCreateWithIOSurface(const void* allocator, const void* surface,
++		const void* pixelBufferAttributes, void** pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++size_t CVPixelBufferGetBytesPerRow(const void* pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetDataSize(const void* pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetHeightOfPlane(const void* pixelBuffer, size_t planeIndex)
++{
++	return 0;
++}
++
++uint32_t CVPixelBufferGetPixelFormatType(const void* pixelBuffer)
++{
++	return 0;
++}
++
++/* No object ever has this type, so a CFGetTypeID comparison never matches. */
++unsigned long CVPixelBufferGetTypeID(void)
++{
++	return 0;
++}
++
++bool CVPixelBufferIsPlanar(const void* pixelBuffer)
++{
++	return false;
++}
++
++int32_t CVPixelBufferPoolCreate(const void* allocator, const void* poolAttributes,
++		const void* pixelBufferAttributes, void** poolOut)
++{
++	if (poolOut != NULL)
++		*poolOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++int32_t CVPixelBufferPoolCreatePixelBuffer(const void* allocator, const void* pool, void** pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++int32_t CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(const void* allocator, const void* pool,
++		const void* auxAttributes, void** pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++void CVPixelBufferPoolFlush(const void* pool, uint64_t options)
++{
++}
+diff --git a/src/frameworks/GameController/src/GameController.m b/src/frameworks/GameController/src/GameController.m
+index 7920f73c..2b7f4682 100644
+--- a/src/frameworks/GameController/src/GameController.m
++++ b/src/frameworks/GameController/src/GameController.m
+@@ -21,6 +21,7 @@
+ #include <GameController/GameController.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -130,3 +131,56 @@ void* threadRunLoopSourceCallback(void)
+     if (verbose) puts("STUB: threadRunLoopSourceCallback called");
+     return NULL;
+ }
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: gamepad symbols linked by the current Riot Client. */
++NSString * const GCControllerDidConnectNotification = @"GCControllerDidConnectNotification";
++NSString * const GCControllerDidDisconnectNotification = @"GCControllerDidDisconnectNotification";
++const float GCHapticDurationInfinite = __builtin_inff();
++NSString * const GCHapticsLocalityDefault = @"Default";
++NSString * const GCHapticsLocalityLeftHandle = @"LeftHandle";
++NSString * const GCHapticsLocalityLeftTrigger = @"LeftTrigger";
++NSString * const GCHapticsLocalityRightHandle = @"RightHandle";
++NSString * const GCHapticsLocalityRightTrigger = @"RightTrigger";
++
++RCLOL_NIL_STUB_CLASS(GCDualSenseGamepad)
++RCLOL_NIL_STUB_CLASS(GCDualShockGamepad)
++RCLOL_NIL_STUB_CLASS(GCXboxGamepad)
+diff --git a/src/frameworks/UserNotifications/src/UserNotifications.m b/src/frameworks/UserNotifications/src/UserNotifications.m
+index 70f527e8..d049335e 100644
+--- a/src/frameworks/UserNotifications/src/UserNotifications.m
++++ b/src/frameworks/UserNotifications/src/UserNotifications.m
+@@ -232,3 +232,6 @@ void* un_kCMTimeInvalid(void)
+     if (verbose) puts("STUB: un_kCMTimeInvalid called");
+     return NULL;
+ }
++
++/* darling-lol: linked by the current Riot Client. */
++NSString * const UNNotificationAttachmentOptionsTypeHintKey = @"UNNotificationAttachmentOptionsTypeHintKey";
+diff --git a/src/frameworks/VideoToolbox/src/VideoToolbox.m b/src/frameworks/VideoToolbox/src/VideoToolbox.m
+index 70570c90..9f7822e9 100644
+--- a/src/frameworks/VideoToolbox/src/VideoToolbox.m
++++ b/src/frameworks/VideoToolbox/src/VideoToolbox.m
+@@ -1533,3 +1533,9 @@ void* VTXPCMessageSetVideoFormatDescription(void)
+     if (verbose) puts("STUB: VTXPCMessageSetVideoFormatDescription called");
+     return NULL;
+ }
++
++/* darling-lol: linked by the current Riot Client. Darling has no supplemental
++ * decoders to register. */
++void VTRegisterSupplementalVideoDecoderIfAvailable(uint32_t codecType)
++{
++}
+diff --git a/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm b/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm
+new file mode 100644
+index 00000000..02fb335d
+--- /dev/null
++++ b/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm
+@@ -0,0 +1,167 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// darling-lol: block-based property listeners and CATapDescription, linked by
++// the current Riot Client's Electron. The listeners are built on the
++// function-pointer API: each registration owns a copy of the block and the queue
++// it is delivered on.
++
++#include <CoreAudio/AudioHardware.h>
++#include <dispatch/dispatch.h>
++#include <Block.h>
++#include <stdlib.h>
++#include <string.h>
++#include <mutex>
++#include <vector>
++#import <objc/NSObject.h>
++#import <objc/runtime.h>
++
++namespace
++{
++
++struct BlockListener
++{
++	AudioObjectID object;
++	AudioObjectPropertyAddress address;
++	dispatch_queue_t queue;
++	AudioObjectPropertyListenerBlock block;
++};
++
++std::mutex g_listenersLock;
++std::vector<BlockListener*> g_listeners;
++
++bool sameAddress(const AudioObjectPropertyAddress& a, const AudioObjectPropertyAddress& b)
++{
++	return a.mSelector == b.mSelector && a.mScope == b.mScope && a.mElement == b.mElement;
++}
++
++OSStatus deliverToBlock(AudioObjectID inObjectID, UInt32 inNumberAddresses,
++		const AudioObjectPropertyAddress* inAddresses, void* inClientData)
++{
++	BlockListener* listener = static_cast<BlockListener*>(inClientData);
++	AudioObjectPropertyListenerBlock block = listener->block;
++
++	if (listener->queue == NULL)
++	{
++		block(inNumberAddresses, inAddresses);
++		return noErr;
++	}
++
++	// The addresses only live for this call; the block runs later on its queue.
++	size_t size = inNumberAddresses * sizeof(AudioObjectPropertyAddress);
++	AudioObjectPropertyAddress* copy = static_cast<AudioObjectPropertyAddress*>(malloc(size ? size : 1));
++	if (copy == NULL)
++		return kAudioHardwareUnspecifiedError;
++	memcpy(copy, inAddresses, size);
++	dispatch_async(listener->queue, ^{
++		block(inNumberAddresses, copy);
++		free(copy);
++	});
++	return noErr;
++}
++
++}
++
++extern "C" OSStatus AudioObjectAddPropertyListenerBlock(AudioObjectID inObjectID,
++		const AudioObjectPropertyAddress* inAddress, dispatch_queue_t inDispatchQueue,
++		AudioObjectPropertyListenerBlock inListener)
++{
++	if (inAddress == NULL || inListener == NULL)
++		return kAudioHardwareIllegalOperationError;
++
++	BlockListener* listener = new BlockListener{inObjectID, *inAddress, inDispatchQueue,
++		Block_copy(inListener)};
++	if (inDispatchQueue != NULL)
++		dispatch_retain(inDispatchQueue);
++
++	OSStatus status = AudioObjectAddPropertyListener(inObjectID, inAddress, deliverToBlock, listener);
++	if (status != noErr)
++	{
++		if (inDispatchQueue != NULL)
++			dispatch_release(inDispatchQueue);
++		Block_release(listener->block);
++		delete listener;
++		return status;
++	}
++
++	std::lock_guard<std::mutex> guard(g_listenersLock);
++	g_listeners.push_back(listener);
++	return noErr;
++}
++
++extern "C" OSStatus AudioObjectRemovePropertyListenerBlock(AudioObjectID inObjectID,
++		const AudioObjectPropertyAddress* inAddress, dispatch_queue_t inDispatchQueue,
++		AudioObjectPropertyListenerBlock inListener)
++{
++	if (inAddress == NULL || inListener == NULL)
++		return kAudioHardwareIllegalOperationError;
++
++	BlockListener* listener = NULL;
++	{
++		std::lock_guard<std::mutex> guard(g_listenersLock);
++		for (auto it = g_listeners.begin(); it != g_listeners.end(); ++it)
++		{
++			// Block_copy of a heap block returns the same block, so the caller's
++			// pointer identifies its registration.
++			if ((*it)->object == inObjectID && sameAddress((*it)->address, *inAddress)
++				&& (*it)->queue == inDispatchQueue && (*it)->block == inListener)
++			{
++				listener = *it;
++				g_listeners.erase(it);
++				break;
++			}
++		}
++	}
++	if (listener == NULL)
++		return kAudioHardwareUnknownPropertyError;
++
++	OSStatus status = AudioObjectRemovePropertyListener(inObjectID, inAddress, deliverToBlock, listener);
++	// A delivery already queued holds its own reference to the block.
++	if (listener->queue != NULL)
++		dispatch_release(listener->queue);
++	Block_release(listener->block);
++	delete listener;
++	return status;
++}
++
++// Process taps (macOS 14.2) are not supported; the class exists so the binary
++// links, and every message it does not implement returns nil or 0. CoreAudio
++// does not link Foundation, so unknown selectors are resolved with an IMP
++// instead of being forwarded.
++static id returnNil(id self, SEL _cmd, ...)
++{
++	return nil;
++}
++
++@interface CATapDescription : NSObject
++@end
++
++@implementation CATapDescription
++
+++ (BOOL)resolveClassMethod:(SEL)sel
++{
++	return class_addMethod(object_getClass(self), sel, (IMP) returnNil, "@@:");
++}
++
+++ (BOOL)resolveInstanceMethod:(SEL)sel
++{
++	return class_addMethod(self, sel, (IMP) returnNil, "@@:");
++}
++
++@end
+diff --git a/src/frameworks/Accessibility/src/AXCustomContent.m b/src/frameworks/Accessibility/src/AXCustomContent.m
+new file mode 100644
+index 00000000..1cb1ee21
+--- /dev/null
++++ b/src/frameworks/Accessibility/src/AXCustomContent.m
+@@ -0,0 +1,60 @@
++/*
++ * Accessibility.framework compatibility class.
++ *
++ * Electron links AXCustomContent for custom accessibility content. Darling has
++ * no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising.
++ */
++
++#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
++
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++@interface AXCustomContent : NSObject
++@end
++
++@implementation AXCustomContent
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel
++{
++	return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel);
++}
++
+++ (void)forwardInvocation:(NSInvocation *)invocation
++{
++	rclolReturnZero(invocation);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel
++{
++	return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel);
++}
++
++- (void)forwardInvocation:(NSInvocation *)invocation
++{
++	rclolReturnZero(invocation);
++}
++
++@end
+diff --git a/src/libm/Source/Intel/xmm_log.c b/src/libm/Source/Intel/xmm_log.c
+index 336dfc91..b1a57f23 100644
+--- a/src/libm/Source/Intel/xmm_log.c
++++ b/src/libm/Source/Intel/xmm_log.c
+@@ -421,8 +421,17 @@ double log2( double x )
+ 	
+ 	// mainline: 0 < x < inf
+ 	if( _mm_istrue_sd( _mm_and_pd( xGTzero, xLTinf ) ) ) {
+-		xd = _xlog(xd);
+-		xd = _mm_mul_sdm(xd, &conversion);
++		// darling-lol: take the exponent apart first, so powers of two are
++		// exact (log(x) * conversion gave log2(4096) = 11.999...; Chromium's
++		// FFT truncates it and aborts). The mantissa is kept in
++		// [sqrt(1/2), sqrt(2)) to stay accurate near 1.
++		int exponent;
++		double mantissa = frexp( x, &exponent );
++		if( mantissa < 0x1.6a09e667f3bcdp-1 ) {
++			mantissa *= 2.0;
++			exponent--;
++		}
++		return (double) exponent + log( mantissa ) * conversion;
+ 	}
+ 	
+ 	// edge cases

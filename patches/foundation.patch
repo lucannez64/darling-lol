@@ -120,3 +120,243 @@ index 09c0a732b..53649d20b 100644
  @end
 +
 +NSString *const NSUserActivityTypeBrowsingWeb = @"com.apple.coreservices.useractivity.browser";
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 961a33b..24326ed 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -55,6 +55,7 @@ set(foundation_sources
+ 	src/NSCompoundPredicate.m
+ 	src/NSCompoundPredicateOperator.m
+ 	src/NSConstantValueExpression.m
++	src/NSConstantIntegerNumber.m
+ 	src/NSCustomPredicateOperator.m
+ 	src/NSDataDetector.m
+ 	src/NSData.m
+diff --git a/src/NSConstantIntegerNumber.m b/src/NSConstantIntegerNumber.m
+new file mode 100644
+index 0000000..756ff17
+--- /dev/null
++++ b/src/NSConstantIntegerNumber.m
+@@ -0,0 +1,202 @@
++//
++//  NSConstantIntegerNumber.m
++//  Foundation
++//
++//  Numbers that newer Clang versions emit at compile time for Objective-C
++//  literals (-fobjc-constant-literals). The objects live in the binary that
++//  uses them, so they are never allocated, retained or freed. Comparison,
++//  hashing and descriptions use an equivalent regular NSNumber.
++//
++
++#import <Foundation/NSNumber.h>
++#import <Foundation/NSString.h>
++
++// The layouts Clang emits.
++struct NSConstantIntegerNumberLayout {
++    Class isa;
++    const char *encoding; // @encode of the literal's type
++    long long value;
++};
++
++struct NSConstantFloatNumberLayout {
++    Class isa;
++    float value;
++};
++
++struct NSConstantDoubleNumberLayout {
++    Class isa;
++    double value;
++};
++
++#define CONSTANT_INTEGER(object) ((const struct NSConstantIntegerNumberLayout *)(object))
++#define CONSTANT_FLOAT(object) ((const struct NSConstantFloatNumberLayout *)(object))
++#define CONSTANT_DOUBLE(object) ((const struct NSConstantDoubleNumberLayout *)(object))
++
++@interface NSConstantIntegerNumber : NSNumber
++@end
++@interface NSConstantFloatNumber : NSNumber
++@end
++@interface NSConstantDoubleNumber : NSNumber
++@end
++
++// Accessors, comparison and lifetime shared by the three classes. Each class
++// supplies -objCType, -getValue:, -doubleValue, -longLongValue,
++// -unsignedLongLongValue and -_regularNumber.
++#define CONSTANT_NUMBER_COMMON \
++    - (char)charValue { return (char)[self longLongValue]; } \
++    - (unsigned char)unsignedCharValue { return (unsigned char)[self unsignedLongLongValue]; } \
++    - (short)shortValue { return (short)[self longLongValue]; } \
++    - (unsigned short)unsignedShortValue { return (unsigned short)[self unsignedLongLongValue]; } \
++    - (int)intValue { return (int)[self longLongValue]; } \
++    - (unsigned int)unsignedIntValue { return (unsigned int)[self unsignedLongLongValue]; } \
++    - (long)longValue { return (long)[self longLongValue]; } \
++    - (unsigned long)unsignedLongValue { return (unsigned long)[self unsignedLongLongValue]; } \
++    - (NSInteger)integerValue { return (NSInteger)[self longLongValue]; } \
++    - (NSUInteger)unsignedIntegerValue { return (NSUInteger)[self unsignedLongLongValue]; } \
++    - (float)floatValue { return (float)[self doubleValue]; } \
++    - (BOOL)boolValue { return [self doubleValue] != 0; } \
++    - (NSComparisonResult)compare:(NSNumber *)other { return [[self _regularNumber] compare:other]; } \
++    - (BOOL)isEqual:(id)other { return [[self _regularNumber] isEqual:other]; } \
++    - (BOOL)isEqualToNumber:(NSNumber *)other { return [[self _regularNumber] isEqualToNumber:other]; } \
++    - (NSUInteger)hash { return [[self _regularNumber] hash]; } \
++    - (NSString *)stringValue { return [[self _regularNumber] stringValue]; } \
++    - (NSString *)description { return [[self _regularNumber] description]; } \
++    - (NSString *)descriptionWithLocale:(id)locale { return [[self _regularNumber] descriptionWithLocale:locale]; } \
++    - (id)copyWithZone:(NSZone *)zone { return self; } \
++    - (id)retain { return self; } \
++    - (oneway void)release { } \
++    - (id)autorelease { return self; } \
++    - (NSUInteger)retainCount { return NSUIntegerMax; } \
++    - (void)dealloc { }
++
++static BOOL isUnsignedEncoding(const char *encoding)
++{
++    switch (encoding[0])
++    {
++        case 'C': case 'S': case 'I': case 'L': case 'Q': case 'B':
++            return YES;
++        default:
++            return NO;
++    }
++}
++
++@implementation NSConstantIntegerNumber
++
++- (const char *)objCType
++{
++    return CONSTANT_INTEGER(self)->encoding;
++}
++
++- (void)getValue:(void *)value
++{
++    long long v = CONSTANT_INTEGER(self)->value;
++    switch (CONSTANT_INTEGER(self)->encoding[0])
++    {
++        case 'c': case 'C': case 'B': *(char *)value = (char)v; break;
++        case 's': case 'S': *(short *)value = (short)v; break;
++        case 'i': case 'I': *(int *)value = (int)v; break;
++        default: *(long long *)value = v; break;
++    }
++}
++
++- (long long)longLongValue
++{
++    return CONSTANT_INTEGER(self)->value;
++}
++
++- (unsigned long long)unsignedLongLongValue
++{
++    return (unsigned long long)CONSTANT_INTEGER(self)->value;
++}
++
++- (double)doubleValue
++{
++    if (isUnsignedEncoding(CONSTANT_INTEGER(self)->encoding))
++        return (double)[self unsignedLongLongValue];
++    return (double)CONSTANT_INTEGER(self)->value;
++}
++
++- (NSNumber *)_regularNumber
++{
++    if (CONSTANT_INTEGER(self)->encoding[0] == 'B')
++        return [NSNumber numberWithBool:CONSTANT_INTEGER(self)->value != 0];
++    if (isUnsignedEncoding(CONSTANT_INTEGER(self)->encoding))
++        return [NSNumber numberWithUnsignedLongLong:[self unsignedLongLongValue]];
++    return [NSNumber numberWithLongLong:CONSTANT_INTEGER(self)->value];
++}
++
++CONSTANT_NUMBER_COMMON
++
++@end
++
++@implementation NSConstantFloatNumber
++
++- (const char *)objCType
++{
++    return @encode(float);
++}
++
++- (void)getValue:(void *)value
++{
++    *(float *)value = CONSTANT_FLOAT(self)->value;
++}
++
++- (long long)longLongValue
++{
++    return (long long)CONSTANT_FLOAT(self)->value;
++}
++
++- (unsigned long long)unsignedLongLongValue
++{
++    return (unsigned long long)CONSTANT_FLOAT(self)->value;
++}
++
++- (double)doubleValue
++{
++    return CONSTANT_FLOAT(self)->value;
++}
++
++- (NSNumber *)_regularNumber
++{
++    return [NSNumber numberWithFloat:CONSTANT_FLOAT(self)->value];
++}
++
++CONSTANT_NUMBER_COMMON
++
++@end
++
++@implementation NSConstantDoubleNumber
++
++- (const char *)objCType
++{
++    return @encode(double);
++}
++
++- (void)getValue:(void *)value
++{
++    *(double *)value = CONSTANT_DOUBLE(self)->value;
++}
++
++- (long long)longLongValue
++{
++    return (long long)CONSTANT_DOUBLE(self)->value;
++}
++
++- (unsigned long long)unsignedLongLongValue
++{
++    return (unsigned long long)CONSTANT_DOUBLE(self)->value;
++}
++
++- (double)doubleValue
++{
++    return CONSTANT_DOUBLE(self)->value;
++}
++
++- (NSNumber *)_regularNumber
++{
++    return [NSNumber numberWithDouble:CONSTANT_DOUBLE(self)->value];
++}
++
++CONSTANT_NUMBER_COMMON
++
++@end
+diff --git a/src/NSBundle.m b/src/NSBundle.m
+index ce2819c..06b871d 100644
+--- a/src/NSBundle.m
++++ b/src/NSBundle.m
+@@ -722,7 +722,14 @@ static void __NSBundleMainBundleDealloc()
+     // synchronize this entire block to prevent simultaneous loads
+     @synchronized(self)
+     {
+-        if (![self isLoaded])
++        // darling-lol: like Apple's, an already-loaded bundle reports YES.
++        // NSDisplay instances are per thread and load the AppKit backends
++        // again on each new thread.
++        if ([self isLoaded])
++        {
++            loaded = true;
++        }
++        else
+         {
+             loaded = CFBundleLoadExecutableAndReturnError(_cfBundle, (CFErrorRef *)error);
+             if (loaded)
