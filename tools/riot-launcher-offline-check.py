@@ -138,7 +138,8 @@ with open({str(log)!r}, "a") as output:
             "/Volumes/SystemRoot/run/user/offline-check/discord-ipc-0", "Discord IPC link missing"
         # Opting out removes the links an earlier launch left behind.
         subprocess.run(["sh", str(launcher)], env={**env, "RCLOL_DISCORD_RPC": "0"}, check=True, capture_output=True, text=True)
-        assert not os.path.lexists(prefix / "run/user/offline-check/discord-ipc-0"), "stale Discord IPC link kept"
+        assert not any(os.path.lexists(prefix / f"run/user/offline-check/discord-ipc-{n}") for n in range(10)), \
+            "stale Discord IPC link kept"
         # An inherited injection must also be absent for first-time installation.
         env["RIOT_LAUNCHER_HOST"] = str(folder / "Install Riot.app/Contents/MacOS/RiotClientServices")
         env["DISABLE_MANGOHUD"] = "0"  # Inherited settings cannot override launcher policy.
