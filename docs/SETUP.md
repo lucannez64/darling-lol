@@ -117,7 +117,8 @@ into the prefix at the guest's `$XDG_RUNTIME_DIR` (or `/private/tmp` when it is
 unset), pointing at the host sockets through `/Volumes/SystemRoot`. Native,
 Flatpak (`app/com.discordapp.Discord`), Vesktop Flatpak and Snap Discord are
 found when running at launch; otherwise native is assumed. Discord must be
-running on the host. `RCLOL_DISCORD_RPC=0` skips the links.
+running on the host. `RCLOL_DISCORD_RPC=0` skips the links and removes ones
+left by an earlier launch.
 
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,

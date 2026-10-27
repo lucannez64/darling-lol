@@ -174,17 +174,27 @@ fi
 # Discord Rich Presence: the client's Discord SDK looks for discord-ipc-N in the guest's
 # $XDG_RUNTIME_DIR (else TMPDIR, which Darling sets to /private/tmp). Those paths resolve
 # inside the prefix, so link them to the host sockets; vchroot follows /Volumes/SystemRoot
-# out to the host root. Flatpak/Snap Discord and Vesktop keep the socket in a subdirectory.
-# RCLOL_DISCORD_RPC=0 leaves the prefix untouched.
+# out to the host root. Discord itself picks XDG_RUNTIME_DIR, TMPDIR, TMP, TEMP, then /tmp;
+# Flatpak/Snap Discord and Vesktop keep the socket in a subdirectory.
+# RCLOL_DISCORD_RPC=0 removes links left by an earlier launch instead.
+guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
 if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
- host_ipc=${XDG_RUNTIME_DIR:-/tmp}
+ host_ipc=${XDG_RUNTIME_DIR:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}}
  for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do
-  if [ -S "$dir/discord-ipc-0" ]; then host_ipc=$dir; break; fi
+  for n in 0 1 2 3 4 5 6 7 8 9; do
+   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; break 2; fi
+  done
  done
- guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
  (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
   ln -sfn "/Volumes/SystemRoot$host_ipc/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
  done) || echo 'discord-rpc: could not link the Discord IPC sockets; continuing without them' >&2
+else
+ # Only links this launcher made: they point through /Volumes/SystemRoot.
+ for n in 0 1 2 3 4 5 6 7 8 9; do
+  case $(readlink "$guest_ipc/discord-ipc-$n" 2>/dev/null) in
+   /Volumes/SystemRoot/*) rm -f "$guest_ipc/discord-ipc-$n" ;;
+  esac
+ done
 fi
 # exec-guest.py closes host file descriptors above stderr before starting the guest. A shell
 # loop cannot: dash only accepts single-digit descriptors in redirections.
