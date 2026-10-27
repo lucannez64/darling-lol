@@ -112,6 +112,13 @@ minutes without a client or match once it has seen one. See
 [the troubleshooting measurement](TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
 for the measured CPU effect and limitations.
 
+Discord Rich Presence: before each launch the launcher links `discord-ipc-0`…`9`
+into the prefix at the guest's `$XDG_RUNTIME_DIR` (or `/private/tmp` when it is
+unset), pointing at the host sockets through `/Volumes/SystemRoot`. Native,
+Flatpak (`app/com.discordapp.Discord`), Vesktop Flatpak and Snap Discord are
+found when running at launch; otherwise native is assumed. Discord must be
+running on the host. `RCLOL_DISCORD_RPC=0` skips the links.
+
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
 GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),

@@ -171,6 +171,21 @@ fi
 # On affected setups Chromium's default temp directory is unusable. Electron
 # can copy app.asar entries to temporary files for async reads and report a
 # failed copy as "not found". Use a writable guest directory by default.
+# Discord Rich Presence: the client's Discord SDK looks for discord-ipc-N in the guest's
+# $XDG_RUNTIME_DIR (else TMPDIR, which Darling sets to /private/tmp). Those paths resolve
+# inside the prefix, so link them to the host sockets; vchroot follows /Volumes/SystemRoot
+# out to the host root. Flatpak/Snap Discord and Vesktop keep the socket in a subdirectory.
+# RCLOL_DISCORD_RPC=0 leaves the prefix untouched.
+if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
+ host_ipc=${XDG_RUNTIME_DIR:-/tmp}
+ for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do
+  if [ -S "$dir/discord-ipc-0" ]; then host_ipc=$dir; break; fi
+ done
+ guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
+ (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
+  ln -sfn "/Volumes/SystemRoot$host_ipc/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
+ done) || echo 'discord-rpc: could not link the Discord IPC sockets; continuing without them' >&2
+fi
 # exec-guest.py closes host file descriptors above stderr before starting the guest. A shell
 # loop cannot: dash only accepts single-digit descriptors in redirections.
 # Keep the launcher as a supervisor: on Ctrl+C/terminal close it stops the
