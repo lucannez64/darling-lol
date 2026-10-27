@@ -120,3 +120,209 @@ index 09c0a732b..53649d20b 100644
  @end
 +
 +NSString *const NSUserActivityTypeBrowsingWeb = @"com.apple.coreservices.useractivity.browser";
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 961a33b..5b7f0f7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -208,6 +208,7 @@ set(foundation_sources
+ 	src/NSURL.m
+ 	src/NSUUID.m
+ 	src/NSValue.m
++	src/NSConstantNumbers.m
+ 	src/NSValueTransformer.m
+ 	src/NSVariableAssignmentExpression.m
+ 	src/NSVariableExpression.m
+diff --git a/src/NSBundle.m b/src/NSBundle.m
+index ce2819c..43dfd4f 100644
+--- a/src/NSBundle.m
++++ b/src/NSBundle.m
+@@ -730,6 +730,10 @@ static void __NSBundleMainBundleDealloc()
+                 [self _setIsLoaded: YES];
+             }
+         }
++        else
++        {
++            loaded = true;
++        }
+     }
+ 
+     return loaded;
+diff --git a/src/NSConstantNumbers.m b/src/NSConstantNumbers.m
+new file mode 100644
+index 0000000..799744a
+--- /dev/null
++++ b/src/NSConstantNumbers.m
+@@ -0,0 +1,173 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Classes for the constant number literals that clang emits when the
++// deployment target is macOS 12 or later. The compiler lays the objects out
++// in static data, so they are never allocated, retained or freed.
++
++#import <Foundation/NSValue.h>
++#import <Foundation/NSString.h>
++#import <CoreFoundation/CFNumber.h>
++
++#define NS_CONSTANT_OBJECT_LIFETIME \
++- (id)retain { return self; } \
++- (oneway void)release {} \
++- (id)autorelease { return self; } \
++- (NSUInteger)retainCount { return NSUIntegerMax; } \
++- (id)copyWithZone:(NSZone *)zone { return self; }
++
++typedef struct {
++    Class isa;
++    const char *encoding;
++    long long value;
++} NSConstantIntegerNumberLayout;
++
++typedef struct {
++    Class isa;
++    double value;
++} NSConstantDoubleNumberLayout;
++
++typedef struct {
++    Class isa;
++    float value;
++} NSConstantFloatNumberLayout;
++
++#define NS_CONSTANT_NUMBER_FORWARDING \
++- (const char *)objCType { return [[self _number] objCType]; } \
++- (void)getValue:(void *)value { [[self _number] getValue:value]; } \
++- (BOOL)_getValue:(void *)value forType:(CFNumberType)type { return CFNumberGetValue((CFNumberRef)[self _number], type, value); } \
++- (CFNumberType)_cfNumberType { return CFNumberGetType((CFNumberRef)[self _number]); } \
++- (NSString *)stringValue { return [[self _number] stringValue]; } \
++- (NSString *)description { return [[self _number] description]; } \
++- (NSString *)descriptionWithLocale:(id)locale { return [[self _number] descriptionWithLocale:locale]; } \
++- (NSComparisonResult)compare:(NSNumber *)other { return [[self _number] compare:other]; } \
++- (BOOL)isEqualToNumber:(NSNumber *)other { return [[self _number] isEqualToNumber:other]; } \
++- (BOOL)isEqual:(id)other { return [[self _number] isEqual:other]; } \
++- (NSUInteger)hash { return [[self _number] hash]; }
++
++@interface NSConstantIntegerNumber : NSNumber
++@end
++
++@implementation NSConstantIntegerNumber
++
++NS_CONSTANT_OBJECT_LIFETIME
++NS_CONSTANT_NUMBER_FORWARDING
++
++- (long long)_value
++{
++    return ((const NSConstantIntegerNumberLayout *)(void *)self)->value;
++}
++
++- (char)_encoding
++{
++    const char *encoding = ((const NSConstantIntegerNumberLayout *)(void *)self)->encoding;
++    return encoding != NULL ? encoding[0] : 'q';
++}
++
++- (NSNumber *)_number
++{
++    long long value = [self _value];
++    switch ([self _encoding])
++    {
++        case 'c': return [NSNumber numberWithChar:(char)value];
++        case 'C': return [NSNumber numberWithUnsignedChar:(unsigned char)value];
++        case 's': return [NSNumber numberWithShort:(short)value];
++        case 'S': return [NSNumber numberWithUnsignedShort:(unsigned short)value];
++        case 'i': return [NSNumber numberWithInt:(int)value];
++        case 'I': return [NSNumber numberWithUnsignedInt:(unsigned int)value];
++        case 'l': return [NSNumber numberWithLong:(long)value];
++        case 'L': return [NSNumber numberWithUnsignedLong:(unsigned long)value];
++        case 'Q': return [NSNumber numberWithUnsignedLongLong:(unsigned long long)value];
++        case 'B': return [NSNumber numberWithBool:value != 0];
++        default: return [NSNumber numberWithLongLong:value];
++    }
++}
++
++- (char)charValue { return (char)[self _value]; }
++- (unsigned char)unsignedCharValue { return (unsigned char)[self _value]; }
++- (short)shortValue { return (short)[self _value]; }
++- (unsigned short)unsignedShortValue { return (unsigned short)[self _value]; }
++- (int)intValue { return (int)[self _value]; }
++- (unsigned int)unsignedIntValue { return (unsigned int)[self _value]; }
++- (long)longValue { return (long)[self _value]; }
++- (unsigned long)unsignedLongValue { return (unsigned long)[self _value]; }
++- (long long)longLongValue { return [self _value]; }
++- (unsigned long long)unsignedLongLongValue { return (unsigned long long)[self _value]; }
++- (NSInteger)integerValue { return (NSInteger)[self _value]; }
++- (NSUInteger)unsignedIntegerValue { return (NSUInteger)[self _value]; }
++- (BOOL)boolValue { return [self _value] != 0; }
++- (float)floatValue { return [[self _number] floatValue]; }
++- (double)doubleValue { return [[self _number] doubleValue]; }
++
++@end
++
++@interface NSConstantDoubleNumber : NSNumber
++@end
++
++@implementation NSConstantDoubleNumber
++
++NS_CONSTANT_OBJECT_LIFETIME
++NS_CONSTANT_NUMBER_FORWARDING
++
++- (double)doubleValue
++{
++    return ((const NSConstantDoubleNumberLayout *)(void *)self)->value;
++}
++
++- (NSNumber *)_number
++{
++    return [NSNumber numberWithDouble:[self doubleValue]];
++}
++
++- (float)floatValue { return (float)[self doubleValue]; }
++- (int)intValue { return (int)[self doubleValue]; }
++- (long)longValue { return (long)[self doubleValue]; }
++- (long long)longLongValue { return (long long)[self doubleValue]; }
++- (NSInteger)integerValue { return (NSInteger)[self doubleValue]; }
++- (NSUInteger)unsignedIntegerValue { return (NSUInteger)[self doubleValue]; }
++- (BOOL)boolValue { return [self doubleValue] != 0; }
++
++@end
++
++@interface NSConstantFloatNumber : NSNumber
++@end
++
++@implementation NSConstantFloatNumber
++
++NS_CONSTANT_OBJECT_LIFETIME
++NS_CONSTANT_NUMBER_FORWARDING
++
++- (float)floatValue
++{
++    return ((const NSConstantFloatNumberLayout *)(void *)self)->value;
++}
++
++- (NSNumber *)_number
++{
++    return [NSNumber numberWithFloat:[self floatValue]];
++}
++
++- (double)doubleValue { return [self floatValue]; }
++- (int)intValue { return (int)[self floatValue]; }
++- (long)longValue { return (long)[self floatValue]; }
++- (long long)longLongValue { return (long long)[self floatValue]; }
++- (NSInteger)integerValue { return (NSInteger)[self floatValue]; }
++- (NSUInteger)unsignedIntegerValue { return (NSUInteger)[self floatValue]; }
++- (BOOL)boolValue { return [self floatValue] != 0; }
++
++@end
++

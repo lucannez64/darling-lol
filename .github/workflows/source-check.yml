@@ -45,6 +45,7 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_client_in_game_tricks.py'
       - run: python -m unittest discover -s tests -p 'test_setup_portability.py'
       - run: python -m unittest discover -s tests -p 'test_preflight.py'
+      - run: python -m unittest discover -s tests -p 'test_macos12_client_compat.py'
       - run: python -m unittest discover -s tests -p 'test_crash_report.py'
       - run: python -m unittest discover -s tests -p 'test_doctor.py'
       - run: python -m unittest discover -s tests -p 'test_perf_baseline.py'

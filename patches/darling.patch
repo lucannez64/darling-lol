@@ -1266,17 +1266,26 @@ index f74d9b0c3..655e90d51 100644
  #endif /* AUDIOHARDWAREIMPL_H */
 -
 diff --git a/src/CoreAudio/CoreAudio/CMakeLists.txt b/src/CoreAudio/CoreAudio/CMakeLists.txt
-index 5f10c2f92..089c94127 100644
+index 5f10c2f9..e0959de2 100644
 --- a/src/CoreAudio/CoreAudio/CMakeLists.txt
 +++ b/src/CoreAudio/CoreAudio/CMakeLists.txt
-@@ -8,6 +8,7 @@ set(coreaudio_sources
+@@ -8,6 +8,8 @@ set(coreaudio_sources
  	AudioHardware.cpp
      AudioHardwareImpl.cpp
      HostTime.mm
++    AudioHardwareBlocks.mm
 +    AudioConverterShim.c
      pulse/AudioHardwareImplPA.cpp
      pulse/AudioHardwareImplPAInput.cpp
      pulse/AudioHardwareImplPAOutput.cpp
+@@ -28,6 +30,7 @@ add_framework(CoreAudio
+ 
+     DEPENDENCIES
+         system
++        objc
+         cxx
+         CoreFoundation
+         pulse
 diff --git a/src/CoreAudio/CoreAudio/HostTime.mm b/src/CoreAudio/CoreAudio/HostTime.mm
 index 879fb48a1..fb99e99d1 100644
 --- a/src/CoreAudio/CoreAudio/HostTime.mm
@@ -3675,13 +3684,15 @@ index 0b927c40e..d186494e7 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/src/frameworks/CoreMedia/src/CoreMedia.c b/src/frameworks/CoreMedia/src/CoreMedia.c
-index 3d76e8103..4a975959c 100644
+index 3d76e810..dedea1a9 100644
 --- a/src/frameworks/CoreMedia/src/CoreMedia.c
 +++ b/src/frameworks/CoreMedia/src/CoreMedia.c
-@@ -26,6 +26,32 @@
+@@ -25,6 +25,33 @@
+ 
  const CFStringRef kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms = CFSTR("SampleDescriptionExtensionAtoms");
  const CFStringRef kCMSampleAttachmentKey_NotSync = CFSTR("NotSync");
- 
++const CFStringRef kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding = CFSTR("ResetDecoderBeforeDecoding");
++
 +const CFStringRef kCMFormatDescriptionTransferFunction_ITU_R_709_2 = CFSTR("ITU_R_709_2");
 +const CFStringRef kCMFormatDescriptionTransferFunction_SMPTE_240M_1995 = CFSTR("SMPTE_240M_1995");
 +const CFStringRef kCMFormatDescriptionTransferFunction_UseGamma = CFSTR("UseGamma");
@@ -3707,10 +3718,9 @@ index 3d76e8103..4a975959c 100644
 +const CFStringRef kCMFormatDescriptionYCbCrMatrix_ITU_R_601_4 = CFSTR("ITU_R_601_4");
 +const CFStringRef kCMFormatDescriptionYCbCrMatrix_SMPTE_240M_1995 = CFSTR("SMPTE_240M_1995");
 +const CFStringRef kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 = CFSTR("ITU_R_2020");
-+
+ 
  static int verbose = 0;
  
- __attribute__((constructor))
 diff --git a/src/frameworks/CoreServices/CMakeLists.txt b/src/frameworks/CoreServices/CMakeLists.txt
 index 3fac3be55..aae2c7435 100644
 --- a/src/frameworks/CoreServices/CMakeLists.txt
@@ -3917,7 +3927,7 @@ index dd78f6df4..8fa95a174 100644
  
  OSStatus
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c b/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
-index 854fa1e7f..8a76923c4 100644
+index 854fa1e7..0540ea73 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
 +++ b/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
 @@ -19,9 +19,14 @@
@@ -3990,7 +4000,7 @@ index 854fa1e7f..8a76923c4 100644
  		CFRelease(executable);
  
  	}
-@@ -184,3 +205,25 @@ err_pre_info:
+@@ -184,3 +205,62 @@ err_pre_info:
  	CFRelease(rs);
  	CFRelease(info_plist_url);
  }
@@ -4015,6 +4025,43 @@ index 854fa1e7f..8a76923c4 100644
 +	if (verbose)
 +		printf("STUB: LSSetDefaultRoleHandlerForContentType\n");
 +	return noErr;
++}
++
++// Shared file lists (login items and Finder sidebar lists) are not
++// implemented; creation fails and item queries return nothing.
++CFTypeRef LSSharedFileListCreate(CFAllocatorRef inAllocator, CFStringRef inListType, CFTypeRef listOptions)
++{
++	return NULL;
++}
++
++CFArrayRef LSSharedFileListCopySnapshot(CFTypeRef inList, UInt32 *outSnapshotSeed)
++{
++	if (outSnapshotSeed != NULL)
++		*outSnapshotSeed = 0;
++	return NULL;
++}
++
++CFTypeRef LSSharedFileListInsertItemURL(CFTypeRef inList, CFTypeRef insertAfterThisItem, CFStringRef inDisplayName,
++	CFTypeRef inIconRef, CFURLRef inURL, CFDictionaryRef inPropertiesToSet, CFArrayRef inPropertiesToClear)
++{
++	return NULL;
++}
++
++CFTypeRef LSSharedFileListItemCopyProperty(CFTypeRef inItem, CFStringRef inPropertyName)
++{
++	return NULL;
++}
++
++CFURLRef LSSharedFileListItemCopyResolvedURL(CFTypeRef inItem, UInt32 inFlags, CFErrorRef *outError)
++{
++	if (outError != NULL)
++		*outError = NULL;
++	return NULL;
++}
++
++OSStatus LSSharedFileListItemRemove(CFTypeRef inList, CFTypeRef inItem)
++{
++	return -50; // paramErr
 +}
 diff --git a/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h b/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h
 index 09b70e4cb..2f7f5b89a 100644
@@ -4062,7 +4109,7 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..99e0a5494 100644
+index 3e9cba22..9d869aa5 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 @@ -1,38 +1,887 @@
@@ -5110,7 +5157,7 @@ index 3e9cba226..99e0a5494 100644
  					forKey: kDirectDisplayArray];
  			return kCVReturnSuccess;
  		}
-@@ -117,14 +1059,31 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+@@ -117,17 +1059,40 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -5145,8 +5192,17 @@ index 3e9cba226..99e0a5494 100644
  	return kCVReturnSuccess;
  }
  
++CVReturn CVDisplayLinkGetCurrentTime(CVDisplayLinkRef displayLink, CVTimeStamp *outTime)
++{
++    // The link does not track the current video time.
++    return kCVReturnError;
++}
++
+ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONNULL displayLink )
+ {
+ 	CVTime time = { 0, 0, kCVTimeIsIndefinite };
 diff --git a/src/frameworks/CoreVideo/src/constants.c b/src/frameworks/CoreVideo/src/constants.c
-index 02f06704e..5d4fd4b2d 100644
+index 02f06704..e1852550 100644
 --- a/src/frameworks/CoreVideo/src/constants.c
 +++ b/src/frameworks/CoreVideo/src/constants.c
 @@ -42,6 +42,11 @@ const CFStringRef kCVImageBufferTransferFunction_Linear = CFSTR("Linear");
@@ -5161,6 +5217,13 @@ index 02f06704e..5d4fd4b2d 100644
  
  const CFStringRef kCVPixelBufferIOSurfacePropertiesKey = CFSTR("IOSurfaceProperties");
  const CFStringRef kCVPixelBufferOpenGLCompatibilityKey = CFSTR("OpenGLCompatibility");
+@@ -53,3 +58,6 @@ const CFStringRef kCVPixelBufferWidthKey = CFSTR("Width");
+ const CFStringRef kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey = CFSTR("IOSurfaceOpenGLTextureCompatibility");
+ const CFStringRef kCVPixelBufferPoolMaximumBufferAgeKey = CFSTR("MaximumBufferAge");
+ const CFStringRef kCVPixelBufferPoolMinimumBufferCountKey = CFSTR("MinimumBufferCount");
++const CFStringRef kCVImageBufferColorPrimaries_DCI_P3 = CFSTR("DCI_P3");
++const CFStringRef kCVImageBufferColorPrimaries_P3_D65 = CFSTR("P3_D65");
++const CFStringRef kCVImageBufferAmbientViewingEnvironmentKey = CFSTR("AmbientViewingEnvironment");
 diff --git a/src/frameworks/CryptoTokenKit/CMakeLists.txt b/src/frameworks/CryptoTokenKit/CMakeLists.txt
 index 6260e9b35..c02096039 100644
 --- a/src/frameworks/CryptoTokenKit/CMakeLists.txt
@@ -7837,7 +7900,7 @@ index 9a489b386..9fe56cc3f 100644
  
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
 diff --git a/src/libsandbox/src/sandbox.c b/src/libsandbox/src/sandbox.c
-index 5af5298aa..fb59ee5d1 100644
+index 5af5298a..ccce9e32 100644
 --- a/src/libsandbox/src/sandbox.c
 +++ b/src/libsandbox/src/sandbox.c
 @@ -21,6 +21,8 @@
@@ -7849,137 +7912,119 @@ index 5af5298aa..fb59ee5d1 100644
  
  static int verbose = 0;
  
-@@ -29,63 +31,105 @@ static void initme(void) {
+@@ -29,39 +31,73 @@ static void initme(void) {
      verbose = getenv("STUB_VERBOSE") != NULL;
  }
  
 -void* sandbox_apply(void)
-+/* darling-lol: SeatbeltExtensions token family. Chromium's seatbelt client
-+ * issues/consumes/releases these around sandboxed child setup; without
-+ * enforcement we hand out dummy nonzero tokens and accept everything.
-+ * (These live in libsandbox.dylib on macOS, hence here and not in
-+ * libsystem_sandbox.) */
-+static int64_t sandbox_extension_next_token = 1;
-+
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags)
- {
--    if (verbose) puts("STUB: sandbox_apply called");
--    return NULL;
-+    if (verbose) puts("STUB: sandbox_extension_issue_file called");
-+    (void)path; (void)flags;
-+    return sandbox_extension_next_token++;
- }
- 
--void* sandbox_apply_container(void)
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags)
- {
--    if (verbose) puts("STUB: sandbox_apply_container called");
--    return NULL;
-+    if (verbose) puts("STUB: sandbox_extension_issue_mach called");
-+    (void)name; (void)flags;
-+    return sandbox_extension_next_token++;
- }
- 
--void* sandbox_compile_entitlements(void)
-+int sandbox_extension_consume(int64_t token)
- {
--    if (verbose) puts("STUB: sandbox_compile_entitlements called");
--    return NULL;
-+    if (verbose) puts("STUB: sandbox_extension_consume called");
-+    (void)token;
-+    return 0;
- }
- 
--void* sandbox_compile_file(void)
-+int sandbox_extension_release(int64_t token)
-+{
-+    if (verbose) puts("STUB: sandbox_extension_release called");
-+    (void)token;
-+    return 0;
-+}
-+
 +/* darling-lol: compile/apply family. No seatbelt compiler exists, so
 + * "compiling" a profile yields a dummy handle and applying succeeds.
 + * Signatures match Apple's (the old stubs had wrong shapes). */
 +
-+void* sandbox_compile_string(const char *profile, char **errorbuf)
-+{
-+    if (verbose) puts("STUB: sandbox_compile_string called");
++struct darling_sandbox_profile {
++    uint32_t type;
++    const void *data;
++    size_t data_len;
++};
++
++static const char darling_sandbox_bytecode[] = "darling-sandbox-stub";
++
++static void *darling_sandbox_profile_new(char **errorbuf)
+ {
+-    if (verbose) puts("STUB: sandbox_apply called");
+-    return NULL;
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)profile;
-+    return strdup("darling-sandbox-stub");
++    struct darling_sandbox_profile *profile = calloc(1, sizeof(*profile));
++    if (profile != NULL) {
++        profile->data = darling_sandbox_bytecode;
++        profile->data_len = sizeof(darling_sandbox_bytecode) - 1;
++    }
++    return profile;
+ }
+ 
+-void* sandbox_apply_container(void)
++void* sandbox_compile_string(const char *profile, void *params, char **errorbuf)
+ {
+-    if (verbose) puts("STUB: sandbox_apply_container called");
+-    return NULL;
++    if (verbose) puts("STUB: sandbox_compile_string called");
++    (void)profile; (void)params;
++    return darling_sandbox_profile_new(errorbuf);
 +}
 +
-+void* sandbox_compile_file(const char *path, char **errorbuf)
- {
-     if (verbose) puts("STUB: sandbox_compile_file called");
--    return NULL;
-+    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)path;
-+    return strdup("darling-sandbox-stub");
++void* sandbox_compile_file(const char *path, void *params, char **errorbuf)
++{
++    if (verbose) puts("STUB: sandbox_compile_file called");
++    (void)path; (void)params;
++    return darling_sandbox_profile_new(errorbuf);
++}
++
++void* sandbox_compile_named(const char *name, void *params, char **errorbuf)
++{
++    if (verbose) puts("STUB: sandbox_compile_named called");
++    (void)name; (void)params;
++    return darling_sandbox_profile_new(errorbuf);
  }
  
--void* sandbox_compile_named(void)
-+void* sandbox_compile_named(const char *name, char **errorbuf)
+-void* sandbox_compile_entitlements(void)
++void* sandbox_compile_entitlements(void *entitlements, void *params, char **errorbuf)
  {
-     if (verbose) puts("STUB: sandbox_compile_named called");
+     if (verbose) puts("STUB: sandbox_compile_entitlements called");
 -    return NULL;
-+    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)name;
-+    return strdup("darling-sandbox-stub");
++    (void)entitlements; (void)params;
++    return darling_sandbox_profile_new(errorbuf);
  }
  
--void* sandbox_compile_string(void)
-+void* sandbox_compile_entitlements(void *entitlements, char **errorbuf)
- {
--    if (verbose) puts("STUB: sandbox_compile_string called");
--    return NULL;
-+    if (verbose) puts("STUB: sandbox_compile_entitlements called");
-+    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)entitlements;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_container_paths_iterate_items(void)
+-void* sandbox_compile_file(void)
 +int sandbox_apply(void *handle)
  {
--    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
+-    if (verbose) puts("STUB: sandbox_compile_file called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_apply called");
 +    (void)handle;
 +    return 0;
  }
  
--void* sandbox_create_params(void)
+-void* sandbox_compile_named(void)
 +void sandbox_free_profile(void *handle)
  {
--    if (verbose) puts("STUB: sandbox_create_params called");
+-    if (verbose) puts("STUB: sandbox_compile_named called");
+-    return NULL;
 +    if (verbose) puts("STUB: sandbox_free_profile called");
 +    free(handle);
-+}
-+
+ }
+ 
+-void* sandbox_compile_string(void)
 +void* sandbox_apply_container(void)
-+{
+ {
+-    if (verbose) puts("STUB: sandbox_compile_string called");
 +    if (verbose) puts("STUB: sandbox_apply_container called");
      return NULL;
  }
  
+@@ -74,19 +110,13 @@ void* sandbox_container_paths_iterate_items(void)
+ void* sandbox_create_params(void)
+ {
+     if (verbose) puts("STUB: sandbox_create_params called");
+-    return NULL;
++    return calloc(1, 64);
+ }
+ 
 -void* sandbox_free_params(void)
-+void* sandbox_container_paths_iterate_items(void)
++void sandbox_free_params(void *params)
  {
--    if (verbose) puts("STUB: sandbox_free_params called");
-+    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
-     return NULL;
- }
- 
+     if (verbose) puts("STUB: sandbox_free_params called");
+-    return NULL;
+-}
+-
 -void* sandbox_free_profile(void)
-+void* sandbox_create_params(void)
- {
+-{
 -    if (verbose) puts("STUB: sandbox_free_profile called");
-+    if (verbose) puts("STUB: sandbox_create_params called");
-     return NULL;
+-    return NULL;
++    free(params);
  }
  
+ void* sandbox_inspect_pid(void)
 diff --git a/src/libsystem_coreservices/dirhelper.c b/src/libsystem_coreservices/dirhelper.c
 index f22f8213d..e7fbdc92e 100644
 --- a/src/libsystem_coreservices/dirhelper.c
@@ -8028,7 +8073,7 @@ index f22f8213d..e7fbdc92e 100644
  				snprintf(p, limit, "%s/.cache/%s%s", home, dir_suffix ? dir_suffix : "", dir_suffix ? "/" : "");
  			else
 diff --git a/src/sandbox/sandbox.c b/src/sandbox/sandbox.c
-index f48cceb9e..9afa967db 100644
+index f48cceb9..0b28d721 100644
 --- a/src/sandbox/sandbox.c
 +++ b/src/sandbox/sandbox.c
 @@ -10,7 +10,13 @@ const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT = SANDBOX_FILTER_NONE;
@@ -8046,7 +8091,7 @@ index f48cceb9e..9afa967db 100644
  	return 0;
  }
  
-@@ -51,18 +57,36 @@ void sandbox_free_error(char *errorbuf)
+@@ -51,18 +57,66 @@ void sandbox_free_error(char *errorbuf)
  
  int sandbox_init_with_parameters(const char *profile, uint64_t flags, const char *const parameters[], char **errorbuf)
  {
@@ -8082,10 +8127,40 @@ index f48cceb9e..9afa967db 100644
 +		return 1;
 +	}
 +	(void)type;
++	return 0;
++}
++
++/* darling-lol: SeatbeltExtensions token family. Chromium's seatbelt client
++ * issues/consumes/releases these around sandboxed child setup and binds them
++ * through libSystem, so they live here rather than in libsandbox. Without
++ * enforcement we hand out dummy nonzero tokens and accept everything. */
++static int64_t sandbox_extension_next_token = 1;
++
++int64_t sandbox_extension_issue_file(const char *path, uint32_t flags)
++{
++	(void)path; (void)flags;
++	return __atomic_fetch_add(&sandbox_extension_next_token, 1, __ATOMIC_RELAXED);
++}
++
++int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags)
++{
++	(void)name; (void)flags;
++	return __atomic_fetch_add(&sandbox_extension_next_token, 1, __ATOMIC_RELAXED);
++}
++
++int sandbox_extension_consume(int64_t token)
++{
++	(void)token;
++	return 0;
++}
++
++int sandbox_extension_release(int64_t token)
++{
++	(void)token;
  	return 0;
  }
  
-@@ -84,42 +108,56 @@ int sandbox_unsuspend(void)
+@@ -84,42 +138,56 @@ int sandbox_unsuspend(void)
  
  int sandbox_issue_extension(const char *path, char **ext_token)
  {
@@ -8150,7 +8225,7 @@ index f48cceb9e..9afa967db 100644
  }
  
  int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
-@@ -129,7 +167,9 @@ int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
+@@ -129,7 +197,9 @@ int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
  
  int sandbox_wakeup_daemon(char **errorbuf)
  {
@@ -11465,3 +11540,1744 @@ index a68739ff..5c8eb836 100644
  }
  
  size_t
+diff --git a/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm b/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm
+new file mode 100644
+index 00000000..f5d3a7dd
+--- /dev/null
++++ b/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm
+@@ -0,0 +1,158 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <CoreAudio/AudioHardware.h>
++#include <Block.h>
++#include <dispatch/dispatch.h>
++#include <objc/NSObject.h>
++#import <Foundation/NSInvocation.h>
++#import <Foundation/NSMethodSignature.h>
++#include <mutex>
++#include <vector>
++#include <cstring>
++
++// Block-based property listeners, built on the function-pointer listeners.
++
++namespace
++{
++struct BlockListener
++{
++	AudioObjectID object;
++	AudioObjectPropertyAddress address;
++	dispatch_queue_t queue;
++	AudioObjectPropertyListenerBlock block;
++};
++
++std::mutex g_blockListenersLock;
++std::vector<BlockListener*> g_blockListeners;
++
++OSStatus BlockListenerTrampoline(AudioObjectID inObjectID, UInt32 inNumberAddresses,
++	const AudioObjectPropertyAddress* inAddresses, void* inClientData)
++{
++	BlockListener* listener = static_cast<BlockListener*>(inClientData);
++	AudioObjectPropertyListenerBlock block = Block_copy(listener->block);
++
++	if (listener->queue == nullptr)
++	{
++		block(inNumberAddresses, inAddresses);
++		Block_release(block);
++		return kAudioHardwareNoError;
++	}
++
++	AudioObjectPropertyAddress* addresses = new AudioObjectPropertyAddress[inNumberAddresses ? inNumberAddresses : 1];
++	std::memcpy(addresses, inAddresses, inNumberAddresses * sizeof(*inAddresses));
++	dispatch_async(listener->queue, ^{
++		block(inNumberAddresses, addresses);
++		Block_release(block);
++		delete[] addresses;
++	});
++	return kAudioHardwareNoError;
++}
++
++bool SameAddress(const AudioObjectPropertyAddress& a, const AudioObjectPropertyAddress& b)
++{
++	return a.mSelector == b.mSelector && a.mScope == b.mScope && a.mElement == b.mElement;
++}
++}
++
++extern "C" OSStatus AudioObjectAddPropertyListenerBlock(AudioObjectID inObjectID,
++	const AudioObjectPropertyAddress* inAddress, dispatch_queue_t inDispatchQueue,
++	AudioObjectPropertyListenerBlock inListener)
++{
++	if (inAddress == nullptr || inListener == nullptr)
++		return kAudioHardwareIllegalOperationError;
++
++	BlockListener* listener = new BlockListener { inObjectID, *inAddress, inDispatchQueue, Block_copy(inListener) };
++	if (inDispatchQueue != nullptr)
++		dispatch_retain(inDispatchQueue);
++
++	OSStatus status = AudioObjectAddPropertyListener(inObjectID, inAddress, BlockListenerTrampoline, listener);
++	if (status != kAudioHardwareNoError)
++	{
++		if (inDispatchQueue != nullptr)
++			dispatch_release(inDispatchQueue);
++		Block_release(listener->block);
++		delete listener;
++		return status;
++	}
++
++	std::lock_guard<std::mutex> guard(g_blockListenersLock);
++	g_blockListeners.push_back(listener);
++	return kAudioHardwareNoError;
++}
++
++extern "C" OSStatus AudioObjectRemovePropertyListenerBlock(AudioObjectID inObjectID,
++	const AudioObjectPropertyAddress* inAddress, dispatch_queue_t inDispatchQueue,
++	AudioObjectPropertyListenerBlock inListener)
++{
++	if (inAddress == nullptr)
++		return kAudioHardwareIllegalOperationError;
++
++	BlockListener* listener = nullptr;
++	{
++		std::lock_guard<std::mutex> guard(g_blockListenersLock);
++		for (auto it = g_blockListeners.begin(); it != g_blockListeners.end(); ++it)
++		{
++			BlockListener* candidate = *it;
++			if (candidate->object == inObjectID && SameAddress(candidate->address, *inAddress)
++				&& candidate->queue == inDispatchQueue && candidate->block == inListener)
++			{
++				listener = candidate;
++				g_blockListeners.erase(it);
++				break;
++			}
++		}
++	}
++	if (listener == nullptr)
++		return kAudioHardwareIllegalOperationError;
++
++	OSStatus status = AudioObjectRemovePropertyListener(inObjectID, inAddress, BlockListenerTrampoline, listener);
++	if (listener->queue != nullptr)
++		dispatch_release(listener->queue);
++	Block_release(listener->block);
++	delete listener;
++	return status;
++}
++
++// Process taps (macOS 14.2) are not supported; the class exists so binaries
++// that reference it load, and every message to it returns nil/0.
++@interface CATapDescription : NSObject
++@end
++
++@implementation CATapDescription
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    (void)anInvocation;
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    (void)anInvocation;
++}
++
++@end
+diff --git a/src/frameworks/AVFAudio/CMakeLists.txt b/src/frameworks/AVFAudio/CMakeLists.txt
+index 600fb28c..fcd6bb97 100644
+--- a/src/frameworks/AVFAudio/CMakeLists.txt
++++ b/src/frameworks/AVFAudio/CMakeLists.txt
+@@ -18,6 +18,7 @@ add_framework(AVFAudio
+ 	VERSION ${FRAMEWORK_VERSION}
+ 
+ 	SOURCES
++		src/AVFAudioAdditions.m
+ 		src/AVFAudio.m
+         src/AVAudioIONode.m
+         src/AVAudioOutputNode.m
+diff --git a/src/frameworks/AVFAudio/src/AVFAudioAdditions.m b/src/frameworks/AVFAudio/src/AVFAudioAdditions.m
+new file mode 100644
+index 00000000..93b2fd67
+--- /dev/null
++++ b/src/frameworks/AVFAudio/src/AVFAudioAdditions.m
+@@ -0,0 +1,105 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Symbols that clients built against newer SDKs link unconditionally.
++
++#import <Foundation/Foundation.h>
++#include <math.h>
++
++const float AVSpeechUtteranceDefaultSpeechRate = 0.5f;
++const float AVSpeechUtteranceMaximumSpeechRate = 1.0f;
++
++@interface AVSpeechSynthesisVoice : NSObject
++@end
++
++@implementation AVSpeechSynthesisVoice
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface AVSpeechSynthesizer : NSObject
++@end
++
++@implementation AVSpeechSynthesizer
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface AVSpeechUtterance : NSObject
++@end
++
++@implementation AVSpeechUtterance
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
+diff --git a/src/frameworks/AVFoundation/CMakeLists.txt b/src/frameworks/AVFoundation/CMakeLists.txt
+index 34b6df2f..fe0b1d50 100644
+--- a/src/frameworks/AVFoundation/CMakeLists.txt
++++ b/src/frameworks/AVFoundation/CMakeLists.txt
+@@ -18,6 +18,7 @@ add_framework(AVFoundation
+     VERSION ${FRAMEWORK_VERSION}
+ 
+     SOURCES
++        src/AVFoundationAdditions.m
+         src/AVFoundation.m
+         src/AVPlayerLayerIntermediateLayer.m
+         src/AVPlayerLayerInternal.m
+diff --git a/src/frameworks/AVFoundation/src/AVFoundationAdditions.m b/src/frameworks/AVFoundation/src/AVFoundationAdditions.m
+new file mode 100644
+index 00000000..34b15c37
+--- /dev/null
++++ b/src/frameworks/AVFoundation/src/AVFoundationAdditions.m
+@@ -0,0 +1,105 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Symbols that clients built against newer SDKs link unconditionally.
++
++#import <Foundation/Foundation.h>
++
++NSString *const AVCaptureDeviceTypeBuiltInWideAngleCamera = @"AVCaptureDeviceTypeBuiltInWideAngleCamera";
++NSString *const AVCaptureDeviceTypeExternalUnknown = @"AVCaptureDeviceTypeExternalUnknown";
++NSString *const AVVideoCodecTypeJPEG = @"jpeg";
++
++@interface AVCaptureDeviceDiscoverySession : NSObject
++@end
++
++@implementation AVCaptureDeviceDiscoverySession
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface AVCapturePhotoOutput : NSObject
++@end
++
++@implementation AVCapturePhotoOutput
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface AVCapturePhotoSettings : NSObject
++@end
++
++@implementation AVCapturePhotoSettings
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
+diff --git a/src/frameworks/Accessibility/CMakeLists.txt b/src/frameworks/Accessibility/CMakeLists.txt
+new file mode 100644
+index 00000000..fde355f4
+--- /dev/null
++++ b/src/frameworks/Accessibility/CMakeLists.txt
+@@ -0,0 +1,19 @@
++project(Accessibility)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++add_framework(Accessibility
++	FAT
++	CURRENT_VERSION
++	VERSION "A"
++	TARGET_NAME Accessibility_framework
++
++	SOURCES
++		src/Accessibility.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/Accessibility/src/Accessibility.m b/src/frameworks/Accessibility/src/Accessibility.m
+new file mode 100644
+index 00000000..bb73aa4b
+--- /dev/null
++++ b/src/frameworks/Accessibility/src/Accessibility.m
+@@ -0,0 +1,54 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Accessibility preferences report the defaults; custom content is not supported.
++
++#import <Foundation/Foundation.h>
++
++NSString *const AXPrefersNonBlinkingTextInsertionIndicatorDidChangeNotification = @"AXPrefersNonBlinkingTextInsertionIndicatorDidChangeNotification";
++
++BOOL AXPrefersNonBlinkingTextInsertionIndicator(void)
++{
++    return NO;
++}
++
++@interface AXCustomContent : NSObject
++@end
++
++@implementation AXCustomContent
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
+diff --git a/src/frameworks/AuthenticationServices/CMakeLists.txt b/src/frameworks/AuthenticationServices/CMakeLists.txt
+index a30692db..89649d4b 100644
+--- a/src/frameworks/AuthenticationServices/CMakeLists.txt
++++ b/src/frameworks/AuthenticationServices/CMakeLists.txt
+@@ -19,6 +19,7 @@ add_framework(AuthenticationServices
+ 	VERSION ${FRAMEWORK_VERSION}
+ 
+ 	SOURCES
++		src/AuthenticationServicesAdditions.m
+ 		src/AKAuthorizationCredential+AuthenticationServicesExtras.m
+ 		src/ASAuthorization.m
+ 		src/ASAuthorizationAppleIDButton.m
+diff --git a/src/frameworks/AuthenticationServices/src/AuthenticationServicesAdditions.m b/src/frameworks/AuthenticationServices/src/AuthenticationServicesAdditions.m
+new file mode 100644
+index 00000000..a47a0e72
+--- /dev/null
++++ b/src/frameworks/AuthenticationServices/src/AuthenticationServicesAdditions.m
+@@ -0,0 +1,26 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Symbols that clients built against newer SDKs link unconditionally.
++
++#import <Foundation/Foundation.h>
++
++NSString *const ASAuthorizationErrorDomain = @"com.apple.AuthenticationServices.AuthorizationError";
++NSString *const ASAuthorizationPublicKeyCredentialAttestationKindNone = @"none";
++NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceDiscouraged = @"discouraged";
++NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferencePreferred = @"preferred";
++NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceRequired = @"required";
+diff --git a/src/frameworks/CMakeLists.txt b/src/frameworks/CMakeLists.txt
+index ea2f9c07..91c568a2 100644
+--- a/src/frameworks/CMakeLists.txt
++++ b/src/frameworks/CMakeLists.txt
+@@ -63,6 +63,7 @@ if (COMPONENT_dev_gui_stubs_common)
+ 	add_subdirectory(ScriptingBridge)
+ 	add_subdirectory(SecurityInterface)
+ 	add_subdirectory(ServiceManagement)
++	add_subdirectory(QuickLookUI)
+ 	add_subdirectory(Quartz)
+ 	add_subdirectory(QuickLook)
+ 	add_subdirectory(SceneKit)
+@@ -102,6 +103,9 @@ if (COMPONENT_gui_stubs)
+ 	add_subdirectory(CoreTelephony)
+ 	add_subdirectory(CoreWLAN)
+ 	add_subdirectory(DiscRecordingUI)
++	add_subdirectory(Accessibility)
++	add_subdirectory(CoreHaptics)
++	add_subdirectory(CoreML)
+ 	add_subdirectory(DiscRecording)
+ 	add_subdirectory(DrawSprocket)
+ 	add_subdirectory(EventKit)
+@@ -115,6 +119,7 @@ if (COMPONENT_gui_stubs)
+ 	add_subdirectory(IOBluetoothUI)
+ 	add_subdirectory(MapKit)
+ 	add_subdirectory(MediaAccessibility)
++	add_subdirectory(MediaPlayer)
+ 	add_subdirectory(MediaToolbox)
+     add_subdirectory(Message)
+ 	add_subdirectory(ModelIO)
+diff --git a/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c b/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c
+index 2bebb92c..75305f9a 100644
+--- a/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c
++++ b/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c
+@@ -117,3 +117,10 @@ EventTime GetEventTime(EventRef inEvent)
+     if (verbose) puts("STUB: GetEventTime called");
+     return (double) 0;
+ }
++
++// Apple Events are not delivered through the event loop.
++OSErr AEProcessEvent(const void *event)
++{
++    if (verbose) puts("STUB: AEProcessEvent called");
++    return -1708; // errAEEventNotHandled
++}
+diff --git a/src/frameworks/CoreHaptics/CMakeLists.txt b/src/frameworks/CoreHaptics/CMakeLists.txt
+new file mode 100644
+index 00000000..4afd6576
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/CMakeLists.txt
+@@ -0,0 +1,18 @@
++project(CoreHaptics)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++add_framework(CoreHaptics
++	FAT
++	CURRENT_VERSION
++	VERSION "A"
++
++	SOURCES
++		src/CoreHaptics.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/CoreHaptics/src/CoreHaptics.m b/src/frameworks/CoreHaptics/src/CoreHaptics.m
+new file mode 100644
+index 00000000..11e3c4db
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/src/CoreHaptics.m
+@@ -0,0 +1,161 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// There is no haptic hardware; the classes exist so clients load.
++
++#import <Foundation/Foundation.h>
++
++NSString *const CHHapticDynamicParameterIDHapticIntensityControl = @"HapticIntensityControl";
++NSString *const CHHapticDynamicParameterIDHapticSharpnessControl = @"HapticSharpnessControl";
++NSString *const CHHapticEventParameterIDHapticIntensity = @"HapticIntensity";
++NSString *const CHHapticEventParameterIDHapticSharpness = @"HapticSharpness";
++NSString *const CHHapticEventTypeHapticContinuous = @"HapticContinuous";
++
++@interface CHHapticDynamicParameter : NSObject
++@end
++
++@implementation CHHapticDynamicParameter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface CHHapticEngine : NSObject
++@end
++
++@implementation CHHapticEngine
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface CHHapticEvent : NSObject
++@end
++
++@implementation CHHapticEvent
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface CHHapticEventParameter : NSObject
++@end
++
++@implementation CHHapticEventParameter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface CHHapticPattern : NSObject
++@end
++
++@implementation CHHapticPattern
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
+diff --git a/src/frameworks/CoreML/CMakeLists.txt b/src/frameworks/CoreML/CMakeLists.txt
+new file mode 100644
+index 00000000..b2b2f049
+--- /dev/null
++++ b/src/frameworks/CoreML/CMakeLists.txt
+@@ -0,0 +1,18 @@
++project(CoreML)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++add_framework(CoreML
++	FAT
++	CURRENT_VERSION
++	VERSION "A"
++
++	SOURCES
++		src/CoreML.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/CoreML/src/CoreML.m b/src/frameworks/CoreML/src/CoreML.m
+new file mode 100644
+index 00000000..dce1e694
+--- /dev/null
++++ b/src/frameworks/CoreML/src/CoreML.m
+@@ -0,0 +1,264 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Models cannot be loaded; the classes exist so clients load.
++
++#import <Foundation/Foundation.h>
++
++
++@interface MLCPUComputeDevice : NSObject
++@end
++
++@implementation MLCPUComputeDevice
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLComputePlan : NSObject
++@end
++
++@implementation MLComputePlan
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLFeatureValue : NSObject
++@end
++
++@implementation MLFeatureValue
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLGPUComputeDevice : NSObject
++@end
++
++@implementation MLGPUComputeDevice
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLModel : NSObject
++@end
++
++@implementation MLModel
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLModelConfiguration : NSObject
++@end
++
++@implementation MLModelConfiguration
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLMultiArray : NSObject
++@end
++
++@implementation MLMultiArray
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLNeuralEngineComputeDevice : NSObject
++@end
++
++@implementation MLNeuralEngineComputeDevice
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MLPredictionOptions : NSObject
++@end
++
++@implementation MLPredictionOptions
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
+diff --git a/src/frameworks/CoreServices/src/AE/stub.c b/src/frameworks/CoreServices/src/AE/stub.c
+index f01373ea..5f1f025e 100644
+--- a/src/frameworks/CoreServices/src/AE/stub.c
++++ b/src/frameworks/CoreServices/src/AE/stub.c
+@@ -25,3 +25,31 @@ OSErr AEInstallEventHandler(
+     if (verbose) puts("STUB: AEInstallEventHandler called");
+     return noErr;
+ }
++
++// No Apple Event transport exists; creating, reading and sending events fails
++// with errAEEventNotHandled so clients take their no-Apple-Events path.
++OSErr AECreateAppleEvent(AEEventClass theAEEventClass, AEEventID theAEEventID, const AEAddressDesc *target,
++  AEReturnID returnID, AETransactionID transactionID, AppleEvent *result) {
++    if (verbose) puts("STUB: AECreateAppleEvent called");
++    return errAEEventNotHandled;
++}
++
++OSErr AEGetParamDesc(const AppleEvent *theAppleEvent, AEKeyword theAEKeyword, DescType desiredType, AEDesc *result) {
++    if (verbose) puts("STUB: AEGetParamDesc called");
++    return errAEEventNotHandled;
++}
++
++OSErr AEPutParamDesc(AppleEvent *theAppleEvent, AEKeyword theAEKeyword, const AEDesc *theAEDesc) {
++    if (verbose) puts("STUB: AEPutParamDesc called");
++    return errAEEventNotHandled;
++}
++
++OSStatus AESendMessage(const AppleEvent *event, AppleEvent *reply, AESendMode sendMode, long timeOutInTicks) {
++    if (verbose) puts("STUB: AESendMessage called");
++    return errAEEventNotHandled;
++}
++
++OSErr AERemoveEventHandler(AEEventClass theAEEventClass, AEEventID theAEEventID, AEEventHandlerUPP handler, Boolean isSysHandler) {
++    if (verbose) puts("STUB: AERemoveEventHandler called");
++    return noErr;
++}
+diff --git a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+index 5883ade5..ff5ab5b8 100644
+--- a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
++++ b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+@@ -9,3 +9,7 @@ Boolean _CSCheckFix(CFStringRef str)
+ 	return 0;
+ }
+ 
++
++extern "C" void _CSCheckFixDisable(void)
++{
++}
+diff --git a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+index 44c8ac7a..d131fb74 100644
+--- a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
++++ b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+@@ -57,6 +57,12 @@ CFArrayRef FSEventStreamCopyPathsBeingWatched(ConstFSEventStreamRef streamRef)
+ 	return (CFArrayRef) [impl copyPathsToWatch];
+ }
+ 
++// Event ids are per stream here; there is no global event counter.
++FSEventStreamEventId FSEventsGetCurrentEventId(void)
++{
++	return 0;
++}
++
+ FSEventStreamEventId FSEventStreamGetLatestEventId(ConstFSEventStreamRef streamRef)
+ {
+ 	return [((FSEventsImpl*) streamRef) lastEventID];
+diff --git a/src/frameworks/CoreVideo/CMakeLists.txt b/src/frameworks/CoreVideo/CMakeLists.txt
+index 04827eb3..6c1bdc23 100644
+--- a/src/frameworks/CoreVideo/CMakeLists.txt
++++ b/src/frameworks/CoreVideo/CMakeLists.txt
+@@ -22,6 +22,7 @@ add_framework(CoreVideo
+     SOURCES
+ 	    src/constants.c
+ 	    src/stubs.c
++	    src/CVPixelBufferCompat.c
+         src/CVDisplayLink.mm
+ 
+     DEPENDENCIES
+diff --git a/src/frameworks/CoreVideo/src/CVPixelBufferCompat.c b/src/frameworks/CoreVideo/src/CVPixelBufferCompat.c
+new file mode 100644
+index 00000000..03cea008
+--- /dev/null
++++ b/src/frameworks/CoreVideo/src/CVPixelBufferCompat.c
+@@ -0,0 +1,116 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Pixel buffers are not implemented. These entry points let clients that link
++// them unconditionally load, and report that no buffer can be created.
++
++#include <CoreFoundation/CoreFoundation.h>
++#include <CoreGraphics/CGGeometry.h>
++#include <stdint.h>
++
++typedef int32_t CVReturn;
++typedef CFTypeRef CVBufferRef;
++typedef CVBufferRef CVPixelBufferRef;
++typedef CVBufferRef CVImageBufferRef;
++typedef CFTypeRef CVPixelBufferPoolRef;
++typedef CFTypeRef CVDisplayLinkRef;
++typedef struct __IOSurface *IOSurfaceRef;
++typedef uint32_t CVAttachmentMode;
++typedef uint64_t CVPixelBufferPoolFlushFlags;
++
++enum { kCVReturnUnsupported = -6670 };
++
++CFTypeID CVPixelBufferGetTypeID(void)
++{
++	return 0;
++}
++
++CVReturn CVPixelBufferCreateWithIOSurface(CFAllocatorRef allocator, IOSurfaceRef surface, CFDictionaryRef attributes, CVPixelBufferRef *pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return kCVReturnUnsupported;
++}
++
++CVReturn CVPixelBufferPoolCreate(CFAllocatorRef allocator, CFDictionaryRef poolAttributes, CFDictionaryRef pixelBufferAttributes, CVPixelBufferPoolRef *poolOut)
++{
++	if (poolOut != NULL)
++		*poolOut = NULL;
++	return kCVReturnUnsupported;
++}
++
++CVReturn CVPixelBufferPoolCreatePixelBuffer(CFAllocatorRef allocator, CVPixelBufferPoolRef pool, CVPixelBufferRef *pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return kCVReturnUnsupported;
++}
++
++CVReturn CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(CFAllocatorRef allocator, CVPixelBufferPoolRef pool, CFDictionaryRef auxAttributes, CVPixelBufferRef *pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return kCVReturnUnsupported;
++}
++
++void CVPixelBufferPoolFlush(CVPixelBufferPoolRef pool, CVPixelBufferPoolFlushFlags options)
++{
++}
++
++size_t CVPixelBufferGetBytesPerRow(CVPixelBufferRef pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetDataSize(CVPixelBufferRef pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetHeightOfPlane(CVPixelBufferRef pixelBuffer, size_t planeIndex)
++{
++	return 0;
++}
++
++OSType CVPixelBufferGetPixelFormatType(CVPixelBufferRef pixelBuffer)
++{
++	return 0;
++}
++
++Boolean CVPixelBufferIsPlanar(CVPixelBufferRef pixelBuffer)
++{
++	return false;
++}
++
++CGRect CVImageBufferGetCleanRect(CVImageBufferRef imageBuffer)
++{
++	return CGRectZero;
++}
++
++CFTypeRef CVBufferCopyAttachment(CVBufferRef buffer, CFStringRef key, CVAttachmentMode *attachmentMode)
++{
++	return NULL;
++}
++
++Boolean CVBufferHasAttachment(CVBufferRef buffer, CFStringRef key)
++{
++	return false;
++}
++
++void CVBufferSetAttachment(CVBufferRef buffer, CFStringRef key, CFTypeRef value, CVAttachmentMode attachmentMode)
++{
++}
+diff --git a/src/frameworks/GameController/CMakeLists.txt b/src/frameworks/GameController/CMakeLists.txt
+index fb328fc1..a0788864 100644
+--- a/src/frameworks/GameController/CMakeLists.txt
++++ b/src/frameworks/GameController/CMakeLists.txt
+@@ -18,6 +18,7 @@ add_framework(GameController
+     VERSION ${FRAMEWORK_VERSION}
+ 
+     SOURCES
++        src/GameControllerAdditions.m
+         src/GameController.m
+         src/_GCCControllerHIDServiceInfo.m
+         src/_GCControllerManager.m
+diff --git a/src/frameworks/GameController/src/GameControllerAdditions.m b/src/frameworks/GameController/src/GameControllerAdditions.m
+new file mode 100644
+index 00000000..2b9fb5a1
+--- /dev/null
++++ b/src/frameworks/GameController/src/GameControllerAdditions.m
+@@ -0,0 +1,111 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Symbols that clients built against newer SDKs link unconditionally.
++
++#import <Foundation/Foundation.h>
++#include <math.h>
++
++NSString *const GCControllerDidConnectNotification = @"GCControllerDidConnectNotification";
++NSString *const GCControllerDidDisconnectNotification = @"GCControllerDidDisconnectNotification";
++NSString *const GCHapticsLocalityDefault = @"Default";
++NSString *const GCHapticsLocalityLeftHandle = @"Left Handle";
++NSString *const GCHapticsLocalityLeftTrigger = @"Left Trigger";
++NSString *const GCHapticsLocalityRightHandle = @"Right Handle";
++NSString *const GCHapticsLocalityRightTrigger = @"Right Trigger";
++const float GCHapticDurationInfinite = INFINITY;
++
++@interface GCDualSenseGamepad : NSObject
++@end
++
++@implementation GCDualSenseGamepad
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface GCDualShockGamepad : NSObject
++@end
++
++@implementation GCDualShockGamepad
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface GCXboxGamepad : NSObject
++@end
++
++@implementation GCXboxGamepad
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
+diff --git a/src/frameworks/MediaPlayer/CMakeLists.txt b/src/frameworks/MediaPlayer/CMakeLists.txt
+new file mode 100644
+index 00000000..0d9ab0a0
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/CMakeLists.txt
+@@ -0,0 +1,18 @@
++project(MediaPlayer)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++add_framework(MediaPlayer
++	FAT
++	CURRENT_VERSION
++	VERSION "A"
++
++	SOURCES
++		src/MediaPlayer.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/MediaPlayer/src/MediaPlayer.m b/src/frameworks/MediaPlayer/src/MediaPlayer.m
+new file mode 100644
+index 00000000..d04f5336
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/src/MediaPlayer.m
+@@ -0,0 +1,110 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Now Playing and remote commands are not connected to the host.
++
++#import <Foundation/Foundation.h>
++
++NSString *const MPMediaItemPropertyAlbumTitle = @"albumTitle";
++NSString *const MPMediaItemPropertyArtist = @"artist";
++NSString *const MPMediaItemPropertyArtwork = @"artwork";
++NSString *const MPMediaItemPropertyPlaybackDuration = @"playbackDuration";
++NSString *const MPMediaItemPropertyTitle = @"title";
++NSString *const MPNowPlayingInfoPropertyCurrentPlaybackDate = @"MPNowPlayingInfoPropertyCurrentPlaybackDate";
++NSString *const MPNowPlayingInfoPropertyElapsedPlaybackTime = @"MPNowPlayingInfoPropertyElapsedPlaybackTime";
++NSString *const MPNowPlayingInfoPropertyPlaybackRate = @"MPNowPlayingInfoPropertyPlaybackRate";
++
++@interface MPMediaItemArtwork : NSObject
++@end
++
++@implementation MPMediaItemArtwork
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MPNowPlayingInfoCenter : NSObject
++@end
++
++@implementation MPNowPlayingInfoCenter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
++
++@interface MPRemoteCommandCenter : NSObject
++@end
++
++@implementation MPRemoteCommandCenter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++}
++
++@end
+diff --git a/src/frameworks/Quartz/CMakeLists.txt b/src/frameworks/Quartz/CMakeLists.txt
+index 30bbc82c..b1b38436 100644
+--- a/src/frameworks/Quartz/CMakeLists.txt
++++ b/src/frameworks/Quartz/CMakeLists.txt
+@@ -32,8 +32,6 @@ add_framework(Quartz
+ 
+ 	SOURCES
+ 		src/Quartz.c
+-		QuickLookUI/src/QLPreviewPanel.m
+-		QuickLookUI/src/QLPreviewView.m
+ 
+ 	DEPENDENCIES
+ 		system
+@@ -41,6 +39,7 @@ add_framework(Quartz
+ 		Foundation
+ 		AppKit
+ 		QuickLook
++		QuickLookUI
+ 		ImageKit
+ )
+ 
+@@ -55,7 +54,8 @@ else()
+ 	set(QuartzCore_BUILD ${CMAKE_BINARY_DIR}/src/frameworks/dev-stubs/QuartzCore/QuartzCore)
+ endif()
+ 
+-# Ideally would be done through a nested QuickLookUI framework
++set(QuickLookUI_BUILD ${CMAKE_BINARY_DIR}/src/frameworks/QuickLookUI/QuickLookUI)
++reexport(Quartz QuickLookUI ${QuickLookUI_BUILD})
+ reexport(Quartz QuickLook ${QuickLook_BUILD})
+ reexport(Quartz ImageKit ${ImageKit_BUILD})
+ reexport(Quartz QuartzComposer ${QuartzComposer_BUILD})
+diff --git a/src/frameworks/QuickLookUI/CMakeLists.txt b/src/frameworks/QuickLookUI/CMakeLists.txt
+new file mode 100644
+index 00000000..d95f6bc9
+--- /dev/null
++++ b/src/frameworks/QuickLookUI/CMakeLists.txt
+@@ -0,0 +1,24 @@
++project(QuickLookUI)
++
++include_directories(
++	${CMAKE_CURRENT_SOURCE_DIR}/../Quartz/QuickLookUI/include
++)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++add_framework(QuickLookUI
++	FAT
++	CURRENT_VERSION
++	VERSION "A"
++
++	SOURCES
++		../Quartz/QuickLookUI/src/QLPreviewPanel.m
++		../Quartz/QuickLookUI/src/QLPreviewView.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++		AppKit
++)
+diff --git a/src/frameworks/UserNotifications/CMakeLists.txt b/src/frameworks/UserNotifications/CMakeLists.txt
+index 581e7aa5..1f35f247 100644
+--- a/src/frameworks/UserNotifications/CMakeLists.txt
++++ b/src/frameworks/UserNotifications/CMakeLists.txt
+@@ -18,6 +18,7 @@ add_framework(UserNotifications
+ 	VERSION ${FRAMEWORK_VERSION}
+ 
+ 	SOURCES
++		src/UserNotificationsAdditions.m
+ 		src/UserNotifications.m
+ 		src/UNLocalizedStringFactory.m
+ 		src/UNNotificationTrigger.m
+diff --git a/src/frameworks/Accelerate/vecLib/vDSP/src/basic.c b/src/frameworks/UserNotifications/src/UserNotificationsAdditions.m
+similarity index 58%
+rename from src/frameworks/Accelerate/vecLib/vDSP/src/basic.c
+rename to src/frameworks/UserNotifications/src/UserNotificationsAdditions.m
+index ecdd15b2..2a058003 100644
+--- a/src/frameworks/Accelerate/vecLib/vDSP/src/basic.c
++++ b/src/frameworks/UserNotifications/src/UserNotificationsAdditions.m
+@@ -1,8 +1,6 @@
+ /*
+  This file is part of Darling.
+ 
+- Copyright (C) 2020 Lubos Dolezel
+-
+  Darling is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+@@ -17,20 +15,8 @@
+  along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
+-#include <vDSP/vDSP.h>
++// Symbols that clients built against newer SDKs link unconditionally.
++
++#import <Foundation/Foundation.h>
+ 
+-void vDSP_vsadd(const float *__A, vDSP_Stride __IA, const float *__B, float *__C, vDSP_Stride __IC, vDSP_Length __N)
+-{
+-	if (__IA == 1 && __IC == 1)
+-	{
+-		#pragma clang loop vectorize(enable)
+-		for (vDSP_Length i = 0; i < __N; i++)
+-			__C[i] = __A[i] + __B[i];
+-	}
+-	else
+-	{
+-		#pragma clang loop vectorize(enable)
+-		for (vDSP_Length i = 0; i < __N; i++)
+-			__C[i * __IC] = __A[i * __IA] + __B[i * __IA];
+-	}
+-}
++NSString *const UNNotificationAttachmentOptionsTypeHintKey = @"UNNotificationAttachmentOptionsTypeHintKey";
+diff --git a/src/frameworks/VideoToolbox/CMakeLists.txt b/src/frameworks/VideoToolbox/CMakeLists.txt
+index 959803c9..2a7c9a2a 100644
+--- a/src/frameworks/VideoToolbox/CMakeLists.txt
++++ b/src/frameworks/VideoToolbox/CMakeLists.txt
+@@ -18,6 +18,7 @@ add_framework(VideoToolbox
+     VERSION ${FRAMEWORK_VERSION}
+ 
+     SOURCES
++        src/VideoToolboxAdditions.c
+         src/VideoToolbox.m
+         src/VTCompressionProperties.c
+         src/FigMetalTransferHelper.m
+diff --git a/src/frameworks/VideoToolbox/src/VideoToolboxAdditions.c b/src/frameworks/VideoToolbox/src/VideoToolboxAdditions.c
+new file mode 100644
+index 00000000..1abb3dd8
+--- /dev/null
++++ b/src/frameworks/VideoToolbox/src/VideoToolboxAdditions.c
+@@ -0,0 +1,30 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// Symbols that clients built against newer SDKs link unconditionally.
++
++#include <CoreFoundation/CoreFoundation.h>
++#include <stdint.h>
++
++const CFStringRef kVTCompressionPropertyKey_EncoderID = CFSTR("EncoderID");
++const CFStringRef kVTEncodeFrameOptionKey_BaseFrameQP = CFSTR("BaseFrameQP");
++const CFStringRef kVTProfileLevel_HEVC_Main_AutoLevel = CFSTR("HEVC_Main_AutoLevel");
++
++// No supplemental decoders exist to register.
++void VTRegisterSupplementalVideoDecoderIfAvailable(uint32_t codecType)
++{
++}
+diff --git a/src/libm/Source/Intel/xmm_log.c b/src/libm/Source/Intel/xmm_log.c
+index 336dfc91..6c09cdf8 100644
+--- a/src/libm/Source/Intel/xmm_log.c
++++ b/src/libm/Source/Intel/xmm_log.c
+@@ -410,6 +410,13 @@ static inline double _xlog2( double x )
+ #warning goofy use of scaled log() to do log2()
+ double log2( double x )
+ {
++	// The scaled log below is not exact for powers of two (log2(4096.0) gives
++	// 11.999999999999998); callers that truncate the result rely on exactness.
++	union { double d; uint64_t u; } bits = { x };
++	uint64_t exponent = ( bits.u >> 52 ) & 0x7ff;
++	if( ( bits.u >> 63 ) == 0 && ( bits.u & 0x000fffffffffffffULL ) == 0 && exponent != 0 && exponent != 0x7ff )
++		return (double)( (int64_t) exponent - 1023 );
++
+ 	static const double conversion = 1.0 / 6.9314718055994530942E-1;
+ 	xDouble xd = DOUBLE_2_XDOUBLE( x );
+ 	
+diff --git a/src/quarantine/quarantine.c b/src/quarantine/quarantine.c
+index d7f0c94e..4def4d00 100644
+--- a/src/quarantine/quarantine.c
++++ b/src/quarantine/quarantine.c
+@@ -156,3 +156,19 @@ int qtn_file_init_with_mount_point(qtn_file_t a, char b[1024])
+ int qtn_proc_init_with_data(qtn_proc_t proc, void* data, size_t data_len) {
+ 	return 0;
+ };
++
++// Process responsibility is not tracked; every process is responsible for
++// itself and disclaiming a child has no effect.
++#include <spawn.h>
++#include <stdbool.h>
++#include <sys/types.h>
++
++pid_t responsibility_get_pid_responsible_for_pid(pid_t pid)
++{
++	return pid;
++}
++
++int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attrs, bool disclaim)
++{
++	return 0;
++}

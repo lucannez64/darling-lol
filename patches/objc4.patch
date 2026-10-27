@@ -23,3 +23,19 @@ index 73f77a8..a9c3905 100644
 +
 +__ZdlPvm
 +__ZdaPvm
+diff --git a/runtime/objc-runtime-new.mm b/runtime/objc-runtime-new.mm
+index df3f9fa..c1d9229 100644
+--- a/runtime/objc-runtime-new.mm
++++ b/runtime/objc-runtime-new.mm
+@@ -2584,7 +2584,10 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
+ 
+ static void validateAlreadyRealizedClass(Class cls) {
+     ASSERT(cls->isRealized());
+-#if TARGET_OS_OSX
++    // Darling: a process may replace the default malloc zone (Chromium's
++    // PartitionAlloc does), and malloc_size() then reports the replacement
++    // allocator's slot size for class_rw_t rather than its exact size.
++#if TARGET_OS_OSX && !defined(DARLING)
+     class_rw_t *rw = cls->data();
+     size_t rwSize = malloc_size(rw);
+ 

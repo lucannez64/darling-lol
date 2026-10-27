@@ -1822,7 +1822,7 @@ index 8c6d5d9..6fd1acf 100644
  }
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
-index 7d5ef80..46debb8 100644
+index 7d5ef80..013b735 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 @@ -24,6 +24,7 @@
@@ -1841,6 +1841,15 @@ index 7d5ef80..46debb8 100644
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/proc_info.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/ptrace.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/reboot.h>
+@@ -303,7 +305,7 @@ void* __bsd_syscall_table[600] = {
+ 	[128] = sys_rename,
+ 	[131] = sys_flock,
+ 	[132] = sys_mkfifo,
+-	[133] = sys_sendto,
++	[133] = sys_sendto_trap,
+ 	[134] = sys_shutdown,
+ 	[135] = sys_socketpair,
+ 	[136] = sys_mkdir,
 @@ -427,6 +429,7 @@ void* __bsd_syscall_table[600] = {
  	[369] = sys_kevent64,
  	[372] = sys_thread_selfid,
@@ -1849,6 +1858,15 @@ index 7d5ef80..46debb8 100644
  	[394] = sys_pselect,
  	[395] = sys_pselect_nocancel,
  	[396] = sys_read_nocancel,
+@@ -446,7 +449,7 @@ void* __bsd_syscall_table[600] = {
+ 	[410] = sys_sigsuspend_nocancel,
+ 	[411] = sys_readv_nocancel,
+ 	[412] = sys_writev_nocancel,
+-	[413] = sys_sendto_nocancel,
++	[413] = sys_sendto_nocancel_trap,
+ 	[414] = sys_pread_nocancel,
+ 	[415] = sys_pwrite_nocancel,
+ 	[417] = sys_poll_nocancel,
 @@ -462,6 +465,7 @@ void* __bsd_syscall_table[600] = {
  	[441] = sys_guarded_open_np,
  	[442] = sys_guarded_close_np,
@@ -2206,10 +2224,34 @@ index f273989..058b985 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..83ad15c 100644
+index bd9cdc2..e814aab 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -139,18 +139,23 @@ sysctl_handler(handle_boottime)
+@@ -23,6 +23,7 @@
+ enum {
+ 	_KERN_MSGBUF = 1000,
+ 	_KERN_OSPRODUCTVERSION,
++	_KERN_HV_VMM_PRESENT,
+ 
+ 	_KERN_SEMMNS = 1000,
+ };
+@@ -45,6 +46,7 @@ static sysctl_handler(handle_usrstack32);
+ static sysctl_handler(handle_usrstack64);
+ static sysctl_handler(handle_sysv_semmns);
+ static sysctl_handler(handle_osproductversion);
++static sysctl_handler(handle_hv_vmm_present);
+ static sysctl_handler(handle_osrevision);
+ 
+ extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
+@@ -75,6 +77,7 @@ const struct known_sysctl sysctls_kern[] = {
+ 	{ .oid = KERN_USRSTACK32, .type = CTLTYPE_INT, .exttype = "I", .name = "usrstack", .handler = handle_usrstack32 },
+ 	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
+ 	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
++	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
+ 	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
+ 	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
+ 	{ .oid = -1 }
+@@ -139,18 +142,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -2239,6 +2281,24 @@ index bd9cdc2..83ad15c 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
+@@ -342,3 +350,17 @@ static sysctl_handler(handle_osrevision) {
+ 	*oldlen = sizeof(*ovalue);
+ 	return 0;
+ }
++
++static sysctl_handler(handle_hv_vmm_present)
++{
++	// Mirror the host: 1 when the CPU reports that it runs under a hypervisor.
++	int present = 0;
++#if defined(__x86_64__) || defined(__i386__)
++	unsigned int eax = 1, ebx, ecx, edx;
++	__asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
++	present = (ecx >> 31) & 1;
++#endif
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = present;
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 index 4319355..122ad3a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
@@ -6294,3 +6354,103 @@ index f890ab2..8969577 100644
  	}
  	return IOCTL_PASS;
  }
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/network/sendto.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/network/sendto.h
+index 2d793c9..fdea88d 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/network/sendto.h
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/network/sendto.h
+@@ -6,6 +6,20 @@ long sys_sendto(int fd, const void* buffer, unsigned long length,
+ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
+ 		int flags, const void* sockaddr, int socklen);
+ 
++// XNU returns system call results in rax and rdx and clears rdx for sendto.
++// Chromium checks rdx after sendto (crbug.com/40064248) and treats a non-zero
++// value as a bogus return, failing the write with ERR_NETWORK_CHANGED.
++struct xnu_syscall_return_pair
++{
++	long value;
++	long secondary;
++};
++
++struct xnu_syscall_return_pair sys_sendto_trap(int fd, const void* buffer, unsigned long length,
++		int flags, const void* sockaddr, int socklen);
++struct xnu_syscall_return_pair sys_sendto_nocancel_trap(int fd, const void* buffer, unsigned long length,
++		int flags, const void* sockaddr, int socklen);
++
+ #define LINUX_SYS_SENDTO	11
+ 
+ #endif // LINUX_SENDTO_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+index 01d4670..664c7a8 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+@@ -18,12 +18,22 @@ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+ 	if (ret < 0)
+ 		ret = errno_linux_to_bsd(ret);
+ 
++	if (ret < 0)
++		return ret;
++
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		rlp->rlim_cur--;
+-		rlp->rlim_max--;
++		if (rlp->rlim_cur != ~0ULL)
++			rlp->rlim_cur--;
++		if (rlp->rlim_max != ~0ULL)
++			rlp->rlim_max--;
+ 	}
+ 
++	if (rlp->rlim_cur > 0x7fffffffffffffffULL)
++		rlp->rlim_cur = 0x7fffffffffffffffULL;
++	if (rlp->rlim_max > 0x7fffffffffffffffULL)
++		rlp->rlim_max = 0x7fffffffffffffffULL;
++
+ 	return ret;
+ }
+ 
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+index 352c739..a315c2a 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+@@ -15,10 +15,17 @@ long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
+ 	if (which == -1)
+ 		return -EINVAL;
+ 
++	if (lim.rlim_cur >= 0x7fffffffffffffffULL)
++		lim.rlim_cur = ~0ULL;
++	if (lim.rlim_max >= 0x7fffffffffffffffULL)
++		lim.rlim_max = ~0ULL;
++
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		lim.rlim_cur++;
+-		lim.rlim_max++;
++		if (lim.rlim_cur != ~0ULL)
++			lim.rlim_cur++;
++		if (lim.rlim_max != ~0ULL)
++			lim.rlim_max++;
+ 	}
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, &lim, 0);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c
+index 820a7eb..1416100 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/sendto.c
+@@ -51,3 +51,17 @@ long sys_sendto_nocancel(int fd, const void* buffer, unsigned long length,
+ 
+ 	return ret;
+ }
++
++struct xnu_syscall_return_pair sys_sendto_trap(int fd, const void* buffer, unsigned long length,
++		int flags, const void* sockaddr, int socklen)
++{
++	struct xnu_syscall_return_pair result = { sys_sendto(fd, buffer, length, flags, sockaddr, socklen), 0 };
++	return result;
++}
++
++struct xnu_syscall_return_pair sys_sendto_nocancel_trap(int fd, const void* buffer, unsigned long length,
++		int flags, const void* sockaddr, int socklen)
++{
++	struct xnu_syscall_return_pair result = { sys_sendto_nocancel(fd, buffer, length, flags, sockaddr, socklen), 0 };
++	return result;
++}

@@ -238,3 +238,93 @@ index f6d166e2..fb7ae819 100644
  #include <utilities/SecCFWrappers.h>
  #include <utilities/SecFileLocations.h>
  
+diff --git a/OSX/CMakeLists.txt b/OSX/CMakeLists.txt
+index 6d257de..facc461 100644
+--- a/OSX/CMakeLists.txt
++++ b/OSX/CMakeLists.txt
+@@ -69,6 +69,7 @@ if (BUILD_TARGET_64BIT)
+ 		DEPENDS
+ 			${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in
+ 			${CMAKE_CURRENT_SOURCE_DIR}/../CSSMOID.exp-in
++			${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecExports.exp-in
+ 		COMMAND
+ 			${CMAKE_C_COMPILER} -E -Xpreprocessor -P -x objective-c -target ${APPLE_TARGET_TRIPLET_64BIT} ${EXP_IN_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in -o ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
+ 	)
+@@ -110,6 +111,7 @@ if (BUILD_TARGET_32BIT)
+ 		DEPENDS
+ 			${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in
+ 			${CMAKE_CURRENT_SOURCE_DIR}/../CSSMOID.exp-in
++			${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecExports.exp-in
+ 		COMMAND
+ 			${CMAKE_C_COMPILER} -E -Xpreprocessor -P -x objective-c -target ${APPLE_TARGET_TRIPLET_32BIT} ${EXP_IN_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in -o ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
+ 	)
+@@ -312,6 +314,10 @@ if (BUILD_TARGET_64BIT)
+ 		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
+ 	)
+ 
++	set_property(TARGET Security_${APPLE_ARCH_64BIT} APPEND PROPERTY
++		LINK_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
++	)
++
+ 	target_link_options(Security_${APPLE_ARCH_64BIT} PRIVATE
+ 		-Wl,-dead_strip
+ 		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
+diff --git a/OSX/sec/Security/SecExports.exp-in b/OSX/sec/Security/SecExports.exp-in
+index 116367d..15736e9 100644
+--- a/OSX/sec/Security/SecExports.exp-in
++++ b/OSX/sec/Security/SecExports.exp-in
+@@ -221,6 +221,7 @@ _kSecTrustRevocationReason
+ _kSecTrustRevocationValidUntilDate
+ 
+ _SecTrustAddToInputCertificates
++_SecTrustCopyCertificateChain
+ _SecTrustCopyCustomAnchorCertificates
+ _SecTrustCopyDetailedPropertiesAtIndex
+ _SecTrustCopyExceptions
+diff --git a/OSX/sec/Security/SecTrust.c b/OSX/sec/Security/SecTrust.c
+index ee5aea2..7d7e78e 100644
+--- a/OSX/sec/Security/SecTrust.c
++++ b/OSX/sec/Security/SecTrust.c
+@@ -1918,6 +1918,20 @@ SecCertificateRef SecTrustGetCertificateAtIndex(SecTrustRef trust,
+     return cert;
+ }
+ 
++CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust) {
++    if (!trust) {
++        return NULL;
++    }
++    SecTrustEvaluateIfNecessary(trust);
++    __block CFArrayRef chain = NULL;
++    dispatch_sync(trust->_trustQueue, ^{
++        if (trust->_chain) {
++            chain = CFArrayCreateCopy(kCFAllocatorDefault, trust->_chain);
++        }
++    });
++    return chain;
++}
++
+ CFDictionaryRef SecTrustCopyInfo(SecTrustRef trust) {
+     if (!trust) {
+         return NULL;
+diff --git a/trust/headers/SecTrust.h b/trust/headers/SecTrust.h
+index a8c7f97..c63ad17 100644
+--- a/trust/headers/SecTrust.h
++++ b/trust/headers/SecTrust.h
+@@ -504,6 +504,17 @@ CFIndex SecTrustGetCertificateCount(SecTrustRef trust)
+     reference has been evaluated or not.
+     @result A SecCertificateRef for the requested certificate.
+  */
++/*!
++    @function SecTrustCopyCertificateChain
++    @abstract Returns the certificate chain built by trust evaluation, from the
++    leaf to the anchor (or the last certificate found if no anchor was found).
++    @param trust A reference to the trust object.
++    @result An array of SecCertificateRef, or NULL if trust is NULL.
++ */
++__nullable
++CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust)
++    __OSX_AVAILABLE(12.0) __IOS_AVAILABLE(15.0) __TVOS_AVAILABLE(15.0) __WATCHOS_AVAILABLE(8.0);
++
+ __nullable
+ SecCertificateRef SecTrustGetCertificateAtIndex(SecTrustRef trust, CFIndex ix)
+     __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_2_0);

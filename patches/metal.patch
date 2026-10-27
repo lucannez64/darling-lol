@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 431f29a..eb3eec8 100644
+index 431f29a..e98cd33 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -42,8 +42,10 @@ add_framework(Metal
@@ -13,7 +13,15 @@ index 431f29a..eb3eec8 100644
  		src/Metal/MTLCommandQueue.mm
  		src/Metal/MTLCompileOptions.mm
  		src/Metal/MTLComputeCommandEncoder.mm
-@@ -97,6 +99,10 @@ if (BUILD_METAL)
+@@ -60,6 +62,7 @@ add_framework(Metal
+ 		src/Metal/MTLTexture.mm
+ 		src/Metal/MTLTextureDescriptor.mm
+ 		src/Metal/MTLVertexDescriptor.mm
++		src/Metal/MTLCompatibility.mm
+ 
+ 	DEPENDENCIES
+ 		system
+@@ -97,6 +100,10 @@ if (BUILD_METAL)
  	target_compile_definitions(Metal PUBLIC
  		DARLING_METAL_ENABLED=1
  	)
@@ -1134,7 +1142,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..2c45608 100644
+index f58184a..67dce7d 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,32 @@
@@ -1285,7 +1293,7 @@ index f58184a..2c45608 100644
  
  	[super dealloc];
  }
-@@ -153,12 +251,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +251,64 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1326,6 +1334,10 @@ index f58184a..2c45608 100644
 +- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
++// Optional capabilities newer clients query unconditionally.
++- (BOOL)supportsBCTextureCompression { return NO; }
++- (BOOL)supports32BitFloatFiltering { return NO; }
++- (NSArray *)counterSets { return @[]; }
 +- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount: (NSUInteger)maxCommandBufferCount
 +{
 +	return [self newCommandQueue];
@@ -1347,7 +1359,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +312,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +316,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1355,7 +1367,7 @@ index f58184a..2c45608 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +330,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +334,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1370,7 +1382,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +344,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +348,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1416,7 +1428,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +389,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +393,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1536,7 +1548,7 @@ index f58184a..2c45608 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +570,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +574,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -3880,3 +3892,49 @@ new file mode 100644
 +MTL_UNSUPPORTED_CLASS
 +#endif
 +@end
+diff --git a/src/Metal/MTLCompatibility.mm b/src/Metal/MTLCompatibility.mm
+new file mode 100644
+index 0000000..21c6945
+--- /dev/null
++++ b/src/Metal/MTLCompatibility.mm
+@@ -0,0 +1,40 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++// Descriptor classes and constants that newer clients reference directly.
++// The features behind them (argument buffers, indirect command buffers,
++// counters, programmatic capture) are not implemented.
++
++#import <Foundation/Foundation.h>
++
++extern "C" NSString *const MTLCommonCounterTimestamp = @"GPUTimestamp";
++extern "C" NSString *const MTLCommonCounterSetTimestamp = @"timestamp";
++
++#define MTL_STUB_CLASS(name) \
++@interface name : NSObject \
++@end \
++@implementation name \
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector \
++{ \
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"]; \
++} \
+++ (void)forwardInvocation:(NSInvocation *)anInvocation \
++{ \
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self); \
++} \
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector \
++{ \
++    return [NSMethodSignature signatureWithObjCTypes: "v@:"]; \
++} \
++- (void)forwardInvocation:(NSInvocation *)anInvocation \
++{ \
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]); \
++} \
++@end
++
++MTL_STUB_CLASS(MTLArgumentDescriptor)
++MTL_STUB_CLASS(MTLBlitPassDescriptor)
++MTL_STUB_CLASS(MTLCaptureDescriptor)
++MTL_STUB_CLASS(MTLCounterSampleBufferDescriptor)
++MTL_STUB_CLASS(MTLFunctionConstantValues)
++MTL_STUB_CLASS(MTLIndirectCommandBufferDescriptor)

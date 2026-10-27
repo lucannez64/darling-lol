@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 89,
+      "modified_files": 105,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -25,7 +25,25 @@
         "src/frameworks/OpenGL/CGLAsyncPresent.inc",
         "src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h",
         "src/startup/mldr/commpage-cpu-caps.h",
-        "src/shellspawn/shellspawn-fds.h"
+        "src/shellspawn/shellspawn-fds.h",
+        "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm",
+        "src/frameworks/AVFAudio/src/AVFAudioAdditions.m",
+        "src/frameworks/AVFoundation/src/AVFoundationAdditions.m",
+        "src/frameworks/Accessibility/CMakeLists.txt",
+        "src/frameworks/Accessibility/src/Accessibility.m",
+        "src/frameworks/AuthenticationServices/src/AuthenticationServicesAdditions.m",
+        "src/frameworks/CoreHaptics/CMakeLists.txt",
+        "src/frameworks/CoreHaptics/src/CoreHaptics.m",
+        "src/frameworks/CoreML/CMakeLists.txt",
+        "src/frameworks/CoreML/src/CoreML.m",
+        "src/frameworks/CoreVideo/src/CVPixelBufferCompat.c",
+        "src/frameworks/GameController/src/GameControllerAdditions.m",
+        "src/frameworks/MediaPlayer/CMakeLists.txt",
+        "src/frameworks/MediaPlayer/src/MediaPlayer.m",
+        "src/frameworks/QuickLookUI/CMakeLists.txt",
+        "src/frameworks/VideoToolbox/src/VideoToolboxAdditions.c",
+        "src/frameworks/Accelerate/vecLib/vDSP/src/arith.c",
+        "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c"
       ]
     },
     {
@@ -33,7 +51,7 @@
       "revision": "534684e6748dffbd875c6cd1942477a52b66a077",
       "repository": "https://github.com/darlinghq/darling-iokituser.git",
       "patch": "patches/IOKitUser.patch",
-      "modified_files": 1,
+      "modified_files": 2,
       "new_files": []
     },
     {
@@ -57,10 +75,17 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 115,
+      "modified_files": 123,
       "new_files": [
         "QuartzCore/include/QuartzCore/CATransformLayer.h",
-        "AppKit/NSGeometryTrace.h"
+        "AppKit/NSGeometryTrace.h",
+        "AppKit/NSAccessibilityCustomAction.m",
+        "AppKit/NSColorSampler.m",
+        "AppKit/NSImageSymbolConfiguration.m",
+        "CoreGraphics/CGColorSpaceSRGBProfile.inc",
+        "CoreGraphics/CGCompatibility.m",
+        "QuartzCore/CAEDRMetadata.m",
+        "AppKit/X11.backend/X11RelativeMouse.h"
       ]
     },
     {
@@ -92,8 +117,10 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 5,
-      "new_files": []
+      "modified_files": 9,
+      "new_files": [
+        "NSConstantLiterals.m"
+      ]
     },
     {
       "path": "src/external/curl",
@@ -118,8 +145,10 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 4,
-      "new_files": []
+      "modified_files": 6,
+      "new_files": [
+        "src/NSConstantNumbers.m"
+      ]
     },
     {
       "path": "src/external/iokitd",
@@ -250,7 +279,8 @@
         "private-include/Metal/MTLSamplerStateInternal.h",
         "private-include/Metal/MTLVertexDescriptorInternal.h",
         "src/Metal/MTLArgument.mm",
-        "src/Metal/MTLBlitCommandEncoder.mm"
+        "src/Metal/MTLBlitCommandEncoder.mm",
+        "src/Metal/MTLCompatibility.mm"
       ]
     },
     {
@@ -258,7 +288,7 @@
       "revision": "1a12df76d12bfc9fdfffadb290f7742763568765",
       "repository": "https://github.com/darlinghq/darling-objc4.git",
       "patch": "patches/objc4.patch",
-      "modified_files": 2,
+      "modified_files": 3,
       "new_files": []
     },
     {
@@ -266,7 +296,7 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 9,
+      "modified_files": 13,
       "new_files": []
     },
     {
@@ -274,7 +304,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 65,
+      "modified_files": 70,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
