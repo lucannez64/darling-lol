@@ -21,7 +21,7 @@ class PatchUpgradeTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         tree = ast.parse((Path(__file__).resolve().parents[1] / 'scripts/prepare.py').read_text())
         definitions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-                       and n.name in ('run', 'applies', 'replacement_changes', 'prepare_patch')]
+                       and n.name in ('git_environment', 'git_run', 'git_output', 'run', 'applies', 'replacement_changes', 'prepare_patch')]
         self.ns = dict(subprocess=subprocess, hashlib=hashlib, os=os, Path=Path, tempfile=tempfile)
         exec(compile(ast.Module(body=definitions, type_ignores=[]), 'prepare.py', 'exec'), self.ns)
         self.temp = tempfile.TemporaryDirectory()
@@ -98,6 +98,36 @@ class PatchUpgradeTests(unittest.TestCase):
                 self.prepare([old_patch])
                 self.assertEqual(self.header.read_text(), contents + 'current change\n')
                 self.assertEqual(self.header.read_text().count('obsolete\n'), 1)
+
+    def test_inherited_git_location_settings_cannot_redirect_migration(self):
+        decoy = self.repo / 'decoy'
+        subprocess.run(['git', 'clone', '-q', '--local', str(self.repo), str(decoy)], check=True)
+        paths = [decoy / '.git' / name for name in ('config', 'index', 'HEAD')]
+        paths.append(decoy / 'window.h')
+        before = [path.read_bytes() for path in paths]
+        own_index = (self.repo / '.git/index').read_bytes()
+        self.header.write_text(self.old)
+        inherited = dict(GIT_DIR=str(decoy / '.git'), GIT_WORK_TREE=str(decoy),
+                         GIT_COMMON_DIR=str(decoy / '.git'), GIT_INDEX_FILE=str(decoy / '.git/index'),
+                         GIT_OBJECT_DIRECTORY=str(decoy / '.git/objects'),
+                         GIT_ALTERNATE_OBJECT_DIRECTORIES=str(decoy / '.git/objects'),
+                         GIT_TRACE='0', GIT_SSH_COMMAND='ssh -o BatchMode=yes',
+                         GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='user.name', GIT_CONFIG_VALUE_0='EnvUser')
+        with patch.dict(os.environ, inherited):
+            clean = self.ns['git_environment']()
+            for name in inherited:
+                if name not in ('GIT_TRACE', 'GIT_SSH_COMMAND') and not name.startswith('GIT_CONFIG_'):
+                    self.assertNotIn(name, clean)
+            configured = self.ns['git_output'](['git', '-C', str(self.repo), 'config', 'user.name'], text=True)
+            self.assertEqual(configured.strip(), 'EnvUser')
+            self.assertEqual(clean['GIT_TRACE'], '0')
+            self.assertEqual(clean['GIT_SSH_COMMAND'], inherited['GIT_SSH_COMMAND'])
+            private = self.ns['git_environment'](self.repo / 'private-index')
+            self.assertEqual(private['GIT_INDEX_FILE'], str(self.repo / 'private-index'))
+            self.prepare()
+        self.assertEqual(self.header.read_text(), self.new)
+        self.assertEqual([path.read_bytes() for path in paths], before)
+        self.assertEqual((self.repo / '.git/index').read_bytes(), own_index)
 
     def test_current_patch_is_not_rewritten(self):
         before = self.header.stat().st_mtime_ns

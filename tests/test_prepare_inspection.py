@@ -1,6 +1,7 @@
 """Failed Git inspections must stop source preparation."""
 import ast
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,11 +12,12 @@ import unittest
 def load_prepare(*names):
     """Execute selected top-level definitions from prepare.py, without its CLI."""
     tree = ast.parse((Path(__file__).resolve().parents[1] / 'scripts/prepare.py').read_text())
+    names = (*names, 'git_environment', 'git_run', 'git_output')
     body = [node for node in tree.body
             if (isinstance(node, ast.FunctionDef) and node.name in names)
             or (isinstance(node, ast.Assign)
                 and any(getattr(target, 'id', '') == 'LFS_POINTER' for target in node.targets))]
-    namespace = {'subprocess': subprocess, 'Path': Path}
+    namespace = {'subprocess': subprocess, 'Path': Path, 'os': os}
     exec(compile(ast.Module(body=body, type_ignores=[]), 'prepare.py', 'exec'), namespace)
     return namespace
 

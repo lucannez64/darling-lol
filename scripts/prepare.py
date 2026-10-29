@@ -10,7 +10,25 @@ p.add_argument('--source',type=Path,default=ROOT/'build/darling-src')
 p.add_argument('--jobs',type=int,default=4,help='parallel submodule fetches')
 p.add_argument('--check-only',action='store_true',help='validate against temporary base indexes, without changing existing source')
 a=p.parse_args();source=a.source.resolve();manifest=json.loads((ROOT/'upstream/manifest.json').read_text())
-def run(args,**kwargs):return subprocess.run(args,check=True,**kwargs)
+def git_environment(index=None):
+    """Select repositories explicitly while retaining transport/auth/config settings."""
+    locations=('GIT_DIR','GIT_WORK_TREE','GIT_COMMON_DIR','GIT_INDEX_FILE',
+               'GIT_OBJECT_DIRECTORY','GIT_ALTERNATE_OBJECT_DIRECTORIES',
+               'GIT_PREFIX','GIT_INTERNAL_SUPER_PREFIX','GIT_IMPLICIT_WORK_TREE',
+               'GIT_NAMESPACE','GIT_SHALLOW_FILE','GIT_GRAFT_FILE','GIT_QUARANTINE_PATH')
+    env={key:value for key,value in os.environ.items() if key not in locations}
+    if index is not None:env['GIT_INDEX_FILE']=str(index)
+    return env
+
+def git_run(args,**kwargs):
+    kwargs.setdefault('env',git_environment())
+    return subprocess.run(args,**kwargs)
+
+def git_output(args,**kwargs):
+    kwargs.setdefault('env',git_environment())
+    return subprocess.check_output(args,**kwargs)
+
+def run(args,**kwargs):return git_run(args,check=True,**kwargs)
 # The pinned darling-swift .lfsconfig points at the retired git-lfs.darlinghq.org; GitHub still serves the objects.
 LFS_URL='lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs'
 # Without these, a checkout writes Git LFS pointer text where a real dylib belongs, which links but crashes.
@@ -18,7 +36,7 @@ LFS_FILTERS=['-c','filter.lfs.required=true','-c','filter.lfs.smudge=git-lfs smu
              '-c','filter.lfs.process=git-lfs filter-process','-c','filter.lfs.clean=git-lfs clean -- %f']
 LFS_POINTER=b'version https://git-lfs.github.com/spec/v1\n'
 def submodules(checkout):
-    out=subprocess.run(['git','-C',str(checkout),'submodule','status','--recursive'],text=True,capture_output=True,check=True).stdout
+    out=git_run(['git','-C',str(checkout),'submodule','status','--recursive'],text=True,capture_output=True,check=True).stdout
     return [checkout/line.split()[1] for line in out.splitlines() if len(line.split())>1]
 def pointers(repo):
     """Tracked files still checked out as LFS pointer text instead of their real content.
@@ -26,7 +44,7 @@ def pointers(repo):
     The marker from `git lfs ls-files` is not enough: it reports * (object present)
     when the pointer text happens to be the same size as the object.
     """
-    out=subprocess.run(['git','-C',str(repo),'lfs','ls-files','--name-only'],text=True,capture_output=True,check=True).stdout
+    out=git_run(['git','-C',str(repo),'lfs','ls-files','--name-only'],text=True,capture_output=True,check=True).stdout
     found=[]
     for name in out.splitlines():
         try:
@@ -40,7 +58,7 @@ def repair(checkout):
     treats both as up to date, so check every worktree before this checkout becomes the source tree."""
     for repo in [checkout,*submodules(checkout)]:
         name=repo.relative_to(checkout) or '.'
-        if repo!=checkout and subprocess.run(['git','-C',str(repo),'status','--porcelain'],text=True,
+        if repo!=checkout and git_run(['git','-C',str(repo),'status','--porcelain'],text=True,
                                              capture_output=True,check=True).stdout.strip():
             print(f'Repairing the interrupted checkout of {name}',flush=True)
             run(['git','-C',str(repo),'checkout','-f','HEAD'],stdout=subprocess.DEVNULL)
@@ -52,7 +70,7 @@ def repair(checkout):
             if pointers(repo):raise SystemExit(f'{name}: Git LFS objects are still missing; install git-lfs and run this again')
 
 def applies(repo,patch,reverse=False):
-    return subprocess.run(['git','-C',str(repo),'apply',*(['--reverse'] if reverse else []),'--check','-'],input=patch,text=True,
+    return git_run(['git','-C',str(repo),'apply',*(['--reverse'] if reverse else []),'--check','-'],input=patch,text=True,
                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 def replacement_changes(repo,old,patch):
     """Merge a base-derived old-to-new transition in a private index.
@@ -60,31 +78,31 @@ def replacement_changes(repo,old,patch):
     Reverse matches can land in repeated context. The pinned base, rather than
     a reverse application to working files, defines both patch versions.
     """
-    paths=set(subprocess.check_output(['git','-C',str(repo),'diff','--name-only','-z','HEAD']).split(b'\0'))
+    paths=set(git_output(['git','-C',str(repo),'diff','--name-only','-z','HEAD']).split(b'\0'))
     for text in (old,patch):
-        stats=subprocess.check_output(['git','-C',str(repo),'apply','--numstat','-z','-'],input=text.encode())
+        stats=git_output(['git','-C',str(repo),'apply','--numstat','-z','-'],input=text.encode())
         paths.update(row.split(b'\t',2)[2] for row in stats.split(b'\0') if row)
     paths.discard(b'')
     with tempfile.TemporaryDirectory(prefix='darling-upgrade-index-') as tmp:
-        env=dict(os.environ,GIT_INDEX_FILE=str(Path(tmp)/'index'))
+        env=git_environment(Path(tmp)/'index')
         trees=[]
         for text in (old,patch):
             run(['git','-C',str(repo),'read-tree','HEAD'],env=env)
-            result=subprocess.run(['git','-C',str(repo),'apply','--cached','--whitespace=nowarn','-'],
+            result=git_run(['git','-C',str(repo),'apply','--cached','--whitespace=nowarn','-'],
                 input=text,text=True,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
             if result.returncode:return None
-            trees.append(subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip())
-        transition=subprocess.check_output(['git','-C',str(repo),'diff','--binary','--full-index',*trees],text=True)
+            trees.append(git_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip())
+        transition=git_output(['git','-C',str(repo),'diff','--binary','--full-index',*trees],text=True)
         if not transition:return None
         run(['git','-C',str(repo),'read-tree','HEAD'],env=env)
         run(['git','-C',str(repo),'update-index','--add','--remove','-z','--stdin'],
             input=b'\0'.join(sorted(paths))+b'\0',env=env)
-        before=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip()
-        result=subprocess.run(['git','-C',str(repo),'apply','--cached','--3way','--whitespace=nowarn','-'],
+        before=git_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip()
+        result=git_run(['git','-C',str(repo),'apply','--cached','--3way','--whitespace=nowarn','-'],
             input=transition,text=True,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         if result.returncode:return None
-        after=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip()
-        return subprocess.check_output(['git','-C',str(repo),'diff','--binary','--full-index',before,after],text=True)
+        after=git_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip()
+        return git_output(['git','-C',str(repo),'diff','--binary','--full-index',before,after],text=True)
 
 def prepare_patch(repo,patch,previous):
     already=applies(repo,patch,reverse=True)
@@ -117,9 +135,9 @@ def previous_patches(component):
     """Earlier applied versions of a component's patch: the recorded copy, then each version in this repository's history."""
     recorded=applied/Path(component['patch']).name
     if recorded.exists():yield recorded.read_text()
-    history=subprocess.run(['git','-C',str(ROOT),'log','--format=%H','--',component['patch']],text=True,capture_output=True).stdout.split()
+    history=git_run(['git','-C',str(ROOT),'log','--format=%H','--',component['patch']],text=True,capture_output=True).stdout.split()
     for commit in history:
-        shown=subprocess.run(['git','-C',str(ROOT),'show',f"{commit}:{component['patch']}"],text=True,capture_output=True)
+        shown=git_run(['git','-C',str(ROOT),'show',f"{commit}:{component['patch']}"],text=True,capture_output=True)
         if shown.returncode==0:yield render(shown.stdout)
 if not (source/'.git').exists():
     if a.check_only:p.error('check-only requires an existing pinned source checkout')
@@ -133,7 +151,7 @@ if not (source/'.git').exists():
         run(['git','-C',str(checkout),'remote','add','origin',manifest['upstream']])
         run(['git','-C',str(checkout),'fetch','--depth','1','origin',manifest['revision']])
         run(['git','-C',str(checkout),'checkout','--detach','FETCH_HEAD'])
-        if subprocess.run(['git','lfs','version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
+        if git_run(['git','lfs','version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
             p.error('Git LFS is required to fetch the pinned sources; install git-lfs first')
         run(['git','-C',str(checkout),*LFS_FILTERS,'lfs','install','--local'],stdout=subprocess.DEVNULL)
         print('Initializing Darling submodules (large repositories/LFS assets may take a while)...',flush=True)
@@ -151,12 +169,12 @@ if not (source/'.git').exists():
 # Never reset someone else's checkout to make a patch apply.
 for component in manifest['components']:
     repo=source/component['path']
-    actual=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    actual=git_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     if actual!=component['revision']:raise SystemExit(f"Wrong revision for {component['path']}: expected {component['revision']}, got {actual}")
     patch=render((ROOT/component['patch']).read_text())
     if a.check_only:
         with tempfile.TemporaryDirectory(prefix='darling-patch-index-') as tmp:
-            env=dict(os.environ,GIT_INDEX_FILE=str(Path(tmp)/'index'))
+            env=git_environment(Path(tmp)/'index')
             run(['git','-C',str(repo),'read-tree',component['revision']],env=env)
             run(['git','-C',str(repo),'apply','--cached','--check','--whitespace=nowarn','-'],input=patch,text=True,env=env)
     else:
