@@ -78,6 +78,27 @@ class PatchUpgradeTests(unittest.TestCase):
         self.prepare()
         self.assertEqual(self.header.read_text(), self.new)
 
+    def test_old_deletion_cannot_insert_code_at_repeated_context(self):
+        base = (self.base + 'a\nb\nc\nobsolete\nx\ny\nz\n' +
+                ''.join(f'gap {i}\n' for i in range(20)) + 'a\nb\nc\nx\ny\nz\n' +
+                ''.join(f'tail {i}\n' for i in range(20)))
+        self.header.write_text(base)
+        self.git('add', 'window.h')
+        self.git('commit', '-qm', 'repeated context base')
+        self.header.write_text(base.replace('obsolete\n', '', 1))
+        old_patch = self.git('diff', 'HEAD', '--', 'window.h')
+        self.header.write_text(base + 'current change\n')
+        self.patch = self.git('diff', 'HEAD', '--', 'window.h')
+        for local_edit in (False, True):
+            with self.subTest(local_edit=local_edit):
+                contents = base.replace('line 0\n', 'user edit\n') if local_edit else base
+                self.header.write_text(contents)
+                # This false positive is exactly what made reversal unsafe.
+                self.assertTrue(self.ns['applies'](self.repo, old_patch, reverse=True))
+                self.prepare([old_patch])
+                self.assertEqual(self.header.read_text(), contents + 'current change\n')
+                self.assertEqual(self.header.read_text().count('obsolete\n'), 1)
+
     def test_current_patch_is_not_rewritten(self):
         before = self.header.stat().st_mtime_ns
         self.prepare()
@@ -104,11 +125,11 @@ class PatchUpgradeTests(unittest.TestCase):
         self.assertEqual(self.header.read_text(), contents)
         self.assertEqual(self.git('write-tree'), index)
 
-    def test_failed_apply_restores_old_patch(self):
+    def test_failed_apply_leaves_old_patch_untouched(self):
         self.header.write_text(self.old)
         original_run = self.ns['run']
         def fail_new(args, **kwargs):
-            if 'apply' in args and '--cached' not in args and kwargs.get('input') == self.patch:
+            if 'apply' in args and '--cached' not in args:
                 raise subprocess.CalledProcessError(1, args)
             return original_run(args, **kwargs)
         self.ns['run'] = fail_new

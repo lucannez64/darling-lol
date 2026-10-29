@@ -55,7 +55,11 @@ def applies(repo,patch,reverse=False):
     return subprocess.run(['git','-C',str(repo),'apply',*(['--reverse'] if reverse else []),'--check','-'],input=patch,text=True,
                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 def replacement_changes(repo,old,patch):
-    """Test an old-to-new transition against working files in a private index."""
+    """Merge a base-derived old-to-new transition in a private index.
+
+    Reverse matches can land in repeated context. The pinned base, rather than
+    a reverse application to working files, defines both patch versions.
+    """
     paths=set(subprocess.check_output(['git','-C',str(repo),'diff','--name-only','-z','HEAD']).split(b'\0'))
     for text in (old,patch):
         stats=subprocess.check_output(['git','-C',str(repo),'apply','--numstat','-z','-'],input=text.encode())
@@ -63,16 +67,24 @@ def replacement_changes(repo,old,patch):
     paths.discard(b'')
     with tempfile.TemporaryDirectory(prefix='darling-upgrade-index-') as tmp:
         env=dict(os.environ,GIT_INDEX_FILE=str(Path(tmp)/'index'))
+        trees=[]
+        for text in (old,patch):
+            run(['git','-C',str(repo),'read-tree','HEAD'],env=env)
+            result=subprocess.run(['git','-C',str(repo),'apply','--cached','--whitespace=nowarn','-'],
+                input=text,text=True,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if result.returncode:return None
+            trees.append(subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip())
+        transition=subprocess.check_output(['git','-C',str(repo),'diff','--binary','--full-index',*trees],text=True)
+        if not transition:return None
         run(['git','-C',str(repo),'read-tree','HEAD'],env=env)
         run(['git','-C',str(repo),'update-index','--add','--remove','-z','--stdin'],
             input=b'\0'.join(sorted(paths))+b'\0',env=env)
-        before=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env)
-        for text,reverse in ((old,True),(patch,False)):
-            result=subprocess.run(['git','-C',str(repo),'apply','--cached',
-                *(['--reverse'] if reverse else []),'--whitespace=nowarn','-'],
-                input=text,text=True,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-            if result.returncode:return False
-        return before!=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env)
+        before=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip()
+        result=subprocess.run(['git','-C',str(repo),'apply','--cached','--3way','--whitespace=nowarn','-'],
+            input=transition,text=True,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if result.returncode:return None
+        after=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env,text=True).strip()
+        return subprocess.check_output(['git','-C',str(repo),'diff','--binary','--full-index',before,after],text=True)
 
 def prepare_patch(repo,patch,previous):
     already=applies(repo,patch,reverse=True)
@@ -83,14 +95,12 @@ def prepare_patch(repo,patch,previous):
         fingerprint=hashlib.sha256(old.encode()).digest()
         if fingerprint in seen:continue
         seen.add(fingerprint)
-        if not applies(repo,old,reverse=True) or not replacement_changes(repo,old,patch):continue
+        if not applies(repo,old,reverse=True):continue
+        replacement=replacement_changes(repo,old,patch)
+        if not replacement:continue
         print(f"Replacing an earlier patch in {repo}",flush=True)
-        run(['git','-C',str(repo),'apply','--reverse','--whitespace=nowarn','-'],input=old,text=True)
-        try:
-            run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
-        except subprocess.CalledProcessError:
-            run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=old,text=True)
-            raise
+        # One atomic apply: no worktree reversal or real-index checkout.
+        run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=replacement,text=True)
         return
     if not already and applies(repo,patch):
         run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
