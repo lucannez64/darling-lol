@@ -57,8 +57,14 @@ def main(path):
     )
     commands = segment("__TEXT", 0x100000000, 0x1000, 0, 0x1000, 5, text_section)
     commands += segment("__LINKEDIT", 0x100001000, 0x1000, 0x1000, 0, 1)
+    # A dylib needs LC_ID_DYLIB to be accepted by llvm-lipo as well as the
+    # signature parser. Keep the command aligned to an eight-byte boundary.
+    identity = b"@rpath/minimal.dylib\0"
+    id_size = (24 + len(identity) + 7) & ~7
+    commands += struct.pack("<IIIIII", 0xD, id_size, 24, 0, 0x10000, 0x10000)
+    commands += identity + b"\0" * (id_size - 24 - len(identity))
     header = struct.pack(
-        "<IIIIIIII", MH_MAGIC_64, CPU_TYPE_X86_64, 3, MH_DYLIB, 2, len(commands), 0, 0
+        "<IIIIIIII", MH_MAGIC_64, CPU_TYPE_X86_64, 3, MH_DYLIB, 3, len(commands), 0, 0
     )
     data = bytearray(header + commands)
     data += b"\0" * (0x1000 - len(data))

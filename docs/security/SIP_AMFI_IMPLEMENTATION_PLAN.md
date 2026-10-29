@@ -12,6 +12,12 @@ not claimed as fully implemented.
 
 Author: fork maintainers (`obrientatsuya/darling-lol`).
 
+The continuation of [PR #144](https://github.com/lucannez64/darling-lol/pull/144)
+preserves the original commits and adds the fixes and validation described in
+[TAKEOVER_VALIDATION.md](TAKEOVER_VALIDATION.md). Test counts below are the
+original author's reference runs unless that validation document says they were
+repeated. They do not establish production readiness.
+
 ---
 
 ## 1. Scope and non-goals
@@ -243,6 +249,12 @@ when `state.valid && state.verified`.
 
 ## 7. Build-system prerequisites
 
+The native `mldr` and `darlingserver` targets require OpenSSL and libxml2
+headers/libraries. libxml2 parses entitlement policy; the standalone
+`dc-codesign` parser still needs only OpenSSL. For example, Debian/Ubuntu hosts
+need `libssl-dev libxml2-dev pkg-config` as well as the existing build toolchain.
+A 32-bit mldr build needs the corresponding 32-bit crypto and XML libraries.
+
 Enforcement is impossible while the runtime itself is unsigned. Order matters:
 
 1. Add a post-build signing step that ad-hoc signs every Mach-O installed by
@@ -473,11 +485,18 @@ in `tests/security/fixtures/README.md`:
   unmodified image runs, and a page modified before sealing is detected.
 - Risk: JIT and self-modifying runtimes (Chromium V8) legitimately need
   `MAP_JIT`; `allow-jit` must gate an explicit, audited exception.
-- **Prototype (this branch):** after mapping segments, `mldr` calls Linux
-  `mseal(2)` on read-only `__TEXT`/`__LINKEDIT`; dyld calls a private
-  `__darling_mseal_range()` helper for every non-writable `__TEXT`/`__LINKEDIT`
-  segment it maps. The kernel then rejects later `mprotect`, `munmap` and
-  `mmap(MAP_FIXED)` over those ranges on Linux ≥ 6.10.
+- **Prototype (this branch):** under signing `enforce` or `DARLING_MSEAL=1`,
+  mldr and dyld first copy each source image into a private memfd, then apply
+  write/grow/shrink/seal seals. Verification and mapping use that same immutable
+  descriptor, so changing or truncating the original inode cannot change the
+  verified bytes. Snapshot errors reject the image; the current size limit is
+  2 GiB per image. This adds a full image copy and memory cost at load time.
+  For M5, read-only `__TEXT`/`__LINKEDIT` mappings are additionally replaced
+  with anonymous snapshots before `mseal(2)`. dyld uses a private
+  `__darling_mseal_range()` helper. Anonymous backing prevents
+  `MADV_DONTNEED` from returning to mutable file contents. The kernel rejects
+  later `mprotect`, `munmap` and `mmap(MAP_FIXED)` over sealed ranges on Linux
+  ≥ 6.10.
   `tests/security/test_m5_seal.sh` checks the main image and a `dlopen()`ed
   dylib: both reject `mprotect(PROT_WRITE)` and `mmap(MAP_FIXED)`: 1/1 passing
   on the 7.3 test host. Sealing is opt-in: set `DARLING_MSEAL=1` (or `on`,
@@ -576,7 +595,9 @@ in `tests/security/fixtures/README.md`:
   `/private/etc`, `/private/var/db` and `/Library/Apple` paths. Protected
   inodes are recorded by `(dev, ino)` and writable fd/path operations compare
   against that set, so an outside hardlink to a protected file is refused once
-  the protected inode has been observed. `tests/security/test_sip.sh` covers
+  the protected inode has been observed, including aliases under `/usr/local`.
+  The path exception is applied only after the learned inode check.
+  `tests/security/test_sip.sh` covers
   off/on, protected writes, `/usr/local`, `..`, symlink, the mutating wrappers,
   writable shared (`MAP_SHARED`) `mmap` and a seeded hardlink escape: 3/3
   passing.

@@ -8526,19 +8526,30 @@ index fee1bde8..14733ac4 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82..6e557c08 100644
+index 6617ef8..d758c1a 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
-@@ -42,6 +42,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -21,6 +21,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <sys/mman.h>
++#include <sys/syscall.h>
+ #include <unistd.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -42,6 +43,11 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  #include <sys/ptrace.h>
  #include <pthread.h>
  #include <sys/utsname.h>
 +#include <darlingserver/cs_state.h>
 +#include "dc_codesign.h"
++#include "dc_entitlements.h"
++#include "dc_mseal.h"
++#include "dc_image_snapshot.h"
  
  #ifndef PAGE_SIZE
  #	define PAGE_SIZE	4096
-@@ -70,7 +72,7 @@ static void reexec32(char** argv);
+@@ -70,7 +76,7 @@ static void reexec32(char** argv);
  #endif
  static void load32(int fd, bool expect_dylinker, struct load_results* lr);
  static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
@@ -8547,7 +8558,7 @@ index 6617ef82..6e557c08 100644
  static int native_prot(int prot);
  static void setup_space(struct load_results* lr, bool is_64_bit);
  static void process_special_env(struct load_results* lr);
-@@ -106,6 +108,216 @@ void* __mldr_main_stack_top = NULL;
+@@ -106,6 +112,256 @@ void* __mldr_main_stack_top = NULL;
  static int kernel_major = -1;
  static int kernel_minor = -1;
  
@@ -8556,31 +8567,54 @@ index 6617ef82..6e557c08 100644
 +// copy with darlingserver for cross-process csops queries.
 +struct dc_cs_local_state mldr_cs_state;
 +
-+static bool entitlements_key_is_true(const uint8_t* data, size_t len, const char* key)
-+{
-+	char needle[320];
-+	size_t needle_len;
-+	const char* start;
-+	const char* end;
-+	const char* match;
++static long dc_native_image_size(int fd) {
++    struct stat st;
++    return fstat(fd, &st) == 0 ? st.st_size : -errno;
++}
++static long dc_native_image_create(void) {
++    long result = syscall(__NR_memfd_create, "darling-verified-image", 3);
++    return result < 0 ? -errno : result;
++}
++static long dc_native_image_read(int fd, void* data, unsigned long len, unsigned long offset) {
++    long result = pread(fd, data, len, (off_t)offset);
++    return result < 0 ? -errno : result;
++}
++static long dc_native_image_write(int fd, const void* data, unsigned long len) {
++    long result = write(fd, data, len);
++    return result < 0 ? -errno : result;
++}
++static long dc_native_image_seal(int fd) { return fcntl(fd, 1033, 15) == 0 ? 0 : -errno; }
++static void dc_native_image_close(int fd) { close(fd); }
++static const struct dc_image_ops dc_native_image_ops = {
++    dc_native_image_size, dc_native_image_create, dc_native_image_read,
++    dc_native_image_write, dc_native_image_seal, dc_native_image_close
++};
 +
-+	if (data == NULL || len == 0)
-+		return false;
-+	if (snprintf(needle, sizeof(needle), "<key>%s</key>", key) >= (int) sizeof(needle))
-+		return false;
-+	needle_len = strlen(needle);
-+	start = (const char*) data;
-+	end = start + len;
++static long dc_native_allocate(unsigned long length) {
++    void* p = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    return p == MAP_FAILED ? -errno : (long)p;
++}
++static long dc_native_protect(void* p, unsigned long length, int prot) {
++    return mprotect(p, length, prot) == 0 ? 0 : -errno;
++}
++static long dc_native_relocate(void* p, unsigned long length, void* target) {
++    void* moved = mremap(p, length, length, MREMAP_MAYMOVE | MREMAP_FIXED, target);
++    return moved == MAP_FAILED ? -errno : (long)moved;
++}
++static void dc_native_release(void* p, unsigned long length) { munmap(p, length); }
++static long dc_native_seal(void* p, unsigned long length) {
++#ifdef __NR_mseal
++    return syscall(__NR_mseal, p, length, 0) == 0 ? 0 : -errno;
++#else
++    return -ENOSYS;
++#endif
++}
++static const struct dc_seal_ops dc_native_seal_ops = {
++    dc_native_allocate, dc_native_protect, dc_native_relocate, dc_native_release, dc_native_seal
++};
 +
-+	match = memmem(start, len, needle, needle_len);
-+	if (match == NULL)
-+		return false;
-+	match += needle_len;
-+	while (match < end && (*match == ' ' || *match == '\t' || *match == '\r' || *match == '\n'))
-+		match++;
-+	return (size_t)(end - match) >= 7 && memcmp(match, "<true/>", 7) == 0
-+	    ? true
-+	    : (size_t)(end - match) >= 8 && memcmp(match, "<true />", 8) == 0;
++static bool entitlements_key_is_true(const uint8_t* data, size_t len, const char* key) {
++    return dc_entitlement_is_true(data, len, key);
 +}
 +
 +static uint32_t flags_from_image(const struct dc_image* img, bool pages_ok)
@@ -8606,9 +8640,8 @@ index 6617ef82..6e557c08 100644
 +//   off (default) | warn | enforce
 +// A parse or page-hash failure always leaves the state invalid. `off` only
 +// suppresses logging and rejection; it still verifies so csops never fabricates
-+// CS_VALID. An unknown policy fails closed. This reads the file on the host;
-+// the TOCTOU window between this check and the loader's own open is documented
-+// in docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (M2).
++// CS_VALID. An unknown policy fails closed. Enforced loads verify and map
++// the same sealed snapshot; symlinks retain normal exec-style resolution.
 +static int codesign_gate(const char* path, int* out_fd)
 +{
 +	const char* policy = getenv("DARLING_CODESIGN_ENFORCE");
@@ -8659,6 +8692,24 @@ index 6617ef82..6e557c08 100644
 +		if (enforce) { errno = ENOEXEC; return -1; }
 +		return 0;
 +	}
++    // Verification and mapping must share immutable contents, not just an inode.
++    const char* msealPolicy = getenv("DARLING_MSEAL");
++    bool freezeImage = enforce || (msealPolicy &&
++        (!strcmp(msealPolicy, "1") || !strcmp(msealPolicy, "on") ||
++         !strcmp(msealPolicy, "true") || !strcmp(msealPolicy, "yes")));
++    if (freezeImage) {
++        long snapshot = dc_snapshot_image(fd, &dc_native_image_ops);
++        close(fd);
++        if (snapshot < 0) {
++            fprintf(stderr, "mldr: cannot snapshot image %s: %s\n", path, strerror((int)-snapshot));
++            errno = ENOEXEC;
++            return -1;
++        }
++        fd = (int)snapshot;
++        struct stat frozen;
++        if (fstat(fd, &frozen) != 0) { close(fd); errno = ENOEXEC; return -1; }
++        st.st_size = frozen.st_size;
++    }
 +	*out_fd = fd;
 +	state->image_dev = (uint64_t) st.st_dev;
 +	state->image_ino = (uint64_t) st.st_ino;
@@ -8764,7 +8815,7 @@ index 6617ef82..6e557c08 100644
  int main(int argc, char** argv, char** envp)
  {
  	void** sp;
-@@ -154,14 +366,20 @@ int main(int argc, char** argv, char** envp)
+@@ -154,14 +410,20 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -8788,7 +8839,7 @@ index 6617ef82..6e557c08 100644
  #endif
  
  	// this was previously necessary when we were loading the binary from the LKM
-@@ -280,16 +498,17 @@ int main(int argc, char** argv, char** envp)
+@@ -280,16 +542,17 @@ int main(int argc, char** argv, char** envp)
  	__builtin_unreachable();
  }
  
@@ -8813,7 +8864,7 @@ index 6617ef82..6e557c08 100644
  	}
  
  	// We need to read argv[1] and detect whether it's a 32 or 64-bit application.
-@@ -563,6 +782,16 @@ static socket_bitmap_t socket_bitmap = {
+@@ -563,6 +826,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -8830,7 +8881,7 @@ index 6617ef82..6e557c08 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +877,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +921,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -8842,7 +8893,7 @@ index 6617ef82..6e557c08 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +907,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +951,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -8857,7 +8908,7 @@ index 6617ef82..6e557c08 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +925,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +969,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -8883,7 +8934,7 @@ index 6617ef82..6e557c08 100644
  		}
  	}
  
-@@ -698,6 +946,22 @@ out:
+@@ -698,6 +990,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -8906,7 +8957,7 @@ index 6617ef82..6e557c08 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +971,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +1015,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -8926,7 +8977,7 @@ index 6617ef82..6e557c08 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +1029,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1073,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -8945,7 +8996,7 @@ index 6617ef82..6e557c08 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1140,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1184,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  
@@ -11693,10 +11744,15 @@ index 87db50d12..01a7b2a3e 100644
  };
  
 diff --git a/src/startup/mldr/CMakeLists.txt b/src/startup/mldr/CMakeLists.txt
-index 5e4271a1..1cab2d7e 100644
+index 5e4271a..ef6488e 100644
 --- a/src/startup/mldr/CMakeLists.txt
 +++ b/src/startup/mldr/CMakeLists.txt
-@@ -21,14 +21,16 @@ set(mldr_sources
+@@ -1,3 +1,4 @@
++find_package(LibXml2 REQUIRED)
+ project(mldr)
+ 
+ cmake_minimum_required(VERSION 3.13)
+@@ -21,14 +22,17 @@ set(mldr_sources
  	commpage.c
  	elfcalls/elfcalls.c
  	elfcalls/threads.c
@@ -11704,33 +11760,39 @@ index 5e4271a1..1cab2d7e 100644
  )
  
  add_executable(mldr ${mldr_sources})
++target_include_directories(mldr PRIVATE ${LIBXML2_INCLUDE_DIR})
  
  target_compile_options(mldr PRIVATE -pthread)
  target_link_options(mldr PRIVATE -pthread)
 +target_compile_definitions(mldr PRIVATE _GNU_SOURCE)
  
 -target_link_libraries(mldr PRIVATE -lrt -ldl mldr_dserver_rpc -lm)
-+target_link_libraries(mldr PRIVATE -lrt -ldl mldr_dserver_rpc -lm -lcrypto)
++target_link_libraries(mldr PRIVATE -lrt -ldl mldr_dserver_rpc -lm -lcrypto ${LIBXML2_LIBRARIES})
  
  install(TARGETS mldr DESTINATION libexec/darling/usr/libexec/darling)
  
-@@ -36,6 +38,9 @@ configure_file(darling.conf.in darling.conf @ONLY)
+@@ -36,6 +40,9 @@ configure_file(darling.conf.in darling.conf @ONLY)
  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/darling.conf" DESTINATION lib/binfmt.d)
  
  if (BUILD_TARGET_32BIT)
 +	# Optional 32-bit loader target. The supported build is x86-64 only
-+	# (TARGET_i386=OFF); enabling this also requires a 32-bit libcrypto
++	# (TARGET_i386=OFF); enabling this also requires a 32-bit libcrypto and libxml2
 +	# development package for dc_codesign.
  	add_library(mldr32_dserver_rpc STATIC ${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c)
  	add_dependencies(mldr32_dserver_rpc generate_dserver_rpc_wrappers)
  	target_compile_options(mldr32_dserver_rpc PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/resources/dserver-rpc-defs.h)
-@@ -49,7 +54,8 @@ if (BUILD_TARGET_32BIT)
+@@ -45,11 +52,13 @@ if (BUILD_TARGET_32BIT)
+ 	target_include_directories(mldr32_dserver_rpc PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/..)
+ 
+ 	add_executable(mldr32 ${mldr_sources})
++	target_include_directories(mldr32 PRIVATE ${LIBXML2_INCLUDE_DIR})
+ 	target_compile_options(mldr32 PRIVATE -m32)
  	target_link_options(mldr32 PRIVATE -m32)
  	target_compile_options(mldr32 PRIVATE -pthread)
  	target_link_options(mldr32 PRIVATE -pthread)
 -	target_link_libraries(mldr32 PRIVATE -lrt -ldl mldr32_dserver_rpc)
 +	target_compile_definitions(mldr32 PRIVATE _GNU_SOURCE)
-+	target_link_libraries(mldr32 PRIVATE -lrt -ldl mldr32_dserver_rpc -lcrypto)
++	target_link_libraries(mldr32 PRIVATE -lrt -ldl mldr32_dserver_rpc -lcrypto -lxml2)
  
  	install(TARGETS mldr32 DESTINATION libexec/darling/usr/libexec/darling)
  endif()
@@ -12462,7 +12524,7 @@ index 00000000..f2727207
 +
 +#endif /* DC_CODESIGN_H */
 diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
-index 1e9ec25d..2e7fefbe 100644
+index 1e9ec25..0114e25 100644
 --- a/src/startup/mldr/loader.c
 +++ b/src/startup/mldr/loader.c
 @@ -6,13 +6,14 @@
@@ -12481,7 +12543,7 @@ index 1e9ec25d..2e7fefbe 100644
  static void setup_space(struct load_results* lr, bool is_64_bit);
  static void* compatible_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
  
-@@ -227,6 +228,29 @@ no_slide:
+@@ -227,6 +228,30 @@ no_slide:
  				if (seg->vmaddr + slide + seg->vmsize > lr->vm_addr_max)
  					lr->vm_addr_max = seg->vmaddr + slide + seg->vmsize;
  
@@ -12499,10 +12561,11 @@ index 1e9ec25d..2e7fefbe 100644
 +					     strcmp(seg->segname, "__LINKEDIT") == 0)) {
 +						uintptr_t sealAddr = seg->vmaddr + slide;
 +						size_t sealLen = PAGE_ROUNDUP(seg->vmsize);
-+						if (syscall(__NR_mseal, (void*) sealAddr, sealLen, 0) != 0 &&
-+						    errno != ENOSYS) {
++						long sealResult = dc_snapshot_and_seal((void*)sealAddr, sealLen,
++                        native_prot(seg->initprot), &dc_native_seal_ops);
++                    if (sealResult < 0 && sealResult != -ENOSYS) {
 +							fprintf(stderr, "mldr: cannot seal %s at %p: %s\n",
-+								seg->segname, (void*) sealAddr, strerror(errno));
++								seg->segname, (void*) sealAddr, strerror((int)-sealResult));
 +						}
 +					}
 +				}
@@ -12511,7 +12574,7 @@ index 1e9ec25d..2e7fefbe 100644
  				if (strcmp(SEG_DATA, seg->segname) == 0)
  				{
  					// Look for section named __all_image_info for GDB integration
-@@ -308,7 +332,7 @@ no_slide:
+@@ -308,7 +333,7 @@ no_slide:
  					exit(1);
  				}
  
@@ -12617,3 +12680,169 @@ index a68739ff..5c8eb836 100644
  }
  
  size_t
+diff --git a/src/startup/mldr/include/dc_entitlements.h b/src/startup/mldr/include/dc_entitlements.h
+new file mode 100644
+index 0000000..2033969
+--- /dev/null
++++ b/src/startup/mldr/include/dc_entitlements.h
+@@ -0,0 +1,63 @@
++/* Bounded, non-networked plist policy parsing shared by mldr and the server. */
++#ifndef DC_ENTITLEMENTS_H
++#define DC_ENTITLEMENTS_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#include <libxml/parser.h>
++#include <libxml/tree.h>
++
++static inline xmlNode* dc_next_element(xmlNode* node) {
++    while (node && (node->type == XML_COMMENT_NODE || node->type == XML_PI_NODE ||
++                    (node->type == XML_TEXT_NODE && xmlIsBlankNode(node)))) node = node->next;
++    return node;
++}
++static inline bool dc_xml_name(xmlNode* node, const char* name) {
++    return node && !node->ns && xmlStrEqual(node->name, (const xmlChar*)name);
++}
++static inline bool dc_entitlement_is_true(const uint8_t* data, size_t len, const char* key) {
++    if (!data || !key || !len || len > 1024 * 1024) return false;
++    while (len && data[len - 1] == 0) len--;
++    xmlDoc* doc = xmlReadMemory((const char*)data, (int)len, "entitlements.plist", NULL,
++        XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
++    if (!doc) return false;
++    bool result = false, seen = false;
++    /* A normal plist DOCTYPE is fine; custom entities and external DTDs are not
++     * policy input. No DTD loading or entity substitution options are enabled. */
++    if (doc->extSubset || (doc->intSubset &&
++        (doc->intSubset->entities || doc->intSubset->pentities))) goto done;
++    {
++        xmlNode* plist = xmlDocGetRootElement(doc);
++        if (!dc_xml_name(plist, "plist")) goto done;
++        xmlNode* dict = dc_next_element(plist->children);
++        if (!dc_xml_name(dict, "dict") || dc_next_element(dict->next)) goto done;
++        for (xmlNode* entry = dc_next_element(dict->children); entry;) {
++            if (!dc_xml_name(entry, "key") || entry->properties) { result = false; goto done; }
++            for (xmlNode* part = entry->children; part; part = part->next) {
++                if (part->type != XML_TEXT_NODE && part->type != XML_CDATA_SECTION_NODE) {
++                    result = false; goto done;
++                }
++            }
++            xmlNode* value = dc_next_element(entry->next);
++            if (!(dc_xml_name(value, "true") || dc_xml_name(value, "false") ||
++                  dc_xml_name(value, "string") || dc_xml_name(value, "data") ||
++                  dc_xml_name(value, "date") || dc_xml_name(value, "integer") ||
++                  dc_xml_name(value, "real") || dc_xml_name(value, "array") ||
++                  dc_xml_name(value, "dict"))) { result = false; goto done; }
++            xmlChar* name = xmlNodeGetContent(entry);
++            bool matches = name && xmlStrEqual(name, (const xmlChar*)key);
++            xmlFree(name);
++            if (matches) {
++                if (seen) { result = false; goto done; }
++                seen = true;
++                result = dc_xml_name(value, "true") && !value->children && !value->properties;
++            }
++            entry = dc_next_element(value->next);
++        }
++    }
++done:
++    xmlFreeDoc(doc);
++    return result;
++}
++#endif
+diff --git a/src/startup/mldr/include/dc_mseal.h b/src/startup/mldr/include/dc_mseal.h
+new file mode 100644
+index 0000000..fb3f73c
+--- /dev/null
++++ b/src/startup/mldr/include/dc_mseal.h
+@@ -0,0 +1,37 @@
++/* Replace a read-only file mapping with an anonymous snapshot before sealing.
++ * mseal alone does not stop writes to the original inode. Anonymous backing also
++ * prevents madvise from discarding COW pages and re-reading a modified file.
++ * Callbacks return negative errno on failure; addresses use the native long ABI.
++ */
++#ifndef DC_MSEAL_H
++#define DC_MSEAL_H
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++struct dc_seal_ops {
++    long (*allocate)(unsigned long);
++    long (*protect)(void*, unsigned long, int);
++    long (*relocate)(void*, unsigned long, void*);
++    void (*release)(void*, unsigned long);
++    long (*seal)(void*, unsigned long);
++};
++static inline int dc_vm_error(long value) {
++    return (unsigned long)value >= (unsigned long)-4095;
++}
++static inline long dc_snapshot_and_seal(void* address, unsigned long length, int prot,
++                                       const struct dc_seal_ops* ops) {
++    const unsigned long page = 4096; /* Darling's x86 guest page size. */
++    if (!length || ((uintptr_t)address & (page - 1)) ||
++        length > ~(unsigned long)0 - (page - 1) || !(prot & 1) || (prot & 2)) return -22;
++    length = (length + page - 1) & ~(page - 1);
++    long allocated = ops->allocate(length);
++    if (dc_vm_error(allocated)) return allocated;
++    void* snapshot = (void*)(uintptr_t)allocated;
++    memcpy(snapshot, address, length);
++    long result = ops->protect(snapshot, length, prot);
++    if (result < 0) { ops->release(snapshot, length); return result; }
++    result = ops->relocate(snapshot, length, address);
++    if (dc_vm_error(result)) { ops->release(snapshot, length); return result; }
++    return ops->seal(address, length);
++}
++#endif
+diff --git a/src/startup/mldr/include/dc_image_snapshot.h b/src/startup/mldr/include/dc_image_snapshot.h
+new file mode 100644
+index 0000000..04d64c1
+--- /dev/null
++++ b/src/startup/mldr/include/dc_image_snapshot.h
+@@ -0,0 +1,48 @@
++/* Immutable file snapshots bind verification and mapping to the same bytes.
++ * Callbacks normalize errors to negative errno and never change the source offset.
++ */
++#ifndef DC_IMAGE_SNAPSHOT_H
++#define DC_IMAGE_SNAPSHOT_H
++#include <stddef.h>
++enum { DC_F_SNAPSHOT_IMAGE = 0x40004443 };
++struct dc_image_ops {
++    long (*size)(int);
++    long (*create)(void);
++    long (*read)(int, void*, unsigned long, unsigned long);
++    long (*write)(int, const void*, unsigned long);
++    long (*seal)(int);
++    void (*close)(int);
++};
++static inline long dc_snapshot_image(int source, const struct dc_image_ops* ops) {
++    long length = ops->size(source);
++    if (length < 0) return length;
++    if (!length) return -22;
++    if ((unsigned long)length > 2UL * 1024 * 1024 * 1024) return -27;
++    long target = ops->create();
++    if (target < 0) return target;
++    unsigned long offset = 0;
++    long error = -5;
++    char buffer[16384];
++    while (offset < (unsigned long)length) {
++        unsigned long amount = (unsigned long)length - offset;
++        if (amount > sizeof(buffer)) amount = sizeof(buffer);
++        long got = ops->read(source, buffer, amount, offset);
++        if (got == -4) continue;
++        if (got <= 0) { error = got < 0 ? got : -5; goto fail; }
++        unsigned long written = 0;
++        while (written < (unsigned long)got) {
++            long put = ops->write((int)target, buffer + written, (unsigned long)got - written);
++            if (put == -4) continue;
++            if (put <= 0) { error = put < 0 ? put : -5; goto fail; }
++            written += (unsigned long)put;
++        }
++        offset += (unsigned long)got;
++    }
++    error = ops->seal((int)target);
++    if (error < 0) goto fail;
++    return target;
++fail:
++    ops->close((int)target);
++    return error;
++}
++#endif

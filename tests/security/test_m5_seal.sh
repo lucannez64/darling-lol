@@ -131,7 +131,7 @@ out=$(cat "$outfile")
 
 case "$out" in
 *"SEAL_OK"*)
-	ok "main and library __TEXT ranges reject mprotect(PROT_WRITE)" ;;
+	ok "main and library __TEXT resist backing-file writes, mprotect(PROT_WRITE) and MAP_FIXED" ;;
 *"main mprotect r=0"*|*"library mprotect r=0"*)
 	bad "mseal(2) is supported but mprotect(PROT_WRITE) succeeded: $out" ;;
 *)

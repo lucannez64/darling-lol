@@ -90,3 +90,26 @@ CI (`.github/workflows/dc-codesign.yml`) runs `make test` and a 30 s fuzz
 smoke on every change under `tools/dc-codesign/`. When no Darling build tree is
 present, both scripts generate a minimal signable Mach-O with
 `minimal_macho.py`.
+
+## Shared runtime policy helpers
+
+`dc_entitlements.h` interprets direct keys of the root plist dictionary for
+mldr and darlingserver. Only an actual `<true/>` grants a boolean entitlement;
+comments, nested dictionaries, duplicate policy keys, malformed XML and custom
+entities grant nothing. It uses libxml2 with network/DTD loading and entity
+substitution disabled. DER policy interpretation remains unimplemented.
+
+`dc_image_snapshot.h` creates an immutable memfd for verification and mapping;
+`dc_mseal.h` replaces read-only mappings with anonymous snapshots before
+sealing. Their runtime copies are checked byte-for-byte by
+`tests/test_security_host.py`, which also compiles and exercises the policies
+with real Linux files, hardlinks and memory mappings:
+
+```sh
+# Additional dependencies: libxml2 development files and pkg-config.
+python3 -m unittest discover -s tests -p test_security_host.py
+```
+
+These host checks do not require an installed Darling runtime. The mseal probe
+skips on kernels that return ENOSYS. See the takeover validation report for
+remaining guest and production acceptance work.

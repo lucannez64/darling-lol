@@ -1,11 +1,18 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 4920879..01f1cab 100644
+index 4920879..008ff0f 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -105,6 +105,10 @@ add_custom_target(generate_dserver_rpc_wrappers
+@@ -1,3 +1,4 @@
++find_package(LibXml2 REQUIRED)
+ project(darlingserver)
+ 
+ cmake_minimum_required(VERSION 3.13)
+@@ -105,6 +106,12 @@ add_custom_target(generate_dserver_rpc_wrappers
  		${CMAKE_CURRENT_BINARY_DIR}/src/rpc.c
  )
  
++include_directories(${LIBXML2_INCLUDE_DIR})
++
 +add_library(darlingserver_dc_codesign STATIC src/dc_codesign.c)
 +target_compile_options(darlingserver_dc_codesign PRIVATE -std=c11)
 +target_compile_definitions(darlingserver_dc_codesign PRIVATE _GNU_SOURCE)
@@ -13,7 +20,7 @@ index 4920879..01f1cab 100644
  add_executable(darlingserver
  	src/darlingserver.cpp
  	src/server.cpp
-@@ -118,6 +122,8 @@ add_executable(darlingserver
+@@ -118,6 +125,8 @@ add_executable(darlingserver
  	src/kqchan.cpp
  	src/async-writer.cpp
  	src/stack-pool.cpp
@@ -22,12 +29,13 @@ index 4920879..01f1cab 100644
  )
  
  add_dependencies(darlingserver
-@@ -127,12 +133,21 @@ add_dependencies(darlingserver
+@@ -127,12 +136,22 @@ add_dependencies(darlingserver
  
  target_link_libraries(darlingserver PRIVATE
  	darlingserver_duct_tape
 +	darlingserver_dc_codesign
 +	-lcrypto
++	${LIBXML2_LIBRARIES}
  )
  
  target_compile_options(darlingserver PRIVATE
@@ -3829,10 +3837,10 @@ index 0000000..6eedb66
 +#endif
 diff --git a/src/cs_verify.cpp b/src/cs_verify.cpp
 new file mode 100644
-index 0000000..137572a
+index 0000000..9ba30d2
 --- /dev/null
 +++ b/src/cs_verify.cpp
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,456 @@
 +/**
 + * This file is part of Darling.
 + *
@@ -3865,6 +3873,7 @@ index 0000000..137572a
 +
 +extern "C" {
 +#include "dc_codesign.h"
++#include <darlingserver/dc_entitlements.h>
 +}
 +
 +namespace {
@@ -3896,40 +3905,9 @@ index 0000000..137572a
 +	std::map<CacheKey, CacheEntry> cache;
 +	uint64_t cacheClock = 0;
 +
-+	const uint8_t* findBytes(const uint8_t* data, size_t len, const char* needle) {
-+		size_t needleLen = strlen(needle);
-+		size_t i;
-+
-+		if (needleLen == 0 || len < needleLen)
-+			return nullptr;
-+		for (i = 0; i + needleLen <= len; i++) {
-+			if (memcmp(data + i, needle, needleLen) == 0)
-+				return data + i;
-+		}
-+		return nullptr;
-+	}
-+
 +	bool keyIsTrue(const uint8_t* data, size_t len, const char* key) {
-+		char needle[320];
-+		const char* match;
-+		const char* end;
-+		size_t needleLen;
-+
-+		if (data == nullptr || len == 0)
-+			return false;
-+		if (snprintf(needle, sizeof(needle), "<key>%s</key>", key) >= (int) sizeof(needle))
-+			return false;
-+		needleLen = strlen(needle);
-+		match = (const char*) findBytes(data, len, needle);
-+		if (match == nullptr)
-+			return false;
-+		match += needleLen;
-+		end = (const char*) data + len;
-+		while (match < end && (*match == ' ' || *match == '\t' || *match == '\r' || *match == '\n'))
-+			match++;
-+		return (end - match >= 7 && memcmp(match, "<true/>", 7) == 0) ||
-+		       (end - match >= 8 && memcmp(match, "<true />", 8) == 0);
-+	}
++        return dc_entitlement_is_true(data, len, key);
++    }
 +
 +	uint32_t flagsFromImage(const struct dc_image& img, bool valid) {
 +		uint32_t flags = DC_CS_SIGNED;
@@ -5330,3 +5308,72 @@ index 0000000..cc22e1c
 +	if (error) *error = "cdhash is not in the trust store";
 +	return false;
 +}
+diff --git a/include/darlingserver/dc_entitlements.h b/include/darlingserver/dc_entitlements.h
+new file mode 100644
+index 0000000..2033969
+--- /dev/null
++++ b/include/darlingserver/dc_entitlements.h
+@@ -0,0 +1,63 @@
++/* Bounded, non-networked plist policy parsing shared by mldr and the server. */
++#ifndef DC_ENTITLEMENTS_H
++#define DC_ENTITLEMENTS_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#include <libxml/parser.h>
++#include <libxml/tree.h>
++
++static inline xmlNode* dc_next_element(xmlNode* node) {
++    while (node && (node->type == XML_COMMENT_NODE || node->type == XML_PI_NODE ||
++                    (node->type == XML_TEXT_NODE && xmlIsBlankNode(node)))) node = node->next;
++    return node;
++}
++static inline bool dc_xml_name(xmlNode* node, const char* name) {
++    return node && !node->ns && xmlStrEqual(node->name, (const xmlChar*)name);
++}
++static inline bool dc_entitlement_is_true(const uint8_t* data, size_t len, const char* key) {
++    if (!data || !key || !len || len > 1024 * 1024) return false;
++    while (len && data[len - 1] == 0) len--;
++    xmlDoc* doc = xmlReadMemory((const char*)data, (int)len, "entitlements.plist", NULL,
++        XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
++    if (!doc) return false;
++    bool result = false, seen = false;
++    /* A normal plist DOCTYPE is fine; custom entities and external DTDs are not
++     * policy input. No DTD loading or entity substitution options are enabled. */
++    if (doc->extSubset || (doc->intSubset &&
++        (doc->intSubset->entities || doc->intSubset->pentities))) goto done;
++    {
++        xmlNode* plist = xmlDocGetRootElement(doc);
++        if (!dc_xml_name(plist, "plist")) goto done;
++        xmlNode* dict = dc_next_element(plist->children);
++        if (!dc_xml_name(dict, "dict") || dc_next_element(dict->next)) goto done;
++        for (xmlNode* entry = dc_next_element(dict->children); entry;) {
++            if (!dc_xml_name(entry, "key") || entry->properties) { result = false; goto done; }
++            for (xmlNode* part = entry->children; part; part = part->next) {
++                if (part->type != XML_TEXT_NODE && part->type != XML_CDATA_SECTION_NODE) {
++                    result = false; goto done;
++                }
++            }
++            xmlNode* value = dc_next_element(entry->next);
++            if (!(dc_xml_name(value, "true") || dc_xml_name(value, "false") ||
++                  dc_xml_name(value, "string") || dc_xml_name(value, "data") ||
++                  dc_xml_name(value, "date") || dc_xml_name(value, "integer") ||
++                  dc_xml_name(value, "real") || dc_xml_name(value, "array") ||
++                  dc_xml_name(value, "dict"))) { result = false; goto done; }
++            xmlChar* name = xmlNodeGetContent(entry);
++            bool matches = name && xmlStrEqual(name, (const xmlChar*)key);
++            xmlFree(name);
++            if (matches) {
++                if (seen) { result = false; goto done; }
++                seen = true;
++                result = dc_xml_name(value, "true") && !value->children && !value->properties;
++            }
++            entry = dc_next_element(value->next);
++        }
++    }
++done:
++    xmlFreeDoc(doc);
++    return result;
++}
++#endif

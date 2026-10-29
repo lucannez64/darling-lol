@@ -8,7 +8,7 @@
    "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
    "repository": "https://github.com/darlinghq/darling.git",
    "patch": "patches/darling.patch",
-   "modified_files": 99,
+   "modified_files": 102,
    "new_files": [
     "src/CoreAudio/AudioTrace.h",
     "src/CoreAudio/CoreAudio/AudioConverterShim.c",
@@ -29,7 +29,10 @@
     "src/startup/mldr/dc_codesign.c",
     "src/startup/mldr/dc_codesign.h",
     "src/frameworks/Accelerate/vecLib/vDSP/src/arith.c",
-    "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c"
+    "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c",
+    "src/startup/mldr/include/dc_entitlements.h",
+    "src/startup/mldr/include/dc_mseal.h",
+    "src/startup/mldr/include/dc_image_snapshot.h"
    ]
   },
   {
@@ -112,7 +115,7 @@
    "revision": "89751e64bc6c2082f7725061824ee0e33395b0de",
    "repository": "https://github.com/darlinghq/darlingserver.git",
    "patch": "patches/darlingserver.patch",
-   "modified_files": 36,
+   "modified_files": 37,
    "new_files": [
     "duct-tape/src/fileport.c",
     "include/darlingserver/cs_state.h",
@@ -121,7 +124,8 @@
     "src/dc_codesign.c",
     "src/dc_codesign.h",
     "internal-include/darlingserver/trustcache.hpp",
-    "src/trustcache.cpp"
+    "src/trustcache.cpp",
+    "include/darlingserver/dc_entitlements.h"
    ]
   },
   {
@@ -129,8 +133,10 @@
    "revision": "63f667cf06d7ed59553adebb0c8d70a117135ac9",
    "repository": "https://github.com/darlinghq/darling-dyld.git",
    "patch": "patches/dyld.patch",
-   "modified_files": 2,
-   "new_files": []
+   "modified_files": 3,
+   "new_files": [
+    "src/dc_image_snapshot.h"
+   ]
   },
   {
    "path": "src/external/foundation",
@@ -293,7 +299,7 @@
    "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
    "repository": "https://github.com/darlinghq/darling-xnu.git",
    "patch": "patches/xnu.patch",
-   "modified_files": 85,
+   "modified_files": 87,
    "new_files": [
     "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
     "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
@@ -306,7 +312,9 @@
     "libsyscall/wrappers/__sysctlbyname.S",
     "darling/src/libsystem_kernel/emulation/include/common/cpu_frequency.h",
     "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h",
-    "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c"
+    "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c",
+    "darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h",
+    "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h"
    ]
   },
   {

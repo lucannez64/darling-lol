@@ -6709,10 +6709,13 @@ index f1ce3d3..791899c 100644
 +	return csops_common(pid, ops, useraddr, usersize);
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
-index 49bac54..eb1fcdb 100644
+index 49bac54..ab71f04 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/fcntl/fcntl.c
-@@ -2,6 +2,10 @@
+@@ -1,7 +1,13 @@
++#include <darling/emulation/common/dc_image_snapshot.h>
++#include <darling/emulation/conversion/stat/common.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/fcntl.h>
  
  #include <sys/errno.h>
  #include <sys/fcntl.h>
@@ -6723,7 +6726,7 @@ index 49bac54..eb1fcdb 100644
  
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/common/base.h>
-@@ -65,6 +69,16 @@ static int cmd_bsd_to_linux(int bsd) {
+@@ -65,6 +71,47 @@ static int cmd_bsd_to_linux(int bsd) {
  	};
  };
  
@@ -6737,14 +6740,48 @@ index 49bac54..eb1fcdb 100644
 +	return ret;
 +}
 +
++static long dc_guest_image_size(int fd) {
++    struct linux_stat st;
++    long result = LINUX_SYSCALL2(__NR_fstat, fd, &st);
++    return result < 0 ? errno_linux_to_bsd((int)result) : (long)st.st_size;
++}
++static long dc_guest_image_create(void) {
++    long result = LINUX_SYSCALL2(__NR_memfd_create, "darling-verified-image", 3);
++    return result < 0 ? errno_linux_to_bsd((int)result) : result;
++}
++static long dc_guest_image_read(int fd, void* data, unsigned long len, unsigned long offset) {
++#ifdef __i386__
++    long result = LINUX_SYSCALL5(__NR_pread64, fd, data, len, offset, 0);
++#else
++    long result = LINUX_SYSCALL4(__NR_pread64, fd, data, len, offset);
++#endif
++    return result < 0 ? errno_linux_to_bsd((int)result) : result;
++}
++static long dc_guest_image_write(int fd, const void* data, unsigned long len) {
++    long result = LINUX_SYSCALL3(__NR_write, fd, data, len);
++    return result < 0 ? errno_linux_to_bsd((int)result) : result;
++}
++static long dc_guest_image_seal(int fd) {
++    long result = LINUX_SYSCALL3(__NR_fcntl, fd, 1033, 15);
++    return result < 0 ? errno_linux_to_bsd((int)result) : result;
++}
++static void dc_guest_image_close(int fd) { LINUX_SYSCALL1(__NR_close, fd); }
++static const struct dc_image_ops dc_guest_image_ops = {
++    dc_guest_image_size, dc_guest_image_create, dc_guest_image_read,
++    dc_guest_image_write, dc_guest_image_seal, dc_guest_image_close
++};
++
  long sys_fcntl(int fd, int cmd, long arg)
  {
  	CANCELATION_POINT();
-@@ -78,8 +92,51 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
+@@ -78,8 +125,54 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
  
  	switch (cmd)
  	{
 -		case F_CHECK_LV:
++        case DC_F_SNAPSHOT_IMAGE:
++            return dc_snapshot_image(fd, &dc_guest_image_ops);
++
 +		case F_ADDFILESIGS_RETURN:
 +		case F_ADDFILESIGS: {
 +			fsignatures_t* signatures = (fsignatures_t*) arg;
@@ -6793,6 +6830,43 @@ index 49bac54..eb1fcdb 100644
  		case F_SETFD:
  			if (arg & ~FD_CLOEXEC)
  				return -EINVAL;
+@@ -89,7 +182,7 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
+ 			break;
+ 		case F_GETPATH:
+ 		{
+-			ret = fdpath(fd, arg, MAXPATHLEN);
++			ret = fdpath(fd, (char*) arg, MAXPATHLEN);
+ 			if (ret < 0)
+ 				return errno_linux_to_bsd(ret);
+ 
+@@ -98,14 +191,14 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
+ 		case F_SETLK:
+ 		case F_SETLKW:
+ 		case F_GETLK: {
+-			struct bsd_flock* bsd_struct = arg;
++			struct bsd_flock* bsd_struct = (struct bsd_flock*) arg;
+ 			struct linux_flock* linux_struct = __builtin_alloca(sizeof(struct linux_flock));
+ 			linux_struct->l_type = flock_type_bsd_to_linux(bsd_struct->l_type);
+ 			linux_struct->l_whence = bsd_struct->l_whence;
+ 			linux_struct->l_start = bsd_struct->l_start;
+ 			linux_struct->l_len = bsd_struct->l_len;
+ 			linux_struct->l_pid = bsd_struct->l_pid;
+-			arg = linux_struct;
++			arg = (long) linux_struct;
+ 		} break;
+ 		case F_FULLFSYNC: {
+ 			ret = LINUX_SYSCALL1(__NR_fsync, fd);
+@@ -138,8 +231,8 @@ long sys_fcntl_nocancel(int fd, int cmd, long arg)
+ 		case F_SETLK:
+ 		case F_SETLKW:
+ 		case F_GETLK: {
+-			struct bsd_flock* bsd_struct = original_arg;
+-			struct linux_flock* linux_struct = arg;
++			struct bsd_flock* bsd_struct = (struct bsd_flock*) original_arg;
++			struct linux_flock* linux_struct = (struct linux_flock*) arg;
+ 			bsd_struct->l_type = flock_type_linux_to_bsd(linux_struct->l_type);
+ 			bsd_struct->l_whence = linux_struct->l_whence;
+ 			bsd_struct->l_start = linux_struct->l_start;
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
 index 6dc66b0..ce6f2cc 100644
 --- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/csops.h
@@ -6921,10 +6995,10 @@ index 7fe0b4e..7e00a00 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
 new file mode 100644
-index 0000000..ee1364d
+index 0000000..05ac08f
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,286 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +
 +#include <errno.h>
@@ -7174,6 +7248,12 @@ index 0000000..ee1364d
 +		}
 +	}
 +
++    // Inode restrictions survive all aliases, including /usr/local.
++    {
++        uint64_t dev, ino;
++        if (sip_stat_inode(host_stat_path, &dev, &ino) == 0 && sip_inode_is_protected(dev, ino))
++            return -EPERM;
++    }
 +	if (guest_path) {
 +		if (path_is(path, "/usr/local"))
 +			return 0;
@@ -7186,12 +7266,6 @@ index 0000000..ee1364d
 +		    path_is(path, "/Library/Apple")) {
 +			sip_remember_path(host_stat_path);
 +			return -EPERM;
-+		}
-+		{
-+			uint64_t dev, ino;
-+			if (sip_stat_inode(host_stat_path, &dev, &ino) == 0 &&
-+			    sip_inode_is_protected(dev, ino))
-+				return -EPERM;
 +		}
 +		return 0;
 +	}
@@ -7209,27 +7283,23 @@ index 0000000..ee1364d
 +		sip_remember_path(host_stat_path);
 +		return -EPERM;
 +	}
-+	{
-+		uint64_t dev, ino;
-+		if (sip_stat_inode(host_stat_path, &dev, &ino) == 0 &&
-+		    sip_inode_is_protected(dev, ino))
-+			return -EPERM;
-+	}
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c
-index 282a5a1..7c6c5e0 100644
+index 282a5a1..f1e46a0 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c
-@@ -1,4 +1,7 @@
+@@ -1,4 +1,9 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +
 +#include <sys/errno.h>
++#include <darling/emulation/common/dc_mseal.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
  
  #include <darling/emulation/conversion/mman/duct_mman.h>
  #include <darling/emulation/conversion/errno.h>
-@@ -27,6 +30,12 @@ void* sys_mmap(void* start, unsigned long len, int prot, int flags, int fd, long
+@@ -27,6 +32,12 @@ void* sys_mmap(void* start, unsigned long len, int prot, int flags, int fd, long
  
  	linux_prot = prot_bsd_to_linux(prot);
  
@@ -7242,7 +7312,7 @@ index 282a5a1..7c6c5e0 100644
  	// if (flags & MAP_32BIT)
  	// 	linux_flags |= LINUX_MAP_32BIT;
  	if (flags & MAP_ANON)
-@@ -66,6 +75,28 @@ long sys_munmap(void* addr, unsigned long len)
+@@ -66,6 +77,34 @@ long sys_munmap(void* addr, unsigned long len)
  	return ret;
  }
  
@@ -7254,18 +7324,24 @@ index 282a5a1..7c6c5e0 100644
 +
 +/* Darling-private helper for dyld: seal an already-mapped image range with
 + * the Linux mseal(2) syscall. Returns a BSD errno on failure. */
-+int __darling_mseal_range(void* addr, unsigned long len)
-+{
-+#ifdef __NR_mseal
-+	int ret = LINUX_SYSCALL3(__NR_mseal, addr, len, 0);
-+	if (ret < 0)
-+		return errno_linux_to_bsd(ret);
-+	return 0;
-+#else
-+	(void)addr;
-+	(void)len;
-+	return -ENOSYS;
-+#endif
++static long dc_guest_allocate(unsigned long length) {
++    return (long)sys_mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++}
++static long dc_guest_protect(void* p, unsigned long length, int prot) { return sys_mprotect(p, length, prot); }
++static long dc_guest_relocate(void* p, unsigned long length, void* target) {
++    long result = LINUX_SYSCALL5(__NR_mremap, p, length, length, 3, target);
++    return dc_vm_error(result) ? errno_linux_to_bsd((int)result) : result;
++}
++static void dc_guest_release(void* p, unsigned long length) { sys_munmap(p, length); }
++static long dc_guest_seal(void* p, unsigned long length) {
++    long result = LINUX_SYSCALL3(__NR_mseal, p, length, 0);
++    return result < 0 ? errno_linux_to_bsd((int)result) : result;
++}
++int __darling_mseal_range(void* addr, unsigned long len, int prot) {
++    static const struct dc_seal_ops ops = {
++        dc_guest_allocate, dc_guest_protect, dc_guest_relocate, dc_guest_release, dc_guest_seal
++    };
++    return (int)dc_snapshot_and_seal(addr, len, prot, &ops);
 +}
 +
  long sys_mprotect(void* addr, unsigned long len, int prot)
@@ -7770,3 +7846,100 @@ index 352c739..31a7fc2 100644
  	}
  
  	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, &lim, 0);
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h b/darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h
+new file mode 100644
+index 0000000..fb3f73c
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h
+@@ -0,0 +1,37 @@
++/* Replace a read-only file mapping with an anonymous snapshot before sealing.
++ * mseal alone does not stop writes to the original inode. Anonymous backing also
++ * prevents madvise from discarding COW pages and re-reading a modified file.
++ * Callbacks return negative errno on failure; addresses use the native long ABI.
++ */
++#ifndef DC_MSEAL_H
++#define DC_MSEAL_H
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++struct dc_seal_ops {
++    long (*allocate)(unsigned long);
++    long (*protect)(void*, unsigned long, int);
++    long (*relocate)(void*, unsigned long, void*);
++    void (*release)(void*, unsigned long);
++    long (*seal)(void*, unsigned long);
++};
++static inline int dc_vm_error(long value) {
++    return (unsigned long)value >= (unsigned long)-4095;
++}
++static inline long dc_snapshot_and_seal(void* address, unsigned long length, int prot,
++                                       const struct dc_seal_ops* ops) {
++    const unsigned long page = 4096; /* Darling's x86 guest page size. */
++    if (!length || ((uintptr_t)address & (page - 1)) ||
++        length > ~(unsigned long)0 - (page - 1) || !(prot & 1) || (prot & 2)) return -22;
++    length = (length + page - 1) & ~(page - 1);
++    long allocated = ops->allocate(length);
++    if (dc_vm_error(allocated)) return allocated;
++    void* snapshot = (void*)(uintptr_t)allocated;
++    memcpy(snapshot, address, length);
++    long result = ops->protect(snapshot, length, prot);
++    if (result < 0) { ops->release(snapshot, length); return result; }
++    result = ops->relocate(snapshot, length, address);
++    if (dc_vm_error(result)) { ops->release(snapshot, length); return result; }
++    return ops->seal(address, length);
++}
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h b/darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h
+new file mode 100644
+index 0000000..04d64c1
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h
+@@ -0,0 +1,48 @@
++/* Immutable file snapshots bind verification and mapping to the same bytes.
++ * Callbacks normalize errors to negative errno and never change the source offset.
++ */
++#ifndef DC_IMAGE_SNAPSHOT_H
++#define DC_IMAGE_SNAPSHOT_H
++#include <stddef.h>
++enum { DC_F_SNAPSHOT_IMAGE = 0x40004443 };
++struct dc_image_ops {
++    long (*size)(int);
++    long (*create)(void);
++    long (*read)(int, void*, unsigned long, unsigned long);
++    long (*write)(int, const void*, unsigned long);
++    long (*seal)(int);
++    void (*close)(int);
++};
++static inline long dc_snapshot_image(int source, const struct dc_image_ops* ops) {
++    long length = ops->size(source);
++    if (length < 0) return length;
++    if (!length) return -22;
++    if ((unsigned long)length > 2UL * 1024 * 1024 * 1024) return -27;
++    long target = ops->create();
++    if (target < 0) return target;
++    unsigned long offset = 0;
++    long error = -5;
++    char buffer[16384];
++    while (offset < (unsigned long)length) {
++        unsigned long amount = (unsigned long)length - offset;
++        if (amount > sizeof(buffer)) amount = sizeof(buffer);
++        long got = ops->read(source, buffer, amount, offset);
++        if (got == -4) continue;
++        if (got <= 0) { error = got < 0 ? got : -5; goto fail; }
++        unsigned long written = 0;
++        while (written < (unsigned long)got) {
++            long put = ops->write((int)target, buffer + written, (unsigned long)got - written);
++            if (put == -4) continue;
++            if (put <= 0) { error = put < 0 ? put : -5; goto fail; }
++            written += (unsigned long)put;
++        }
++        offset += (unsigned long)got;
++    }
++    error = ops->seal((int)target);
++    if (error < 0) goto fail;
++    return target;
++fail:
++    ops->close((int)target);
++    return error;
++}
++#endif

@@ -1,5 +1,5 @@
 diff --git a/src/ImageLoaderMachO.cpp b/src/ImageLoaderMachO.cpp
-index 9242278..c91f49a 100644
+index 9242278..c944ac3 100644
 --- a/src/ImageLoaderMachO.cpp
 +++ b/src/ImageLoaderMachO.cpp
 @@ -29,6 +29,8 @@
@@ -17,12 +17,12 @@ index 9242278..c91f49a 100644
  #include <libkern/OSCacheControl.h>
 +
 +#ifdef DARLING
-+extern "C" int __darling_mseal_range(void* addr, unsigned long len);
++extern "C" int __darling_mseal_range(void* addr, unsigned long len, int prot);
 +#endif
  #include <stdint.h>
  #include <System/sys/codesign.h>
  
-@@ -2724,6 +2730,22 @@ void ImageLoaderMachO::mapSegments(int fd, uint64_t offsetInFat, uint64_t lenInF
+@@ -2724,6 +2730,25 @@ void ImageLoaderMachO::mapSegments(int fd, uint64_t offsetInFat, uint64_t lenInF
  
  	// update slide to reflect load location			
  	this->setSlide(slide);
@@ -39,17 +39,27 @@ index 9242278..c91f49a 100644
 +			continue;
 +		if (strcmp(segName(i), "__TEXT") != 0 && strcmp(segName(i), "__LINKEDIT") != 0)
 +			continue;
-+		__darling_mseal_range((void*)segActualLoadAddress(i), segSize(i));
++		int result = __darling_mseal_range((void*)segActualLoadAddress(i), segSize(i),
++		    PROT_READ | (segExecutable(i) ? PROT_EXEC : 0));
++		if (result < 0)
++			dyld::warn("cannot seal %s in %s: error %d\n", segName(i), getPath(), -result);
 +	}
 +#endif
  }
  
  void ImageLoaderMachO::mapSegments(const void* memoryImage, uint64_t imageLen, const LinkContext& context)
 diff --git a/src/dyld2.cpp b/src/dyld2.cpp
-index 3710870..2a6f6bd 100644
+index 3710870..2d0f1dd 100644
 --- a/src/dyld2.cpp
 +++ b/src/dyld2.cpp
-@@ -23,6 +23,7 @@
+@@ -1,3 +1,6 @@
++#ifdef DARLING
++#include "dc_image_snapshot.h"
++#endif
+ /* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
+  *
+  * Copyright (c) 2004-2013 Apple Inc. All rights reserved.
+@@ -23,6 +26,7 @@
   */
  
  #include <stdint.h>
@@ -57,7 +67,7 @@ index 3710870..2a6f6bd 100644
  #include <string.h>
  #include <unistd.h>
  #include <errno.h>
-@@ -101,7 +102,40 @@
+@@ -101,7 +105,40 @@
  	};
  	extern "C" int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t* output_flags);
  #ifdef DARLING
@@ -99,7 +109,7 @@ index 3710870..2a6f6bd 100644
  #endif
  #else
  	#include <libamfi.h>
-@@ -2514,6 +2548,13 @@ static void checkEnvironmentVariables(const char* envp[])
+@@ -2514,6 +2551,13 @@ static void checkEnvironmentVariables(const char* envp[])
  				key[keyLen] = '\0';
  				if ( (strncmp(key, "DYLD_PRINT_", 11) == 0) && !gLinkContext.allowEnvVarsPrint )
  					continue;
@@ -113,3 +123,98 @@ index 3710870..2a6f6bd 100644
  				processDyldEnvironmentVariable(key, value, NULL);
  			}
  		}
+@@ -3361,12 +3405,40 @@ static bool isSimulatorBinary(const uint8_t* firstPages, const char* path)
+ #endif
+ 
+ 
++#ifdef DARLING
++// Own only the clone: the caller keeps its original fd and path metadata.
++class DarlingImageSnapshot {
++    int _fd;
++public:
++    explicit DarlingImageSnapshot(int source) : _fd(-1) {
++        const char* policy = _simple_getenv(gLinkContext.envp, "DARLING_CODESIGN_ENFORCE");
++        const char* seal = _simple_getenv(gLinkContext.envp, "DARLING_MSEAL");
++        bool requested = (policy && strcmp(policy, "enforce") == 0) || (seal &&
++            (!strcmp(seal, "1") || !strcmp(seal, "on") || !strcmp(seal, "true") || !strcmp(seal, "yes")));
++        if (requested) {
++            _fd = fcntl(source, DC_F_SNAPSHOT_IMAGE, 0);
++            if (_fd < 0) throwf("cannot snapshot image: %d", errno);
++        }
++    }
++    ~DarlingImageSnapshot() { if (_fd >= 0) close(_fd); }
++    int descriptor(int original) const { return _fd >= 0 ? _fd : original; }
++};
++#endif
++
+ // map in file and instantiate an ImageLoader
+ static ImageLoader* loadPhase6(int fd, const struct stat& stat_buf, const char* path, const LoadContext& context)
+ {
+ 	//dyld::log("%s(%s)\n", __func__ , path);
+ 	uint64_t fileOffset = 0;
+ 	uint64_t fileLength = stat_buf.st_size;
++#ifdef DARLING
++    DarlingImageSnapshot snapshot(fd);
++    fd = snapshot.descriptor(fd);
++    struct stat snapshotStat;
++    if (fstat(fd, &snapshotStat) != 0) throwf("cannot stat image snapshot: %d", errno);
++    fileLength = snapshotStat.st_size;
++#endif
++
+ 
+ 	// validate it is a file (not directory)
+ 	if ( (stat_buf.st_mode & S_IFMT) != S_IFREG ) 
+diff --git a/src/dc_image_snapshot.h b/src/dc_image_snapshot.h
+new file mode 100644
+index 0000000..04d64c1
+--- /dev/null
++++ b/src/dc_image_snapshot.h
+@@ -0,0 +1,48 @@
++/* Immutable file snapshots bind verification and mapping to the same bytes.
++ * Callbacks normalize errors to negative errno and never change the source offset.
++ */
++#ifndef DC_IMAGE_SNAPSHOT_H
++#define DC_IMAGE_SNAPSHOT_H
++#include <stddef.h>
++enum { DC_F_SNAPSHOT_IMAGE = 0x40004443 };
++struct dc_image_ops {
++    long (*size)(int);
++    long (*create)(void);
++    long (*read)(int, void*, unsigned long, unsigned long);
++    long (*write)(int, const void*, unsigned long);
++    long (*seal)(int);
++    void (*close)(int);
++};
++static inline long dc_snapshot_image(int source, const struct dc_image_ops* ops) {
++    long length = ops->size(source);
++    if (length < 0) return length;
++    if (!length) return -22;
++    if ((unsigned long)length > 2UL * 1024 * 1024 * 1024) return -27;
++    long target = ops->create();
++    if (target < 0) return target;
++    unsigned long offset = 0;
++    long error = -5;
++    char buffer[16384];
++    while (offset < (unsigned long)length) {
++        unsigned long amount = (unsigned long)length - offset;
++        if (amount > sizeof(buffer)) amount = sizeof(buffer);
++        long got = ops->read(source, buffer, amount, offset);
++        if (got == -4) continue;
++        if (got <= 0) { error = got < 0 ? got : -5; goto fail; }
++        unsigned long written = 0;
++        while (written < (unsigned long)got) {
++            long put = ops->write((int)target, buffer + written, (unsigned long)got - written);
++            if (put == -4) continue;
++            if (put <= 0) { error = put < 0 ? put : -5; goto fail; }
++            written += (unsigned long)put;
++        }
++        offset += (unsigned long)got;
++    }
++    error = ops->seal((int)target);
++    if (error < 0) goto fail;
++    return target;
++fail:
++    ops->close((int)target);
++    return error;
++}
++#endif

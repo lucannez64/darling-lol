@@ -42,6 +42,7 @@ if ! pgrep -x darlingserver >/dev/null 2>&1; then
 	started=1
 fi
 cleanup() {
+	rm -f "$prefix/usr/local/sip-inode-link"
 	rm -f "$prefix/private/tmp/sip-link" "$prefix/usr/local/sip-test" "$prefix/private/etc/sip-test"
 	rm -f "$prefix/private/etc/sip-file" "$prefix/private/etc/sip-inode" "$prefix/private/etc/sip-newlink" "$prefix/private/tmp/sip-hardlink" "$prefix/private/tmp/sip-inode-link"
 	rmdir "$prefix/private/etc/sip-newdir" 2>/dev/null || true
@@ -76,11 +77,13 @@ fi
 
 # Files used by the inode/hardlink and VFS probes. The hardlink is created
 # while SIP is off, outside the protected tree, then used by the "vfs" run.
-mkdir -p "$prefix/private/etc" "$prefix/private/tmp"
+mkdir -p "$prefix/private/etc" "$prefix/private/tmp" "$prefix/usr/local"
 printf 'sip\n' >"$prefix/private/etc/sip-file"
 printf 'sip\n' >"$prefix/private/etc/sip-inode"
 rm -f "$prefix/private/tmp/sip-inode-link"
 ln "$prefix/private/etc/sip-inode" "$prefix/private/tmp/sip-inode-link"
+rm -f "$prefix/usr/local/sip-inode-link"
+ln "$prefix/private/etc/sip-inode" "$prefix/usr/local/sip-inode-link"
 
 guest_root=/Volumes/SystemRoot
 outfile=$tmp/out

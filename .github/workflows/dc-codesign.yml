@@ -4,10 +4,16 @@ on:
   push:
     paths:
       - "tools/dc-codesign/**"
+      - "tests/security/**"
+      - "tests/test_security_host.py"
+      - "patches/**"
       - ".github/workflows/dc-codesign.yml"
   pull_request:
     paths:
       - "tools/dc-codesign/**"
+      - "tests/security/**"
+      - "tests/test_security_host.py"
+      - "patches/**"
   workflow_dispatch:
 
 permissions:
@@ -22,8 +28,8 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang libssl-dev \
-            libclang-rt-18-dev || sudo apt-get install -y -qq clang libssl-dev libfuzzer-14-dev
+          sudo apt-get install -y -qq clang libssl-dev libxml2-dev pkg-config \
+            libclang-rt-18-dev || sudo apt-get install -y -qq clang libssl-dev libxml2-dev pkg-config libfuzzer-14-dev
 
       - name: Install rcodesign (pinned)
         run: |
@@ -33,6 +39,9 @@ jobs:
           tar -xzf /tmp/rcodesign.tgz -C /tmp
           sudo install -m755 /tmp/apple-codesign-0.29.0-x86_64-unknown-linux-musl/rcodesign /usr/local/bin/rcodesign
           rcodesign --version
+
+      - name: Host security policies
+        run: python3 -m unittest discover -s tests -p 'test_security_host.py'
 
       - name: Unit tests (cross-check against rcodesign)
         working-directory: tools/dc-codesign

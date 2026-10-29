@@ -116,6 +116,12 @@ static int test_vfs(void) {
 		unlink("/private/tmp/sip-inode-link");
 	}
 
+	fd = open("/usr/local/sip-inode-link", O_WRONLY);
+	error = errno;
+	failures += expect_eperm("hardlink-usr-local-open", fd == -1 ? -1 : 0, error);
+	if (fd >= 0)
+		close(fd);
+
 	if (failures == 0) {
 		printf("SIP_VFS_OK\n");
 		return 0;
@@ -152,7 +158,7 @@ int main(int argc, char** argv) {
 	unlink("/usr/local/sip-test");
 	unlink("/private/etc/sip-test");
 
-	if (config == 0) {
+	if (config != 0) {
 		if (protected_write != 0 || protected_mkdir != 0 || dotdot_write != 0 ||
 		    localdotdot_write != 0 || symlink_write != 0 || local_write != 0) {
 			printf("SIP_FAIL protected=%d mkdir=%d dotdot=%d localdotdot=%d symlink=%d local=%d\n",
@@ -160,7 +166,7 @@ int main(int argc, char** argv) {
 			    localdotdot_write, symlink_write, local_write);
 			return 1;
 		}
-		printf("SIP_ON_OK\n");
+		printf("SIP_OFF_OK\n");
 	} else {
 		if (protected_write != EPERM || protected_mkdir != EPERM ||
 		    dotdot_write != EPERM || localdotdot_write != EPERM ||
@@ -170,7 +176,7 @@ int main(int argc, char** argv) {
 			    localdotdot_write, symlink_write, local_write);
 			return 1;
 		}
-		printf("SIP_OFF_OK\n");
+		printf("SIP_ON_OK\n");
 	}
 	return 0;
 }
