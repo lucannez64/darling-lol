@@ -2919,7 +2919,7 @@ index 322e186..f712c7a 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,39 +17,207 @@
+@@ -12,39 +17,210 @@
  
  #include <iridium/iridium.hpp>
  
@@ -2946,8 +2946,11 @@ index 322e186..f712c7a 100644
 +	// device list is built, plus one when the presenting OpenGL context first
 +	// imports a Vulkan drawable. It exists so a user can tell us which GPU
 +	// actually rendered a match, which the game's own logs and FPS numbers do not
-+	// show.
++	// show. Off by default: the guest can read this file, so enabling it names the
++	// host GPU to anything running in the prefix. Set DARLING_METAL_DEVICE_LOG=1.
 +	void appendDeviceLog(const std::string& line) {
++		const char* enabled = getenv("DARLING_METAL_DEVICE_LOG");
++		if (!enabled || !*enabled || (enabled[0] == '0' && !enabled[1])) return;
 +		if (FILE* log = fopen("/tmp/metal-device.log", "a")) {
 +			fprintf(log, "[MetalDevice] pid=%d %s\n", getpid(), line.c_str());
 +			fclose(log);

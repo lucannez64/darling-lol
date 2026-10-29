@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Atomically install a built Darling server; never stop or start any process."""
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,12 +8,13 @@ import shutil
 import stat
 import tempfile
 
+from file_digest import sha256
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def digest(path):
-    with path.open("rb") as input:
-        return hashlib.file_digest(input, "sha256").hexdigest()
+    return sha256(path)
 
 
 def live_binaries(destination):

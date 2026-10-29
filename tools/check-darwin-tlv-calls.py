@@ -7,13 +7,17 @@ through it, leaving %rdi unrelated: the thunk then returns NULL and the first wr
 Usage: check-darwin-tlv-calls.py BINARY... ; exits 1 and lists every bad access it finds.
 """
 import re
+from pathlib import Path
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llvm_tools
 
 
 def thread_vars_ranges(path):
     """Address ranges of the __thread_vars sections, which hold the TLV descriptors."""
-    output = subprocess.run(['llvm-objdump', '--macho', '--section-headers', path],
+    output = subprocess.run([llvm_tools.require('llvm-objdump'), '--macho', '--section-headers', path],
                             capture_output=True, text=True, check=True).stdout
     ranges = []
     for line in output.splitlines():
@@ -31,7 +35,7 @@ def bad_accesses(path):
     ranges = thread_vars_ranges(path)
     if not ranges:
         return []
-    disassembly = subprocess.run(['llvm-objdump', '-d', '--no-show-raw-insn', path],
+    disassembly = subprocess.run([llvm_tools.require('llvm-objdump'), '-d', '--no-show-raw-insn', path],
                                  capture_output=True, text=True, check=True).stdout
     load = re.compile(r'(?:leaq|movq)\s+-?0x[0-9a-f]+\(%rip\), %(\w+)\s+#+ 0x([0-9a-f]+)')
     found, function, pending = [], '?', {}

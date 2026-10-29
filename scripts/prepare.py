@@ -7,9 +7,50 @@ sys.dont_write_bytecode=True
 from common import ROOT,render
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--source',type=Path,default=ROOT/'build/darling-src')
+p.add_argument('--jobs',type=int,default=4,help='parallel submodule fetches')
 p.add_argument('--check-only',action='store_true',help='validate against temporary base indexes, without changing existing source')
 a=p.parse_args();source=a.source.resolve();manifest=json.loads((ROOT/'upstream/manifest.json').read_text())
 def run(args,**kwargs):return subprocess.run(args,check=True,**kwargs)
+# The pinned darling-swift .lfsconfig points at the retired git-lfs.darlinghq.org; GitHub still serves the objects.
+LFS_URL='lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs'
+# Without these, a checkout writes Git LFS pointer text where a real dylib belongs, which links but crashes.
+LFS_FILTERS=['-c','filter.lfs.required=true','-c','filter.lfs.smudge=git-lfs smudge -- %f',
+             '-c','filter.lfs.process=git-lfs filter-process','-c','filter.lfs.clean=git-lfs clean -- %f']
+LFS_POINTER=b'version https://git-lfs.github.com/spec/v1\n'
+def submodules(checkout):
+    out=subprocess.run(['git','-C',str(checkout),'submodule','status','--recursive'],text=True,capture_output=True,check=True).stdout
+    return [checkout/line.split()[1] for line in out.splitlines() if len(line.split())>1]
+def pointers(repo):
+    """Tracked files still checked out as LFS pointer text instead of their real content.
+
+    The marker from `git lfs ls-files` is not enough: it reports * (object present)
+    when the pointer text happens to be the same size as the object.
+    """
+    out=subprocess.run(['git','-C',str(repo),'lfs','ls-files','--name-only'],text=True,capture_output=True,check=True).stdout
+    found=[]
+    for name in out.splitlines():
+        try:
+            with open(Path(repo,name),'rb') as handle:head=handle.read(200)
+        except OSError:
+            continue
+        if head.startswith(LFS_POINTER) and b'\nsize ' in head:found.append(name)
+    return found
+def repair(checkout):
+    """An interrupted fetch leaves a submodule with a wiped index or pointer text and 'submodule update'
+    treats both as up to date, so check every worktree before this checkout becomes the source tree."""
+    for repo in [checkout,*submodules(checkout)]:
+        name=repo.relative_to(checkout) or '.'
+        if repo!=checkout and subprocess.run(['git','-C',str(repo),'status','--porcelain'],text=True,
+                                             capture_output=True,check=True).stdout.strip():
+            print(f'Repairing the interrupted checkout of {name}',flush=True)
+            run(['git','-C',str(repo),'checkout','-f','HEAD'],stdout=subprocess.DEVNULL)
+        if pointers(repo):
+            print(f'Fetching the Git LFS objects of {name} (pointer text is not a library)',flush=True)
+            run(['git','-C',str(repo),'lfs','install','--local'],stdout=subprocess.DEVNULL)
+            run(['git','-C',str(repo),*(['-c',LFS_URL] if 'swift' in name.parts else []),'lfs','pull'],
+                stdout=subprocess.DEVNULL)
+            if pointers(repo):raise SystemExit(f'{name}: Git LFS objects are still missing; install git-lfs and run this again')
+
 def applies(repo,patch,reverse=False):
     return subprocess.run(['git','-C',str(repo),'apply',*(['--reverse'] if reverse else []),'--check','-'],input=patch,text=True,
                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
@@ -37,15 +78,19 @@ if not (source/'.git').exists():
         run(['git','-C',str(checkout),'remote','add','origin',manifest['upstream']])
         run(['git','-C',str(checkout),'fetch','--depth','1','origin',manifest['revision']])
         run(['git','-C',str(checkout),'checkout','--detach','FETCH_HEAD'])
+        if subprocess.run(['git','lfs','version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
+            p.error('Git LFS is required to fetch the pinned sources; install git-lfs first')
+        run(['git','-C',str(checkout),*LFS_FILTERS,'lfs','install','--local'],stdout=subprocess.DEVNULL)
         print('Initializing Darling submodules (large repositories/LFS assets may take a while)...',flush=True)
         for attempt in range(1,4):
             try:
-                run(['git','-C',str(checkout),'-c','lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs',
-                     'submodule','update','--init','--recursive','--depth','1','--progress'])
+                run(['git','-C',str(checkout),'-c',LFS_URL,*LFS_FILTERS,'submodule','update','--init','--recursive',
+                     '--depth','1','--jobs',str(a.jobs),'--progress'])
                 break
             except subprocess.CalledProcessError:
                 if attempt==3:raise
                 print(f'Submodule fetch interrupted (attempt {attempt}/3). Retrying...',flush=True)
+        repair(checkout)
         checkout.rename(source)
 
 # Never reset someone else's checkout to make a patch apply.

@@ -16,6 +16,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llvm_tools
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -27,9 +30,14 @@ def load_audit():
     return module
 
 
-def headers(path):
-    return subprocess.run(["llvm-objdump", "--macho", "--private-headers", str(path)],
+def run(*arguments):
+    """Run an LLVM tool, resolving versioned names from PATH or llvm-config."""
+    return subprocess.run((llvm_tools.require(arguments[0]), *arguments[1:]),
                           capture_output=True, text=True, errors="replace").stdout
+
+
+def headers(path):
+    return run("llvm-objdump", "--macho", "--private-headers", str(path))
 
 
 def identity(path):
@@ -43,8 +51,7 @@ def identity(path):
 
 
 def dependencies(path):
-    text = subprocess.run(["llvm-objdump", "--macho", "--dylibs-used", str(path)],
-                          capture_output=True, text=True, errors="replace").stdout
+    text = run("llvm-objdump", "--macho", "--dylibs-used", str(path))
     return sorted(re.findall(r"^\t(\S+) \(compatibility version", text, re.M))
 
 
@@ -70,8 +77,7 @@ def weak_definitions(path):
     """Symbols the library defines only weakly: the -O0 build emits every
     inline function out of line, an optimized build may drop the unused ones,
     and the ABI makes a weak definition optional."""
-    text = subprocess.run(["llvm-nm", "-m", str(path)], capture_output=True, text=True,
-                          errors="replace").stdout
+    text = run("llvm-nm", "-m", str(path))
     weak = set()
     for line in text.splitlines():
         if "weak external" in line:
@@ -80,8 +86,7 @@ def weak_definitions(path):
 
 
 def symbols(path, flag):
-    text = subprocess.run(["llvm-nm", flag, str(path)], capture_output=True, text=True,
-                          errors="replace").stdout
+    text = run("llvm-nm", flag, str(path))
     found = set()
     for line in text.splitlines():
         parts = line.split()

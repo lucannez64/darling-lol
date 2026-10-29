@@ -15,7 +15,6 @@ and is never run against the real prefix by the build. Nothing is activated
 until the guest processes are restarted.
 """
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +23,7 @@ import stat
 import tempfile
 
 from runtime_paths import validate_runtime_paths
+from file_digest import sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,8 +40,7 @@ LIBRARIES = [
 
 
 def digest(path):
-    with path.open("rb") as input:
-        return hashlib.file_digest(input, "sha256").hexdigest()
+    return sha256(path)
 
 
 def destinations(prefix, guest_home):

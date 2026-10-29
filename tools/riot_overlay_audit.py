@@ -23,6 +23,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llvm_tools
+
 ROOT = Path(__file__).resolve().parent.parent
 GAME = (Path.home() / ".darling/Applications/League of Legends.app/Contents/LoL/Game"
         / "LeagueofLegends.app/Contents/MacOS/LeagueofLegends")
@@ -44,7 +47,9 @@ MIN_FUNCTION_INSTRUCTIONS = 20
 
 
 def tool(*arguments):
-    return subprocess.run(arguments, capture_output=True, text=True, errors="replace").stdout
+    """Run an LLVM tool, resolving versioned names from PATH or llvm-config."""
+    return subprocess.run((llvm_tools.require(arguments[0]), *arguments[1:]),
+                          capture_output=True, text=True, errors="replace").stdout
 
 
 def load_commands(path, requested):

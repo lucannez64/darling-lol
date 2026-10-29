@@ -23,10 +23,12 @@ REQUIRED = {
     '__NV_PRIME_RENDER_OFFLOAD': '1', '__EGL_VENDOR_LIBRARY_FILENAMES': '/usr/share/glvnd/egl_vendor.d/10_nvidia.json',
     'VK_ICD_FILENAMES': '/usr/share/vulkan/icd.d/nvidia_icd.json', 'LIBGL_ALWAYS_SOFTWARE': '0',
     'LD_PRELOAD': 'libgamemodeauto.so.0', 'LD_LIBRARY_PATH': '/run/opengl-driver/lib',
-    'HOME': '/home/u', 'USER': 'u', 'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8', 'TERM': 'xterm',
+    'HOME': '/home/u', 'USER': 'u', 'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8',
     'DPREFIX': '/home/u/.darling', 'RCLOL_REFRESH_HZ': '144', 'DYLD_LIBRARY_PATH': '/Users/u/RuntimeLibraries',
 }
 SESSION = {
+    'TERM': 'xterm', 'STARSHIP_SESSION_KEY': 'host-prompt', 'AWS_PROFILE': 'host-profile',
+    'GIT_CONFIG_GLOBAL': '/home/u/.gitconfig', 'EDITOR': '/bin/host-editor',
     'WAYLAND_DISPLAY': 'wayland-0', 'XDG_CURRENT_DESKTOP': 'GNOME', 'XDG_SESSION_TYPE': 'wayland',
     'XDG_SESSION_ID': '2', 'XDG_SEAT': 'seat0', 'DESKTOP_SESSION': 'gnome', 'GDMSESSION': 'gnome',
     'GDM_LANG': 'en_US.UTF-8', 'SESSION_MANAGER': 'local/host:@/tmp/.ICE-unix/1', 'GNOME_SETUP_DISPLAY': ':1',
@@ -45,7 +47,13 @@ class FilterTests(unittest.TestCase):
         environ = {**REQUIRED, **SESSION, 'SHELL': '/bin/fish'}
         removed = exec_guest.filter_host_environment(environ)
         self.assertEqual(set(removed), set(SESSION))
-        self.assertEqual(environ, {**REQUIRED, 'SHELL': '/bin/zsh'})
+        self.assertEqual(environ, {**REQUIRED, 'SHELL': '/bin/zsh', 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})
+
+    def test_explicit_keep_preserves_host_path_and_terminal(self):
+        environ = {'PATH': '/custom/bin', 'TERM': 'xterm',
+                   'RCLOL_KEEP_HOST_ENV': 'PATH TERM', 'RCLOL_FILTER_HOST_ENV': '1'}
+        self.assertEqual(exec_guest.filter_host_environment(environ), [])
+        self.assertEqual(environ, {'PATH': '/custom/bin', 'TERM': 'xterm', 'SHELL': '/bin/zsh'})
 
     def test_keep_list(self):
         environ = {'WAYLAND_DISPLAY': 'wayland-0', 'SSH_AUTH_SOCK': '/s', 'SHELL': '/bin/fish',
@@ -53,6 +61,7 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(exec_guest.filter_host_environment(environ), ['SSH_AUTH_SOCK'])
         self.assertEqual(environ['WAYLAND_DISPLAY'], 'wayland-0')
         self.assertEqual(environ['SHELL'], '/bin/fish')
+        self.assertNotIn('RCLOL_KEEP_HOST_ENV', environ)
 
 
 class ExecTests(unittest.TestCase):
@@ -82,8 +91,11 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(child['fds'], [0, 1, 2])
         self.assertFalse(set(SESSION) & set(child['env']))
         for name, value in REQUIRED.items():
-            self.assertEqual(child['env'].get(name), value, name)
+            expected = '/usr/bin:/bin:/usr/sbin:/sbin' if name == 'PATH' else value
+            self.assertEqual(child['env'].get(name), expected, name)
         self.assertEqual(child['env']['SHELL'], '/bin/zsh')
+        self.assertNotIn('RCLOL_FILTER_HOST_ENV', child['env'])
+        self.assertNotIn('RCLOL_KEEP_HOST_ENV', child['env'])
 
 
 if __name__ == '__main__':

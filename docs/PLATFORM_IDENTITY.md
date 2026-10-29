@@ -9,6 +9,14 @@ does not issue authentic Apple identities or change CPU, GPU, or security
 metadata. The overrides are for application compatibility; they are not intended
 to bypass anti-cheat, telemetry, licensing, or platform security controls.
 
+> **Synthetic, local metadata.** These values are not Apple-issued identifiers,
+> credentials or authentication tokens. Do not use them with Apple services or
+> to impersonate real hardware. This repository does not pass them to Riot as
+> authentication data; the values are exposed to guest applications through
+> IOKit, and the official client's later handling of them is outside this
+> repository's scope. See the
+> [interoperability and compliance scope](INTEROPERABILITY.md).
+
 Preview an OpenCore `config.plist`, a flat GenSMBIOS JSON file, or an existing
 `darling-smbios.conf` without changing the selected prefix:
 
@@ -156,3 +164,12 @@ keeps no identity of its own, so it reports the same values as IOKit, including 
 override saved by this tool. A field the guest does not provide is left out.
 `python3 -m unittest tests.test_system_profiler` checks the output with stub
 commands.
+
+`SPDisplaysDataType` reads the host DRM cards. With `DARLING_METAL_MAC_GPU_NAME`
+set (the launcher default), an AMD or NVIDIA host card is reported as the
+`MacBookPro16,1` discrete GPU: `AMD Radeon Pro 5500M`, vendor `0x1002`, device
+`0x7340`, bus PCIe and VRAM from `DARLING_METAL_VRAM_MB` (4096 by default; a
+value that is not a positive decimal keeps the default). An Intel card is
+reported as `Intel UHD Graphics 630` on bus Built-In with shared memory, as
+`MTLDevice.name` does. This keeps the display report consistent with Metal;
+without the variable the host card is reported as-is.

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Install the tested reclamation library atomically, without restarting clients."""
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +10,7 @@ import stat
 import tempfile
 
 from runtime_paths import runtime_paths
+from file_digest import sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 # The optimized relink from tools/build-riot-kqueue-runtime.py is the library the
@@ -19,8 +19,7 @@ DEFAULT_ARTIFACT = ROOT / "build/riot-libsystem_kernel.dylib"
 
 
 def digest(path):
-    with path.open("rb") as input:
-        return hashlib.file_digest(input, "sha256").hexdigest()
+    return sha256(path)
 
 
 def install(binary, destinations, backup_folder):

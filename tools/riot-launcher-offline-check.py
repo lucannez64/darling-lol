@@ -23,6 +23,21 @@ def check():
         stub = f'''#!{sys.executable}
 import json, os, sys
 record = {{"command": os.path.basename(sys.argv[0]), "args": sys.argv[1:]}}
+# The launcher hands the guest to the session supervisor before exec-guest.py.
+# Run the supervised command without recording the supervisor itself, so the
+# existing assertions still inspect the guest launch that follows.
+if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "session-supervisor.py":
+    remainder = sys.argv[2:]
+    if "--probe-runtime" in remainder:
+        with open({str(log)!r}, "a") as output:
+            output.write(json.dumps({{"command": "runtime-probe"}}) + "\\n")
+        print("stopped")
+        sys.exit(0)
+    if "--" in remainder:
+        assert remainder[remainder.index("--runtime-at-start") + 1] == "stopped"
+        command = remainder[remainder.index("--") + 1:]
+        if command and command[0] == "python3":
+            os.execv(sys.executable, [sys.executable] + command[1:])
 # The launcher starts the guest through exec-guest.py; run it for real.
 if record["command"] == "python3" and sys.argv[1:] and os.path.basename(sys.argv[1]) == "exec-guest.py":
     os.execv(sys.executable, [sys.executable] + sys.argv[1:])
@@ -38,6 +53,7 @@ if record["command"] == "darling":
     record["flags"] = {{key: os.environ.get(key) for key in
         ("RCLOL_APP_ARG3", "RCLOL_APP_ARG3_SLOT", "RCLOL_UX_ARG2", "RCLOL_UX_ARG2_SLOT", "RCLOL_UX_ARG1", "RCLOL_APP_ARGS", "RCLOL_APP_ARG2", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY",
          "WAYLAND_DISPLAY", "XAUTHORITY", "DRI_PRIME", "MESA_NO_ERROR", "__GL_THREADED_OPTIMIZATIONS", "SHELL")}}
+record["hud"] = {{key: os.environ.get(key) for key in ("MANGOHUD", "DISABLE_MANGOHUD")}}
 with open({str(log)!r}, "a") as output:
     output.write(json.dumps(record) + "\\n")
 '''
@@ -59,6 +75,8 @@ with open({str(log)!r}, "a") as output:
         env["DYLD_INSERT_LIBRARIES"] = "/Users/offline-check/zzlogdir.dylib:/tmp/inherited.dylib"
         env["RCLOL_APP_ARGS"] = "--inherited-shim-argument"
         env["RCLOL_APP_ARG2"] = "--inherited-shim-argument-2"
+        env["MANGOHUD"] = "1"
+        env.pop("DISABLE_MANGOHUD", None)
         env["RCLOL_NATIVE_VPX"] = "1"
         env["RCLOL_LEAGUE_UX_TUNING"] = "1"
         # Inherited legacy settings must not re-enable inspection or unlimited frames.
@@ -83,6 +101,11 @@ with open({str(log)!r}, "a") as output:
             for fd in leaked:
                 os.close(fd)
         records = [json.loads(line) for line in log.read_text().splitlines()]
+        probe = next(i for i, record in enumerate(records) if record["command"] == "runtime-probe")
+        roots = next(i for i, record in enumerate(records)
+                     if record["command"] == "python3" and
+                     Path(record["args"][0]).name == "ensure-darling-root-certificates.py")
+        assert probe < roots, "runtime ownership was captured after certificate startup"
         maintenance = [r for r in records if r["command"] == "python3"]
         assert [Path(r["args"][0]).name for r in maintenance] == [
             "runtime_paths.py", "ensure-darling-runtime.py", "ensure-darling-service-accounts.py", "ensure-league-runtime-layout.py",
@@ -90,6 +113,10 @@ with open({str(log)!r}, "a") as output:
         ], "unexpected automatic helper"
         launches = [r for r in records if r["command"] == "darling"]
         assert len(launches) == 1, "unexpected launch count"
+        for record in records:
+            if record["command"] == "runtime-probe":
+                continue
+            assert record["hud"] == {"MANGOHUD": None, "DISABLE_MANGOHUD": "1"}, "MangoHud survived before a runtime helper"
         launch = launches[0]
         assert launch["fds"] == [0, 1, 2], f"inherited descriptors reached the guest: {launch['fds']}"
         assert all(launch["flags"][key] is None for key in (
@@ -106,17 +133,20 @@ with open({str(log)!r}, "a") as output:
         assert "--log-dir=/Users/offline-check/Library/Logs/Riot Games/Riot Client" in launch["args"], "absolute log directory lost"
         # An inherited injection must also be absent for first-time installation.
         env["RIOT_LAUNCHER_HOST"] = str(folder / "Install Riot.app/Contents/MacOS/RiotClientServices")
+        env["DISABLE_MANGOHUD"] = "0"  # Inherited settings cannot override launcher policy.
         subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
         install = json.loads(log.read_text().splitlines()[-1])
         assert install["args"][0] == env["RIOT_LAUNCHER_HOST"]
         assert "--skip-to-install" in install["args"]
         assert not any(arg.startswith("--app-root=") for arg in install["args"])
         assert install["flags"]["DYLD_INSERT_LIBRARIES"] is None
+        assert install["hud"] == {"MANGOHUD": None, "DISABLE_MANGOHUD": "1"}
         env.pop("RIOT_LAUNCHER_HOST")
         env.pop("DYLD_INSERT_LIBRARIES")
         subprocess.run(["sh", str(launcher)], env=env, check=True, capture_output=True, text=True)
         clean = json.loads(log.read_text().splitlines()[-1])
         assert clean["flags"]["DYLD_INSERT_LIBRARIES"] is None
+        assert clean["hud"] == {"MANGOHUD": None, "DISABLE_MANGOHUD": "1"}
         # The opt-in host environment filter drops session metadata but never the launcher's GPU tuning.
         env.update({"RCLOL_FILTER_HOST_ENV": "1", "WAYLAND_DISPLAY": "wayland-0", "XAUTHORITY": "/tmp/xauth",
                     "DRI_PRIME": "1", "SHELL": "/bin/fish"})
@@ -127,7 +157,7 @@ with open({str(log)!r}, "a") as output:
         assert filtered["WAYLAND_DISPLAY"] is None and filtered["SHELL"] == "/bin/zsh", "host session metadata survived"
         assert (filtered["XAUTHORITY"], filtered["DRI_PRIME"]) == ("/tmp/xauth", "1"), "X11/GPU selection lost"
         assert (filtered["MESA_NO_ERROR"], filtered["__GL_THREADED_OPTIMIZATIONS"]) == ("1", "0"), "launcher GPU tuning lost"
-        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved inherited_fds=closed host_env_filter=PASS")
+        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved inherited_fds=closed host_env_filter=PASS mangohud=disabled")
 
 
 if __name__ == "__main__":

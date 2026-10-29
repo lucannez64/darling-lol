@@ -120,6 +120,91 @@ exec REAL_INSTALL "$@"'''.replace('REAL_INSTALL', shutil.which('install')))
         self.assertFalse(target.is_symlink())
 
 
+    def write_config(self, **changes):
+        (self.root / 'build/config.json').write_text(json.dumps(dict(self.config, **changes)))
+
+
+    def config_value(self, key):
+        return json.loads((self.root / 'build/config.json').read_text())[key]
+
+
+    def test_configure_rehomes_default_prefix_after_home_change(self):
+        previous = Path(self.tmp.name) / 'previous home'
+        self.write_config(host_home=str(previous), prefix=str(previous / '.darling'))
+        result = self.run_script('scripts/configure.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config_value('prefix'), str(self.home / '.darling'))
+        self.assertIn('previous home', result.stderr)
+
+
+    def test_configure_keeps_explicit_prefix_after_home_change(self):
+        previous = Path(self.tmp.name) / 'previous home'
+        self.write_config(host_home=str(previous), prefix=str(self.prefix))
+        self.configure()
+        self.assertEqual(self.config_value('prefix'), str(self.prefix))
+        self.assertEqual(self.config_value('host_home'), str(self.home))
+
+
+    def test_configure_warns_about_prefix_inside_previous_home(self):
+        previous = Path(self.tmp.name) / 'previous home'
+        self.write_config(host_home=str(previous), prefix=str(previous / 'custom prefix'))
+        result = self.run_script('scripts/configure.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config_value('prefix'), str(previous / 'custom prefix'))
+        self.assertIn('--prefix', result.stderr)
+
+
+    def test_configure_creates_relative_build_symlink(self):
+        self.configure()
+        link = self.root / 'build/runtime/build'
+        self.assertEqual(os.readlink(link), '..')
+        self.assertEqual(link.resolve(), (self.root / 'build').resolve())
+
+
+    def test_configure_repairs_absolute_and_dangling_build_symlink(self):
+        link = self.root / 'build/runtime/build'
+        link.parent.mkdir(parents=True)
+        link.symlink_to(self.root / 'build')
+        self.configure()
+        self.assertEqual(os.readlink(link), '..')
+        link.unlink()
+        link.symlink_to(self.root / 'moved away/build')
+        self.configure()
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), (self.root / 'build').resolve())
+
+
+    def test_configure_leaves_foreign_build_directory(self):
+        link = self.root / 'build/runtime/build'
+        link.mkdir(parents=True)
+        (link / 'keep').write_text('local build')
+        result = self.run_script('scripts/configure.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual((link / 'keep').read_text(), 'local build')
+        self.assertIn('not a symlink', result.stderr)
+
+
+    def test_configure_warns_about_stale_cmake_cache(self):
+        cache = self.root / 'build/darling-src/build/CMakeCache.txt'
+        cache.parent.mkdir(parents=True)
+        cache.write_text('// generated\nCMAKE_HOME_DIRECTORY:INTERNAL=/root/old checkout/build/darling-src\n')
+        result = self.run_script('scripts/configure.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(cache.is_file(), 'configure removed the CMake cache')
+        self.assertIn('/root/old checkout/build/darling-src', result.stderr)
+        self.assertIn('Remove', result.stderr)
+
+
+    def test_configure_accepts_current_cmake_cache(self):
+        cache = self.root / 'build/darling-src/build/CMakeCache.txt'
+        cache.parent.mkdir(parents=True)
+        cache.write_text(f'CMAKE_HOME_DIRECTORY:INTERNAL={self.root}/build/darling-src\n')
+        result = self.run_script('scripts/configure.py')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+
+
     def test_presentation_creates_prerequisites_and_repeat_install(self):
         self.configure()
         self.runtime_stubs()

@@ -13,6 +13,12 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'tools/ensure-darling-runtime.py'
 
 
 class RuntimeCleanupScopeTests(unittest.TestCase):
+    def enterContext(self, manager):
+        """unittest.TestCase.enterContext() is Python 3.11+; Ubuntu 22.04 ships 3.10."""
+        value = manager.__enter__()
+        self.addCleanup(manager.__exit__, None, None, None)
+        return value
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='cleanup-scope-')
         self.addCleanup(temporary.cleanup)

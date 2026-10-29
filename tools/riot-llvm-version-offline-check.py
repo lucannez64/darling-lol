@@ -3,11 +3,15 @@
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llvm_tools
 
 root = Path(__file__).resolve().parent.parent
 indium = root / 'build/darling-src/src/external/metal/deps/indium'
-include = Path(subprocess.check_output(['llvm-config', '--includedir'], text=True).strip())
+include = Path(llvm_tools.config('--includedir'))
 header = (include / 'llvm/Config/llvm-config.h').read_text()
 major = int(re.search(r'^#define LLVM_VERSION_MAJOR (\d+)', header, re.MULTILINE)[1])
 with tempfile.TemporaryDirectory(prefix='iridium-llvm-version-') as directory:

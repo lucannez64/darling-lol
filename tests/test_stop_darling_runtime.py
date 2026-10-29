@@ -65,7 +65,11 @@ class StopRuntimeTests(unittest.TestCase):
             def __init__(self, *parts, **kwargs):
                 if parts and str(parts[0]) == '/proc':
                     parts = (proc, *parts[1:])
-                super().__init__(*parts, **kwargs)
+                try:
+                    super().__init__(*parts, **kwargs)
+                except TypeError:
+                    # Python 3.10's PurePath.__init__ takes no arguments; 3.12 stores them.
+                    super().__init__()
 
             def read_text(self, *args, **kwargs):
                 if self.name == 'status' and owner.status_error is not None:

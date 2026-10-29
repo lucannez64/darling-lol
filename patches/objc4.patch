@@ -12,6 +12,26 @@ index ff2d703..cd887c9 100644
  inline void operator delete(void* p, const std::nothrow_t&) noexcept(true) { free(p); }
  inline void operator delete[](void* p, const std::nothrow_t&) noexcept(true) { free(p); }
  #pragma clang diagnostic pop
+diff --git a/runtime/objc-runtime-new.mm b/runtime/objc-runtime-new.mm
+index df3f9fa..ea8c860 100644
+--- a/runtime/objc-runtime-new.mm
++++ b/runtime/objc-runtime-new.mm
+@@ -2588,10 +2588,11 @@ static void validateAlreadyRealizedClass(Class cls) {
+     class_rw_t *rw = cls->data();
+     size_t rwSize = malloc_size(rw);
+ 
+-    // Note: this check will need some adjustment if class_rw_t's
+-    // size changes to not match the malloc bucket.
+-    if (rwSize != sizeof(class_rw_t))
+-        _objc_fatal("realized class %p has corrupt data pointer %p", cls, rw);
++    // The allocator may round the size of class_rw_t up to its bucket, so a
++    // valid allocation can be larger than sizeof(class_rw_t); only a smaller
++    // allocation means the data pointer is not a class_rw_t.
++    if (rwSize < sizeof(class_rw_t))
++        _objc_fatal("realized class %p (%s) has corrupt data pointer %p (size %zu, expected at least %zu)", cls, cls->nameForLogging(), rw, rwSize, sizeof(class_rw_t));
+ #endif
+ }
+ 
 diff --git a/unexported_symbols b/unexported_symbols
 index 73f77a8..a9c3905 100644
 --- a/unexported_symbols

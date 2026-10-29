@@ -13,6 +13,8 @@ fi
 python3 scripts/configure.py
 . build/runtime/tools/runtime-paths.sh
 if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
+# Check versions before any runtime helper touches the prefix or the running session.
+[ "${RCLOL_SKIP_PREFLIGHT:-0}" = 1 ] || python3 scripts/preflight.py
 # A server killed by the base install leaves a stale .init.pid that makes darling shell fail.
 python3 build/runtime/tools/ensure-darling-runtime.py
 # Initialize the normal user-owned prefix before installing overrides.

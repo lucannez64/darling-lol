@@ -4,12 +4,15 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llvm_tools
 root = Path(__file__).resolve().parent.parent
 if '--native' in sys.argv:
     indium = root / 'build/darling-src/src/external/metal/deps/indium'
-    llvm_include = subprocess.check_output(['llvm-config', '--includedir'], text=True).strip()
-    llvm_libdir = Path(subprocess.check_output(['llvm-config', '--libdir'], text=True).strip())
-    llvm_names = shlex.split(subprocess.check_output(['llvm-config', '--link-shared', '--libnames'], text=True))
+    llvm_include = llvm_tools.config('--includedir')
+    llvm_libdir = Path(llvm_tools.config('--libdir'))
+    llvm_names = shlex.split(llvm_tools.config('--link-shared', '--libnames'))
     if len(llvm_names) != 1:
         raise SystemExit('Iridium requires one shared LLVM library, got: ' + repr(llvm_names))
     llvm_library = llvm_libdir / llvm_names[0]

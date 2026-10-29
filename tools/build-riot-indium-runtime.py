@@ -5,6 +5,9 @@ import os
 import shlex
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llvm_tools
 root = Path(__file__).resolve().parent.parent
 folder = root / 'build/darling-src/build/src/external/metal/deps/indium'
 # Keep the validated LLVM major locally when a system update replaces it.
@@ -24,9 +27,9 @@ if (pinned_llvm / 'lib/libLLVM-22.so').exists() and os.environ.get('RIOT_IRIDIUM
     llvm_library = pinned_llvm / 'lib/libLLVM-22.so'
 else:
     # Do not combine cached CMake include paths with a newer llvm-config library.
-    llvm_include = Path(subprocess.check_output(['llvm-config', '--includedir'], text=True).strip())
-    llvm_libdir = Path(subprocess.check_output(['llvm-config', '--libdir'], text=True).strip())
-    llvm_names = shlex.split(subprocess.check_output(['llvm-config', '--link-shared', '--libnames'], text=True))
+    llvm_include = Path(llvm_tools.config('--includedir'))
+    llvm_libdir = Path(llvm_tools.config('--libdir'))
+    llvm_names = shlex.split(llvm_tools.config('--link-shared', '--libnames'))
     if len(llvm_names) != 1:
         raise SystemExit('Iridium requires one shared LLVM library, got: ' + repr(llvm_names))
     llvm_library = llvm_libdir / llvm_names[0]

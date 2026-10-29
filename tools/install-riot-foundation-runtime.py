@@ -9,7 +9,6 @@ tools/install-riot-memory-runtime.py (its default source is the rebuilt
 build/riot-libsystem_kernel.dylib); this installer does not touch it.
 """
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,14 +17,14 @@ import stat
 import tempfile
 
 from runtime_paths import runtime_paths
+from file_digest import sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACT = ROOT / "build/riot-Foundation"
 
 
 def digest(path):
-    with path.open("rb") as input:
-        return hashlib.file_digest(input, "sha256").hexdigest()
+    return sha256(path)
 
 
 def copy_framework(sdk_framework, framework):
