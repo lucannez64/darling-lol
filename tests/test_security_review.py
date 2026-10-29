@@ -146,3 +146,30 @@ int main() {
         self.assertNotIn('VMs boot with SIP disabled', rendered)
         self.assertNotIn('empty entitlements blob returns success', rendered)
         self.assertNotIn('therefore reports', rendered)
+
+    def test_regeneration_preserves_archived_builds_and_original_provenance(self):
+        ground = module_at('review_ground_truth_merge', ROOT / 'tests/security/ground_truth_to_golden.py')
+        archive = json.loads((ROOT / 'tests/security/fixtures/macos-golden.json').read_text())
+        old = next(e for e in archive['environments'] if e['runner'] == 'macos-14')
+        updated = json.loads(json.dumps(next(e for e in archive['environments'] if e['runner'] == 'macos-15')))
+        updated['probe']['child_matches_self'] = False
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'golden.json'
+            markdown = Path(tmp) / 'report.md'
+            output.write_text(json.dumps(archive))
+            argv = ['ground_truth_to_golden.py', tmp, '--json', str(output),
+                    '--markdown', str(markdown), '--run-id', 'test-new-run', '--date', '2026-10-29']
+            with patch('sys.argv', argv), patch.object(ground, 'parse_env', return_value=[updated]):
+                ground.main()
+                # Repeating the same build refreshes it without duplicating it.
+                ground.main()
+            merged = json.loads(output.read_text())
+            self.assertEqual(len(merged['environments']), len(archive['environments']))
+            retained = next(e for e in merged['environments'] if e['runner'] == 'macos-14')
+            self.assertEqual(retained, dict(old, source=old.get('source', archive['source'])))
+            fresh = next(e for e in merged['environments'] if e['runner'] == 'macos-15')
+            self.assertEqual(fresh['source']['run_id'], 'test-new-run')
+            self.assertFalse(fresh['probe']['child_matches_self'])
+            rendered = markdown.read_text()
+            self.assertIn(archive['source']['run_id'], rendered)
+            self.assertIn('test-new-run', rendered)

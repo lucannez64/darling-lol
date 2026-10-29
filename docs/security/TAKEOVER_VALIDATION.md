@@ -17,7 +17,7 @@ open for Apple trust/notarization and production soak acceptance.
   EINTR are handled, and each image is limited to 2 GiB. There is an additional
   full-image copy and memory cost; no performance claim is made.
 - A learned protected inode could be opened through an existing hardlink under
-  `/usr/local`: the path exception returned before checking the inode registry.
+  `/usr/local`: the path exception returned before check-ing the inode registry.
   The shared policy now checks the registry first. New local files under
   `/usr/local` still work. Both the host probe and guest fixture include this
   alias, as well as an alias under `/tmp`.
@@ -72,7 +72,7 @@ is fail-closed when requested. JIT pages are outside M5, and sealed images
 cannot be unmapped on dlclose. This is cooperative enforcement: raw Linux
 syscalls bypass guest wrapper policy. The SIP registry still learns inodes
 only when protected paths are inspected, is bounded, and cannot prevent a
-symlink swap between path checking and the actual syscall. Rootless mode has
+symlink swap between path check-ing and the actual syscall. Rootless mode has
 no authenticated trust-store boundary. DER entitlement policy, Apple CMS/
 Developer ID trust, notarization acceptance and a full match soak remain open.
 The default signing mode stays off; this continuation does not establish
@@ -85,7 +85,7 @@ The first continuation review added the following regressions and corrections:
 - Cross-process signing-state updates use the existing host-credential debug
   authorization. The UID/GID RPC still updates the emulated audit token, but
   never copies a requested UID into the server's authorization credential.
-- A constructor-set fork marker survives parent death. Initial checkin permits
+- A constructor-set fork marker survives parent death. Initial check-in permits
   registration once only for an initial process; fork children keep inherited
   state even if unverified. Exec clears all old signing state and blobs before
   reopening registration. Compiled tests exercise the real transition and debug

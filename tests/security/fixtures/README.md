@@ -88,6 +88,17 @@ python3 tests/security/ground_truth_to_golden.py ARTIFACT_DIR \
     --run-id <id> --date <YYYY-MM-DD>
 ```
 
+Regeneration merges into the existing `--json` output. Archived runner/build/
+architecture combinations, including macOS 14, remain with their original
+source run and date. A fresh observation replaces only the same runner/build/
+architecture combination. Each environment carries its own `source`; the
+top-level `source` describes the latest collection, not every archived row.
+The rendered table shows per-environment provenance.
+
+To write a new output location while retaining a separate archive, pass
+`--merge-from tests/security/fixtures/macos-golden.json`. New collections use
+macOS 15; retired macOS 14 runner jobs are not reintroduced.
+
 The probe's own cdhash changes per build, so the golden file records its
 **flags**, not its hash. Apple binary cdhashes are recorded per macOS build.
 

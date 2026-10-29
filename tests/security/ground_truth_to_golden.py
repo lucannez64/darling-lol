@@ -169,6 +169,25 @@ def sort_envs(envs):
     return sorted(envs, key=lambda e: e["runner"])
 
 
+def merge_observations(previous, environments, source):
+    """Refresh observed builds while retaining archived builds and provenance."""
+    def identity(environment):
+        macos = environment["macos"]
+        return (environment["runner"], macos.get("product"),
+                macos.get("build"), macos.get("arch"))
+
+    merged = {}
+    for environment in previous.get("environments", []):
+        archived = dict(environment)
+        archived["source"] = dict(environment.get("source") or previous.get("source") or {})
+        merged[identity(archived)] = archived
+    for environment in environments:
+        current = dict(environment)
+        current["source"] = dict(source)
+        merged[identity(current)] = current
+    return sort_envs(list(merged.values()))
+
+
 def render_markdown(golden):
     out = []
     out.append("# macOS ground truth")
@@ -181,7 +200,7 @@ def render_markdown(golden):
     )
     out.append("")
     if golden.get("source", {}).get("run_id"):
-        out.append(f"Source run: `{golden['source']['run_id']}`.")
+        out.append(f"Latest collection run: `{golden['source']['run_id']}`.")
         out.append("")
     out.append("> Caveat: these measurements describe the listed CI environments.")
     out.append("> SIP status is reported per runner; unavailable observations do not")
@@ -190,13 +209,15 @@ def render_markdown(golden):
 
     out.append("## Environments")
     out.append("")
-    out.append("| Runner | macOS | Build | Darwin | Arch | SIP | CSR config |")
-    out.append("|---|---|---|---|---|---|---|")
+    out.append("| Runner | macOS | Build | Darwin | Arch | SIP | CSR config | Source run | Date |")
+    out.append("|---|---|---|---|---|---|---|---|---|")
     for e in golden["environments"]:
+        provenance = e.get("source", golden.get("source", {}))
         out.append(
             f"| {e['runner']} | {e['macos']['product']} | {e['macos']['build']} | "
             f"{e['macos']['darwin']} | {e['macos']['arch']} | {e['sip']} | "
-            f"`{e['csr']['config']}` |"
+            f"`{e['csr']['config']}` | {provenance.get('run_id') or 'unavailable'} | "
+            f"{provenance.get('date') or 'unavailable'} |"
         )
     out.append("")
 
@@ -268,19 +289,15 @@ def render_markdown(golden):
 
     out.append("## What this establishes")
     out.append("")
-    out.append("- Exact `csops` status flags for a locally built, linker-signed binary.")
-    out.append("- `CS_OPS_TEAMID` failure mode (`-1`/`ENOENT`) when no team exists.")
-    out.append("- Empty-entitlements semantics.")
-    out.append("- Cross-process `csops` works when SIP allows `task_for_pid`.")
-    out.append("- Per-macOS-build cdhashes and platform identifiers for Apple binaries.")
-    out.append("- Real entitlement keys from `amfid` and friends.")
+    out.append("- The successful observations listed above, scoped to each runner/build and source run.")
+    out.append("- Failed or unavailable probes establish no successful-call semantics.")
     out.append("")
     out.append("## What it does not establish")
     out.append("")
-    out.append("- SIP enforcement: the runners boot with SIP disabled.")
+    out.append("- General SIP enforcement: the read-only probe does not test denied operations.")
     out.append("- Hardened-runtime behaviour of a notarized third-party app.")
     out.append("- Notarization tickets (no public notarized fixture here).")
-    out.append("- Intel behaviour: the matrix is arm64 only.")
+    out.append("- Behaviour on architectures or macOS builds absent from the collected data.")
     out.append("")
     return "\n".join(out)
 
@@ -290,6 +307,8 @@ def main():
     ap.add_argument("artifacts", type=pathlib.Path)
     ap.add_argument("--json", type=pathlib.Path, required=True)
     ap.add_argument("--markdown", type=pathlib.Path, required=True)
+    ap.add_argument("--merge-from", type=pathlib.Path,
+                    help="archive to retain (defaults to the existing --json output)")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--date", default=None)
     args = ap.parse_args()
@@ -298,20 +317,25 @@ def main():
     if not envs:
         sys.exit("no ground-truth artifacts found")
 
+    archive = args.merge_from or args.json
+    if args.merge_from and not archive.is_file():
+        ap.error(f"archive does not exist: {archive}")
+    previous = json.loads(archive.read_text(encoding="utf-8")) if archive.exists() else {}
+    source = {
+        "workflow": "security-ground-truth.yml",
+        "run_id": args.run_id,
+        "date": args.date,
+    }
     golden = {
         "schema": 1,
-        "source": {
-            "workflow": "security-ground-truth.yml",
-            "run_id": args.run_id,
-            "date": args.date,
-        },
-        "environments": envs,
+        "source": source,
+        "environments": merge_observations(previous, envs, source),
     }
     args.json.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(json.dumps(golden, indent=2) + "\n", encoding="utf-8")
     args.markdown.parent.mkdir(parents=True, exist_ok=True)
     args.markdown.write_text(render_markdown(golden), encoding="utf-8")
-    print(f"wrote {args.json} and {args.markdown} ({len(envs)} environments)")
+    print(f"wrote {args.json} and {args.markdown} ({len(golden['environments'])} environments)")
 
 
 if __name__ == "__main__":
