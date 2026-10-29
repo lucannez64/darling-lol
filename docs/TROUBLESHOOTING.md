@@ -822,12 +822,20 @@ Both can be overridden per launch:
 DARLING_METAL_GPU_NAME='AMD Radeon Pro 5500M' DARLING_METAL_VRAM_MB=4096 ./scripts/run.sh
 ```
 
-The Riot launcher sets `DARLING_METAL_MAC_GPU_NAME=1`: the name becomes the GPU that
-the MacBookPro16,1 IOKit reports shipped with, from the host's vendor: `AMD Radeon Pro 5500M`
-on AMD and `Intel UHD Graphics 630` on Intel. NVIDIA GPUs keep their own name, so the game
-never takes AMD or Intel driver paths on an NVIDIA card. The working set is still the host's.
-`DARLING_METAL_MAC_GPU_NAME=0 ./scripts/run.sh` reports the host name instead; other Darling
-apps report it unless they set the variable. `DARLING_METAL_GPU_NAME` wins over both.
+The launcher reads one hardware-presentation file,
+`$DPREFIX/private/etc/darling-system.prop` (falling back to the checkout's
+`tools/system.prop`). It defaults to `profile=host`, which reports the real host
+card name and VRAM. To opt into the MacBookPro16,1 presentation for one run:
+
+```sh
+RCLOL_PLATFORM_PROFILE=compat ./scripts/run.sh
+```
+
+Or set `profile=compat` in the installed `system.prop`. In COMPAT, AMD becomes
+`AMD Radeon Pro 5500M` and Intel becomes `Intel UHD Graphics 630`; NVIDIA keeps
+its own name so the game never takes AMD or Intel driver paths on an NVIDIA card.
+The working set is still the host's. `DARLING_METAL_MAC_GPU_NAME=0` and
+`DARLING_METAL_GPU_NAME` remain lower-level per-process overrides.
 
 `registryID` is a fixed non-zero value, as on a real Mac.
 

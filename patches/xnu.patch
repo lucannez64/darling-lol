@@ -137,8 +137,8 @@ index 0000000..8ae1665
 + * and 8 physical CPUs). The game and the clients size their worker pools from
 + * hw.ncpu / hw.activecpu, so on this 6-core/12-thread host the game created 7
 + * workers where the same PC runs 12 threads under Windows. Report what the
-+ * host really has instead, while the emulated Mac identity (hw.model, brand
-+ * string) stays unchanged.
++ * host really has instead, while the emulated hw.model identity stays
++ * unchanged.
 + *
 + * Values are cached once per process. avail/active reflect the process's
 + * affinity mask (cgroup or taskset restrictions); max values reflect the
@@ -1996,13 +1996,13 @@ index f273989..058b985 100644
  	{ .oid = -1 }
  };
  
-@@ -71,6 +150,32 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +150,34 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
 +
-+		// Keep the emulated MacBookPro16,1 identity (hw.model, brand string,
-+		// memory size), but report the host's real CPU counts. The game and the
++		// Keep the emulated MacBookPro16,1 hw.model, but report the host's real
++		// CPU counts and the profile-selected memory size. The game and the
 +		// clients size their worker pools from these values; the old fixed
 +		// 8 logical / 8 physical configuration made the game create 7 workers
 +		// on a 12-thread host. Note it did not even match the emulated machine:
@@ -2025,7 +2025,9 @@ index f273989..058b985 100644
 +			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +		}
-+		hinfo.max_mem = 17179869184ULL; // 16 GB, matching the emulated machine
++		const char* memory = getenv("RCLOL_MEMORY_BYTES");
++		if (memory != NULL && memory[0] != '\0')
++			hinfo.max_mem = strtoull(memory, NULL, 10);
  	}
  
  	return &hinfo;
@@ -2243,8 +2245,10 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/m
 index 4319355..122ad3a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,9 @@
  #include <alloca.h>
++#include <stdlib.h>
++#include <string.h>
  
  #include <darling/emulation/common/simple.h>
 +#include <darling/emulation/common/cpu_topology.h>
@@ -2259,7 +2263,7 @@ index 4319355..122ad3a 100644
  };
  
  static sysctl_handler(handle_vendor);
-@@ -32,9 +34,15 @@ static sysctl_handler(handle_max_basic);
+@@ -32,9 +34,39 @@ static sysctl_handler(handle_max_basic);
  static sysctl_handler(handle_family);
  static sysctl_handler(handle_model);
  static sysctl_handler(handle_stepping);
@@ -2267,7 +2271,31 @@ index 4319355..122ad3a 100644
 -static sysctl_handler(handle_features);
 +static sysctl_handler(handle_brand_string)
 +{
-+	copyout_string("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", (char*) old, oldlen);
++	const char* brand = getenv("RCLOL_CPU_BRAND");
++	char cpuinfo[4096];
++
++	if (brand == NULL || brand[0] == '\0')
++	{
++		brand = "Unknown CPU";
++		if (read_string("/Volumes/SystemRoot/proc/cpuinfo", cpuinfo, (int)sizeof(cpuinfo)))
++		{
++			char* line = strstr(cpuinfo, "model name");
++			char* value = line != NULL ? strchr(line, ':') : NULL;
++
++			if (value != NULL)
++			{
++				char* end;
++				++value;
++				while (*value == ' ' || *value == '\t')
++					++value;
++				end = strchr(value, '\n');
++				if (end != NULL)
++					*end = '\0';
++				brand = value;
++			}
++		}
++	}
++	copyout_string(brand, (char*) old, oldlen);
 +	return 0;
 +}
 +
@@ -2293,7 +2321,7 @@ index 4319355..122ad3a 100644
      return 0;
  }
  
-+// Original cpuid-based implementation, replaced by the fixed brand string defined above
++// Original cpuid-based implementation, replaced by the profile-aware brand string above
 +#if 0
  sysctl_handler(handle_brand_string)
  {

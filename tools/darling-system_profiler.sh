@@ -4,7 +4,7 @@
 # and software overviews come from the guest's own IOKit, sysctl and sw_vers, so they
 # match what other APIs report (including a configure-darling-platform.py override).
 # Installed as /usr/sbin/system_profiler by tools/install-darling-system-profiler.py.
-host=/Volumes/SystemRoot
+host=${RCLOL_SYSTEM_ROOT:-/Volumes/SystemRoot}
 xml=0
 types=
 while [ $# -gt 0 ]; do
@@ -33,15 +33,36 @@ pci_name() { # vendor device (hex without 0x) -> "Vendor Model"
    }' "$ids"
   return
  done
+ case "$1" in
+  1002) echo 'AMD Graphics';;
+  10de) echo 'NVIDIA Graphics';;
+  8086) echo 'Intel Graphics';;
+  *) echo 'Display';;
+ esac
+}
+
+valid_vram() { # positive decimal MB, bounded so the shell test cannot overflow
+ case "$1" in ''|*[!0-9]*) return 1;; esac
+ [ "${#1}" -le 7 ] && [ "$1" -gt 0 ] && [ "$1" -le 1048576 ]
 }
 
 displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
- # Same switch as the Metal device name: report the MacBookPro16,1 compatibility
- # GPU profile so system_profiler and Metal agree. This changes the reported
- # platform identity only; it does not change the host, the driver, or the GPU
- # that actually presents frames.
+ # HOST reports the host card. COMPAT is the opt-in MacBookPro16,1 presentation,
+ # selected by tools/system.prop; it only changes the reported identity, never
+ # the host, the driver, or the GPU that actually presents frames. NVIDIA keeps
+ # its own name in COMPAT so the game does not take AMD driver paths.
+ profile=${RCLOL_PLATFORM_PROFILE:-host}
+ gpu_mode=${RCLOL_GPU_NAME:-}
+ if [ -z "$gpu_mode" ]; then
+  case "${DARLING_METAL_MAC_GPU_NAME:-}" in '') ;; 0) ;; *) gpu_mode=mac;; esac
+ fi
+ [ -n "$gpu_mode" ] || gpu_mode=host
  mac_gpu_profile=0
- case "${DARLING_METAL_MAC_GPU_NAME:-}" in '') ;; 0) ;; *) mac_gpu_profile=1;; esac
+ [ "$gpu_mode" = mac ] && mac_gpu_profile=1
+ profile_vram=${RCLOL_GPU_VRAM_MB:-}
+ [ -n "$profile_vram" ] || profile_vram=${DARLING_METAL_VRAM_MB:-}
+ case "$profile_vram" in host) profile_vram=;; esac
+ valid_vram "$profile_vram" || profile_vram=
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
   [ -r "$card/device/vendor" ] || continue
   vendor=$(sed 's/^0x//' "$card/device/vendor"); device=$(sed 's/^0x//' "$card/device/device")
@@ -49,22 +70,19 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
   if [ -r "$card/device/mem_info_vram_total" ]; then
    vram=$(awk '{ printf "%d", $1 / 1048576 }' "$card/device/mem_info_vram_total")
   fi
+  [ -n "$profile_vram" ] && vram=$profile_vram
   name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
   bus=builtin
   if [ "$mac_gpu_profile" = 1 ]; then
    case "$vendor" in
-    1002|10de) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
-               vram=${DARLING_METAL_VRAM_MB:-4096}
-               case "$vram" in ''|*[!0-9]*) vram=4096;; esac
-               # Keep the numeric test overflow-safe: a long digit string must
-               # fall back before the shell compares it.
-               if [ "${#vram}" -gt 7 ] || [ "$vram" -eq 0 ] || [ "$vram" -gt 1048576 ]; then
-                vram=4096
-               fi
-               bus=pcie;;
+    1002) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
+          valid_vram "$vram" || vram=4096
+          bus=pcie;;
     8086) vendor=8086; device=3e9b; name='Intel UHD Graphics 630'
           vram=; bus=builtin;;
    esac
+  elif [ "$gpu_mode" != host ]; then
+   name=$gpu_mode
   fi
   echo "$vendor|$device|$vram|$name|$bus"
  done

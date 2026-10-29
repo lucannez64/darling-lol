@@ -1,0 +1,28 @@
+# darling-lol hardware presentation profile.
+#
+# This is the single source for the CPU, GPU, VRAM and memory values that the
+# launcher exports to Metal and the patched guest sysctls. Platform identity
+# (model, serial, UUID and board) remains in darling-platform.plist so a bad
+# detection can be corrected without changing this hardware profile.
+#
+# profile=host   (default) report the real host CPU/GPU/VRAM/memory.
+# profile=compat (opt-in)  report the MacBookPro16,1 compatibility values.
+# COMPAT is never selected by default. Change only this key to opt in:
+# profile=compat
+profile=host
+
+# HOST: the literal value "host" is resolved at launch from /proc and /sys.
+host.cpu.brand=host
+host.gpu.name=host
+host.gpu.vram=host
+host.gpu.unified=host
+host.memory.bytes=host
+
+# COMPAT: guest-visible compatibility profile. These are compatibility strings,
+# not identifiers from a real Mac; they do not enable or disable any Riot or
+# Apple security check.
+compat.cpu.brand=Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz
+compat.gpu.name=mac
+compat.gpu.vram=4096
+compat.gpu.unified=1
+compat.memory.bytes=17179869184
