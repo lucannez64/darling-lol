@@ -93,6 +93,9 @@ architecture combinations, including macOS 14, remain with their original
 source run and date. A fresh observation replaces only the same runner/build/
 architecture combination. Each environment carries its own `source`; the
 top-level `source` describes the latest collection, not every archived row.
+Legacy rows without an established per-row source report provenance as
+unavailable. Earlier archive-level metadata remains in `archive_sources` for
+reference; it is not assigned to individual legacy rows.
 The rendered table shows per-environment provenance.
 
 To write a new output location while retaining a separate archive, pass

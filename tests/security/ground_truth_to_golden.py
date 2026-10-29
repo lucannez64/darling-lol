@@ -179,7 +179,7 @@ def merge_observations(previous, environments, source):
     merged = {}
     for environment in previous.get("environments", []):
         archived = dict(environment)
-        archived["source"] = dict(environment.get("source") or previous.get("source") or {})
+        archived["source"] = dict(environment.get("source") or {})
         merged[identity(archived)] = archived
     for environment in environments:
         current = dict(environment)
@@ -212,7 +212,7 @@ def render_markdown(golden):
     out.append("| Runner | macOS | Build | Darwin | Arch | SIP | CSR config | Source run | Date |")
     out.append("|---|---|---|---|---|---|---|---|---|")
     for e in golden["environments"]:
-        provenance = e.get("source", golden.get("source", {}))
+        provenance = e.get("source") or {}
         out.append(
             f"| {e['runner']} | {e['macos']['product']} | {e['macos']['build']} | "
             f"{e['macos']['darwin']} | {e['macos']['arch']} | {e['sip']} | "
@@ -326,9 +326,15 @@ def main():
         "run_id": args.run_id,
         "date": args.date,
     }
+    # Retain archive-level metadata for reference without claiming it belongs
+    # to every legacy row. Only explicit per-row source metadata is authoritative.
+    archive_sources = list(previous.get("archive_sources", []))
+    if previous.get("source") and previous["source"] != source and previous["source"] not in archive_sources:
+        archive_sources.append(previous["source"])
     golden = {
         "schema": 1,
         "source": source,
+        "archive_sources": archive_sources,
         "environments": merge_observations(previous, envs, source),
     }
     args.json.parent.mkdir(parents=True, exist_ok=True)
