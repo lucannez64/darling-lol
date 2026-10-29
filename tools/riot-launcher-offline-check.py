@@ -79,6 +79,8 @@ with open({str(log)!r}, "a") as output:
         env.pop("DISABLE_MANGOHUD", None)
         env["RCLOL_NATIVE_VPX"] = "1"
         env["RCLOL_LEAGUE_UX_TUNING"] = "1"
+        env["XDG_RUNTIME_DIR"] = "/run/user/offline-check"
+        env.pop("RCLOL_DISCORD_RPC", None)
         # Inherited legacy settings must not re-enable inspection or unlimited frames.
         env.update({
             "RCLOL_APP_ARG3": "--inspect=127.0.0.1:9229",
@@ -131,6 +133,17 @@ with open({str(log)!r}, "a") as output:
         assert "--launch-product=league_of_legends" in launch["args"], "product launch lost"
         assert "--app-root=/Applications/Riot Client.app" in launch["args"], "application root lost"
         assert "--log-dir=/Users/offline-check/Library/Logs/Riot Games/Riot Client" in launch["args"], "absolute log directory lost"
+        # Discord Rich Presence: the guest's XDG_RUNTIME_DIR must lead out to the host socket.
+        assert os.readlink(prefix / "run/user/offline-check/discord-ipc-0") == \
+            "/Volumes/SystemRoot/run/user/offline-check/discord-ipc-0", "Discord IPC link missing"
+        # Opting out removes the links an earlier launch left behind, including the TMPDIR
+        # fallback (/private/tmp) left by a launch without XDG_RUNTIME_DIR.
+        (prefix / "private/tmp").mkdir(parents=True)
+        (prefix / "private/tmp/discord-ipc-0").symlink_to("/Volumes/SystemRoot/tmp/discord-ipc-0")
+        subprocess.run(["sh", str(launcher)], env={**env, "RCLOL_DISCORD_RPC": "0"}, check=True, capture_output=True, text=True)
+        assert not any(os.path.lexists(prefix / directory / f"discord-ipc-{n}")
+                       for directory in ("run/user/offline-check", "private/tmp") for n in range(10)), \
+            "stale Discord IPC link kept"
         # An inherited injection must also be absent for first-time installation.
         env["RIOT_LAUNCHER_HOST"] = str(folder / "Install Riot.app/Contents/MacOS/RiotClientServices")
         env["DISABLE_MANGOHUD"] = "0"  # Inherited settings cannot override launcher policy.
@@ -157,7 +170,7 @@ with open({str(log)!r}, "a") as output:
         assert filtered["WAYLAND_DISPLAY"] is None and filtered["SHELL"] == "/bin/zsh", "host session metadata survived"
         assert (filtered["XAUTHORITY"], filtered["DRI_PRIME"]) == ("/tmp/xauth", "1"), "X11/GPU selection lost"
         assert (filtered["MESA_NO_ERROR"], filtered["__GL_THREADED_OPTIMIZATIONS"]) == ("1", "0"), "launcher GPU tuning lost"
-        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved inherited_fds=closed host_env_filter=PASS mangohud=disabled")
+        print("LAUNCHER_OFFLINE pass=1 installed=PASS installer=PASS inherited_injection=absent runtime=preserved inherited_fds=closed host_env_filter=PASS mangohud=disabled discord_ipc=linked")
 
 
 if __name__ == "__main__":
