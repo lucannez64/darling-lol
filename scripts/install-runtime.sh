@@ -47,6 +47,18 @@ fi
 python3 build/runtime/tools/install-darling-system-profiler.py
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
 python3 build/runtime/tools/validate-riot-runtime.py
+# Sign the installed runtime and populate the local trust store. The base SDK
+# is signed only when this process can actually write it; the per-user
+# RuntimeLibraries/RuntimeFrameworks overlays are always signed.
+if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
+  sign_args="--prefix --quiet"
+  if [ -w /usr/local/libexec/darling ]; then
+    sign_args="--sdk $sign_args"
+  fi
+  if ! sh "$repo/tools/sign-darling-runtime.sh" $sign_args; then
+    echo 'Runtime signing/trust-store update failed; the launcher may refuse hardened images.' >&2
+  fi
+fi
 # Mark this canonical prefix and configured guest ready only after validation.
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
   # Overlay installation can also refresh darlingserver; record the final base.

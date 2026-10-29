@@ -1,0 +1,64 @@
+name: security-ground-truth
+
+# Collects read-only code-signing / SIP observations from real macOS hosts.
+# Used by docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (phase M0).
+# No game, no account, no mutation: the probe only reads csops/csr state.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tests/security/probe/**"
+      - ".github/workflows/security-ground-truth.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        # arm64 runners. Intel hosts can run the same probe manually; the
+        # GitHub Intel labels are retired or persistently queued.
+        os: [macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build probe
+        run: clang -O2 -Wall -Wextra -o ground_truth tests/security/probe/ground_truth.c
+
+      - name: Run probe
+        run: ./ground_truth > "ground-truth-${{ matrix.os }}.json"
+
+      - name: Static signing and SIP info
+        run: |
+          out="codesign-${{ matrix.os }}.txt"
+          {
+            echo "### sw_vers"; sw_vers
+            echo "### uname"; uname -a
+            echo "### csrutil"; csrutil status
+            echo "### spctl"; spctl --status
+          } > "$out" 2>&1 || true
+          for p in \
+            /bin/ls \
+            /usr/bin/true \
+            /usr/lib/dyld \
+            /usr/bin/security \
+            /usr/sbin/spctl \
+            /usr/libexec/amfid \
+            /usr/libexec/trustd \
+            /System/Library/Frameworks/Security.framework/Versions/A/Security ; do
+            [ -e "$p" ] || continue
+            echo "### $p" >> "$out"
+            codesign -dvvv "$p" >> "$out" 2>&1 || true
+            codesign -d --entitlements - "$p" >> "$out" 2>&1 || true
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ground-truth-${{ matrix.os }}
+          path: |
+            ground-truth-*.json
+            codesign-*.txt
