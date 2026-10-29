@@ -87,6 +87,63 @@ python3 tools/install-riot-memory-runtime.py --backup-dir "$HOME/darling-memory-
 
 If the destination library itself is root-owned, inspect the named path and its ownership before retrying with sudo. Do not run all setup/build steps as root or recursively change ownership of the system SDK. Backups and binaries are ignored by Git and must stay local.
 
+## Riot Client 142 replaces itself and then crashes (#154)
+
+Riot Client 142 ships Electron 43, which asks Darling for frameworks the runtime
+does not provide yet (`QuickLookUI`, `MediaPlayer`, `CoreHaptics`, `CoreML`,
+`ScreenCaptureKit` and others). The client downloads the update in the
+background and swaps it in on the next launch, so a working install turns into
+one that cannot open after a restart. Nothing in the prefix records the update:
+the bundle's `CFBundleShortVersionString` is still `1.0`.
+
+Until the runtime grows those frameworks, stay on the last release that runs:
+**141.0.7.5129**, release id `42E1358C87FB3ABC`. Check what is installed:
+
+```sh
+python3 tools/riot-client-pin.py --status
+```
+
+Run it from the repository, or use the rendered copy at
+`build/runtime/tools/riot-client-pin.py`; `--status` also shows whether self-update
+is on, which staged `.partial-*` bundle waits to replace it, and whether the
+client is running. `--json` prints the same state as JSON.
+
+To keep the installed client, with both clients and the game closed:
+
+```sh
+python3 tools/riot-client-pin.py --backup "$HOME/darling-backups" --pin --discard-partial
+```
+
+`--backup` copies the bundle and its `Metadata/Riot Client` release marker to
+`DIR/<release>` (with `cp --reflink=auto`, so it shares blocks where the
+filesystem supports it). `--pin` sets `enable_self_update: false` in
+`Contents/Resources/system.yaml`, the only line it rewrites, and `--discard-partial`
+removes the staged update so its next launch cannot resume. Add `--dry-run` to see
+the plan without changing anything.
+
+If a launch already installed 142, restore the kept bundle:
+
+```sh
+python3 tools/riot-client-pin.py --restore "$HOME/darling-backups/42E1358C87FB3ABC" --pin --discard-partial
+```
+
+Backup and restore run before pinning or discarding staged updates, so `--pin`
+applies to the restored bundle. The backup keeps the settings as they were before
+pinning. Restore also works in a fresh prefix. It stages the saved bundle and
+metadata before replacing either installed path; copy failures preserve the
+installation, and a failed swap rolls back both paths.
+
+The replaced bundle is renamed aside as `Riot Client.app.replaced-<timestamp>`,
+never deleted. Its release metadata is kept alongside it with a `.metadata`
+suffix, and the saved metadata is restored with the saved bundle. When a release
+that runs becomes available, `--unpin` turns
+self-update back on. Every write refuses to run while a Riot Client process is
+alive, because it would race the updater. `--discard-partial` deletes a
+directory, so it is accepted only together with `--pin` or `--unpin`.
+
+Pinning only keeps the macOS client. League itself keeps patching normally, and
+a game update that needs a newer client still has to wait for the 142 work.
+
 ## Updated library or server still behaves like the old version
 
 Atomic replacement preserves active process mappings. Darling also uses an overlay filesystem; updating its backing prefix from the host can leave an old file visible inside the active namespace. A fresh standalone guest check continued to report the old memory behavior despite the host path having the new checksum. Reopening only Riot does not replace this namespace.
