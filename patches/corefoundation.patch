@@ -321,3 +321,250 @@ index a3da56a..4678733 100644
  - (NSArray *)keysSortedByValueUsingSelector:(SEL)comparator
  {
      return [[self allKeys] sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 27864ad..e5cf047 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -123,6 +123,7 @@ set(cf_sources
+ 	NSCache.m
+ 	NSCalendar.m
+ 	NSCFType.m
++	NSConstantCollections.m
+ 	NSConstantString.m
+ 	NSData.m
+ 	NSDateComponents.m
+diff --git a/NSFileSecurity.m b/NSFileSecurity.m
+index 61b7386..092ebdd 100644
+--- a/NSFileSecurity.m
++++ b/NSFileSecurity.m
+@@ -1,8 +1,106 @@
+ #import <Foundation/NSObject.h>
++#import <CoreFoundation/CFFileSecurity.h>
++#include <sys/stat.h>
+ 
+-@interface NSFileSecurity : NSObject
++@interface NSFileSecurity : NSObject <NSCopying>
++{
++@public
++    uid_t _owner;
++    gid_t _group;
++    mode_t _mode;
++    CFOptionFlags _validProperties;
++}
+ @end
+ 
+ @implementation NSFileSecurity
++
++- (id)copyWithZone:(NSZone *)zone
++{
++    NSFileSecurity *copy = [[NSFileSecurity allocWithZone:zone] init];
++    copy->_owner = _owner;
++    copy->_group = _group;
++    copy->_mode = _mode;
++    copy->_validProperties = _validProperties;
++    return copy;
++}
++
+ @end
+ 
++CFFileSecurityRef CFFileSecurityCreate(CFAllocatorRef allocator)
++{
++    return (CFFileSecurityRef)[[NSFileSecurity alloc] init];
++}
++
++CFFileSecurityRef CFFileSecurityCreateCopy(CFAllocatorRef allocator, CFFileSecurityRef fileSec)
++{
++    return (CFFileSecurityRef)[(NSFileSecurity *)fileSec copy];
++}
++
++Boolean CFFileSecurityGetOwner(CFFileSecurityRef fileSec, uid_t *owner)
++{
++    NSFileSecurity *security = (NSFileSecurity *)fileSec;
++    if (security == nil || !(security->_validProperties & kCFFileSecurityClearOwner))
++        return false;
++    if (owner)
++        *owner = security->_owner;
++    return true;
++}
++
++Boolean CFFileSecuritySetOwner(CFFileSecurityRef fileSec, uid_t owner)
++{
++    NSFileSecurity *security = (NSFileSecurity *)fileSec;
++    if (security == nil)
++        return false;
++    security->_owner = owner;
++    security->_validProperties |= kCFFileSecurityClearOwner;
++    return true;
++}
++
++Boolean CFFileSecurityGetGroup(CFFileSecurityRef fileSec, gid_t *group)
++{
++    NSFileSecurity *security = (NSFileSecurity *)fileSec;
++    if (security == nil || !(security->_validProperties & kCFFileSecurityClearGroup))
++        return false;
++    if (group)
++        *group = security->_group;
++    return true;
++}
++
++Boolean CFFileSecuritySetGroup(CFFileSecurityRef fileSec, gid_t group)
++{
++    NSFileSecurity *security = (NSFileSecurity *)fileSec;
++    if (security == nil)
++        return false;
++    security->_group = group;
++    security->_validProperties |= kCFFileSecurityClearGroup;
++    return true;
++}
++
++Boolean CFFileSecurityGetMode(CFFileSecurityRef fileSec, mode_t *mode)
++{
++    NSFileSecurity *security = (NSFileSecurity *)fileSec;
++    if (security == nil || !(security->_validProperties & kCFFileSecurityClearMode))
++        return false;
++    if (mode)
++        *mode = security->_mode;
++    return true;
++}
++
++Boolean CFFileSecuritySetMode(CFFileSecurityRef fileSec, mode_t mode)
++{
++    NSFileSecurity *security = (NSFileSecurity *)fileSec;
++    if (security == nil)
++        return false;
++    security->_mode = mode & ALLPERMS;
++    security->_validProperties |= kCFFileSecurityClearMode;
++    return true;
++}
++
++Boolean CFFileSecurityClearProperties(CFFileSecurityRef fileSec, CFOptionFlags clearPropertyMask)
++{
++    NSFileSecurity *security = (NSFileSecurity *)fileSec;
++    if (security == nil)
++        return false;
++    security->_validProperties &= ~clearPropertyMask;
++    return true;
++}
+diff --git a/NSURL.m b/NSURL.m
+index 1a020de..b9d2bd4 100644
+--- a/NSURL.m
++++ b/NSURL.m
+@@ -60,6 +60,7 @@ NSString *const NSURLIsExcludedFromBackupKey = @"NSURLIsExcludedFromBackupKey";
+ NSString *const NSURLPathKey = @"_NSURLPathKey";
+ NSString *const NSURLIsMountTriggerKey = @"NSURLIsMountTriggerKey";
+ NSString *const NSURLFileResourceTypeKey = @"NSURLFileResourceTypeKey";
++NSString *const NSURLContentTypeKey = @"NSURLContentTypeKey";
+ NSString *const NSURLFileResourceTypeNamedPipe = @"NSURLFileResourceTypeNamedPipe";
+ NSString *const NSURLFileResourceTypeCharacterSpecial = @"NSURLFileResourceTypeCharacterSpecial";
+ NSString *const NSURLFileResourceTypeDirectory = @"NSURLFileResourceTypeDirectory";
+diff --git a/NSConstantCollections.m b/NSConstantCollections.m
+new file mode 100644
+index 0000000..bac1001
+--- /dev/null
++++ b/NSConstantCollections.m
+@@ -0,0 +1,105 @@
++//
++//  NSConstantCollections.m
++//  CoreFoundation
++//
++//  Copyright (c) 2026 Darling Developers. All rights reserved.
++//
++
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++#import <limits.h>
++
++@interface NSConstantArray : NSArray {
++    NSUInteger _count;
++    const id *_objects;
++}
++@end
++
++@interface NSConstantDictionary : NSDictionary {
++    NSUInteger _options;
++    NSUInteger _count;
++    const id *_keys;
++    const id *_objects;
++}
++@end
++
++#define CONSTANT_OBJECT_METHODS                     \
++- (id)retain { return self; }                       \
++- (oneway void)release {}                           \
++- (id)autorelease { return self; }                  \
++- (NSUInteger)retainCount { return UINT_MAX; }      \
++- (id)copyWithZone:(NSZone *)zone { return self; }
++
++@implementation NSConstantArray
++
++CONSTANT_OBJECT_METHODS
++
++- (NSUInteger)count
++{
++    return _count;
++}
++
++- (id)objectAtIndex:(NSUInteger)index
++{
++    if (index >= _count)
++    {
++        [NSException raise:NSRangeException format:@"index %lu beyond bounds [0 .. %lu]", (unsigned long)index, (unsigned long)_count - 1];
++    }
++    return _objects[index];
++}
++
++@end
++
++@implementation NSConstantDictionary
++
++CONSTANT_OBJECT_METHODS
++
++- (NSUInteger)count
++{
++    return _count;
++}
++
++- (id)objectForKey:(id)key
++{
++    if (key == nil)
++    {
++        return nil;
++    }
++    for (NSUInteger i = 0; i < _count; i++)
++    {
++        if (_keys[i] == key || [_keys[i] isEqual:key])
++        {
++            return _objects[i];
++        }
++    }
++    return nil;
++}
++
++- (NSEnumerator *)keyEnumerator
++{
++    return [[NSArray arrayWithObjects:_keys count:_count] objectEnumerator];
++}
++
++@end
++
++extern struct objc_class _NSConstantArrayClass __asm("_OBJC_CLASS_$_NSConstantArray");
++extern struct objc_class _NSConstantDictionaryClass __asm("_OBJC_CLASS_$_NSConstantDictionary");
++
++struct __NSConstantArrayLayout {
++    void *isa;
++    NSUInteger count;
++    const id *objects;
++};
++
++struct __NSConstantDictionaryLayout {
++    void *isa;
++    NSUInteger options;
++    NSUInteger count;
++    const id *keys;
++    const id *objects;
++};
++
++struct __NSConstantArrayLayout __NSArray0__struct = { &_NSConstantArrayClass, 0, NULL };
++struct __NSConstantDictionaryLayout __NSDictionary0__struct = { &_NSConstantDictionaryClass, 1, 0, NULL, NULL };

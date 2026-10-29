@@ -120,3 +120,297 @@ index 09c0a732b..53649d20b 100644
  @end
 +
 +NSString *const NSUserActivityTypeBrowsingWeb = @"com.apple.coreservices.useractivity.browser";
+diff --git a/src/NSNotificationCenter.m b/src/NSNotificationCenter.m
+index 0034834..1eeb729 100644
+--- a/src/NSNotificationCenter.m
++++ b/src/NSNotificationCenter.m
+@@ -13,8 +13,14 @@
+ #import <dispatch/dispatch.h>
+ #import <pthread.h>
+ 
++OBJC_EXPORT id objc_initWeakOrNil(id *location, id newObj);
++OBJC_EXPORT id objc_loadWeakRetained(id *location);
++OBJC_EXPORT void objc_destroyWeak(id *location);
++
+ @interface _NSNotificationObserver : NSObject
+ {
++	id _weakObserver;
++	id _unretainedObserver;
+ 	id _observer;
+ 	SEL _selector;
+ 	NSString* _name;
+@@ -48,6 +54,8 @@
+     if (self)
+     {
+         _observer = observer;
++        if (observer != nil && objc_initWeakOrNil(&_weakObserver, observer) == nil)
++            _unretainedObserver = observer;
+         _selector = selector;
+         _name = [name copy];
+         _object = object;
+@@ -59,6 +67,7 @@
+ 
+ - (void)dealloc
+ {
++    objc_destroyWeak(&_weakObserver);
+     [_name release];
+     [_queue release];
+     [_block release];
+@@ -83,7 +92,9 @@
+     }
+     else if (_observer != nil && _selector != NULL)
+     {
+-        [_observer performSelector:_selector withObject:notif];
++        id target = _unretainedObserver ? [_unretainedObserver retain] : objc_loadWeakRetained(&_weakObserver);
++        [target performSelector:_selector withObject:notif];
++        [target release];
+     }
+ }
+ 
+diff --git a/src/NSAppleEventManager.m b/src/NSAppleEventManager.m
+index 194c5d0..7e4d684 100644
+--- a/src/NSAppleEventManager.m
++++ b/src/NSAppleEventManager.m
+@@ -17,11 +17,50 @@ static NSAppleEventManager* instance = nil;
+ }
+ 
+ - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
+ }
+ 
+ - (void)forwardInvocation:(NSInvocation *)anInvocation {
+     NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id nothing = nil;
++    [anInvocation setReturnValue:&nothing];
++}
++
++- (NSAppleEventDescriptor *)currentAppleEvent
++{
++    return nil;
++}
++
++- (NSAppleEventDescriptor *)currentReplyAppleEvent
++{
++    return nil;
++}
++
++- (NSAppleEventManagerSuspensionID)suspendCurrentAppleEvent
++{
++    return NULL;
++}
++
++- (NSAppleEventDescriptor *)appleEventForSuspensionID:(NSAppleEventManagerSuspensionID)suspensionID
++{
++    return nil;
++}
++
++- (NSAppleEventDescriptor *)replyAppleEventForSuspensionID:(NSAppleEventManagerSuspensionID)suspensionID
++{
++    return nil;
++}
++
++- (void)resumeWithSuspensionID:(NSAppleEventManagerSuspensionID)suspensionID
++{
++}
++
++- (void)setCurrentAppleEventAndReplyEventWithSuspensionID:(NSAppleEventManagerSuspensionID)suspensionID
++{
++}
++
++- (void)removeEventHandlerForEventClass:(AEEventClass)eventClass andEventID:(AEEventID)eventID
++{
+ }
+ 
+ - (void) setEventHandler: (id) handler
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 961a33b..a56cf72 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -125,6 +125,7 @@ set(foundation_sources
+ 	src/NSNotification.m
+ 	src/NSNotificationQueue.m
+ 	src/NSNumberFormatter.m
++	src/NSConstantNumber.m
+ 	src/NSNumber.m
+ 	src/NSObjCRuntime.m
+ 	src/NSObjectInternal.m
+diff --git a/include/Foundation/NSURL.h b/include/Foundation/NSURL.h
+index 2da3da7..237339f 100644
+--- a/include/Foundation/NSURL.h
++++ b/include/Foundation/NSURL.h
+@@ -41,6 +41,7 @@ FOUNDATION_EXPORT NSString * const NSURLIsExcludedFromBackupKey;
+ FOUNDATION_EXPORT NSString * const NSURLPathKey;
+ FOUNDATION_EXPORT NSString * const NSURLIsMountTriggerKey;
+ FOUNDATION_EXPORT NSString * const NSURLFileResourceTypeKey;
++FOUNDATION_EXPORT NSString * const NSURLContentTypeKey;
+ FOUNDATION_EXPORT NSString * const NSURLFileResourceTypeNamedPipe;
+ FOUNDATION_EXPORT NSString * const NSURLFileResourceTypeCharacterSpecial;
+ FOUNDATION_EXPORT NSString * const NSURLFileResourceTypeDirectory;
+diff --git a/src/NSConstantNumber.m b/src/NSConstantNumber.m
+new file mode 100644
+index 0000000..ff9aab7
+--- /dev/null
++++ b/src/NSConstantNumber.m
+@@ -0,0 +1,161 @@
++//
++//  NSConstantNumber.m
++//  Foundation
++//
++//  Copyright (c) 2026 Darling Developers. All rights reserved.
++//
++
++#import <Foundation/NSValue.h>
++#import <Foundation/NSString.h>
++#import <limits.h>
++#import <stdint.h>
++
++@interface NSConstantIntegerNumber : NSNumber {
++    const char *_encoding;
++    long long _value;
++}
++@end
++
++@interface NSConstantFloatNumber : NSNumber {
++    float _value;
++}
++@end
++
++@interface NSConstantDoubleNumber : NSNumber {
++    double _value;
++}
++@end
++
++#define CONSTANT_NUMBER_METHODS(VALUE)                                              \
++- (id)retain { return self; }                                                       \
++- (oneway void)release {}                                                           \
++- (id)autorelease { return self; }                                                  \
++- (NSUInteger)retainCount { return UINT_MAX; }                                      \
++- (id)copyWithZone:(NSZone *)zone { return self; }                                  \
++- (char)charValue { return (char)(VALUE); }                                         \
++- (unsigned char)unsignedCharValue { return (unsigned char)(VALUE); }               \
++- (short)shortValue { return (short)(VALUE); }                                      \
++- (unsigned short)unsignedShortValue { return (unsigned short)(VALUE); }            \
++- (int)intValue { return (int)(VALUE); }                                            \
++- (unsigned int)unsignedIntValue { return (unsigned int)(VALUE); }                  \
++- (long)longValue { return (long)(VALUE); }                                         \
++- (unsigned long)unsignedLongValue { return (unsigned long)(VALUE); }               \
++- (long long)longLongValue { return (long long)(VALUE); }                           \
++- (unsigned long long)unsignedLongLongValue { return (unsigned long long)(VALUE); } \
++- (float)floatValue { return (float)[self doubleValue]; }                           \
++- (BOOL)boolValue { return (VALUE) != 0; }                                          \
++- (NSUInteger)hash { return [[self _boxedNumber] hash]; }                           \
++- (BOOL)isEqual:(id)other { return [[self _boxedNumber] isEqual:other]; }           \
++- (BOOL)isEqualToNumber:(NSNumber *)other { return [[self _boxedNumber] isEqualToNumber:other]; } \
++- (NSComparisonResult)compare:(NSNumber *)other { return [[self _boxedNumber] compare:other]; } \
++- (NSString *)description { return [[self _boxedNumber] description]; }            \
++- (NSString *)descriptionWithLocale:(id)locale { return [[self _boxedNumber] descriptionWithLocale:locale]; }
++
++static BOOL isUnsignedEncoding(char type)
++{
++    return type == 'C' || type == 'S' || type == 'I' || type == 'L' || type == 'Q';
++}
++
++@implementation NSConstantIntegerNumber
++
++CONSTANT_NUMBER_METHODS(_value)
++
++- (NSNumber *)_boxedNumber
++{
++    if (isUnsignedEncoding(_encoding[0]))
++    {
++        return [NSNumber numberWithUnsignedLongLong:(unsigned long long)_value];
++    }
++    return [NSNumber numberWithLongLong:_value];
++}
++
++- (const char *)objCType
++{
++    return _encoding;
++}
++
++- (void)getValue:(void *)buffer
++{
++    switch (_encoding[0])
++    {
++        case 'c':
++        case 'C':
++        case 'B':
++            *(int8_t *)buffer = (int8_t)_value;
++            break;
++        case 's':
++        case 'S':
++            *(int16_t *)buffer = (int16_t)_value;
++            break;
++        case 'i':
++        case 'I':
++            *(int32_t *)buffer = (int32_t)_value;
++            break;
++        default:
++            *(int64_t *)buffer = (int64_t)_value;
++            break;
++    }
++}
++
++- (double)doubleValue
++{
++    if (isUnsignedEncoding(_encoding[0]))
++    {
++        return (double)(unsigned long long)_value;
++    }
++    return (double)_value;
++}
++
++@end
++
++@implementation NSConstantFloatNumber
++
++CONSTANT_NUMBER_METHODS(_value)
++
++- (NSNumber *)_boxedNumber
++{
++    return [NSNumber numberWithFloat:_value];
++}
++
++- (const char *)objCType
++{
++    return "f";
++}
++
++- (void)getValue:(void *)buffer
++{
++    *(float *)buffer = _value;
++}
++
++- (double)doubleValue
++{
++    return _value;
++}
++
++@end
++
++@implementation NSConstantDoubleNumber
++
++CONSTANT_NUMBER_METHODS(_value)
++
++- (NSNumber *)_boxedNumber
++{
++    return [NSNumber numberWithDouble:_value];
++}
++
++- (const char *)objCType
++{
++    return "d";
++}
++
++- (void)getValue:(void *)buffer
++{
++    *(double *)buffer = _value;
++}
++
++- (double)doubleValue
++{
++    return _value;
++}
++
++@end

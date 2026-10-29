@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 89,
+      "modified_files": 125,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -25,7 +25,88 @@
         "src/frameworks/OpenGL/CGLAsyncPresent.inc",
         "src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h",
         "src/startup/mldr/commpage-cpu-caps.h",
-        "src/shellspawn/shellspawn-fds.h"
+        "src/shellspawn/shellspawn-fds.h",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/A/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/Current",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/A/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/Current",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/A/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/Current",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/A/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/Current",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/A/Headers",
+        "Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/Current",
+        "framework-include/Accessibility",
+        "framework-include/CoreHaptics",
+        "framework-include/CoreML",
+        "framework-include/MediaPlayer",
+        "framework-include/QuickLookUI",
+        "src/CoreAudio/CoreAudio/CATapDescription.m",
+        "src/CoreAudio/include/CoreAudio/CATapDescription.h",
+        "src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesisVoice.h",
+        "src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesizer.h",
+        "src/frameworks/AVFAudio/include/AVFAudio/AVSpeechUtterance.h",
+        "src/frameworks/AVFAudio/src/AVSpeechSynthesisVoice.m",
+        "src/frameworks/AVFAudio/src/AVSpeechSynthesizer.m",
+        "src/frameworks/AVFAudio/src/AVSpeechUtterance.m",
+        "src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDeviceDiscoverySession.h",
+        "src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoOutput.h",
+        "src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoSettings.h",
+        "src/frameworks/AVFoundation/src/AVCaptureDeviceDiscoverySession.m",
+        "src/frameworks/AVFoundation/src/AVCapturePhotoOutput.m",
+        "src/frameworks/AVFoundation/src/AVCapturePhotoSettings.m",
+        "src/frameworks/Accessibility/CMakeLists.txt",
+        "src/frameworks/Accessibility/include/Accessibility/AXCustomContent.h",
+        "src/frameworks/Accessibility/include/Accessibility/Accessibility.h",
+        "src/frameworks/Accessibility/src/AXCustomContent.m",
+        "src/frameworks/AuthenticationServices/src/constants.m",
+        "src/frameworks/CoreHaptics/CMakeLists.txt",
+        "src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticDynamicParameter.h",
+        "src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEvent.h",
+        "src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEventParameter.h",
+        "src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticPattern.h",
+        "src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h",
+        "src/frameworks/CoreHaptics/src/CHHapticDynamicParameter.m",
+        "src/frameworks/CoreHaptics/src/CHHapticEvent.m",
+        "src/frameworks/CoreHaptics/src/CHHapticEventParameter.m",
+        "src/frameworks/CoreHaptics/src/CHHapticPattern.m",
+        "src/frameworks/CoreML/CMakeLists.txt",
+        "src/frameworks/CoreML/include/CoreML/CoreML.h",
+        "src/frameworks/CoreML/include/CoreML/MLFeatureValue.h",
+        "src/frameworks/CoreML/include/CoreML/MLModel.h",
+        "src/frameworks/CoreML/include/CoreML/MLModelConfiguration.h",
+        "src/frameworks/CoreML/include/CoreML/MLMultiArray.h",
+        "src/frameworks/CoreML/include/CoreML/MLPredictionOptions.h",
+        "src/frameworks/CoreML/src/MLFeatureValue.m",
+        "src/frameworks/CoreML/src/MLModel.m",
+        "src/frameworks/CoreML/src/MLModelConfiguration.m",
+        "src/frameworks/CoreML/src/MLMultiArray.m",
+        "src/frameworks/CoreML/src/MLPredictionOptions.m",
+        "src/frameworks/CoreServices/src/SharedFileList/LSSharedFileList.c",
+        "src/frameworks/CoreVideo/src/CVBuffer.c",
+        "src/frameworks/GameController/include/GameController/GCDualSenseGamepad.h",
+        "src/frameworks/GameController/include/GameController/GCDualShockGamepad.h",
+        "src/frameworks/GameController/include/GameController/GCXboxGamepad.h",
+        "src/frameworks/GameController/src/GCDualSenseGamepad.m",
+        "src/frameworks/GameController/src/GCDualShockGamepad.m",
+        "src/frameworks/GameController/src/GCXboxGamepad.m",
+        "src/frameworks/GameController/src/constants.m",
+        "src/frameworks/MediaPlayer/CMakeLists.txt",
+        "src/frameworks/MediaPlayer/include/MediaPlayer/MPMediaItemArtwork.h",
+        "src/frameworks/MediaPlayer/include/MediaPlayer/MPNowPlayingInfoCenter.h",
+        "src/frameworks/MediaPlayer/include/MediaPlayer/MPRemoteCommandCenter.h",
+        "src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h",
+        "src/frameworks/MediaPlayer/src/MPMediaItemArtwork.m",
+        "src/frameworks/MediaPlayer/src/MPNowPlayingInfoCenter.m",
+        "src/frameworks/MediaPlayer/src/MPRemoteCommandCenter.m",
+        "src/frameworks/Quartz/QuickLookUI/CMakeLists.txt",
+        "src/frameworks/UserNotifications/src/constants.m",
+        "src/quarantine/include/responsibility.h"
       ]
     },
     {
@@ -33,7 +114,7 @@
       "revision": "534684e6748dffbd875c6cd1942477a52b66a077",
       "repository": "https://github.com/darlinghq/darling-iokituser.git",
       "patch": "patches/IOKitUser.patch",
-      "modified_files": 1,
+      "modified_files": 2,
       "new_files": []
     },
     {
@@ -57,10 +138,18 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 115,
+      "modified_files": 135,
       "new_files": [
         "QuartzCore/include/QuartzCore/CATransformLayer.h",
-        "AppKit/NSGeometryTrace.h"
+        "AppKit/NSGeometryTrace.h",
+        "AppKit/NSAccessibilityCustomAction.m",
+        "AppKit/NSColorSampler.m",
+        "AppKit/NSImageSymbolConfiguration.m",
+        "AppKit/include/AppKit/NSAccessibilityCustomAction.h",
+        "AppKit/include/AppKit/NSColorSampler.h",
+        "AppKit/include/AppKit/NSImageSymbolConfiguration.h",
+        "QuartzCore/CAEDRMetadata.m",
+        "QuartzCore/include/QuartzCore/CAEDRMetadata.h"
       ]
     },
     {
@@ -92,8 +181,10 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 5,
-      "new_files": []
+      "modified_files": 8,
+      "new_files": [
+        "NSConstantCollections.m"
+      ]
     },
     {
       "path": "src/external/curl",
@@ -118,8 +209,10 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 4,
-      "new_files": []
+      "modified_files": 8,
+      "new_files": [
+        "src/NSConstantNumber.m"
+      ]
     },
     {
       "path": "src/external/iokitd",
@@ -237,7 +330,7 @@
       "revision": "ae20248dc144beab899e38752f5a530f28a0ea56",
       "repository": "https://github.com/darlinghq/darling-metal.git",
       "patch": "patches/metal.patch",
-      "modified_files": 27,
+      "modified_files": 29,
       "new_files": [
         "include/Metal/MTLArgument.h",
         "include/Metal/MTLBlitCommandEncoder.h",
@@ -250,7 +343,15 @@
         "private-include/Metal/MTLSamplerStateInternal.h",
         "private-include/Metal/MTLVertexDescriptorInternal.h",
         "src/Metal/MTLArgument.mm",
-        "src/Metal/MTLBlitCommandEncoder.mm"
+        "src/Metal/MTLBlitCommandEncoder.mm",
+        "include/Metal/MTLBlitPass.h",
+        "include/Metal/MTLCounters.h",
+        "include/Metal/MTLFunctionConstantValues.h",
+        "include/Metal/MTLIndirectCommandBuffer.h",
+        "src/Metal/MTLBlitPass.mm",
+        "src/Metal/MTLCounters.mm",
+        "src/Metal/MTLFunctionConstantValues.mm",
+        "src/Metal/MTLIndirectCommandBuffer.mm"
       ]
     },
     {
@@ -258,7 +359,7 @@
       "revision": "1a12df76d12bfc9fdfffadb290f7742763568765",
       "repository": "https://github.com/darlinghq/darling-objc4.git",
       "patch": "patches/objc4.patch",
-      "modified_files": 2,
+      "modified_files": 3,
       "new_files": []
     },
     {
@@ -266,7 +367,7 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 9,
+      "modified_files": 12,
       "new_files": []
     },
     {
@@ -274,7 +375,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 65,
+      "modified_files": 69,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",

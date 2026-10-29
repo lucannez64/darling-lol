@@ -2206,10 +2206,34 @@ index f273989..058b985 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..83ad15c 100644
+index bd9cdc2..fa6a832 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -139,18 +139,23 @@ sysctl_handler(handle_boottime)
+@@ -23,6 +23,7 @@
+ enum {
+ 	_KERN_MSGBUF = 1000,
+ 	_KERN_OSPRODUCTVERSION,
++	_KERN_HV_VMM_PRESENT,
+ 
+ 	_KERN_SEMMNS = 1000,
+ };
+@@ -46,6 +47,7 @@ static sysctl_handler(handle_usrstack64);
+ static sysctl_handler(handle_sysv_semmns);
+ static sysctl_handler(handle_osproductversion);
+ static sysctl_handler(handle_osrevision);
++static sysctl_handler(handle_hv_vmm_present);
+ 
+ extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
+ extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
+@@ -76,6 +78,7 @@ const struct known_sysctl sysctls_kern[] = {
+ 	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
+ 	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
+ 	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
++	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
+ 	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
+ 	{ .oid = -1 }
+ };
+@@ -139,18 +142,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -2239,6 +2263,18 @@ index bd9cdc2..83ad15c 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
+@@ -342,3 +350,11 @@ static sysctl_handler(handle_osrevision) {
+ 	*oldlen = sizeof(*ovalue);
+ 	return 0;
+ }
++
++static sysctl_handler(handle_hv_vmm_present) {
++	int* ovalue = (int*)old;
++	if (ovalue)
++		*ovalue = 0;
++	*oldlen = sizeof(*ovalue);
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 index 4319355..122ad3a 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
@@ -6201,6 +6237,106 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/vchro
  								ctxt->current_root_len = prefix_path_len;
  							}
 
+diff --git a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+index 24a5f01..36eba90 100644
+--- a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
++++ b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
+@@ -42,4 +42,17 @@ enum {
+ 
+ unsigned int rlimit_bsd_to_linux(unsigned int which);
+ 
++#define LINUX_RLIM_INFINITY (~0ULL)
++#define XNU_RLIM_INFINITY 0x7fffffffffffffffULL
++
++static inline unsigned long long rlimit_linux_to_bsd_value(unsigned long long value)
++{
++	return value >= XNU_RLIM_INFINITY ? XNU_RLIM_INFINITY : value;
++}
++
++static inline unsigned long long rlimit_bsd_to_linux_value(unsigned long long value)
++{
++	return value >= XNU_RLIM_INFINITY ? LINUX_RLIM_INFINITY : value;
++}
++
+ #endif // DARLING_CONVERSION_MISC_GETRLIMIT
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+index 01d4670..e9655d5 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
+@@ -16,12 +16,17 @@ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+ 
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, 0, rlp);
+ 	if (ret < 0)
+-		ret = errno_linux_to_bsd(ret);
++		return errno_linux_to_bsd(ret);
++
++	rlp->rlim_cur = rlimit_linux_to_bsd_value(rlp->rlim_cur);
++	rlp->rlim_max = rlimit_linux_to_bsd_value(rlp->rlim_max);
+ 
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		rlp->rlim_cur--;
+-		rlp->rlim_max--;
++		if (rlp->rlim_cur != XNU_RLIM_INFINITY)
++			rlp->rlim_cur--;
++		if (rlp->rlim_max != XNU_RLIM_INFINITY)
++			rlp->rlim_max--;
+ 	}
+ 
+ 	return ret;
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+index 352c739..e4892e7 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
+@@ -17,10 +17,15 @@ long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
+ 
+ 	if (which == LINUX_RLIMIT_NOFILE)
+ 	{
+-		lim.rlim_cur++;
+-		lim.rlim_max++;
++		if (lim.rlim_cur < XNU_RLIM_INFINITY)
++			lim.rlim_cur++;
++		if (lim.rlim_max < XNU_RLIM_INFINITY)
++			lim.rlim_max++;
+ 	}
+ 
++	lim.rlim_cur = rlimit_bsd_to_linux_value(lim.rlim_cur);
++	lim.rlim_max = rlimit_bsd_to_linux_value(lim.rlim_max);
++
+ 	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, &lim, 0);
+ 	if (ret < 0)
+ 		ret = errno_linux_to_bsd(ret);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+index a26ae39..f163f54 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+@@ -11,13 +11,24 @@ Lentry_hook:
+ 	movq	(%r10,%rax,8), %r10
+ 	test	%r10, %r10
+ 	jz		.no_sys
++	pushq	%rax
++	pushq	%rax
+ 	# Re-push possible 7th and 8th arg
+-	movq	24(%rsp), %r11
++	movq	40(%rsp), %r11
+ 	pushq	%r11
+-	movq	24(%rsp), %r11
++	movq	40(%rsp), %r11
+ 	pushq	%r11
+ 	call	*%r10
+ 	addq	$16, %rsp
++	popq	%r11
++	popq	%r11
++	cmpq	$2, %r11
++	je		.std_ret
++	cmpq	$42, %r11
++	je		.std_ret
++	cmpq	$66, %r11
++	je		.std_ret
++	xorl	%edx, %edx
+ .std_ret:
+ Lexit_hook:
+ 	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c
 index f890ab2..8969577 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/ioctl/socket.c

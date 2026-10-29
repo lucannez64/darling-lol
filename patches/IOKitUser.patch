@@ -1,8 +1,16 @@
 diff --git a/IOKitLib.c b/IOKitLib.c
-index 81ed8f7..3120abb 100644
+index 81ed8f7..f9fc030 100644
 --- a/IOKitLib.c
 +++ b/IOKitLib.c
-@@ -884,6 +884,15 @@ IONotificationPortGetRunLoopSource(
+@@ -110,6 +110,7 @@ gIOKitLibSerializeOptions = kIOCFSerializeToBinary;
+ 
+ extern 	mach_port_t 	mach_task_self();
+ const 	mach_port_t 	kIOMasterPortDefault = MACH_PORT_NULL;
++const 	mach_port_t 	kIOMainPortDefault = MACH_PORT_NULL;
+ 
+ static mach_port_t
+ __IOGetDefaultMasterPort()
+@@ -884,6 +885,15 @@ IONotificationPortGetRunLoopSource(
      CFMachPortContext 	    context;
      Boolean		            cfReusedPort = false;
  
@@ -18,7 +26,7 @@ index 81ed8f7..3120abb 100644
      if (notify->source)
          return (notify->source);
      
-@@ -934,6 +943,11 @@ mach_port_t
+@@ -934,6 +944,11 @@ mach_port_t
  IONotificationPortGetMachPort(
  	IONotificationPortRef	notify )
  {
@@ -30,3 +38,17 @@ index 81ed8f7..3120abb 100644
      return( notify->wakePort );
  }
  
+diff --git a/IOKitLib.h b/IOKitLib.h
+index ffdf1f4..5db4bac 100644
+--- a/IOKitLib.h
++++ b/IOKitLib.h
+@@ -102,6 +102,9 @@ typedef void
+ extern
+ const mach_port_t kIOMasterPortDefault;
+ 
++extern
++const mach_port_t kIOMainPortDefault;
++
+ /*! @function IOMasterPort
+     @abstract Returns the mach port used to initiate communication with IOKit.
+     @discussion Functions that don't specify an existing object require the IOKit master port to be passed. This function obtains that port.

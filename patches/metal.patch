@@ -1,8 +1,8 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 431f29a..eb3eec8 100644
+index 431f29a..69b3004 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -42,8 +42,10 @@ add_framework(Metal
+@@ -42,15 +42,21 @@ add_framework(Metal
  	SOURCES
  		src/Metal/Metal.mm
  		src/Metal/MTLBuffer.mm
@@ -10,10 +10,21 @@ index 431f29a..eb3eec8 100644
  		src/Metal/MTLCaptureManager.mm
  		src/Metal/MTLCommandBuffer.mm
 +	src/Metal/MTLBlitCommandEncoder.mm
++		src/Metal/MTLBlitPass.mm
  		src/Metal/MTLCommandQueue.mm
  		src/Metal/MTLCompileOptions.mm
  		src/Metal/MTLComputeCommandEncoder.mm
-@@ -97,6 +99,10 @@ if (BUILD_METAL)
+ 		src/Metal/MTLComputePipeline.mm
++		src/Metal/MTLCounters.mm
+ 		src/Metal/MTLDepthStencilDescriptor.mm
+ 		src/Metal/MTLDevice.mm
+ 		src/Metal/MTLDrawable.mm
++		src/Metal/MTLFunctionConstantValues.mm
++		src/Metal/MTLIndirectCommandBuffer.mm
+ 		src/Metal/MTLLibrary.mm
+ 		src/Metal/MTLPipeline.mm
+ 		src/Metal/MTLRenderCommandEncoder.mm
+@@ -97,6 +103,10 @@ if (BUILD_METAL)
  	target_compile_definitions(Metal PUBLIC
  		DARLING_METAL_ENABLED=1
  	)
@@ -101,10 +112,18 @@ index f22a57d..6b6715d 100644
 +@end
 +#endif
 diff --git a/include/Metal/MTLDevice.h b/include/Metal/MTLDevice.h
-index a3efc96..299c038 100644
+index a3efc96..9e9dc5d 100644
 --- a/include/Metal/MTLDevice.h
 +++ b/include/Metal/MTLDevice.h
-@@ -18,9 +18,18 @@ METAL_DECLARATIONS_BEGIN
+@@ -8,6 +8,7 @@
+ 
+ #import <Metal/MTLResource.h>
+ #import <Metal/MTLDefines.h>
++#import <Metal/MTLCounters.h>
+ 
+ METAL_DECLARATIONS_BEGIN
+ 
+@@ -18,9 +19,18 @@ METAL_DECLARATIONS_BEGIN
  @protocol MTLBuffer;
  @protocol MTLLibrary;
  @protocol MTLRenderPipelineState;
@@ -124,7 +143,7 @@ index a3efc96..299c038 100644
  @class MTLRenderPipelineDescriptor;
  
  typedef NS_OPTIONS(NSUInteger, MTLPipelineOption) {
-@@ -42,8 +51,31 @@ MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevices(void);
+@@ -42,8 +52,34 @@ MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevices(void);
  MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevicesWithObserver(id<NSObject>* observer, MTLDeviceNotificationHandler handler);
  MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
  
@@ -147,6 +166,9 @@ index a3efc96..299c038 100644
 +@property (readonly) BOOL isHeadless;
 +@property (readonly) NSString* name;
 +@property (readonly) uint64_t registryID;
++@property (readonly) NSArray<id<MTLCounterSet>>* counterSets;
++@property (readonly) BOOL supports32BitFloatFiltering;
++@property (readonly) BOOL supportsBCTextureCompression;
 +- (BOOL)isDepth24Stencil8PixelFormatSupported;
 +- (BOOL)supportsFamily: (NSUInteger)family;
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet;
@@ -156,7 +178,7 @@ index a3efc96..299c038 100644
  - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor: (MTLComputePipelineDescriptor*)descriptor
                                                               options: (MTLPipelineOption)options
                                                            reflection: (MTLAutoreleasedComputePipelineReflection*)reflection
-@@ -57,10 +89,14 @@ MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
+@@ -57,10 +93,14 @@ MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error;
  
@@ -470,18 +492,32 @@ index 2084d6f..366dfa7 100644
 +@end
 +#endif
 diff --git a/include/Metal/Metal.h b/include/Metal/Metal.h
-index 3c63a1d..a9c0dc7 100644
+index 3c63a1d..89d9583 100644
 --- a/include/Metal/Metal.h
 +++ b/include/Metal/Metal.h
-@@ -5,6 +5,8 @@
+@@ -5,16 +5,22 @@
  #define _METAL_METAL_H_
  
  #import <Metal/MTLBuffer.h>
 +#import <Metal/MTLArgument.h>
 +#import <Metal/MTLBlitCommandEncoder.h>
++#import <Metal/MTLBlitPass.h>
  #import <Metal/MTLCommandBuffer.h>
  #import <Metal/MTLCommandEncoder.h>
  #import <Metal/MTLCommandQueue.h>
+ #import <Metal/MTLCompileOptions.h>
+ #import <Metal/MTLComputeCommandEncoder.h>
+ #import <Metal/MTLComputePipeline.h>
++#import <Metal/MTLCounters.h>
+ #import <Metal/MTLDefines.h>
+ #import <Metal/MTLDepthStencilDescriptor.h>
+ #import <Metal/MTLDevice.h>
+ #import <Metal/MTLDrawable.h>
++#import <Metal/MTLFunctionConstantValues.h>
++#import <Metal/MTLIndirectCommandBuffer.h>
+ #import <Metal/MTLLibrary.h>
+ #import <Metal/MTLPipeline.h>
+ #import <Metal/MTLPixelFormat.h>
 diff --git a/private-include/Metal/MTLBufferInternal.h b/private-include/Metal/MTLBufferInternal.h
 index 0a620b2..79cf40a 100644
 --- a/private-include/Metal/MTLBufferInternal.h
@@ -1134,7 +1170,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..2c45608 100644
+index f58184a..3efc68c 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,32 @@
@@ -1285,7 +1321,7 @@ index f58184a..2c45608 100644
  
  	[super dealloc];
  }
-@@ -153,12 +251,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +251,63 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1301,6 +1337,9 @@ index f58184a..2c45608 100644
 +
 +/* darling-lol M57: feature queries ANGLE's Metal backend needs. */
 +- (BOOL)isDepth24Stencil8PixelFormatSupported { return _device->supportsDepth24Stencil8PixelFormat(); }
++- (NSArray<id<MTLCounterSet>>*)counterSets { return [NSArray array]; }
++- (BOOL)supports32BitFloatFiltering { return NO; }
++- (BOOL)supportsBCTextureCompression { return NO; }
 +- (BOOL)hasUnifiedMemory
 +{
 +	// Stays YES by default: with NO, ANGLE and games take the Managed/Private paths
@@ -1347,7 +1386,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +312,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +315,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1355,7 +1394,7 @@ index f58184a..2c45608 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +330,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +333,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1370,7 +1409,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +344,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +347,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1416,7 +1455,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +389,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +392,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1536,7 +1575,7 @@ index f58184a..2c45608 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +570,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +573,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -3208,9 +3247,10 @@ index cde968d..0a016c6 100644
  @end
 diff --git a/include/Metal/MTLArgument.h b/include/Metal/MTLArgument.h
 new file mode 100644
+index 0000000..d38afd4
 --- /dev/null
 +++ b/include/Metal/MTLArgument.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,39 @@
 +#ifndef _METAL_MTLARGUMENT_H_
 +#define _METAL_MTLARGUMENT_H_
 +#import <Foundation/Foundation.h>
@@ -3231,6 +3271,16 @@ new file mode 100644
 +@property(readonly) NSUInteger bufferAlignment;
 +@property(readonly) NSUInteger bufferDataSize;
 +@property(readonly) MTLStructType* bufferStructType;
++@end
++typedef NS_ENUM(NSUInteger, MTLBindingAccess) { MTLBindingAccessReadOnly=0, MTLBindingAccessReadWrite=1, MTLBindingAccessWriteOnly=2 };
++@interface MTLArgumentDescriptor : NSObject <NSCopying>
+++ (MTLArgumentDescriptor*)argumentDescriptor;
++@property NSUInteger dataType;
++@property NSUInteger index;
++@property NSUInteger arrayLength;
++@property MTLBindingAccess access;
++@property NSUInteger textureType;
++@property NSUInteger constantBlockAlignment;
 +@end
 +@interface MTLComputePipelineReflection : NSObject
 +@property(readonly) NSArray<MTLArgument*>* arguments;
@@ -3693,9 +3743,10 @@ new file mode 100644
 +#endif
 diff --git a/src/Metal/MTLArgument.mm b/src/Metal/MTLArgument.mm
 new file mode 100644
+index 0000000..85027dc
 --- /dev/null
 +++ b/src/Metal/MTLArgument.mm
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,88 @@
 +#import <Metal/MTLArgumentInternal.h>
 +@implementation MTLStructMember
 +@synthesize name=_name, offset=_offset;
@@ -3773,6 +3824,16 @@ new file mode 100644
 +}
 +#endif
 +- (void)dealloc { [_vertexArguments release];[_fragmentArguments release];[super dealloc]; }
++@end
++@implementation MTLArgumentDescriptor
++@synthesize dataType=_dataType, index=_index, arrayLength=_arrayLength, access=_access, textureType=_textureType, constantBlockAlignment=_constantBlockAlignment;
+++ (MTLArgumentDescriptor*)argumentDescriptor { return [[[self alloc] init] autorelease]; }
++- (instancetype)copyWithZone:(NSZone*)zone {
++    MTLArgumentDescriptor* copy=[[[self class] allocWithZone:zone] init];
++    copy.dataType=_dataType; copy.index=_index; copy.arrayLength=_arrayLength;
++    copy.access=_access; copy.textureType=_textureType; copy.constantBlockAlignment=_constantBlockAlignment;
++    return copy;
++}
 +@end
 diff --git a/src/Metal/MTLBlitCommandEncoder.mm b/src/Metal/MTLBlitCommandEncoder.mm
 new file mode 100644
@@ -3879,4 +3940,251 @@ new file mode 100644
 +@dynamic device, label;
 +MTL_UNSUPPORTED_CLASS
 +#endif
++@end
+diff --git a/include/Metal/MTLCaptureManager.h b/include/Metal/MTLCaptureManager.h
+index da2bbd3..c3aeb14 100644
+--- a/include/Metal/MTLCaptureManager.h
++++ b/include/Metal/MTLCaptureManager.h
+@@ -3,5 +3,16 @@
+ 
+ #import <Foundation/Foundation.h>
+ 
++typedef NS_ENUM(NSInteger, MTLCaptureDestination) {
++    MTLCaptureDestinationDeveloperTools = 1,
++    MTLCaptureDestinationGPUTraceDocument = 2,
++};
++
++@interface MTLCaptureDescriptor : NSObject <NSCopying>
++@property(retain) id captureObject;
++@property MTLCaptureDestination destination;
++@property(copy) NSURL* outputURL;
++@end
++
+ @interface MTLCaptureManager : NSObject
+ @end
+diff --git a/src/Metal/MTLCaptureManager.mm b/src/Metal/MTLCaptureManager.mm
+index b06ff37..c0051b3 100644
+--- a/src/Metal/MTLCaptureManager.mm
++++ b/src/Metal/MTLCaptureManager.mm
+@@ -5,6 +5,26 @@
+ #import <Foundation/NSMethodSignature.h>
+ #import <Foundation/NSInvocation.h>
+ 
++@implementation MTLCaptureDescriptor
++@synthesize captureObject = _captureObject;
++@synthesize destination = _destination;
++@synthesize outputURL = _outputURL;
++- (instancetype)init {
++    self = [super init];
++    if (self)
++        _destination = MTLCaptureDestinationDeveloperTools;
++    return self;
++}
++- (void)dealloc { [_captureObject release]; [_outputURL release]; [super dealloc]; }
++- (instancetype)copyWithZone:(NSZone*)zone {
++    MTLCaptureDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    copy.captureObject = _captureObject;
++    copy.destination = _destination;
++    copy.outputURL = _outputURL;
++    return copy;
++}
++@end
++
+ @implementation MTLCaptureManager
+ 
+ - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
+diff --git a/include/Metal/MTLBlitPass.h b/include/Metal/MTLBlitPass.h
+new file mode 100644
+index 0000000..db42c51
+--- /dev/null
++++ b/include/Metal/MTLBlitPass.h
+@@ -0,0 +1,9 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#pragma once
++#import <Foundation/Foundation.h>
++
++@interface MTLBlitPassDescriptor : NSObject <NSCopying>
+++ (MTLBlitPassDescriptor*)blitPassDescriptor;
++@end
+diff --git a/include/Metal/MTLCounters.h b/include/Metal/MTLCounters.h
+new file mode 100644
+index 0000000..67434bf
+--- /dev/null
++++ b/include/Metal/MTLCounters.h
+@@ -0,0 +1,28 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#pragma once
++#import <Foundation/Foundation.h>
++#import <Metal/MTLResource.h>
++
++typedef NSString* MTLCommonCounter;
++typedef NSString* MTLCommonCounterSet;
++
++FOUNDATION_EXPORT MTLCommonCounter const MTLCommonCounterTimestamp;
++FOUNDATION_EXPORT MTLCommonCounterSet const MTLCommonCounterSetTimestamp;
++
++@protocol MTLCounter <NSObject>
++@property(readonly) NSString* name;
++@end
++
++@protocol MTLCounterSet <NSObject>
++@property(readonly) NSString* name;
++@property(readonly) NSArray<id<MTLCounter>>* counters;
++@end
++
++@interface MTLCounterSampleBufferDescriptor : NSObject <NSCopying>
++@property(retain) id<MTLCounterSet> counterSet;
++@property(copy) NSString* label;
++@property MTLStorageMode storageMode;
++@property NSUInteger sampleCount;
++@end
+diff --git a/include/Metal/MTLFunctionConstantValues.h b/include/Metal/MTLFunctionConstantValues.h
+new file mode 100644
+index 0000000..9357a4e
+--- /dev/null
++++ b/include/Metal/MTLFunctionConstantValues.h
+@@ -0,0 +1,12 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#pragma once
++#import <Foundation/Foundation.h>
++
++@interface MTLFunctionConstantValues : NSObject <NSCopying>
++- (void)setConstantValue:(const void*)value type:(NSUInteger)type atIndex:(NSUInteger)index;
++- (void)setConstantValues:(const void*)values type:(NSUInteger)type withRange:(NSRange)range;
++- (void)setConstantValue:(const void*)value type:(NSUInteger)type withName:(NSString*)name;
++- (void)reset;
++@end
+diff --git a/include/Metal/MTLIndirectCommandBuffer.h b/include/Metal/MTLIndirectCommandBuffer.h
+new file mode 100644
+index 0000000..e1414fa
+--- /dev/null
++++ b/include/Metal/MTLIndirectCommandBuffer.h
+@@ -0,0 +1,23 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#pragma once
++#import <Foundation/Foundation.h>
++
++typedef NS_OPTIONS(NSUInteger, MTLIndirectCommandType) {
++    MTLIndirectCommandTypeDraw = (1 << 0),
++    MTLIndirectCommandTypeDrawIndexed = (1 << 1),
++    MTLIndirectCommandTypeDrawPatches = (1 << 2),
++    MTLIndirectCommandTypeDrawIndexedPatches = (1 << 3),
++    MTLIndirectCommandTypeConcurrentDispatch = (1 << 5),
++    MTLIndirectCommandTypeConcurrentDispatchThreads = (1 << 6),
++};
++
++@interface MTLIndirectCommandBufferDescriptor : NSObject <NSCopying>
++@property MTLIndirectCommandType commandTypes;
++@property BOOL inheritPipelineState;
++@property BOOL inheritBuffers;
++@property NSUInteger maxVertexBufferBindCount;
++@property NSUInteger maxFragmentBufferBindCount;
++@property NSUInteger maxKernelBufferBindCount;
++@end
+diff --git a/src/Metal/MTLBlitPass.mm b/src/Metal/MTLBlitPass.mm
+new file mode 100644
+index 0000000..4bb2c81
+--- /dev/null
++++ b/src/Metal/MTLBlitPass.mm
+@@ -0,0 +1,9 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#import <Metal/MTLBlitPass.h>
++
++@implementation MTLBlitPassDescriptor
+++ (MTLBlitPassDescriptor*)blitPassDescriptor { return [[[self alloc] init] autorelease]; }
++- (instancetype)copyWithZone:(NSZone*)zone { return [[[self class] allocWithZone:zone] init]; }
++@end
+diff --git a/src/Metal/MTLCounters.mm b/src/Metal/MTLCounters.mm
+new file mode 100644
+index 0000000..ab2f510
+--- /dev/null
++++ b/src/Metal/MTLCounters.mm
+@@ -0,0 +1,23 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#import <Metal/MTLCounters.h>
++
++MTLCommonCounter const MTLCommonCounterTimestamp = @"GPUTimestamp";
++MTLCommonCounterSet const MTLCommonCounterSetTimestamp = @"timestamp";
++
++@implementation MTLCounterSampleBufferDescriptor
++@synthesize counterSet = _counterSet;
++@synthesize label = _label;
++@synthesize storageMode = _storageMode;
++@synthesize sampleCount = _sampleCount;
++- (void)dealloc { [_counterSet release]; [_label release]; [super dealloc]; }
++- (instancetype)copyWithZone:(NSZone*)zone {
++    MTLCounterSampleBufferDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    copy.counterSet = _counterSet;
++    copy.label = _label;
++    copy.storageMode = _storageMode;
++    copy.sampleCount = _sampleCount;
++    return copy;
++}
++@end
+diff --git a/src/Metal/MTLFunctionConstantValues.mm b/src/Metal/MTLFunctionConstantValues.mm
+new file mode 100644
+index 0000000..51fc1bc
+--- /dev/null
++++ b/src/Metal/MTLFunctionConstantValues.mm
+@@ -0,0 +1,12 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#import <Metal/MTLFunctionConstantValues.h>
++
++@implementation MTLFunctionConstantValues
++- (void)setConstantValue:(const void*)value type:(NSUInteger)type atIndex:(NSUInteger)index {}
++- (void)setConstantValues:(const void*)values type:(NSUInteger)type withRange:(NSRange)range {}
++- (void)setConstantValue:(const void*)value type:(NSUInteger)type withName:(NSString*)name {}
++- (void)reset {}
++- (instancetype)copyWithZone:(NSZone*)zone { return [[[self class] allocWithZone:zone] init]; }
++@end
+diff --git a/src/Metal/MTLIndirectCommandBuffer.mm b/src/Metal/MTLIndirectCommandBuffer.mm
+new file mode 100644
+index 0000000..7d2814a
+--- /dev/null
++++ b/src/Metal/MTLIndirectCommandBuffer.mm
+@@ -0,0 +1,31 @@
++// SPDX-FileCopyrightText: 2026 Darling Developers
++// SPDX-License-Identifier: MPL-2.0
++
++#import <Metal/MTLIndirectCommandBuffer.h>
++
++@implementation MTLIndirectCommandBufferDescriptor
++@synthesize commandTypes = _commandTypes;
++@synthesize inheritPipelineState = _inheritPipelineState;
++@synthesize inheritBuffers = _inheritBuffers;
++@synthesize maxVertexBufferBindCount = _maxVertexBufferBindCount;
++@synthesize maxFragmentBufferBindCount = _maxFragmentBufferBindCount;
++@synthesize maxKernelBufferBindCount = _maxKernelBufferBindCount;
++- (instancetype)init {
++    self = [super init];
++    if (self) {
++        _inheritPipelineState = YES;
++        _inheritBuffers = YES;
++    }
++    return self;
++}
++- (instancetype)copyWithZone:(NSZone*)zone {
++    MTLIndirectCommandBufferDescriptor* copy = [[[self class] allocWithZone:zone] init];
++    copy.commandTypes = _commandTypes;
++    copy.inheritPipelineState = _inheritPipelineState;
++    copy.inheritBuffers = _inheritBuffers;
++    copy.maxVertexBufferBindCount = _maxVertexBufferBindCount;
++    copy.maxFragmentBufferBindCount = _maxFragmentBufferBindCount;
++    copy.maxKernelBufferBindCount = _maxKernelBufferBindCount;
++    return copy;
++}
 +@end

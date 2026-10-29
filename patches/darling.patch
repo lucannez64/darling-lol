@@ -917,7 +917,7 @@ index 000000000..6e85e8230
 +    return noErr;
 +}
 diff --git a/src/CoreAudio/CoreAudio/AudioHardware.cpp b/src/CoreAudio/CoreAudio/AudioHardware.cpp
-index 7243e6a62..647c8aff7 100644
+index 7243e6a6..917a4c46 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardware.cpp
 +++ b/src/CoreAudio/CoreAudio/AudioHardware.cpp
 @@ -1,3 +1,4 @@
@@ -925,7 +925,7 @@ index 7243e6a62..647c8aff7 100644
  /*
  This file is part of Darling.
  
-@@ -25,6 +26,9 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -25,7 +26,14 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  #include <CarbonCore/MacErrors.h>
  #include <dispatch/dispatch.h>
  #include <memory>
@@ -933,9 +933,14 @@ index 7243e6a62..647c8aff7 100644
 +#include <cstdio>
 +#include <cstdlib>
  #include <unordered_map>
++#include <mutex>
++#include <vector>
++#include <algorithm>
++#include <Block.h>
  #include "stub.h"
  
-@@ -38,7 +42,7 @@ static void initObjects()
+ static std::unordered_map<AudioObjectID, std::unique_ptr<AudioHardwareImpl>> g_objects;
+@@ -38,7 +46,7 @@ static void initObjects()
  		g_objects.insert(std::make_pair(kAudioObjectSystemObject, std::make_unique<AudioHardwareImplPA>(kAudioObjectSystemObject)));
  		g_objects.insert(std::make_pair(kAudioObjectSystemObject + 1, std::make_unique<AudioHardwareImplPAOutput>(kAudioObjectSystemObject + 1)));
  		g_objects.insert(std::make_pair(kAudioObjectSystemObject + 2, std::make_unique<AudioHardwareImplPAInput>(kAudioObjectSystemObject + 2)));
@@ -944,7 +949,7 @@ index 7243e6a62..647c8aff7 100644
  	});
  }
  
-@@ -58,6 +62,35 @@ static AudioHardwareImpl* GetSystemObject()
+@@ -58,6 +66,35 @@ static AudioHardwareImpl* GetSystemObject()
  	return GetObject(kAudioObjectSystemObject);
  }
  
@@ -980,7 +985,7 @@ index 7243e6a62..647c8aff7 100644
  void AudioObjectShow(AudioObjectID inObjectID)
  {
  	AudioHardwareImpl* obj = GetObject(inObjectID);
-@@ -68,45 +101,94 @@ void AudioObjectShow(AudioObjectID inObjectID)
+@@ -68,45 +105,94 @@ void AudioObjectShow(AudioObjectID inObjectID)
  Boolean AudioObjectHasProperty(AudioObjectID inObjectID,
  		const AudioObjectPropertyAddress* inAddress)
  {
@@ -1085,7 +1090,7 @@ index 7243e6a62..647c8aff7 100644
  }
  
  OSStatus AudioObjectSetPropertyData(AudioObjectID inObjectID,
-@@ -114,11 +196,15 @@ OSStatus AudioObjectSetPropertyData(AudioObjectID inObjectID,
+@@ -114,11 +200,15 @@ OSStatus AudioObjectSetPropertyData(AudioObjectID inObjectID,
  		const void* inQualifierData, UInt32 inDataSize, const void* inData)
  {
  	AudioHardwareImpl* obj = GetObject(inObjectID);
@@ -1104,7 +1109,7 @@ index 7243e6a62..647c8aff7 100644
  }
  
  OSStatus AudioObjectAddPropertyListener(AudioObjectID inObjectID,
-@@ -129,7 +215,9 @@ OSStatus AudioObjectAddPropertyListener(AudioObjectID inObjectID,
+@@ -129,7 +219,9 @@ OSStatus AudioObjectAddPropertyListener(AudioObjectID inObjectID,
  	if (!obj)
  		return kAudioHardwareBadObjectError;
  	
@@ -1115,6 +1120,107 @@ index 7243e6a62..647c8aff7 100644
  }
  
  OSStatus AudioObjectRemovePropertyListener(AudioObjectID inObjectID,
+@@ -143,6 +235,100 @@ OSStatus AudioObjectRemovePropertyListener(AudioObjectID inObjectID,
+ 	return obj->removePropertyListener(inAddress, inListener, inClientData);
+ }
+ 
++namespace
++{
++struct PropertyListenerBlock
++{
++	AudioObjectID objectID;
++	AudioObjectPropertyAddress address;
++	dispatch_queue_t queue;
++	AudioObjectPropertyListenerBlock block;
++};
++
++std::mutex g_listenerBlocksLock;
++std::vector<PropertyListenerBlock*> g_listenerBlocks;
++
++OSStatus PropertyListenerBlockProc(AudioObjectID inObjectID, UInt32 inNumberAddresses,
++		const AudioObjectPropertyAddress* inAddresses, void* inClientData)
++{
++	PropertyListenerBlock* listener = static_cast<PropertyListenerBlock*>(inClientData);
++
++	if (!listener->queue)
++	{
++		listener->block(inNumberAddresses, inAddresses);
++		return noErr;
++	}
++
++	std::vector<AudioObjectPropertyAddress>* addresses =
++		new std::vector<AudioObjectPropertyAddress>(inAddresses, inAddresses + inNumberAddresses);
++	AudioObjectPropertyListenerBlock block = Block_copy(listener->block);
++	dispatch_async(listener->queue, ^{
++		block(addresses->size(), addresses->data());
++		Block_release(block);
++		delete addresses;
++	});
++	return noErr;
++}
++}
++
++OSStatus AudioObjectAddPropertyListenerBlock(AudioObjectID inObjectID,
++		const AudioObjectPropertyAddress* inAddress,
++		dispatch_queue_t inDispatchQueue, AudioObjectPropertyListenerBlock inListener)
++{
++	if (!inAddress || !inListener)
++		return kAudioHardwareIllegalOperationError;
++
++	PropertyListenerBlock* listener = new PropertyListenerBlock{ inObjectID, *inAddress, inDispatchQueue, Block_copy(inListener) };
++	if (inDispatchQueue)
++		dispatch_retain(inDispatchQueue);
++
++	OSStatus status = AudioObjectAddPropertyListener(inObjectID, inAddress, PropertyListenerBlockProc, listener);
++	if (status != noErr)
++	{
++		if (inDispatchQueue)
++			dispatch_release(inDispatchQueue);
++		Block_release(listener->block);
++		delete listener;
++		return status;
++	}
++
++	std::lock_guard<std::mutex> guard(g_listenerBlocksLock);
++	g_listenerBlocks.push_back(listener);
++	return noErr;
++}
++
++OSStatus AudioObjectRemovePropertyListenerBlock(AudioObjectID inObjectID,
++		const AudioObjectPropertyAddress* inAddress,
++		dispatch_queue_t inDispatchQueue, AudioObjectPropertyListenerBlock inListener)
++{
++	if (!inAddress || !inListener)
++		return kAudioHardwareIllegalOperationError;
++
++	PropertyListenerBlock* listener = nullptr;
++	{
++		std::lock_guard<std::mutex> guard(g_listenerBlocksLock);
++		auto it = std::find_if(g_listenerBlocks.begin(), g_listenerBlocks.end(), [&](PropertyListenerBlock* candidate) {
++			return candidate->objectID == inObjectID
++				&& candidate->address.mSelector == inAddress->mSelector
++				&& candidate->address.mScope == inAddress->mScope
++				&& candidate->address.mElement == inAddress->mElement
++				&& candidate->queue == inDispatchQueue
++				&& candidate->block == inListener;
++		});
++		if (it == g_listenerBlocks.end())
++			return kAudioHardwareUnknownPropertyError;
++		listener = *it;
++		g_listenerBlocks.erase(it);
++	}
++
++	OSStatus status = AudioObjectRemovePropertyListener(inObjectID, inAddress, PropertyListenerBlockProc, listener);
++	if (listener->queue)
++		dispatch_release(listener->queue);
++	Block_release(listener->block);
++	delete listener;
++	return status;
++}
++
+ OSStatus AudioHardwareUnload(void)
+ {
+ 	return noErr;
 diff --git a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp b/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
 index f006ba51e..e0e4b4984 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
@@ -1266,17 +1372,27 @@ index f74d9b0c3..655e90d51 100644
  #endif /* AUDIOHARDWAREIMPL_H */
 -
 diff --git a/src/CoreAudio/CoreAudio/CMakeLists.txt b/src/CoreAudio/CoreAudio/CMakeLists.txt
-index 5f10c2f92..089c94127 100644
+index 5f10c2f9..41106c4e 100644
 --- a/src/CoreAudio/CoreAudio/CMakeLists.txt
 +++ b/src/CoreAudio/CoreAudio/CMakeLists.txt
-@@ -8,6 +8,7 @@ set(coreaudio_sources
+@@ -8,6 +8,8 @@ set(coreaudio_sources
  	AudioHardware.cpp
      AudioHardwareImpl.cpp
      HostTime.mm
++    CATapDescription.m
 +    AudioConverterShim.c
      pulse/AudioHardwareImplPA.cpp
      pulse/AudioHardwareImplPAInput.cpp
      pulse/AudioHardwareImplPAOutput.cpp
+@@ -29,6 +31,8 @@ add_framework(CoreAudio
+     DEPENDENCIES
+         system
+         cxx
++        objc
+         CoreFoundation
++        Foundation
+         pulse
+ )
 diff --git a/src/CoreAudio/CoreAudio/HostTime.mm b/src/CoreAudio/CoreAudio/HostTime.mm
 index 879fb48a1..fb99e99d1 100644
 --- a/src/CoreAudio/CoreAudio/HostTime.mm
@@ -3427,10 +3543,10 @@ index 102614203..9b80671a6 100644
  #endif /* AUDIOHARDWAREBASE_H */
 -
 diff --git a/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDevice.h b/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDevice.h
-index cb2896957..b2c25fbd4 100644
+index cb289695..17338cae 100644
 --- a/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDevice.h
 +++ b/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDevice.h
-@@ -18,7 +18,22 @@
+@@ -18,7 +18,27 @@
  */
  
  #include <Foundation/Foundation.h>
@@ -3442,6 +3558,11 @@ index cb2896957..b2c25fbd4 100644
 +	AVAuthorizationStatusDenied = 2,
 +	AVAuthorizationStatusAuthorized = 3,
 +};
++
++typedef NSString *AVCaptureDeviceType;
++
++extern AVCaptureDeviceType const AVCaptureDeviceTypeBuiltInWideAngleCamera;
++extern AVCaptureDeviceType const AVCaptureDeviceTypeExternalUnknown;
  
  @interface AVCaptureDevice : NSObject
  
@@ -4017,23 +4138,43 @@ index 854fa1e7f..8a76923c4 100644
 +	return noErr;
 +}
 diff --git a/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h b/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h
-index 09b70e4cb..2f7f5b89a 100644
+index 09b70e4c..23d80761 100644
 --- a/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h
 +++ b/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h
-@@ -8,6 +8,8 @@ __BEGIN_DECLS
+@@ -8,6 +8,18 @@ __BEGIN_DECLS
  
  typedef struct CV_BRIDGED_TYPE(id) __CVBuffer* CVBufferRef;
  
++typedef uint32_t CVAttachmentMode;
++enum {
++	kCVAttachmentMode_ShouldNotPropagate = 0,
++	kCVAttachmentMode_ShouldPropagate = 1,
++};
++
 +extern const CFStringRef kCVBufferPropagatedAttachmentsKey;
++
++CFTypeRef CVBufferCopyAttachment(CVBufferRef buffer, CFStringRef key, CVAttachmentMode *attachmentMode);
++Boolean CVBufferHasAttachment(CVBufferRef buffer, CFStringRef key);
++void CVBufferSetAttachment(CVBufferRef buffer, CFStringRef key, CFTypeRef value, CVAttachmentMode attachmentMode);
 +
  __END_DECLS
  
  #endif // _COREVIDEO_CVBUFFER_H_
 diff --git a/src/frameworks/CoreVideo/include/CoreVideo/CVImageBuffer.h b/src/frameworks/CoreVideo/include/CoreVideo/CVImageBuffer.h
-index 937ba8312..45ab80e75 100644
+index 937ba831..2bb41528 100644
 --- a/src/frameworks/CoreVideo/include/CoreVideo/CVImageBuffer.h
 +++ b/src/frameworks/CoreVideo/include/CoreVideo/CVImageBuffer.h
-@@ -30,6 +30,7 @@ extern const CFStringRef kCVImageBufferTransferFunction_Linear;
+@@ -22,6 +22,9 @@ extern const CFStringRef kCVImageBufferChromaLocation_Top;
+ extern const CFStringRef kCVImageBufferChromaLocation_TopLeft;
+ 
+ extern const CFStringRef kCVImageBufferColorPrimaries_ITU_R_2020;
++extern const CFStringRef kCVImageBufferColorPrimaries_DCI_P3;
++extern const CFStringRef kCVImageBufferColorPrimaries_P3_D65;
++extern const CFStringRef kCVImageBufferAmbientViewingEnvironmentKey;
+ extern const CFStringRef kCVImageBufferYCbCrMatrix_ITU_R_2020;
+ 
+ extern const CFStringRef kCVImageBufferTransferFunction_ITU_R_2020;
+@@ -30,6 +33,7 @@ extern const CFStringRef kCVImageBufferTransferFunction_Linear;
  extern const CFStringRef kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ;
  extern const CFStringRef kCVImageBufferTransferFunction_SMPTE_ST_428_1;
  extern const CFStringRef kCVImageBufferTransferFunction_SMPTE_C;
@@ -4041,7 +4182,7 @@ index 937ba8312..45ab80e75 100644
  
  extern CFStringRef const kCVImageBufferPixelAspectRatioHorizontalSpacingKey;
  extern CFStringRef const kCVImageBufferPixelAspectRatioVerticalSpacingKey;
-@@ -43,5 +44,7 @@ extern CFStringRef const kCVImageBufferColorPrimaries_SMPTE_C;
+@@ -43,5 +47,7 @@ extern CFStringRef const kCVImageBufferColorPrimaries_SMPTE_C;
  extern CFStringRef const kCVImageBufferTransferFunction_ITU_R_709_2;
  extern CFStringRef const kCVImageBufferTransferFunction_SMPTE_240M_1995;
  extern CFStringRef const kCVImageBufferTransferFunction_UseGamma;
@@ -4050,19 +4191,37 @@ index 937ba8312..45ab80e75 100644
  
  #endif // _COREVIDEO_CVIMAGEBUFFER_H_
 diff --git a/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferPool.h b/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferPool.h
-index 299caa5b1..bdff6028c 100644
+index 299caa5b..ca71dc1d 100644
 --- a/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferPool.h
 +++ b/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferPool.h
-@@ -26,6 +26,7 @@
+@@ -22,12 +22,25 @@
+ 
+ #include <sys/cdefs.h>
+ #include <CoreVideo/CVBase.h>
++#include <CoreVideo/CVPixelBuffer.h>
+ 
  __BEGIN_DECLS
  
  extern const CFStringRef kCVPixelBufferPoolMaximumBufferAgeKey;
 +extern const CFStringRef kCVPixelBufferPoolAllocationThresholdKey;
  extern const CFStringRef kCVPixelBufferPoolMinimumBufferCountKey;
  
++typedef struct __CVPixelBufferPool *CVPixelBufferPoolRef;
++typedef CVOptionFlags CVPixelBufferPoolFlushFlags;
++enum {
++	kCVPixelBufferPoolFlushExcessBuffers = 1,
++};
++
++CVReturn CVPixelBufferPoolCreate(CFAllocatorRef allocator, CFDictionaryRef poolAttributes, CFDictionaryRef pixelBufferAttributes, CVPixelBufferPoolRef *poolOut);
++CVReturn CVPixelBufferPoolCreatePixelBuffer(CFAllocatorRef allocator, CVPixelBufferPoolRef pixelBufferPool, CVPixelBufferRef *pixelBufferOut);
++CVReturn CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(CFAllocatorRef allocator, CVPixelBufferPoolRef pixelBufferPool, CFDictionaryRef auxAttributes, CVPixelBufferRef *pixelBufferOut);
++void CVPixelBufferPoolFlush(CVPixelBufferPoolRef pool, CVPixelBufferPoolFlushFlags options);
++
  __END_DECLS
+ 
+ #endif
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..99e0a5494 100644
+index 3e9cba22..a6dd396f 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 @@ -1,38 +1,887 @@
@@ -4961,7 +5120,7 @@ index 3e9cba226..99e0a5494 100644
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,35 +890,128 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,35 +890,148 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
@@ -5010,13 +5169,31 @@ index 3e9cba226..99e0a5494 100644
  CVReturn CVDisplayLinkStop(CVDisplayLinkRef displayLink)
  {
 -	if (!displayLink)
--		return kCVReturnInvalidArgument;
--	// TODO
--	return kCVReturnSuccess;
 +    if(!displayLink)return kCVReturnInvalidArgument;
 +    CVStateGuard guard;CVLinkStateRec rec;
 +    if(readState(&rec)) { rec.running=0;writeState(&rec); }
 +    return kCVReturnSuccess;
++}
++
++CVReturn CVDisplayLinkGetCurrentTime(CVDisplayLinkRef displayLink, CVTimeStamp *outTime)
++{
++	if (!displayLink || !outTime)
+ 		return kCVReturnInvalidArgument;
+-	// TODO
++
++	struct mach_timebase_info timebase;
++	mach_timebase_info(&timebase);
++	uint64_t periodMach = (1000000000ull / 60ull) * timebase.denom / timebase.numer;
++	uint64_t hostTime = mach_absolute_time();
++
++	memset(outTime, 0, sizeof(*outTime));
++	outTime->hostTime = hostTime;
++	outTime->videoTime = hostTime / periodMach;
++	outTime->videoTimeScale = 60;
++	outTime->videoRefreshPeriod = 1;
++	outTime->flags = kCVTimeStampHostTimeValid | kCVTimeStampVideoTimeValid |
++	    kCVTimeStampVideoRefreshPeriodValid;
+ 	return kCVReturnSuccess;
  }
  
  Boolean CVDisplayLinkIsRunning(CVDisplayLinkRef displayLink)
@@ -5101,7 +5278,7 @@ index 3e9cba226..99e0a5494 100644
  	return kCVReturnSuccess;
  }
  
-@@ -91,7 +1033,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
+@@ -91,7 +1053,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
  			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
  			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
  
@@ -5110,7 +5287,7 @@ index 3e9cba226..99e0a5494 100644
  					forKey: kDirectDisplayArray];
  			return kCVReturnSuccess;
  		}
-@@ -117,14 +1059,31 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+@@ -117,14 +1079,31 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -5146,16 +5323,26 @@ index 3e9cba226..99e0a5494 100644
  }
  
 diff --git a/src/frameworks/CoreVideo/src/constants.c b/src/frameworks/CoreVideo/src/constants.c
-index 02f06704e..5d4fd4b2d 100644
+index 02f06704..524cc225 100644
 --- a/src/frameworks/CoreVideo/src/constants.c
 +++ b/src/frameworks/CoreVideo/src/constants.c
-@@ -42,6 +42,11 @@ const CFStringRef kCVImageBufferTransferFunction_Linear = CFSTR("Linear");
+@@ -18,6 +18,8 @@ const CFStringRef kCVImageBufferYCbCrMatrix_SMPTE_240M_1995 = CFSTR("SMPTE_240M_
+ const CFStringRef kCVImageBufferColorPrimaries_ITU_R_709_2 = CFSTR("ITU_R_709_2");
+ const CFStringRef kCVImageBufferColorPrimaries_EBU_3213 = CFSTR("EBU_3213");
+ const CFStringRef kCVImageBufferColorPrimaries_SMPTE_C = CFSTR("SMPTE_C");
++const CFStringRef kCVImageBufferColorPrimaries_DCI_P3 = CFSTR("DCI_P3");
++const CFStringRef kCVImageBufferColorPrimaries_P3_D65 = CFSTR("P3_D65");
+ 
+ const CFStringRef kCVImageBufferTransferFunction_ITU_R_709_2 = CFSTR("ITU_R_709_2");
+ const CFStringRef kCVImageBufferTransferFunction_SMPTE_240M_1995 = CFSTR("SMPTE_240M_1995");
+@@ -42,6 +44,12 @@ const CFStringRef kCVImageBufferTransferFunction_Linear = CFSTR("Linear");
  const CFStringRef kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ = CFSTR("SMPTE_ST_2084_PQ");
  const CFStringRef kCVImageBufferTransferFunction_SMPTE_ST_428_1 = CFSTR("SMPTE_ST_428_1");
  const CFStringRef kCVImageBufferTransferFunction_SMPTE_C = CFSTR("SMPTE_C");
 +const CFStringRef kCVImageBufferTransferFunction_sRGB = CFSTR("sRGB");
 +const CFStringRef kCVBufferPropagatedAttachmentsKey = CFSTR("CVBufferPropagatedAttachments");
 +const CFStringRef kCVImageBufferContentLightLevelInfoKey = CFSTR("ContentLightLevelInfo");
++const CFStringRef kCVImageBufferAmbientViewingEnvironmentKey = CFSTR("AmbientViewingEnvironment");
 +const CFStringRef kCVImageBufferMasteringDisplayColorVolumeKey = CFSTR("MasteringDisplayColorVolume");
 +const CFStringRef kCVPixelBufferPoolAllocationThresholdKey = CFSTR("AllocationThreshold");
  
@@ -7748,10 +7935,10 @@ index a700038d7..7bb98bf4b 100644
  #ifdef __cplusplus
  }
 diff --git a/src/frameworks/VideoToolbox/include/VideoToolbox/VTCompressionProperties.h b/src/frameworks/VideoToolbox/include/VideoToolbox/VTCompressionProperties.h
-index 68242ee34..a9108c9c1 100644
+index 68242ee3..eca0fa71 100644
 --- a/src/frameworks/VideoToolbox/include/VideoToolbox/VTCompressionProperties.h
 +++ b/src/frameworks/VideoToolbox/include/VideoToolbox/VTCompressionProperties.h
-@@ -34,4 +34,10 @@ extern CFStringRef const kVTCompressionPropertyKey_ExpectedFrameRate;
+@@ -34,4 +34,13 @@ extern CFStringRef const kVTCompressionPropertyKey_ExpectedFrameRate;
  
  extern CFStringRef const kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder;
  
@@ -7760,13 +7947,16 @@ index 68242ee34..a9108c9c1 100644
 +extern CFStringRef const kVTCompressionPropertyKey_TransferFunction;
 +extern CFStringRef const kVTCompressionPropertyKey_YCbCrMatrix;
 +extern CFStringRef const kVTVideoEncoderSpecification_EnableLowLatencyRateControl;
++extern CFStringRef const kVTCompressionPropertyKey_EncoderID;
++extern CFStringRef const kVTEncodeFrameOptionKey_BaseFrameQP;
++extern CFStringRef const kVTProfileLevel_HEVC_Main_AutoLevel;
 +
  #endif
 diff --git a/src/frameworks/VideoToolbox/src/VTCompressionProperties.c b/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
-index 9e363904e..774557a64 100644
+index 9e363904..4ca65cd7 100644
 --- a/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
 +++ b/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
-@@ -30,3 +30,9 @@ const CFStringRef kVTCompressionPropertyKey_MaxFrameDelayCount = CFSTR("MaxFrame
+@@ -30,3 +30,12 @@ const CFStringRef kVTCompressionPropertyKey_MaxFrameDelayCount = CFSTR("MaxFrame
  const CFStringRef kVTCompressionPropertyKey_ExpectedFrameRate = CFSTR("ExpectedFrameRate");
  
  const CFStringRef kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = CFSTR("RequireHardwareAcceleratedVideoEncoder");
@@ -7776,6 +7966,9 @@ index 9e363904e..774557a64 100644
 +const CFStringRef kVTCompressionPropertyKey_TransferFunction = CFSTR("TransferFunction");
 +const CFStringRef kVTCompressionPropertyKey_YCbCrMatrix = CFSTR("YCbCrMatrix");
 +const CFStringRef kVTVideoEncoderSpecification_EnableLowLatencyRateControl = CFSTR("EnableLowLatencyRateControl");
++const CFStringRef kVTCompressionPropertyKey_EncoderID = CFSTR("EncoderID");
++const CFStringRef kVTEncodeFrameOptionKey_BaseFrameQP = CFSTR("BaseFrameQP");
++const CFStringRef kVTProfileLevel_HEVC_Main_AutoLevel = CFSTR("HEVC_Main_AutoLevel");
 diff --git a/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h b/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h
 index 62d827aa2..15383581b 100644
 --- a/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h
@@ -7837,7 +8030,7 @@ index 9a489b386..9fe56cc3f 100644
  
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
 diff --git a/src/libsandbox/src/sandbox.c b/src/libsandbox/src/sandbox.c
-index 5af5298aa..fb59ee5d1 100644
+index 5af5298a..88543a3c 100644
 --- a/src/libsandbox/src/sandbox.c
 +++ b/src/libsandbox/src/sandbox.c
 @@ -21,6 +21,8 @@
@@ -7849,52 +8042,45 @@ index 5af5298aa..fb59ee5d1 100644
  
  static int verbose = 0;
  
-@@ -29,63 +31,105 @@ static void initme(void) {
+@@ -29,39 +31,114 @@ static void initme(void) {
      verbose = getenv("STUB_VERBOSE") != NULL;
  }
  
 -void* sandbox_apply(void)
 +/* darling-lol: SeatbeltExtensions token family. Chromium's seatbelt client
 + * issues/consumes/releases these around sandboxed child setup; without
-+ * enforcement we hand out dummy nonzero tokens and accept everything.
++ * enforcement we hand out dummy tokens and accept everything.
 + * (These live in libsandbox.dylib on macOS, hence here and not in
 + * libsystem_sandbox.) */
-+static int64_t sandbox_extension_next_token = 1;
-+
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags)
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
  {
 -    if (verbose) puts("STUB: sandbox_apply called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_extension_issue_file called");
-+    (void)path; (void)flags;
-+    return sandbox_extension_next_token++;
++    return strdup("darling-sandbox-stub");
  }
  
 -void* sandbox_apply_container(void)
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags)
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags)
  {
 -    if (verbose) puts("STUB: sandbox_apply_container called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_extension_issue_mach called");
-+    (void)name; (void)flags;
-+    return sandbox_extension_next_token++;
++    return strdup("darling-sandbox-stub");
  }
  
 -void* sandbox_compile_entitlements(void)
-+int sandbox_extension_consume(int64_t token)
++int64_t sandbox_extension_consume(const char *extension_token)
  {
 -    if (verbose) puts("STUB: sandbox_compile_entitlements called");
 -    return NULL;
 +    if (verbose) puts("STUB: sandbox_extension_consume called");
-+    (void)token;
-+    return 0;
- }
- 
--void* sandbox_compile_file(void)
-+int sandbox_extension_release(int64_t token)
++    return extension_token != NULL ? 1 : -1;
++}
++
++int sandbox_extension_release(int64_t extension_handle)
 +{
 +    if (verbose) puts("STUB: sandbox_extension_release called");
-+    (void)token;
 +    return 0;
 +}
 +
@@ -7902,60 +8088,82 @@ index 5af5298aa..fb59ee5d1 100644
 + * "compiling" a profile yields a dummy handle and applying succeeds.
 + * Signatures match Apple's (the old stubs had wrong shapes). */
 +
-+void* sandbox_compile_string(const char *profile, char **errorbuf)
++struct darling_sandbox_profile {
++    char* builtin;
++    unsigned char* data;
++    size_t size;
++};
++
++static const unsigned char darling_sandbox_bytecode[] = "darling-sandbox-stub";
++
++static void* darling_sandbox_profile_new(void)
++{
++    struct darling_sandbox_profile* profile = calloc(1, sizeof(*profile));
++    if (profile == NULL)
++        return NULL;
++    profile->size = sizeof(darling_sandbox_bytecode) - 1;
++    profile->data = malloc(profile->size);
++    if (profile->data == NULL) {
++        free(profile);
++        return NULL;
++    }
++    memcpy(profile->data, darling_sandbox_bytecode, profile->size);
++    return profile;
+ }
+ 
+-void* sandbox_compile_file(void)
++void* sandbox_compile_string(const char *profile, void *params, char **errorbuf)
 +{
 +    if (verbose) puts("STUB: sandbox_compile_string called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)profile;
-+    return strdup("darling-sandbox-stub");
++    (void)profile; (void)params;
++    return darling_sandbox_profile_new();
 +}
 +
-+void* sandbox_compile_file(const char *path, char **errorbuf)
++void* sandbox_compile_file(const char *path, void *params, char **errorbuf)
  {
      if (verbose) puts("STUB: sandbox_compile_file called");
 -    return NULL;
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)path;
-+    return strdup("darling-sandbox-stub");
++    (void)path; (void)params;
++    return darling_sandbox_profile_new();
  }
  
 -void* sandbox_compile_named(void)
-+void* sandbox_compile_named(const char *name, char **errorbuf)
++void* sandbox_compile_named(const char *name, void *params, char **errorbuf)
  {
      if (verbose) puts("STUB: sandbox_compile_named called");
 -    return NULL;
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)name;
-+    return strdup("darling-sandbox-stub");
++    (void)name; (void)params;
++    return darling_sandbox_profile_new();
  }
  
 -void* sandbox_compile_string(void)
-+void* sandbox_compile_entitlements(void *entitlements, char **errorbuf)
++void* sandbox_compile_entitlements(void *entitlements, void *params, char **errorbuf)
  {
 -    if (verbose) puts("STUB: sandbox_compile_string called");
--    return NULL;
 +    if (verbose) puts("STUB: sandbox_compile_entitlements called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)entitlements;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_container_paths_iterate_items(void)
++    (void)entitlements; (void)params;
++    return darling_sandbox_profile_new();
++}
++
 +int sandbox_apply(void *handle)
- {
--    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
--    return NULL;
++{
 +    if (verbose) puts("STUB: sandbox_apply called");
 +    (void)handle;
 +    return 0;
- }
- 
--void* sandbox_create_params(void)
++}
++
 +void sandbox_free_profile(void *handle)
- {
--    if (verbose) puts("STUB: sandbox_create_params called");
++{
++    struct darling_sandbox_profile* profile = handle;
 +    if (verbose) puts("STUB: sandbox_free_profile called");
-+    free(handle);
++    if (profile == NULL)
++        return;
++    free(profile->data);
++    free(profile);
 +}
 +
 +void* sandbox_apply_container(void)
@@ -7964,22 +8172,24 @@ index 5af5298aa..fb59ee5d1 100644
      return NULL;
  }
  
+@@ -77,16 +154,9 @@ void* sandbox_create_params(void)
+     return NULL;
+ }
+ 
 -void* sandbox_free_params(void)
-+void* sandbox_container_paths_iterate_items(void)
++void sandbox_free_params(void *params)
  {
--    if (verbose) puts("STUB: sandbox_free_params called");
-+    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
-     return NULL;
- }
- 
+     if (verbose) puts("STUB: sandbox_free_params called");
+-    return NULL;
+-}
+-
 -void* sandbox_free_profile(void)
-+void* sandbox_create_params(void)
- {
+-{
 -    if (verbose) puts("STUB: sandbox_free_profile called");
-+    if (verbose) puts("STUB: sandbox_create_params called");
-     return NULL;
+-    return NULL;
  }
  
+ void* sandbox_inspect_pid(void)
 diff --git a/src/libsystem_coreservices/dirhelper.c b/src/libsystem_coreservices/dirhelper.c
 index f22f8213d..e7fbdc92e 100644
 --- a/src/libsystem_coreservices/dirhelper.c
@@ -8028,7 +8238,7 @@ index f22f8213d..e7fbdc92e 100644
  				snprintf(p, limit, "%s/.cache/%s%s", home, dir_suffix ? dir_suffix : "", dir_suffix ? "/" : "");
  			else
 diff --git a/src/sandbox/sandbox.c b/src/sandbox/sandbox.c
-index f48cceb9e..9afa967db 100644
+index f48cceb9..1504a600 100644
 --- a/src/sandbox/sandbox.c
 +++ b/src/sandbox/sandbox.c
 @@ -10,7 +10,13 @@ const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT = SANDBOX_FILTER_NONE;
@@ -8085,7 +8295,7 @@ index f48cceb9e..9afa967db 100644
  	return 0;
  }
  
-@@ -84,42 +108,56 @@ int sandbox_unsuspend(void)
+@@ -84,42 +108,76 @@ int sandbox_unsuspend(void)
  
  int sandbox_issue_extension(const char *path, char **ext_token)
  {
@@ -8123,6 +8333,26 @@ index f48cceb9e..9afa967db 100644
 +		*ext_token = strdup("darling-sandbox-stub");
 +	}
 +	return 0;
++}
++
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
++{
++	return strdup("darling-sandbox-stub");
++}
++
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags)
++{
++	return strdup("darling-sandbox-stub");
++}
++
++int64_t sandbox_extension_consume(const char *extension_token)
++{
++	return extension_token != NULL ? 1 : -1;
++}
++
++int sandbox_extension_release(int64_t extension_handle)
++{
++	return 0;
  }
  
  int sandbox_consume_extension(const char *path, const char *ext_token)
@@ -8150,7 +8380,7 @@ index f48cceb9e..9afa967db 100644
  }
  
  int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
-@@ -129,7 +167,9 @@ int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
+@@ -129,7 +187,9 @@ int sandbox_container_path_for_pid(pid_t pid, char *buffer, size_t bufsize)
  
  int sandbox_wakeup_daemon(char **errorbuf)
  {
@@ -8162,7 +8392,7 @@ index f48cceb9e..9afa967db 100644
  }
  
 diff --git a/src/sandbox/sandbox.h b/src/sandbox/sandbox.h
-index 6fa2d088c..655554284 100644
+index 6fa2d088..a456ce7c 100644
 --- a/src/sandbox/sandbox.h
 +++ b/src/sandbox/sandbox.h
 @@ -161,6 +161,14 @@ int sandbox_note(const char *note);
@@ -8172,10 +8402,10 @@ index 6fa2d088c..655554284 100644
 +/* darling-lol: SeatbeltExtensions token family (used by Chromium).
 + * No enforcement exists, so issue dummy nonzero tokens and accept
 + * consume/release as no-ops. */
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags);
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags);
-+int sandbox_extension_consume(int64_t token);
-+int sandbox_extension_release(int64_t token);
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags);
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags);
++int64_t sandbox_extension_consume(const char *extension_token);
++int sandbox_extension_release(int64_t extension_handle);
 +
  int sandbox_issue_extension(const char *path, char **ext_token);
  int sandbox_issue_fs_extension(const char *path, uint64_t flags, char **ext_token);
@@ -11465,3 +11695,3257 @@ index a68739ff..5c8eb836 100644
  }
  
  size_t
+diff --git a/src/libm/Source/Intel/xmm_log.c b/src/libm/Source/Intel/xmm_log.c
+index 336dfc91..eed26d7b 100644
+--- a/src/libm/Source/Intel/xmm_log.c
++++ b/src/libm/Source/Intel/xmm_log.c
+@@ -421,6 +421,9 @@ double log2( double x )
+ 	
+ 	// mainline: 0 < x < inf
+ 	if( _mm_istrue_sd( _mm_and_pd( xGTzero, xLTinf ) ) ) {
++		union { double d; unsigned long long u; } bits = { x };
++		if( (bits.u & 0x000FFFFFFFFFFFFFULL) == 0 && (bits.u >> 52) != 0 )
++			return (double)((int)(bits.u >> 52) - 1023);
+ 		xd = _xlog(xd);
+ 		xd = _mm_mul_sdm(xd, &conversion);
+ 	}
+diff --git a/src/CoreAudio/include/CoreAudio/CoreAudio.h b/src/CoreAudio/include/CoreAudio/CoreAudio.h
+index fc4aad08..c9644a23 100644
+--- a/src/CoreAudio/include/CoreAudio/CoreAudio.h
++++ b/src/CoreAudio/include/CoreAudio/CoreAudio.h
+@@ -3,3 +3,7 @@
+ #include <CoreAudio/AudioHardwareBase.h>
+ #include <CoreAudio/HostTime.h>
+ 
++
++#ifdef __OBJC__
++#import <CoreAudio/CATapDescription.h>
++#endif
+diff --git a/src/frameworks/AVFAudio/CMakeLists.txt b/src/frameworks/AVFAudio/CMakeLists.txt
+index 600fb28c..5c41873f 100644
+--- a/src/frameworks/AVFAudio/CMakeLists.txt
++++ b/src/frameworks/AVFAudio/CMakeLists.txt
+@@ -18,6 +18,9 @@ add_framework(AVFAudio
+ 	VERSION ${FRAMEWORK_VERSION}
+ 
+ 	SOURCES
++		src/AVSpeechSynthesisVoice.m
++		src/AVSpeechSynthesizer.m
++		src/AVSpeechUtterance.m
+ 		src/AVFAudio.m
+         src/AVAudioIONode.m
+         src/AVAudioOutputNode.m
+diff --git a/src/frameworks/AVFAudio/include/AVFAudio/AVFAudio.h b/src/frameworks/AVFAudio/include/AVFAudio/AVFAudio.h
+index 7bd052bd..126ed3d6 100644
+--- a/src/frameworks/AVFAudio/include/AVFAudio/AVFAudio.h
++++ b/src/frameworks/AVFAudio/include/AVFAudio/AVFAudio.h
+@@ -22,6 +22,9 @@
+ #define _AVFAudio_H_
+ 
+ #import <Foundation/Foundation.h>
++#import <AVFAudio/AVSpeechSynthesisVoice.h>
++#import <AVFAudio/AVSpeechSynthesizer.h>
++#import <AVFAudio/AVSpeechUtterance.h>
+ 
+ #import <AVFAudio/AVAudio3DMixing.h>
+ #import <AVFAudio/AVAudioMixing.h>
+diff --git a/src/frameworks/AVFoundation/CMakeLists.txt b/src/frameworks/AVFoundation/CMakeLists.txt
+index 34b6df2f..5f25cfc3 100644
+--- a/src/frameworks/AVFoundation/CMakeLists.txt
++++ b/src/frameworks/AVFoundation/CMakeLists.txt
+@@ -18,6 +18,9 @@ add_framework(AVFoundation
+     VERSION ${FRAMEWORK_VERSION}
+ 
+     SOURCES
++        src/AVCaptureDeviceDiscoverySession.m
++        src/AVCapturePhotoOutput.m
++        src/AVCapturePhotoSettings.m
+         src/AVFoundation.m
+         src/AVPlayerLayerIntermediateLayer.m
+         src/AVPlayerLayerInternal.m
+diff --git a/src/frameworks/AVFoundation/constants.m b/src/frameworks/AVFoundation/constants.m
+index d2ec3e7d..fe4565b3 100644
+--- a/src/frameworks/AVFoundation/constants.m
++++ b/src/frameworks/AVFoundation/constants.m
+@@ -59,6 +59,7 @@ NSString *const AVVideoCodecH264 = @"avc1";
+ NSString *const AVVideoCodecHEVC = @"hvc1";
+ NSString *const AVVideoCodecJPEG = @"jpeg";
+ NSString *const AVVideoCodecKey = @"AVVideoCodecKey";
++NSString *const AVVideoCodecTypeJPEG = @"jpeg";
+ NSString *const AVVideoCompressionPropertiesKey = @"AVVideoCompressionPropertiesKey";
+ NSString *const AVVideoHeightKey = @"AVVideoHeightKey";
+ NSString *const AVVideoMaxKeyFrameIntervalKey = @"MaxKeyFrameInterval";
+@@ -100,3 +101,6 @@ const AVMetadataKey AVMetadataCommonKeyDescription = @"description";
+ const AVMetadataKey AVMetadataCommonKeyTitle = @"title";
+ 
+ const AVMetadataKey AVMetadataID3MetadataKeyUserURL = @"WXXX";
++
++NSString *const AVCaptureDeviceTypeBuiltInWideAngleCamera = @"AVCaptureDeviceTypeBuiltInWideAngleCamera";
++NSString *const AVCaptureDeviceTypeExternalUnknown = @"AVCaptureDeviceTypeExternalUnknown";
+diff --git a/src/frameworks/AVFoundation/include/AVFoundation/AVFoundation.h b/src/frameworks/AVFoundation/include/AVFoundation/AVFoundation.h
+index 3ca37569..f9694e5f 100644
+--- a/src/frameworks/AVFoundation/include/AVFoundation/AVFoundation.h
++++ b/src/frameworks/AVFoundation/include/AVFoundation/AVFoundation.h
+@@ -22,6 +22,9 @@
+ #define _AVFoundation_H_
+ 
+ #import <Foundation/Foundation.h>
++#import <AVFoundation/AVCaptureDeviceDiscoverySession.h>
++#import <AVFoundation/AVCapturePhotoOutput.h>
++#import <AVFoundation/AVCapturePhotoSettings.h>
+ 
+ #import <AVFoundation/AVAssetReaderOutputAdaptor.h>
+ #import <AVFoundation/AVAssetResourceLoaderRequest.h>
+diff --git a/src/frameworks/AVFoundation/include/AVFoundation/AVVideoSettings.h b/src/frameworks/AVFoundation/include/AVFoundation/AVVideoSettings.h
+index 68e8f781..285017bd 100644
+--- a/src/frameworks/AVFoundation/include/AVFoundation/AVVideoSettings.h
++++ b/src/frameworks/AVFoundation/include/AVFoundation/AVVideoSettings.h
+@@ -7,6 +7,7 @@ extern NSString *const AVVideoCodecH264;
+ extern NSString *const AVVideoCodecHEVC;
+ extern NSString *const AVVideoCodecJPEG;
+ extern NSString *const AVVideoCodecKey;
++extern NSString *const AVVideoCodecTypeJPEG;
+ extern NSString *const AVVideoCompressionPropertiesKey;
+ extern NSString *const AVVideoHeightKey;
+ extern NSString *const AVVideoWidthKey;
+diff --git a/src/frameworks/AuthenticationServices/CMakeLists.txt b/src/frameworks/AuthenticationServices/CMakeLists.txt
+index a30692db..b10c253f 100644
+--- a/src/frameworks/AuthenticationServices/CMakeLists.txt
++++ b/src/frameworks/AuthenticationServices/CMakeLists.txt
+@@ -19,6 +19,7 @@ add_framework(AuthenticationServices
+ 	VERSION ${FRAMEWORK_VERSION}
+ 
+ 	SOURCES
++		src/constants.m
+ 		src/AKAuthorizationCredential+AuthenticationServicesExtras.m
+ 		src/ASAuthorization.m
+ 		src/ASAuthorizationAppleIDButton.m
+diff --git a/src/frameworks/AuthenticationServices/include/AuthenticationServices/AuthenticationServices.h b/src/frameworks/AuthenticationServices/include/AuthenticationServices/AuthenticationServices.h
+index 5f34d7bd..76270a27 100644
+--- a/src/frameworks/AuthenticationServices/include/AuthenticationServices/AuthenticationServices.h
++++ b/src/frameworks/AuthenticationServices/include/AuthenticationServices/AuthenticationServices.h
+@@ -167,5 +167,11 @@
+ #import <AuthenticationServices/_SafariLaunchAgentProtocol.h>
+ #import <AuthenticationServices/_WKWebAuthenticationPanelDelegate.h>
+ 
++FOUNDATION_EXPORT NSString *const ASAuthorizationErrorDomain;
++FOUNDATION_EXPORT NSString *const ASAuthorizationPublicKeyCredentialAttestationKindNone;
++FOUNDATION_EXPORT NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceDiscouraged;
++FOUNDATION_EXPORT NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferencePreferred;
++FOUNDATION_EXPORT NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceRequired;
++
+ #endif
+ 
+diff --git a/src/frameworks/CMakeLists.txt b/src/frameworks/CMakeLists.txt
+index ea2f9c07..9ee6a881 100644
+--- a/src/frameworks/CMakeLists.txt
++++ b/src/frameworks/CMakeLists.txt
+@@ -84,6 +84,7 @@ endif()
+ if (COMPONENT_gui_stubs)
+ 	set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "gui_stubs")
+ 
++	add_subdirectory(Accessibility)
+ 	add_subdirectory(AddressBook)
+ 	add_subdirectory(AGL)
+ 	add_subdirectory(AuthenticationServices)
+@@ -96,9 +97,11 @@ if (COMPONENT_gui_stubs)
+ 	add_subdirectory(ContactsUI)
+ 	add_subdirectory(CoreAudioKit)
+ 	add_subdirectory(CoreBluetooth)
++	add_subdirectory(CoreHaptics)
+ 	add_subdirectory(CoreLocation)
+ 	add_subdirectory(CoreMIDI)
+ 	add_subdirectory(CoreMediaIO)
++	add_subdirectory(CoreML)
+ 	add_subdirectory(CoreTelephony)
+ 	add_subdirectory(CoreWLAN)
+ 	add_subdirectory(DiscRecordingUI)
+@@ -115,6 +118,7 @@ if (COMPONENT_gui_stubs)
+ 	add_subdirectory(IOBluetoothUI)
+ 	add_subdirectory(MapKit)
+ 	add_subdirectory(MediaAccessibility)
++	add_subdirectory(MediaPlayer)
+ 	add_subdirectory(MediaToolbox)
+     add_subdirectory(Message)
+ 	add_subdirectory(ModelIO)
+diff --git a/src/frameworks/Carbon/HIToolbox/include/HIToolbox/CarbonEventsCore.h b/src/frameworks/Carbon/HIToolbox/include/HIToolbox/CarbonEventsCore.h
+index 039a6bb2..4f875d40 100644
+--- a/src/frameworks/Carbon/HIToolbox/include/HIToolbox/CarbonEventsCore.h
++++ b/src/frameworks/Carbon/HIToolbox/include/HIToolbox/CarbonEventsCore.h
+@@ -50,6 +50,7 @@ OSStatus InstallEventHandler(EventTargetRef a, EventHandlerUPP b, ItemCount c, c
+ 
+ 
+ EventHandlerUPP NewEventHandlerUPP(EventHandlerProcPtr a);
++OSStatus AEProcessEvent(EventRef a);
+ OSStatus PostEventToQueue(EventQueueRef a, EventRef b, EventPriority c);
+ 
+ OSStatus ReceiveNextEvent(ItemCount a, const EventTypeSpec* b, EventTimeout c, Boolean d, EventRef* e);
+diff --git a/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c b/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c
+index 2bebb92c..50c10e1c 100644
+--- a/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c
++++ b/src/frameworks/Carbon/HIToolbox/src/CarbonEventsCore.c
+@@ -77,6 +77,12 @@ EventHandlerUPP NewEventHandlerUPP(EventHandlerProcPtr a)
+ 	return (EventHandlerUPP)0;
+ }
+ 
++OSStatus AEProcessEvent(EventRef a)
++{
++    if (verbose) puts("STUB: AEProcessEvent called");
++	return -1708; // errAEEventNotHandled
++}
++
+ OSStatus PostEventToQueue(EventQueueRef a, EventRef b, EventPriority c)
+ {
+     if (verbose) puts("STUB: PostEventToQueue called");
+diff --git a/src/frameworks/CoreMedia/include/CoreMedia/CMSampleBuffer.h b/src/frameworks/CoreMedia/include/CoreMedia/CMSampleBuffer.h
+index 9ccdafef..c2073669 100644
+--- a/src/frameworks/CoreMedia/include/CoreMedia/CMSampleBuffer.h
++++ b/src/frameworks/CoreMedia/include/CoreMedia/CMSampleBuffer.h
+@@ -23,5 +23,6 @@
+ #include <CoreFoundation/CoreFoundation.h>
+ 
+ extern const CFStringRef kCMSampleAttachmentKey_DisplayImmediately;
++extern const CFStringRef kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding;
+ 
+ #endif
+diff --git a/src/frameworks/CoreMedia/src/CMSampleBuffer.c b/src/frameworks/CoreMedia/src/CMSampleBuffer.c
+index 5f4773c0..8eb24082 100644
+--- a/src/frameworks/CoreMedia/src/CMSampleBuffer.c
++++ b/src/frameworks/CoreMedia/src/CMSampleBuffer.c
+@@ -20,3 +20,4 @@
+ #include <CoreMedia/CMSampleBuffer.h>
+ 
+ const CFStringRef kCMSampleAttachmentKey_DisplayImmediately = CFSTR("DisplayImmediately");
++const CFStringRef kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding = CFSTR("ResetDecoderBeforeDecoding");
+diff --git a/src/frameworks/CoreServices/include/AE/AE.h b/src/frameworks/CoreServices/include/AE/AE.h
+index ef6076be..3347013b 100644
+--- a/src/frameworks/CoreServices/include/AE/AE.h
++++ b/src/frameworks/CoreServices/include/AE/AE.h
+@@ -6,5 +6,9 @@
+ 
+ OSErr AECreateDesc(DescType typeCode, const void *dataPtr, Size dataSize, AEDesc *result);
+ OSErr AEDisposeDesc(AEDesc *theAEDesc);
++OSErr AECreateAppleEvent(AEEventClass theAEEventClass, AEEventID theAEEventID, const AEAddressDesc *target, AEReturnID returnID, AETransactionID transactionID, AppleEvent *result);
++OSErr AEGetParamDesc(const AppleEvent *theAppleEvent, AEKeyword theAEKeyword, DescType desiredType, AEDesc *result);
++OSErr AEPutParamDesc(AppleEvent *theAppleEvent, AEKeyword theAEKeyword, const AEDesc *theAEDesc);
++OSStatus AESendMessage(const AppleEvent *event, AppleEvent *reply, AESendMode sendMode, long timeOutInTicks);
+ 
+ #endif
+diff --git a/src/frameworks/CoreServices/include/AE/AppleEvents.h b/src/frameworks/CoreServices/include/AE/AppleEvents.h
+index a3ce3edc..cb2286ff 100644
+--- a/src/frameworks/CoreServices/include/AE/AppleEvents.h
++++ b/src/frameworks/CoreServices/include/AE/AppleEvents.h
+@@ -19,5 +19,6 @@ enum : DescType {
+ };
+ 
+ OSErr AEInstallEventHandler(AEEventClass theAEEventClass, AEEventID theAEEventID, AEEventHandlerUPP handler, SRefCon handlerRefcon, Boolean isSysHandler);
++OSErr AERemoveEventHandler(AEEventClass theAEEventClass, AEEventID theAEEventID, AEEventHandlerUPP handler, Boolean isSysHandler);
+ 
+ #endif
+diff --git a/src/frameworks/CoreServices/include/CoreServices/CoreServicesPriv.h b/src/frameworks/CoreServices/include/CoreServices/CoreServicesPriv.h
+index 7ec34d6c..6ceb5a14 100644
+--- a/src/frameworks/CoreServices/include/CoreServices/CoreServicesPriv.h
++++ b/src/frameworks/CoreServices/include/CoreServices/CoreServicesPriv.h
+@@ -10,6 +10,7 @@
+ CF_EXTERN_C_BEGIN
+ 
+ Boolean _CSCheckFix(CFStringRef str);
++void _CSCheckFixDisable(void);
+ 
+ // Also assumed
+ #define QTN_FLAG_ASSESSMENT_OK 1
+diff --git a/src/frameworks/CoreServices/include/FSEvents/FSEvents.h b/src/frameworks/CoreServices/include/FSEvents/FSEvents.h
+index cada65c7..b7e221ff 100644
+--- a/src/frameworks/CoreServices/include/FSEvents/FSEvents.h
++++ b/src/frameworks/CoreServices/include/FSEvents/FSEvents.h
+@@ -112,6 +112,7 @@ extern FSEventStreamRef FSEventStreamCreateRelativeToDevice(
+ 
+ extern CF_RETURNS_RETAINED CFArrayRef FSEventStreamCopyPathsBeingWatched(ConstFSEventStreamRef streamRef);
+ 
++extern FSEventStreamEventId FSEventsGetCurrentEventId(void);
+ extern FSEventStreamEventId FSEventStreamGetLatestEventId(ConstFSEventStreamRef streamRef);
+ 
+ extern void FSEventStreamInvalidate(FSEventStreamRef streamRef);
+diff --git a/src/frameworks/CoreServices/include/SharedFileList/LSSharedFileList.h b/src/frameworks/CoreServices/include/SharedFileList/LSSharedFileList.h
+index 724166f8..1696e982 100644
+--- a/src/frameworks/CoreServices/include/SharedFileList/LSSharedFileList.h
++++ b/src/frameworks/CoreServices/include/SharedFileList/LSSharedFileList.h
+@@ -22,8 +22,18 @@
+ 
+ #include <CoreFoundation/CoreFoundation.h>
+ 
++typedef struct OpaqueLSSharedFileListRef *LSSharedFileListRef;
+ typedef struct OpaqueLSSharedFileListItemRef *LSSharedFileListItemRef;
++typedef UInt32 LSSharedFileListResolutionFlags;
++struct OpaqueIconRef;
+ 
+ extern LSSharedFileListItemRef kLSSharedFileListItemLast;
+ 
++LSSharedFileListRef LSSharedFileListCreate(CFAllocatorRef inAllocator, CFStringRef inListType, CFTypeRef listOptions);
++CFArrayRef LSSharedFileListCopySnapshot(LSSharedFileListRef inList, UInt32 *outSnapshotSeed);
++LSSharedFileListItemRef LSSharedFileListInsertItemURL(LSSharedFileListRef inList, LSSharedFileListItemRef insertAfterThisItem, CFStringRef inDisplayName, struct OpaqueIconRef *inIconRef, CFURLRef inURL, CFDictionaryRef inPropertiesToSet, CFArrayRef inPropertiesToClear);
++OSStatus LSSharedFileListItemRemove(LSSharedFileListRef inList, LSSharedFileListItemRef inItem);
++CFTypeRef LSSharedFileListItemCopyProperty(LSSharedFileListItemRef inItem, CFStringRef inPropertyName);
++CFURLRef LSSharedFileListItemCopyResolvedURL(LSSharedFileListItemRef inItem, LSSharedFileListResolutionFlags inFlags, CFErrorRef *outError);
++
+ #endif
+diff --git a/src/frameworks/CoreServices/src/AE/stub.c b/src/frameworks/CoreServices/src/AE/stub.c
+index f01373ea..8c2e6f6b 100644
+--- a/src/frameworks/CoreServices/src/AE/stub.c
++++ b/src/frameworks/CoreServices/src/AE/stub.c
+@@ -1,4 +1,5 @@
+ #include <AE/AE.h>
++#include <CarbonCore/MacErrors.h>
+ 
+ static int verbose = 0;
+ __attribute__((constructor)) static void initme(void) {
+@@ -25,3 +26,62 @@ OSErr AEInstallEventHandler(
+     if (verbose) puts("STUB: AEInstallEventHandler called");
+     return noErr;
+ }
++
++OSErr AECreateAppleEvent(
++  AEEventClass theAEEventClass,
++  AEEventID theAEEventID,
++  const AEAddressDesc *target,
++  AEReturnID returnID,
++  AETransactionID transactionID,
++  AppleEvent *result
++) {
++    if (verbose) puts("STUB: AECreateAppleEvent called");
++    if (result) {
++        result->descriptorType = 'null';
++        result->dataHandle = NULL;
++    }
++    return errAEEventNotHandled;
++}
++
++OSErr AEGetParamDesc(
++  const AppleEvent *theAppleEvent,
++  AEKeyword theAEKeyword,
++  DescType desiredType,
++  AEDesc *result
++) {
++    if (verbose) puts("STUB: AEGetParamDesc called");
++    if (result) {
++        result->descriptorType = 'null';
++        result->dataHandle = NULL;
++    }
++    return errAEDescNotFound;
++}
++
++OSErr AEPutParamDesc(
++  AppleEvent *theAppleEvent,
++  AEKeyword theAEKeyword,
++  const AEDesc *theAEDesc
++) {
++    if (verbose) puts("STUB: AEPutParamDesc called");
++    return errAEEventNotHandled;
++}
++
++OSErr AERemoveEventHandler(
++  AEEventClass theAEEventClass,
++  AEEventID theAEEventID,
++  AEEventHandlerUPP handler,
++  Boolean isSysHandler
++) {
++    if (verbose) puts("STUB: AERemoveEventHandler called");
++    return noErr;
++}
++
++OSStatus AESendMessage(
++  const AppleEvent *event,
++  AppleEvent *reply,
++  AESendMode sendMode,
++  long timeOutInTicks
++) {
++    if (verbose) puts("STUB: AESendMessage called");
++    return errAEEventNotHandled;
++}
+diff --git a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+index 5883ade5..381ac62d 100644
+--- a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
++++ b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+@@ -9,3 +9,7 @@ Boolean _CSCheckFix(CFStringRef str)
+ 	return 0;
+ }
+ 
++void _CSCheckFixDisable(void)
++{
++}
++
+diff --git a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+index 44c8ac7a..4fd6c195 100644
+--- a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
++++ b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+@@ -57,6 +57,11 @@ CFArrayRef FSEventStreamCopyPathsBeingWatched(ConstFSEventStreamRef streamRef)
+ 	return (CFArrayRef) [impl copyPathsToWatch];
+ }
+ 
++FSEventStreamEventId FSEventsGetCurrentEventId(void)
++{
++	return 0;
++}
++
+ FSEventStreamEventId FSEventStreamGetLatestEventId(ConstFSEventStreamRef streamRef)
+ {
+ 	return [((FSEventsImpl*) streamRef) lastEventID];
+diff --git a/src/frameworks/CoreServices/src/SharedFileList/CMakeLists.txt b/src/frameworks/CoreServices/src/SharedFileList/CMakeLists.txt
+index 68f71dec..b658a383 100644
+--- a/src/frameworks/CoreServices/src/SharedFileList/CMakeLists.txt
++++ b/src/frameworks/CoreServices/src/SharedFileList/CMakeLists.txt
+@@ -14,6 +14,7 @@ add_framework(SharedFileList
+ 
+ 	SOURCES
+ 		constants.c
++		LSSharedFileList.c
+ 
+ 	DEPENDENCIES
+ 		CoreFoundation
+diff --git a/src/frameworks/CoreVideo/CMakeLists.txt b/src/frameworks/CoreVideo/CMakeLists.txt
+index 04827eb3..d4f05133 100644
+--- a/src/frameworks/CoreVideo/CMakeLists.txt
++++ b/src/frameworks/CoreVideo/CMakeLists.txt
+@@ -22,6 +22,7 @@ add_framework(CoreVideo
+     SOURCES
+ 	    src/constants.c
+ 	    src/stubs.c
++	    src/CVBuffer.c
+         src/CVDisplayLink.mm
+ 
+     DEPENDENCIES
+diff --git a/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBuffer.h b/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBuffer.h
+index 620a0a79..b4d5159c 100644
+--- a/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBuffer.h
++++ b/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBuffer.h
+@@ -88,6 +88,12 @@ typedef CVImageBufferRef CVPixelBufferRef;
+ typedef void (*CVPixelBufferReleaseBytesCallback)(void *releaseRefCon, const void *baseAddress);
+ 
+ // TODO: This header file is incomplete
++CFTypeID CVPixelBufferGetTypeID(void);
++size_t CVPixelBufferGetBytesPerRow(CVPixelBufferRef pixelBuffer);
++size_t CVPixelBufferGetDataSize(CVPixelBufferRef pixelBuffer);
++size_t CVPixelBufferGetHeightOfPlane(CVPixelBufferRef pixelBuffer, size_t planeIndex);
++OSType CVPixelBufferGetPixelFormatType(CVPixelBufferRef pixelBuffer);
++Boolean CVPixelBufferIsPlanar(CVPixelBufferRef pixelBuffer);
+ CVReturn CVPixelBufferCreateWithBytes(CFAllocatorRef allocator, size_t width, size_t height, OSType pixelFormatType, void *baseAddress, size_t bytesPerRow, CVPixelBufferReleaseBytesCallback releaseCallback, void *releaseRefCon, CFDictionaryRef pixelBufferAttributes, CVPixelBufferRef  _Nullable *pixelBufferOut);
+ 
+ __END_DECLS
+diff --git a/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferIOSurface.h b/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferIOSurface.h
+index 96741685..69bd34c4 100644
+--- a/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferIOSurface.h
++++ b/src/frameworks/CoreVideo/include/CoreVideo/CVPixelBufferIOSurface.h
+@@ -27,6 +27,8 @@ __BEGIN_DECLS
+ 
+ extern const CFStringRef kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey;
+ 
++CVReturn CVPixelBufferCreateWithIOSurface(CFAllocatorRef allocator, struct __IOSurface *surface, CFDictionaryRef pixelBufferAttributes, CVPixelBufferRef *pixelBufferOut);
++
+ __END_DECLS
+ 
+ #endif
+diff --git a/src/frameworks/GameController/CMakeLists.txt b/src/frameworks/GameController/CMakeLists.txt
+index fb328fc1..afa257b8 100644
+--- a/src/frameworks/GameController/CMakeLists.txt
++++ b/src/frameworks/GameController/CMakeLists.txt
+@@ -18,6 +18,10 @@ add_framework(GameController
+     VERSION ${FRAMEWORK_VERSION}
+ 
+     SOURCES
++        src/GCDualSenseGamepad.m
++        src/GCDualShockGamepad.m
++        src/GCXboxGamepad.m
++        src/constants.m
+         src/GameController.m
+         src/_GCCControllerHIDServiceInfo.m
+         src/_GCControllerManager.m
+diff --git a/src/frameworks/GameController/include/GameController/GameController.h b/src/frameworks/GameController/include/GameController/GameController.h
+index faa5d56e..b20f0d5c 100644
+--- a/src/frameworks/GameController/include/GameController/GameController.h
++++ b/src/frameworks/GameController/include/GameController/GameController.h
+@@ -22,6 +22,9 @@
+ #define _GameController_H_
+ 
+ #import <Foundation/Foundation.h>
++#import <GameController/GCDualSenseGamepad.h>
++#import <GameController/GCDualShockGamepad.h>
++#import <GameController/GCXboxGamepad.h>
+ 
+ #import <GameController/CBCentralManagerDelegate.h>
+ #import <GameController/CBPeripheralDelegate.h>
+@@ -84,4 +87,13 @@ void* _GCHIDEventCallback(void);
+ void* clamp(void);
+ void* threadRunLoopSourceCallback(void);
+ 
++FOUNDATION_EXPORT NSString *const GCControllerDidConnectNotification;
++FOUNDATION_EXPORT NSString *const GCControllerDidDisconnectNotification;
++FOUNDATION_EXPORT const float GCHapticDurationInfinite;
++FOUNDATION_EXPORT NSString *const GCHapticsLocalityDefault;
++FOUNDATION_EXPORT NSString *const GCHapticsLocalityLeftHandle;
++FOUNDATION_EXPORT NSString *const GCHapticsLocalityLeftTrigger;
++FOUNDATION_EXPORT NSString *const GCHapticsLocalityRightHandle;
++FOUNDATION_EXPORT NSString *const GCHapticsLocalityRightTrigger;
++
+ #endif
+diff --git a/src/frameworks/Quartz/CMakeLists.txt b/src/frameworks/Quartz/CMakeLists.txt
+index 30bbc82c..ac0cd62b 100644
+--- a/src/frameworks/Quartz/CMakeLists.txt
++++ b/src/frameworks/Quartz/CMakeLists.txt
+@@ -25,6 +25,8 @@ include_directories(
+ 	${CMAKE_CURRENT_SOURCE_DIR}/QuickLookUI/include
+ )
+ 
++add_subdirectory(QuickLookUI)
++
+ add_framework(Quartz
+ 	FAT
+ 	CURRENT_VERSION
+@@ -32,8 +34,6 @@ add_framework(Quartz
+ 
+ 	SOURCES
+ 		src/Quartz.c
+-		QuickLookUI/src/QLPreviewPanel.m
+-		QuickLookUI/src/QLPreviewView.m
+ 
+ 	DEPENDENCIES
+ 		system
+@@ -45,6 +45,7 @@ add_framework(Quartz
+ )
+ 
+ set(QuickLook_BUILD ${CMAKE_BINARY_DIR}/src/frameworks/QuickLook/QuickLook)
++set(QuickLookUI_BUILD ${CMAKE_CURRENT_BINARY_DIR}/QuickLookUI/QuickLookUI)
+ set(ImageKit_BUILD ${CMAKE_CURRENT_BINARY_DIR}/ImageKit/ImageKit)
+ set(QuartzComposer_BUILD ${CMAKE_CURRENT_BINARY_DIR}/QuartzComposer/QuartzComposer)
+ set(QuartzFilters_BUILD ${CMAKE_CURRENT_BINARY_DIR}/QuartzFilters/QuartzFilters)
+@@ -55,8 +56,8 @@ else()
+ 	set(QuartzCore_BUILD ${CMAKE_BINARY_DIR}/src/frameworks/dev-stubs/QuartzCore/QuartzCore)
+ endif()
+ 
+-# Ideally would be done through a nested QuickLookUI framework
+ reexport(Quartz QuickLook ${QuickLook_BUILD})
++reexport(Quartz QuickLookUI ${QuickLookUI_BUILD})
+ reexport(Quartz ImageKit ${ImageKit_BUILD})
+ reexport(Quartz QuartzComposer ${QuartzComposer_BUILD})
+ reexport(Quartz QuartzFilters ${QuartzFilters_BUILD})
+diff --git a/src/frameworks/UserNotifications/CMakeLists.txt b/src/frameworks/UserNotifications/CMakeLists.txt
+index 581e7aa5..c0c6878e 100644
+--- a/src/frameworks/UserNotifications/CMakeLists.txt
++++ b/src/frameworks/UserNotifications/CMakeLists.txt
+@@ -18,6 +18,7 @@ add_framework(UserNotifications
+ 	VERSION ${FRAMEWORK_VERSION}
+ 
+ 	SOURCES
++		src/constants.m
+ 		src/UserNotifications.m
+ 		src/UNLocalizedStringFactory.m
+ 		src/UNNotificationTrigger.m
+diff --git a/src/frameworks/UserNotifications/include/UserNotifications/UserNotifications.h b/src/frameworks/UserNotifications/include/UserNotifications/UserNotifications.h
+index fa0af72a..90af55c3 100644
+--- a/src/frameworks/UserNotifications/include/UserNotifications/UserNotifications.h
++++ b/src/frameworks/UserNotifications/include/UserNotifications/UserNotifications.h
+@@ -112,4 +112,6 @@ void* un_CMTimeMakeFromDictionary(void);
+ void* un_CMTimeMakeWithSeconds(void);
+ void* un_kCMTimeInvalid(void);
+ 
++FOUNDATION_EXPORT NSString *const UNNotificationAttachmentOptionsTypeHintKey;
++
+ #endif
+diff --git a/src/frameworks/VideoToolbox/include/VideoToolbox/VideoToolbox.h b/src/frameworks/VideoToolbox/include/VideoToolbox/VideoToolbox.h
+index eb533744..5d67d319 100644
+--- a/src/frameworks/VideoToolbox/include/VideoToolbox/VideoToolbox.h
++++ b/src/frameworks/VideoToolbox/include/VideoToolbox/VideoToolbox.h
+@@ -276,4 +276,6 @@ void* VTXPCMessageSetCMSampleBuffer(void);
+ void* VTXPCMessageSetCVPixelBuffer(void);
+ void* VTXPCMessageSetVideoFormatDescription(void);
+ 
++void VTRegisterSupplementalVideoDecoderIfAvailable(FourCharCode codecType);
++
+ #endif
+diff --git a/src/frameworks/VideoToolbox/src/VideoToolbox.m b/src/frameworks/VideoToolbox/src/VideoToolbox.m
+index 70570c90..3bdf99d7 100644
+--- a/src/frameworks/VideoToolbox/src/VideoToolbox.m
++++ b/src/frameworks/VideoToolbox/src/VideoToolbox.m
+@@ -46,6 +46,10 @@ static void initme(void) {
+     verbose = getenv("STUB_VERBOSE") != NULL;
+ }
+ 
++void VTRegisterSupplementalVideoDecoderIfAvailable(FourCharCode codecType)
++{
++}
++
+ void* COLOR_Y2R24(void)
+ {
+     if (verbose) puts("STUB: COLOR_Y2R24 called");
+diff --git a/src/libsandbox/include/sandbox/sandbox.h b/src/libsandbox/include/sandbox/sandbox.h
+index 50a7e632..101b0861 100644
+--- a/src/libsandbox/include/sandbox/sandbox.h
++++ b/src/libsandbox/include/sandbox/sandbox.h
+@@ -29,7 +29,7 @@ void* sandbox_compile_named(void);
+ void* sandbox_compile_string(void);
+ void* sandbox_container_paths_iterate_items(void);
+ void* sandbox_create_params(void);
+-void* sandbox_free_params(void);
++void sandbox_free_params(void *params);
+ void* sandbox_free_profile(void);
+ void* sandbox_inspect_pid(void);
+ void* sandbox_inspect_smemory(void);
+diff --git a/src/quarantine/quarantine.c b/src/quarantine/quarantine.c
+index d7f0c94e..cfc8ccab 100644
+--- a/src/quarantine/quarantine.c
++++ b/src/quarantine/quarantine.c
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "quarantine.h"
++#include "include/responsibility.h"
+ #include <limits.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -156,3 +157,13 @@ int qtn_file_init_with_mount_point(qtn_file_t a, char b[1024])
+ int qtn_proc_init_with_data(qtn_proc_t proc, void* data, size_t data_len) {
+ 	return 0;
+ };
++
++pid_t responsibility_get_pid_responsible_for_pid(pid_t pid)
++{
++	return pid;
++}
++
++int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attrs, bool disclaim)
++{
++	return 0;
++}
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Headers
+new file mode 120000
+index 00000000..d5ab97c5
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Headers
+@@ -0,0 +1 @@
++Versions/A/Headers
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/A/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/A/Headers
+new file mode 120000
+index 00000000..8823759f
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/A/Headers
+@@ -0,0 +1 @@
++../../../../../../../../../../../../src/frameworks/Accessibility/include/Accessibility
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/Current b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/Current
+new file mode 120000
+index 00000000..8c7e5a66
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Versions/Current
+@@ -0,0 +1 @@
++A
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Headers
+new file mode 120000
+index 00000000..d5ab97c5
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Headers
+@@ -0,0 +1 @@
++Versions/A/Headers
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/A/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/A/Headers
+new file mode 120000
+index 00000000..16de30b1
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/A/Headers
+@@ -0,0 +1 @@
++../../../../../../../../../../../../src/frameworks/CoreHaptics/include/CoreHaptics
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/Current b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/Current
+new file mode 120000
+index 00000000..8c7e5a66
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Versions/Current
+@@ -0,0 +1 @@
++A
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Headers
+new file mode 120000
+index 00000000..d5ab97c5
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Headers
+@@ -0,0 +1 @@
++Versions/A/Headers
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/A/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/A/Headers
+new file mode 120000
+index 00000000..76cff328
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/A/Headers
+@@ -0,0 +1 @@
++../../../../../../../../../../../../src/frameworks/CoreML/include/CoreML
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/Current b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/Current
+new file mode 120000
+index 00000000..8c7e5a66
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Versions/Current
+@@ -0,0 +1 @@
++A
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Headers
+new file mode 120000
+index 00000000..d5ab97c5
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Headers
+@@ -0,0 +1 @@
++Versions/A/Headers
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/A/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/A/Headers
+new file mode 120000
+index 00000000..6f8c1fcd
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/A/Headers
+@@ -0,0 +1 @@
++../../../../../../../../../../../../src/frameworks/MediaPlayer/include/MediaPlayer
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/Current b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/Current
+new file mode 120000
+index 00000000..8c7e5a66
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Versions/Current
+@@ -0,0 +1 @@
++A
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Headers
+new file mode 120000
+index 00000000..d5ab97c5
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Headers
+@@ -0,0 +1 @@
++Versions/A/Headers
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/A/Headers b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/A/Headers
+new file mode 120000
+index 00000000..264dc29a
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/A/Headers
+@@ -0,0 +1 @@
++../../../../../../../../../../../../src/frameworks/Quartz/QuickLookUI/include/QuickLookUI
+\ No newline at end of file
+diff --git a/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/Current b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/Current
+new file mode 120000
+index 00000000..8c7e5a66
+--- /dev/null
++++ b/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Versions/Current
+@@ -0,0 +1 @@
++A
+\ No newline at end of file
+diff --git a/framework-include/Accessibility b/framework-include/Accessibility
+new file mode 120000
+index 00000000..b48f4f20
+--- /dev/null
++++ b/framework-include/Accessibility
+@@ -0,0 +1 @@
++../Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accessibility.framework/Headers
+\ No newline at end of file
+diff --git a/framework-include/CoreHaptics b/framework-include/CoreHaptics
+new file mode 120000
+index 00000000..ac2a9c16
+--- /dev/null
++++ b/framework-include/CoreHaptics
+@@ -0,0 +1 @@
++../Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreHaptics.framework/Headers
+\ No newline at end of file
+diff --git a/framework-include/CoreML b/framework-include/CoreML
+new file mode 120000
+index 00000000..e7bf244c
+--- /dev/null
++++ b/framework-include/CoreML
+@@ -0,0 +1 @@
++../Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/CoreML.framework/Headers
+\ No newline at end of file
+diff --git a/framework-include/MediaPlayer b/framework-include/MediaPlayer
+new file mode 120000
+index 00000000..406df9d2
+--- /dev/null
++++ b/framework-include/MediaPlayer
+@@ -0,0 +1 @@
++../Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/MediaPlayer.framework/Headers
+\ No newline at end of file
+diff --git a/framework-include/QuickLookUI b/framework-include/QuickLookUI
+new file mode 120000
+index 00000000..30803b10
+--- /dev/null
++++ b/framework-include/QuickLookUI
+@@ -0,0 +1 @@
++../Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/QuickLookUI.framework/Headers
+\ No newline at end of file
+diff --git a/src/CoreAudio/CoreAudio/CATapDescription.m b/src/CoreAudio/CoreAudio/CATapDescription.m
+new file mode 100644
+index 00000000..7ab4bbd2
+--- /dev/null
++++ b/src/CoreAudio/CoreAudio/CATapDescription.m
+@@ -0,0 +1,36 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreAudio/CATapDescription.h>
++
++@implementation CATapDescription
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/CoreAudio/include/CoreAudio/CATapDescription.h b/src/CoreAudio/include/CoreAudio/CATapDescription.h
+new file mode 100644
+index 00000000..3957f130
+--- /dev/null
++++ b/src/CoreAudio/include/CoreAudio/CATapDescription.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface CATapDescription : NSObject
++@end
+diff --git a/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesisVoice.h b/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesisVoice.h
+new file mode 100644
+index 00000000..317b1318
+--- /dev/null
++++ b/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesisVoice.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface AVSpeechSynthesisVoice : NSObject
++@end
+diff --git a/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesizer.h b/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesizer.h
+new file mode 100644
+index 00000000..28ba36fe
+--- /dev/null
++++ b/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechSynthesizer.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface AVSpeechSynthesizer : NSObject
++@end
+diff --git a/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechUtterance.h b/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechUtterance.h
+new file mode 100644
+index 00000000..5ca0be88
+--- /dev/null
++++ b/src/frameworks/AVFAudio/include/AVFAudio/AVSpeechUtterance.h
+@@ -0,0 +1,27 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface AVSpeechUtterance : NSObject
++@end
++
++FOUNDATION_EXPORT const float AVSpeechUtteranceDefaultSpeechRate;
++FOUNDATION_EXPORT const float AVSpeechUtteranceMinimumSpeechRate;
++FOUNDATION_EXPORT const float AVSpeechUtteranceMaximumSpeechRate;
+diff --git a/src/frameworks/AVFAudio/src/AVSpeechSynthesisVoice.m b/src/frameworks/AVFAudio/src/AVSpeechSynthesisVoice.m
+new file mode 100644
+index 00000000..1793a3d7
+--- /dev/null
++++ b/src/frameworks/AVFAudio/src/AVSpeechSynthesisVoice.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AVFAudio/AVSpeechSynthesisVoice.h>
++
++@implementation AVSpeechSynthesisVoice
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/AVFAudio/src/AVSpeechSynthesizer.m b/src/frameworks/AVFAudio/src/AVSpeechSynthesizer.m
+new file mode 100644
+index 00000000..9251bbc1
+--- /dev/null
++++ b/src/frameworks/AVFAudio/src/AVSpeechSynthesizer.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AVFAudio/AVSpeechSynthesizer.h>
++
++@implementation AVSpeechSynthesizer
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/AVFAudio/src/AVSpeechUtterance.m b/src/frameworks/AVFAudio/src/AVSpeechUtterance.m
+new file mode 100644
+index 00000000..24f7dea8
+--- /dev/null
++++ b/src/frameworks/AVFAudio/src/AVSpeechUtterance.m
+@@ -0,0 +1,52 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AVFAudio/AVSpeechUtterance.h>
++
++const float AVSpeechUtteranceDefaultSpeechRate = 0.5f;
++const float AVSpeechUtteranceMinimumSpeechRate = 0.0f;
++const float AVSpeechUtteranceMaximumSpeechRate = 1.0f;
++
++@implementation AVSpeechUtterance
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDeviceDiscoverySession.h b/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDeviceDiscoverySession.h
+new file mode 100644
+index 00000000..8c4c1219
+--- /dev/null
++++ b/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDeviceDiscoverySession.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface AVCaptureDeviceDiscoverySession : NSObject
++@end
+diff --git a/src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoOutput.h b/src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoOutput.h
+new file mode 100644
+index 00000000..cac0e816
+--- /dev/null
++++ b/src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoOutput.h
+@@ -0,0 +1,24 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++#import <AVFoundation/AVCaptureOutput.h>
++
++@interface AVCapturePhotoOutput : AVCaptureOutput
++@end
+diff --git a/src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoSettings.h b/src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoSettings.h
+new file mode 100644
+index 00000000..afd3daf9
+--- /dev/null
++++ b/src/frameworks/AVFoundation/include/AVFoundation/AVCapturePhotoSettings.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface AVCapturePhotoSettings : NSObject
++@end
+diff --git a/src/frameworks/AVFoundation/src/AVCaptureDeviceDiscoverySession.m b/src/frameworks/AVFoundation/src/AVCaptureDeviceDiscoverySession.m
+new file mode 100644
+index 00000000..6c4f6565
+--- /dev/null
++++ b/src/frameworks/AVFoundation/src/AVCaptureDeviceDiscoverySession.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AVFoundation/AVCaptureDeviceDiscoverySession.h>
++
++@implementation AVCaptureDeviceDiscoverySession
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/AVFoundation/src/AVCapturePhotoOutput.m b/src/frameworks/AVFoundation/src/AVCapturePhotoOutput.m
+new file mode 100644
+index 00000000..c7248b75
+--- /dev/null
++++ b/src/frameworks/AVFoundation/src/AVCapturePhotoOutput.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AVFoundation/AVCapturePhotoOutput.h>
++
++@implementation AVCapturePhotoOutput
++@end
+diff --git a/src/frameworks/AVFoundation/src/AVCapturePhotoSettings.m b/src/frameworks/AVFoundation/src/AVCapturePhotoSettings.m
+new file mode 100644
+index 00000000..e1a42201
+--- /dev/null
++++ b/src/frameworks/AVFoundation/src/AVCapturePhotoSettings.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <AVFoundation/AVCapturePhotoSettings.h>
++
++@implementation AVCapturePhotoSettings
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/Accessibility/CMakeLists.txt b/src/frameworks/Accessibility/CMakeLists.txt
+new file mode 100644
+index 00000000..fdac0f7a
+--- /dev/null
++++ b/src/frameworks/Accessibility/CMakeLists.txt
+@@ -0,0 +1,28 @@
++project(Accessibility)
++
++remove_sdk_framework(Accessibility)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(Accessibility
++	VERSION ${FRAMEWORK_VERSION}
++	HEADER "include/Accessibility"
++)
++
++add_framework(Accessibility
++	FAT
++	CURRENT_VERSION
++	VERSION ${FRAMEWORK_VERSION}
++	TARGET_NAME AccessibilityFramework
++
++	SOURCES
++		src/AXCustomContent.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/Accessibility/include/Accessibility/AXCustomContent.h b/src/frameworks/Accessibility/include/Accessibility/AXCustomContent.h
+new file mode 100644
+index 00000000..97a8186e
+--- /dev/null
++++ b/src/frameworks/Accessibility/include/Accessibility/AXCustomContent.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface AXCustomContent : NSObject
++@end
+diff --git a/src/frameworks/Accessibility/include/Accessibility/Accessibility.h b/src/frameworks/Accessibility/include/Accessibility/Accessibility.h
+new file mode 100644
+index 00000000..5359b3b0
+--- /dev/null
++++ b/src/frameworks/Accessibility/include/Accessibility/Accessibility.h
+@@ -0,0 +1,27 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _ACCESSIBILITY_H_
++#define _ACCESSIBILITY_H_
++
++#import <Foundation/Foundation.h>
++
++#import <Accessibility/AXCustomContent.h>
++
++#endif
+diff --git a/src/frameworks/Accessibility/src/AXCustomContent.m b/src/frameworks/Accessibility/src/AXCustomContent.m
+new file mode 100644
+index 00000000..48abacda
+--- /dev/null
++++ b/src/frameworks/Accessibility/src/AXCustomContent.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Accessibility/AXCustomContent.h>
++
++@implementation AXCustomContent
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/AuthenticationServices/src/constants.m b/src/frameworks/AuthenticationServices/src/constants.m
+new file mode 100644
+index 00000000..1a0ade78
+--- /dev/null
++++ b/src/frameworks/AuthenticationServices/src/constants.m
+@@ -0,0 +1,26 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++NSString *const ASAuthorizationErrorDomain = @"com.apple.AuthenticationServices.AuthorizationError";
++NSString *const ASAuthorizationPublicKeyCredentialAttestationKindNone = @"none";
++NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceDiscouraged = @"discouraged";
++NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferencePreferred = @"preferred";
++NSString *const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceRequired = @"required";
+diff --git a/src/frameworks/CoreHaptics/CMakeLists.txt b/src/frameworks/CoreHaptics/CMakeLists.txt
+new file mode 100644
+index 00000000..d49a029d
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/CMakeLists.txt
+@@ -0,0 +1,30 @@
++project(CoreHaptics)
++
++remove_sdk_framework(CoreHaptics)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(CoreHaptics
++	VERSION ${FRAMEWORK_VERSION}
++	HEADER "include/CoreHaptics"
++)
++
++add_framework(CoreHaptics
++	FAT
++	CURRENT_VERSION
++	VERSION ${FRAMEWORK_VERSION}
++
++	SOURCES
++		src/CHHapticDynamicParameter.m
++		src/CHHapticEvent.m
++		src/CHHapticEventParameter.m
++		src/CHHapticPattern.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticDynamicParameter.h b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticDynamicParameter.h
+new file mode 100644
+index 00000000..412808b6
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticDynamicParameter.h
+@@ -0,0 +1,26 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface CHHapticDynamicParameter : NSObject
++@end
++
++FOUNDATION_EXPORT NSString *const CHHapticDynamicParameterIDHapticIntensityControl;
++FOUNDATION_EXPORT NSString *const CHHapticDynamicParameterIDHapticSharpnessControl;
+diff --git a/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEvent.h b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEvent.h
+new file mode 100644
+index 00000000..19d37bea
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEvent.h
+@@ -0,0 +1,25 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface CHHapticEvent : NSObject
++@end
++
++FOUNDATION_EXPORT NSString *const CHHapticEventTypeHapticContinuous;
+diff --git a/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEventParameter.h b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEventParameter.h
+new file mode 100644
+index 00000000..727982ce
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticEventParameter.h
+@@ -0,0 +1,26 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface CHHapticEventParameter : NSObject
++@end
++
++FOUNDATION_EXPORT NSString *const CHHapticEventParameterIDHapticIntensity;
++FOUNDATION_EXPORT NSString *const CHHapticEventParameterIDHapticSharpness;
+diff --git a/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticPattern.h b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticPattern.h
+new file mode 100644
+index 00000000..c8698a9c
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/include/CoreHaptics/CHHapticPattern.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface CHHapticPattern : NSObject
++@end
+diff --git a/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h b/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h
+new file mode 100644
+index 00000000..9134bbe4
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/include/CoreHaptics/CoreHaptics.h
+@@ -0,0 +1,30 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _COREHAPTICS_H_
++#define _COREHAPTICS_H_
++
++#import <Foundation/Foundation.h>
++
++#import <CoreHaptics/CHHapticDynamicParameter.h>
++#import <CoreHaptics/CHHapticEvent.h>
++#import <CoreHaptics/CHHapticEventParameter.h>
++#import <CoreHaptics/CHHapticPattern.h>
++
++#endif
+diff --git a/src/frameworks/CoreHaptics/src/CHHapticDynamicParameter.m b/src/frameworks/CoreHaptics/src/CHHapticDynamicParameter.m
+new file mode 100644
+index 00000000..f5725b03
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/src/CHHapticDynamicParameter.m
+@@ -0,0 +1,51 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreHaptics/CHHapticDynamicParameter.h>
++
++NSString *const CHHapticDynamicParameterIDHapticIntensityControl = @"HapticIntensityControl";
++NSString *const CHHapticDynamicParameterIDHapticSharpnessControl = @"HapticSharpnessControl";
++
++@implementation CHHapticDynamicParameter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreHaptics/src/CHHapticEvent.m b/src/frameworks/CoreHaptics/src/CHHapticEvent.m
+new file mode 100644
+index 00000000..6024c4ff
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/src/CHHapticEvent.m
+@@ -0,0 +1,50 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreHaptics/CHHapticEvent.h>
++
++NSString *const CHHapticEventTypeHapticContinuous = @"HapticContinuous";
++
++@implementation CHHapticEvent
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreHaptics/src/CHHapticEventParameter.m b/src/frameworks/CoreHaptics/src/CHHapticEventParameter.m
+new file mode 100644
+index 00000000..1819e6bc
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/src/CHHapticEventParameter.m
+@@ -0,0 +1,51 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreHaptics/CHHapticEventParameter.h>
++
++NSString *const CHHapticEventParameterIDHapticIntensity = @"HapticIntensity";
++NSString *const CHHapticEventParameterIDHapticSharpness = @"HapticSharpness";
++
++@implementation CHHapticEventParameter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreHaptics/src/CHHapticPattern.m b/src/frameworks/CoreHaptics/src/CHHapticPattern.m
+new file mode 100644
+index 00000000..cae8621b
+--- /dev/null
++++ b/src/frameworks/CoreHaptics/src/CHHapticPattern.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreHaptics/CHHapticPattern.h>
++
++@implementation CHHapticPattern
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreML/CMakeLists.txt b/src/frameworks/CoreML/CMakeLists.txt
+new file mode 100644
+index 00000000..70fe2934
+--- /dev/null
++++ b/src/frameworks/CoreML/CMakeLists.txt
+@@ -0,0 +1,31 @@
++project(CoreML)
++
++remove_sdk_framework(CoreML)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(CoreML
++	VERSION ${FRAMEWORK_VERSION}
++	HEADER "include/CoreML"
++)
++
++add_framework(CoreML
++	FAT
++	CURRENT_VERSION
++	VERSION ${FRAMEWORK_VERSION}
++
++	SOURCES
++		src/MLFeatureValue.m
++		src/MLModel.m
++		src/MLModelConfiguration.m
++		src/MLMultiArray.m
++		src/MLPredictionOptions.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/CoreML/include/CoreML/CoreML.h b/src/frameworks/CoreML/include/CoreML/CoreML.h
+new file mode 100644
+index 00000000..857225eb
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/CoreML.h
+@@ -0,0 +1,31 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _COREML_H_
++#define _COREML_H_
++
++#import <Foundation/Foundation.h>
++
++#import <CoreML/MLFeatureValue.h>
++#import <CoreML/MLModel.h>
++#import <CoreML/MLModelConfiguration.h>
++#import <CoreML/MLMultiArray.h>
++#import <CoreML/MLPredictionOptions.h>
++
++#endif
+diff --git a/src/frameworks/CoreML/include/CoreML/MLFeatureValue.h b/src/frameworks/CoreML/include/CoreML/MLFeatureValue.h
+new file mode 100644
+index 00000000..2a28745f
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/MLFeatureValue.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MLFeatureValue : NSObject
++@end
+diff --git a/src/frameworks/CoreML/include/CoreML/MLModel.h b/src/frameworks/CoreML/include/CoreML/MLModel.h
+new file mode 100644
+index 00000000..5fab1e1e
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/MLModel.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MLModel : NSObject
++@end
+diff --git a/src/frameworks/CoreML/include/CoreML/MLModelConfiguration.h b/src/frameworks/CoreML/include/CoreML/MLModelConfiguration.h
+new file mode 100644
+index 00000000..e6202782
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/MLModelConfiguration.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MLModelConfiguration : NSObject
++@end
+diff --git a/src/frameworks/CoreML/include/CoreML/MLMultiArray.h b/src/frameworks/CoreML/include/CoreML/MLMultiArray.h
+new file mode 100644
+index 00000000..4f69b37f
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/MLMultiArray.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MLMultiArray : NSObject
++@end
+diff --git a/src/frameworks/CoreML/include/CoreML/MLPredictionOptions.h b/src/frameworks/CoreML/include/CoreML/MLPredictionOptions.h
+new file mode 100644
+index 00000000..005a48a8
+--- /dev/null
++++ b/src/frameworks/CoreML/include/CoreML/MLPredictionOptions.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MLPredictionOptions : NSObject
++@end
+diff --git a/src/frameworks/CoreML/src/MLFeatureValue.m b/src/frameworks/CoreML/src/MLFeatureValue.m
+new file mode 100644
+index 00000000..ec9e4772
+--- /dev/null
++++ b/src/frameworks/CoreML/src/MLFeatureValue.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreML/MLFeatureValue.h>
++
++@implementation MLFeatureValue
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreML/src/MLModel.m b/src/frameworks/CoreML/src/MLModel.m
+new file mode 100644
+index 00000000..decf76e2
+--- /dev/null
++++ b/src/frameworks/CoreML/src/MLModel.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreML/MLModel.h>
++
++@implementation MLModel
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreML/src/MLModelConfiguration.m b/src/frameworks/CoreML/src/MLModelConfiguration.m
+new file mode 100644
+index 00000000..2b93bbaa
+--- /dev/null
++++ b/src/frameworks/CoreML/src/MLModelConfiguration.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreML/MLModelConfiguration.h>
++
++@implementation MLModelConfiguration
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreML/src/MLMultiArray.m b/src/frameworks/CoreML/src/MLMultiArray.m
+new file mode 100644
+index 00000000..e70b88d6
+--- /dev/null
++++ b/src/frameworks/CoreML/src/MLMultiArray.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreML/MLMultiArray.h>
++
++@implementation MLMultiArray
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreML/src/MLPredictionOptions.m b/src/frameworks/CoreML/src/MLPredictionOptions.m
+new file mode 100644
+index 00000000..bac5a044
+--- /dev/null
++++ b/src/frameworks/CoreML/src/MLPredictionOptions.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <CoreML/MLPredictionOptions.h>
++
++@implementation MLPredictionOptions
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/CoreServices/src/SharedFileList/LSSharedFileList.c b/src/frameworks/CoreServices/src/SharedFileList/LSSharedFileList.c
+new file mode 100644
+index 00000000..cc2f73c9
+--- /dev/null
++++ b/src/frameworks/CoreServices/src/SharedFileList/LSSharedFileList.c
+@@ -0,0 +1,57 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <SharedFileList/SharedFileList.h>
++#include <CarbonCore/MacErrors.h>
++
++LSSharedFileListRef LSSharedFileListCreate(CFAllocatorRef inAllocator, CFStringRef inListType, CFTypeRef listOptions)
++{
++	return NULL;
++}
++
++CFArrayRef LSSharedFileListCopySnapshot(LSSharedFileListRef inList, UInt32 *outSnapshotSeed)
++{
++	if (outSnapshotSeed)
++		*outSnapshotSeed = 0;
++	if (!inList)
++		return NULL;
++	return CFArrayCreate(kCFAllocatorDefault, NULL, 0, &kCFTypeArrayCallBacks);
++}
++
++LSSharedFileListItemRef LSSharedFileListInsertItemURL(LSSharedFileListRef inList, LSSharedFileListItemRef insertAfterThisItem, CFStringRef inDisplayName, struct OpaqueIconRef *inIconRef, CFURLRef inURL, CFDictionaryRef inPropertiesToSet, CFArrayRef inPropertiesToClear)
++{
++	return NULL;
++}
++
++OSStatus LSSharedFileListItemRemove(LSSharedFileListRef inList, LSSharedFileListItemRef inItem)
++{
++	return paramErr;
++}
++
++CFTypeRef LSSharedFileListItemCopyProperty(LSSharedFileListItemRef inItem, CFStringRef inPropertyName)
++{
++	return NULL;
++}
++
++CFURLRef LSSharedFileListItemCopyResolvedURL(LSSharedFileListItemRef inItem, LSSharedFileListResolutionFlags inFlags, CFErrorRef *outError)
++{
++	if (outError)
++		*outError = NULL;
++	return NULL;
++}
+diff --git a/src/frameworks/CoreVideo/src/CVBuffer.c b/src/frameworks/CoreVideo/src/CVBuffer.c
+new file mode 100644
+index 00000000..7c6e83d0
+--- /dev/null
++++ b/src/frameworks/CoreVideo/src/CVBuffer.c
+@@ -0,0 +1,102 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <CoreVideo/CoreVideo.h>
++#include <CoreGraphics/CGGeometry.h>
++
++CFTypeRef CVBufferCopyAttachment(CVBufferRef buffer, CFStringRef key, CVAttachmentMode *attachmentMode)
++{
++	return NULL;
++}
++
++Boolean CVBufferHasAttachment(CVBufferRef buffer, CFStringRef key)
++{
++	return false;
++}
++
++void CVBufferSetAttachment(CVBufferRef buffer, CFStringRef key, CFTypeRef value, CVAttachmentMode attachmentMode)
++{
++}
++
++CGRect CVImageBufferGetCleanRect(CVImageBufferRef imageBuffer)
++{
++	return CGRectZero;
++}
++
++CFTypeID CVPixelBufferGetTypeID(void)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetBytesPerRow(CVPixelBufferRef pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetDataSize(CVPixelBufferRef pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetHeightOfPlane(CVPixelBufferRef pixelBuffer, size_t planeIndex)
++{
++	return 0;
++}
++
++OSType CVPixelBufferGetPixelFormatType(CVPixelBufferRef pixelBuffer)
++{
++	return 0;
++}
++
++Boolean CVPixelBufferIsPlanar(CVPixelBufferRef pixelBuffer)
++{
++	return false;
++}
++
++CVReturn CVPixelBufferCreateWithIOSurface(CFAllocatorRef allocator, struct __IOSurface *surface, CFDictionaryRef pixelBufferAttributes, CVPixelBufferRef *pixelBufferOut)
++{
++	if (pixelBufferOut)
++		*pixelBufferOut = NULL;
++	return kCVReturnInvalidArgument;
++}
++
++CVReturn CVPixelBufferPoolCreate(CFAllocatorRef allocator, CFDictionaryRef poolAttributes, CFDictionaryRef pixelBufferAttributes, CVPixelBufferPoolRef *poolOut)
++{
++	if (poolOut)
++		*poolOut = NULL;
++	return kCVReturnInvalidPoolAttributes;
++}
++
++CVReturn CVPixelBufferPoolCreatePixelBuffer(CFAllocatorRef allocator, CVPixelBufferPoolRef pixelBufferPool, CVPixelBufferRef *pixelBufferOut)
++{
++	if (pixelBufferOut)
++		*pixelBufferOut = NULL;
++	return kCVReturnInvalidArgument;
++}
++
++CVReturn CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(CFAllocatorRef allocator, CVPixelBufferPoolRef pixelBufferPool, CFDictionaryRef auxAttributes, CVPixelBufferRef *pixelBufferOut)
++{
++	if (pixelBufferOut)
++		*pixelBufferOut = NULL;
++	return kCVReturnInvalidArgument;
++}
++
++void CVPixelBufferPoolFlush(CVPixelBufferPoolRef pool, CVPixelBufferPoolFlushFlags options)
++{
++}
+diff --git a/src/frameworks/GameController/include/GameController/GCDualSenseGamepad.h b/src/frameworks/GameController/include/GameController/GCDualSenseGamepad.h
+new file mode 100644
+index 00000000..a1094eb1
+--- /dev/null
++++ b/src/frameworks/GameController/include/GameController/GCDualSenseGamepad.h
+@@ -0,0 +1,24 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++#import <GameController/GCExtendedGamepad.h>
++
++@interface GCDualSenseGamepad : GCExtendedGamepad
++@end
+diff --git a/src/frameworks/GameController/include/GameController/GCDualShockGamepad.h b/src/frameworks/GameController/include/GameController/GCDualShockGamepad.h
+new file mode 100644
+index 00000000..762db00a
+--- /dev/null
++++ b/src/frameworks/GameController/include/GameController/GCDualShockGamepad.h
+@@ -0,0 +1,24 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++#import <GameController/GCExtendedGamepad.h>
++
++@interface GCDualShockGamepad : GCExtendedGamepad
++@end
+diff --git a/src/frameworks/GameController/include/GameController/GCXboxGamepad.h b/src/frameworks/GameController/include/GameController/GCXboxGamepad.h
+new file mode 100644
+index 00000000..9321d7ea
+--- /dev/null
++++ b/src/frameworks/GameController/include/GameController/GCXboxGamepad.h
+@@ -0,0 +1,24 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++#import <GameController/GCExtendedGamepad.h>
++
++@interface GCXboxGamepad : GCExtendedGamepad
++@end
+diff --git a/src/frameworks/GameController/src/GCDualSenseGamepad.m b/src/frameworks/GameController/src/GCDualSenseGamepad.m
+new file mode 100644
+index 00000000..099597a6
+--- /dev/null
++++ b/src/frameworks/GameController/src/GCDualSenseGamepad.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <GameController/GCDualSenseGamepad.h>
++
++@implementation GCDualSenseGamepad
++@end
+diff --git a/src/frameworks/GameController/src/GCDualShockGamepad.m b/src/frameworks/GameController/src/GCDualShockGamepad.m
+new file mode 100644
+index 00000000..98458c9a
+--- /dev/null
++++ b/src/frameworks/GameController/src/GCDualShockGamepad.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <GameController/GCDualShockGamepad.h>
++
++@implementation GCDualShockGamepad
++@end
+diff --git a/src/frameworks/GameController/src/GCXboxGamepad.m b/src/frameworks/GameController/src/GCXboxGamepad.m
+new file mode 100644
+index 00000000..c327dd2c
+--- /dev/null
++++ b/src/frameworks/GameController/src/GCXboxGamepad.m
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <GameController/GCXboxGamepad.h>
++
++@implementation GCXboxGamepad
++@end
+diff --git a/src/frameworks/GameController/src/constants.m b/src/frameworks/GameController/src/constants.m
+new file mode 100644
+index 00000000..c9f32ef9
+--- /dev/null
++++ b/src/frameworks/GameController/src/constants.m
+@@ -0,0 +1,30 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++#include <float.h>
++
++NSString *const GCControllerDidConnectNotification = @"GCControllerDidConnectNotification";
++NSString *const GCControllerDidDisconnectNotification = @"GCControllerDidDisconnectNotification";
++const float GCHapticDurationInfinite = FLT_MAX;
++NSString *const GCHapticsLocalityDefault = @"Default";
++NSString *const GCHapticsLocalityLeftHandle = @"LeftHandle";
++NSString *const GCHapticsLocalityLeftTrigger = @"LeftTrigger";
++NSString *const GCHapticsLocalityRightHandle = @"RightHandle";
++NSString *const GCHapticsLocalityRightTrigger = @"RightTrigger";
+diff --git a/src/frameworks/MediaPlayer/CMakeLists.txt b/src/frameworks/MediaPlayer/CMakeLists.txt
+new file mode 100644
+index 00000000..7d473074
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/CMakeLists.txt
+@@ -0,0 +1,29 @@
++project(MediaPlayer)
++
++remove_sdk_framework(MediaPlayer)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++set(FRAMEWORK_VERSION "A")
++
++generate_sdk_framework(MediaPlayer
++	VERSION ${FRAMEWORK_VERSION}
++	HEADER "include/MediaPlayer"
++)
++
++add_framework(MediaPlayer
++	FAT
++	CURRENT_VERSION
++	VERSION ${FRAMEWORK_VERSION}
++
++	SOURCES
++		src/MPMediaItemArtwork.m
++		src/MPNowPlayingInfoCenter.m
++		src/MPRemoteCommandCenter.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++)
+diff --git a/src/frameworks/MediaPlayer/include/MediaPlayer/MPMediaItemArtwork.h b/src/frameworks/MediaPlayer/include/MediaPlayer/MPMediaItemArtwork.h
+new file mode 100644
+index 00000000..a4f9da82
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/include/MediaPlayer/MPMediaItemArtwork.h
+@@ -0,0 +1,29 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MPMediaItemArtwork : NSObject
++@end
++
++FOUNDATION_EXPORT NSString *const MPMediaItemPropertyAlbumTitle;
++FOUNDATION_EXPORT NSString *const MPMediaItemPropertyArtist;
++FOUNDATION_EXPORT NSString *const MPMediaItemPropertyArtwork;
++FOUNDATION_EXPORT NSString *const MPMediaItemPropertyPlaybackDuration;
++FOUNDATION_EXPORT NSString *const MPMediaItemPropertyTitle;
+diff --git a/src/frameworks/MediaPlayer/include/MediaPlayer/MPNowPlayingInfoCenter.h b/src/frameworks/MediaPlayer/include/MediaPlayer/MPNowPlayingInfoCenter.h
+new file mode 100644
+index 00000000..6f43332e
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/include/MediaPlayer/MPNowPlayingInfoCenter.h
+@@ -0,0 +1,27 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MPNowPlayingInfoCenter : NSObject
++@end
++
++FOUNDATION_EXPORT NSString *const MPNowPlayingInfoPropertyCurrentPlaybackDate;
++FOUNDATION_EXPORT NSString *const MPNowPlayingInfoPropertyElapsedPlaybackTime;
++FOUNDATION_EXPORT NSString *const MPNowPlayingInfoPropertyPlaybackRate;
+diff --git a/src/frameworks/MediaPlayer/include/MediaPlayer/MPRemoteCommandCenter.h b/src/frameworks/MediaPlayer/include/MediaPlayer/MPRemoteCommandCenter.h
+new file mode 100644
+index 00000000..524187db
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/include/MediaPlayer/MPRemoteCommandCenter.h
+@@ -0,0 +1,23 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++@interface MPRemoteCommandCenter : NSObject
++@end
+diff --git a/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
+new file mode 100644
+index 00000000..d324e7a1
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/include/MediaPlayer/MediaPlayer.h
+@@ -0,0 +1,29 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _MEDIAPLAYER_H_
++#define _MEDIAPLAYER_H_
++
++#import <Foundation/Foundation.h>
++
++#import <MediaPlayer/MPMediaItemArtwork.h>
++#import <MediaPlayer/MPNowPlayingInfoCenter.h>
++#import <MediaPlayer/MPRemoteCommandCenter.h>
++
++#endif
+diff --git a/src/frameworks/MediaPlayer/src/MPMediaItemArtwork.m b/src/frameworks/MediaPlayer/src/MPMediaItemArtwork.m
+new file mode 100644
+index 00000000..25e8ae9c
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/src/MPMediaItemArtwork.m
+@@ -0,0 +1,54 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <MediaPlayer/MPMediaItemArtwork.h>
++
++NSString *const MPMediaItemPropertyAlbumTitle = @"albumTitle";
++NSString *const MPMediaItemPropertyArtist = @"artist";
++NSString *const MPMediaItemPropertyArtwork = @"artwork";
++NSString *const MPMediaItemPropertyPlaybackDuration = @"playbackDuration";
++NSString *const MPMediaItemPropertyTitle = @"title";
++
++@implementation MPMediaItemArtwork
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/MediaPlayer/src/MPNowPlayingInfoCenter.m b/src/frameworks/MediaPlayer/src/MPNowPlayingInfoCenter.m
+new file mode 100644
+index 00000000..d1da5325
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/src/MPNowPlayingInfoCenter.m
+@@ -0,0 +1,52 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <MediaPlayer/MPNowPlayingInfoCenter.h>
++
++NSString *const MPNowPlayingInfoPropertyCurrentPlaybackDate = @"MPNowPlayingInfoPropertyCurrentPlaybackDate";
++NSString *const MPNowPlayingInfoPropertyElapsedPlaybackTime = @"MPNowPlayingInfoPropertyElapsedPlaybackTime";
++NSString *const MPNowPlayingInfoPropertyPlaybackRate = @"MPNowPlayingInfoPropertyPlaybackRate";
++
++@implementation MPNowPlayingInfoCenter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/MediaPlayer/src/MPRemoteCommandCenter.m b/src/frameworks/MediaPlayer/src/MPRemoteCommandCenter.m
+new file mode 100644
+index 00000000..a0908bd8
+--- /dev/null
++++ b/src/frameworks/MediaPlayer/src/MPRemoteCommandCenter.m
+@@ -0,0 +1,48 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <MediaPlayer/MPRemoteCommandCenter.h>
++
++@implementation MPRemoteCommandCenter
++
+++ (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
+++ (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), self);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
++{
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
++}
++
++- (void)forwardInvocation:(NSInvocation *)anInvocation
++{
++    NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++    id result = nil;
++    [anInvocation setReturnValue: &result];
++}
++
++@end
+diff --git a/src/frameworks/Quartz/QuickLookUI/CMakeLists.txt b/src/frameworks/Quartz/QuickLookUI/CMakeLists.txt
+new file mode 100644
+index 00000000..b67b22b5
+--- /dev/null
++++ b/src/frameworks/Quartz/QuickLookUI/CMakeLists.txt
+@@ -0,0 +1,29 @@
++project(QuickLookUI)
++
++set(DYLIB_COMPAT_VERSION "1.0.0")
++set(DYLIB_CURRENT_VERSION "1.0.0")
++
++set(FRAMEWORK_VERSION "A")
++
++remove_sdk_framework(QuickLookUI)
++
++generate_sdk_framework(QuickLookUI
++	VERSION ${FRAMEWORK_VERSION}
++	HEADER "include/QuickLookUI"
++)
++
++add_framework(QuickLookUI
++	FAT
++	CURRENT_VERSION
++	VERSION ${FRAMEWORK_VERSION}
++
++	SOURCES
++		src/QLPreviewPanel.m
++		src/QLPreviewView.m
++
++	DEPENDENCIES
++		system
++		objc
++		Foundation
++		AppKit
++)
+diff --git a/src/frameworks/UserNotifications/src/constants.m b/src/frameworks/UserNotifications/src/constants.m
+new file mode 100644
+index 00000000..81dfc761
+--- /dev/null
++++ b/src/frameworks/UserNotifications/src/constants.m
+@@ -0,0 +1,22 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#import <Foundation/Foundation.h>
++
++NSString *const UNNotificationAttachmentOptionsTypeHintKey = @"UNNotificationAttachmentOptionsTypeHintKey";
+diff --git a/src/quarantine/include/responsibility.h b/src/quarantine/include/responsibility.h
+new file mode 100644
+index 00000000..ce28e6e9
+--- /dev/null
++++ b/src/quarantine/include/responsibility.h
+@@ -0,0 +1,38 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef _RESPONSIBILITY_H_
++#define _RESPONSIBILITY_H_
++
++#include <stdbool.h>
++#include <sys/types.h>
++#include <spawn.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++pid_t responsibility_get_pid_responsible_for_pid(pid_t pid);
++int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attrs, bool disclaim);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif

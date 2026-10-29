@@ -238,3 +238,54 @@ index f6d166e2..fb7ae819 100644
  #include <utilities/SecCFWrappers.h>
  #include <utilities/SecFileLocations.h>
  
+diff --git a/OSX/libsecurity_keychain/lib/SecTrust.cpp b/OSX/libsecurity_keychain/lib/SecTrust.cpp
+index eb9d294..9521562 100644
+--- a/OSX/libsecurity_keychain/lib/SecTrust.cpp
++++ b/OSX/libsecurity_keychain/lib/SecTrust.cpp
+@@ -617,6 +617,20 @@ SecTrustGetEvidenceInfo(SecTrustRef trust)
+ 	return (CSSM_TP_APPLE_EVIDENCE_INFO *)secTrust->_legacy_info_array;
+ }
+ 
++CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust) {
++    CFIndex ix, count = SecTrustGetCertificateCount(trust);
++    if (count <= 0)
++        return NULL;
++
++    CFMutableArrayRef chain = CFArrayCreateMutable(kCFAllocatorDefault, count, &kCFTypeArrayCallBacks);
++    for (ix = 0; ix < count; ix++) {
++        SecCertificateRef cert = SecTrustGetCertificateAtIndex(trust, ix);
++        if (cert)
++            CFArrayAppendValue(chain, cert);
++    }
++    return chain;
++}
++
+ CFArrayRef SecTrustCopyProperties(SecTrustRef trust) {
+     /* OS X creates a completely different structure with one dictionary for each certificate */
+     CFIndex ix, count = SecTrustGetCertificateCount(trust);
+diff --git a/trust/headers/SecTrust.h b/trust/headers/SecTrust.h
+index a8c7f97..2062be6 100644
+--- a/trust/headers/SecTrust.h
++++ b/trust/headers/SecTrust.h
+@@ -570,6 +570,9 @@ __nullable
+ CFArrayRef SecTrustCopyProperties(SecTrustRef trust)
+     __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_2_0);
+ 
++__nullable
++CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust);
++
+ /*!
+     @function SecTrustCopyResult
+     @abstract Returns a dictionary containing information about the
+diff --git a/OSX/sec/Security/SecExports.exp-in b/OSX/sec/Security/SecExports.exp-in
+index 116367d..15736e9 100644
+--- a/OSX/sec/Security/SecExports.exp-in
++++ b/OSX/sec/Security/SecExports.exp-in
+@@ -221,6 +221,7 @@ _kSecTrustRevocationReason
+ _kSecTrustRevocationValidUntilDate
+ 
+ _SecTrustAddToInputCertificates
++_SecTrustCopyCertificateChain
+ _SecTrustCopyCustomAnchorCertificates
+ _SecTrustCopyDetailedPropertiesAtIndex
+ _SecTrustCopyExceptions
