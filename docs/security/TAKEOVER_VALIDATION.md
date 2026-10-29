@@ -77,3 +77,36 @@ no authenticated trust-store boundary. DER entitlement policy, Apple CMS/
 Developer ID trust, notarization acceptance and a full match soak remain open.
 The default signing mode stays off; this continuation does not establish
 production security or close #49.
+
+## Follow-up review fixes
+
+The first continuation review added the following regressions and corrections:
+
+- Cross-process signing-state updates use the existing host-credential debug
+  authorization. The UID/GID RPC still updates the emulated audit token, but
+  never copies a requested UID into the server's authorization credential.
+- A constructor-set fork marker survives parent death. Initial checkin permits
+  registration once only for an initial process; fork children keep inherited
+  state even if unverified. Exec clears all old signing state and blobs before
+  reopening registration. Compiled tests exercise the real transition and debug
+  authorization methods with explicit credential/registration scenarios.
+- Both rename operands reject ancestors of protected roots. The learned inode
+  registry is explicitly process-local; exec/independent processes do not share
+  it. Host regressions check `/private`, `/private/var`, `/Library` and `/`.
+- Primary and alternate CodeDirectories are validated and the strongest
+  supported hash is selected: SHA-384, SHA-256, truncated SHA-256, then SHA-1.
+  Dual-digest rcodesign fixtures check the selected cdhash and page hashes;
+  even a malformed unselected directory is rejected. Duplicate slots or hash
+  types are rejected.
+- Prefix overlays require explicit `--trust`; automatic SDK trust stays scoped
+  to the SDK when SDK and prefix roots are processed together. Key creation
+  starts under umask 077, which is restored on success and failure.
+- Ground-truth rendering no longer infers flags, empty entitlements or SIP
+  state from missing results. Existing macOS 14 observations remain historical;
+  new collection uses macOS 15, and collection actions use pinned commit SHAs.
+
+The unrelated framework sections visible in monolithic patch files are
+unchanged from main. Comparing per-upstream-file patch sections shows that
+`darling.patch` changes only mldr, its elfcalls interface and the new security
+helpers. This continuation does not reintroduce the audio/graphics/framework
+implementation work already present on main.

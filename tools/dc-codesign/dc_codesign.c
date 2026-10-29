@@ -332,25 +332,15 @@ static int verify_special_blob(struct dc_image *img, uint32_t blob_type,
 	return 0;
 }
 
-static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
+static int parse_one_codedirectory(struct dc_image *img, const struct dc_blob *blob,
+                                   char *err, size_t errlen)
 {
-	const uint8_t *cd = NULL;
-	uint32_t cd_len = 0;
+	const uint8_t *cd = img->data + img->sig_offset + blob->offset;
+	uint32_t cd_len = blob->length;
 	uint64_t need;
 	uint32_t hash_off, ident_off, n_special, n_code;
 	uint32_t code_limit32 = 0;
 	uint64_t code_limit = 0;
-
-	for (uint32_t i = 0; i < img->blob_count; i++) {
-		if (img->blobs[i].type == DC_BLOB_CODEDIRECTORY) {
-			if (cd)
-				return fail(err, errlen, "multiple CodeDirectory blobs");
-			cd = img->data + img->sig_offset + img->blobs[i].offset;
-			cd_len = img->blobs[i].length;
-		}
-	}
-	if (!cd)
-		return fail(err, errlen, "no CodeDirectory blob");
 
 	if (cd_len < CD_MIN_SIZE)
 		return fail(err, errlen, "CodeDirectory shorter than v0 header");
@@ -513,6 +503,43 @@ static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
 	}
 
 	return 0;
+}
+
+/* XNU preference: SHA-384, full SHA-256, truncated SHA-256, SHA-1. */
+static unsigned hash_rank(uint32_t type)
+{
+    switch (type) {
+    case DC_HASHTYPE_SHA1: return 1;
+    case DC_HASHTYPE_SHA256_TRUNCATED: return 2;
+    case DC_HASHTYPE_SHA256: return 3;
+    case DC_HASHTYPE_SHA384: return 4;
+    default: return 0;
+    }
+}
+
+static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
+{
+    struct dc_image best;
+    unsigned best_rank = 0, seen_slots = 0, seen_ranks = 0;
+    for (uint32_t i = 0; i < img->blob_count; i++) {
+        const struct dc_blob *blob = &img->blobs[i];
+        unsigned slot;
+        if (blob->type == DC_BLOB_CODEDIRECTORY) slot = 0;
+        else if (blob->type >= 0x1000 && blob->type <= 0x1004) slot = blob->type - 0x1000 + 1;
+        else continue;
+        if (seen_slots & (1u << slot)) return fail(err, errlen, "duplicate CodeDirectory slot");
+        seen_slots |= 1u << slot;
+        struct dc_image candidate = *img;
+        if (parse_one_codedirectory(&candidate, blob, err, errlen) != 0) return -1;
+        unsigned rank = hash_rank(candidate.hash_type);
+        if (!rank || (seen_ranks & (1u << rank)))
+            return fail(err, errlen, "unsupported or duplicate CodeDirectory hash type");
+        seen_ranks |= 1u << rank;
+        if (rank > best_rank) { best = candidate; best_rank = rank; }
+    }
+    if (!best_rank) return fail(err, errlen, "no CodeDirectory blob");
+    *img = best;
+    return 0;
 }
 
 int dc_parse(const uint8_t *data, size_t size, struct dc_image *img,

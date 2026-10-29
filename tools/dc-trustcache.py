@@ -79,7 +79,11 @@ def run(args):
 def ensure_key(store, key, pub):
     key.parent.mkdir(parents=True, exist_ok=True)
     if not key.exists():
-        run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(key)])
+        old_umask = os.umask(0o077)
+        try:
+            run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(key)])
+        finally:
+            os.umask(old_umask)
         os.chmod(key, 0o600)
     if not pub.exists():
         run(["openssl", "pkey", "-in", str(key), "-pubout", "-out", str(pub)])

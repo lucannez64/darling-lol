@@ -534,8 +534,10 @@ in `tests/security/fixtures/README.md`:
   directory used by the server is `/etc/darling` for a rootful install; the
   CLI can prepare a user-config store for rootless testing, but the server
   disables it because uid 0 maps to a host user that a guest can impersonate.
-  The private and public keys live beside the store. `tools/sign-darling-runtime.sh
-  --sdk` / `--prefix` now records every signed runtime cdhash through `sync`,
+  The private and public keys live beside the store. Private keys are created
+  under umask 077, restored afterward. `tools/sign-darling-runtime.sh --sdk`
+  records SDK cdhashes through `sync`; `--prefix` and other overlay roots need
+  an explicit `--trust` to enter the store, even with `--sdk --prefix`,
   and `scripts/install-runtime.sh` invokes the signer.
   `darlingserver/src/trustcache.cpp` verifies the signature with the public
   key, requires the trust directory to be outside the prefix and to be
@@ -595,8 +597,11 @@ in `tests/security/fixtures/README.md`:
   `/private/etc`, `/private/var/db` and `/Library/Apple` paths. Protected
   inodes are recorded by `(dev, ino)` and writable fd/path operations compare
   against that set, so an outside hardlink to a protected file is refused once
-  the protected inode has been observed, including aliases under `/usr/local`.
-  The path exception is applied only after the learned inode check.
+  the protected inode has been observed in the same process, including aliases
+  under `/usr/local`. Fork children inherit that process-local registry;
+  independently started or exec'd processes have their own registry.
+  The path exception is applied only after the learned inode check. Renaming
+  either an ancestor of a protected root or a protected path is also denied.
   `tests/security/test_sip.sh` covers
   off/on, protected writes, `/usr/local`, `..`, symlink, the mutating wrappers,
   writable shared (`MAP_SHARED`) `mmap` and a seeded hardlink escape: 3/3

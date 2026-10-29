@@ -6900,10 +6900,10 @@ index 6dc66b0..ce6f2cc 100644
  #endif // LINUX_CSOPS_H
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h
 new file mode 100644
-index 0000000..9e9e50e
+index 0000000..bf815ca
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,15 @@
 +#ifndef _DARLING_SIP_H
 +#define _DARLING_SIP_H
 +
@@ -6914,6 +6914,7 @@ index 0000000..9e9e50e
 +uint32_t dc_sip_csr_config(void);
 +int dc_sip_check_csr(uint32_t bit);
 +int dc_sip_check_write(const char* host_path);
++int dc_sip_check_tree_move(const char* host_path);
 +int dc_sip_check_guest_write(const char* guest_path);
 +int dc_sip_check_fd(int fd);
 +
@@ -6995,10 +6996,10 @@ index 7fe0b4e..7e00a00 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
 new file mode 100644
-index 0000000..05ac08f
+index 0000000..f7b2428
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,308 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +
 +#include <errno.h>
@@ -7248,7 +7249,8 @@ index 0000000..05ac08f
 +		}
 +	}
 +
-+    // Inode restrictions survive all aliases, including /usr/local.
++    // Restrictions cover aliases learned in this process (or inherited on fork),
++    // including /usr/local. Independent/exec processes have their own registry.
 +    {
 +        uint64_t dev, ino;
 +        if (sip_stat_inode(host_stat_path, &dev, &ino) == 0 && sip_inode_is_protected(dev, ino))
@@ -7284,6 +7286,27 @@ index 0000000..05ac08f
 +		return -EPERM;
 +	}
 +	return 0;
++}
++
++/* Renaming an ancestor would move protected paths outside their policy roots. */
++int dc_sip_check_tree_move(const char* host_path) {
++    static const char* const roots[] = {
++        "/System", "/bin", "/sbin", "/usr", "/private/etc",
++        "/private/var/db", "/Library/Apple", NULL
++    };
++    char normalized[4096];
++    struct vchroot_unexpand_args u;
++    if (!dc_sip_enabled()) return 0;
++    if (!host_path || normalize_path(host_path, normalized, sizeof(normalized)) != 0 ||
++        strlen(normalized) >= sizeof(u.path)) return -EPERM;
++    strcpy(u.path, normalized);
++    if (vchroot_unexpand(&u) != 0 || u.path[0] != '/') return -EPERM;
++    size_t length = strlen(u.path);
++    for (unsigned i = 0; roots[i]; i++) {
++        if (length == 1 || (strncmp(roots[i], u.path, length) == 0 && roots[i][length] == '/'))
++            return -EPERM;
++    }
++    return dc_sip_check_write(host_path);
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/mman.c
 index 282a5a1..f1e46a0 100644
@@ -7571,7 +7594,7 @@ index 5b294f9..3022032 100644
  	linux_flags = atflags_bsd_to_linux(flag);
  	if (linux_flags == LINUX_AT_INVALID)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/renameat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/renameat.c
-index 23a1912..cc54222 100644
+index 23a1912..18e147e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/renameat.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/renameat.c
 @@ -8,6 +8,7 @@
@@ -7586,10 +7609,10 @@ index 23a1912..cc54222 100644
  	ret = vchroot_expand(&vc2);
  	if (ret < 0)
  		return errno_linux_to_bsd(ret);
-+	ret = dc_sip_check_write(vc.path);
++	ret = dc_sip_check_tree_move(vc.path);
 +	if (ret != 0)
 +		return ret;
-+	ret = dc_sip_check_write(vc2.path);
++	ret = dc_sip_check_tree_move(vc2.path);
 +	if (ret != 0)
 +		return ret;
  

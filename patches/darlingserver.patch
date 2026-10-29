@@ -1630,7 +1630,7 @@ index 708f3f3..fd46ab8 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..dcba643 100644
+index c97be30..19b1f62 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
 @@ -21,6 +21,8 @@
@@ -1672,7 +1672,7 @@ index c97be30..dcba643 100644
  		bool _startSuspended = false;
  		bool _pendingReplacement = false;
  		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
-@@ -102,6 +113,18 @@ namespace DarlingServer {
+@@ -102,6 +113,22 @@ namespace DarlingServer {
  		Architecture _architecture;
  		std::weak_ptr<Process> _tracerProcess;
  		std::string _executablePath;
@@ -1682,7 +1682,11 @@ index c97be30..dcba643 100644
 +		// while writing into another task.
 +		mutable std::shared_mutex _csMutex;
 +		struct dc_cs_state _csState = {};
-+		/* Set by checkin for the initial exec and again on every exec. */
++		/* Constructor-set fork identity survives the parent's weak pointer. */
++		bool _isForkChild = false;
++		bool _initialCsCheckinPending = true;
++		void _prepareCsStateForCheckin(bool didExec);
++		/* Open once for an initial process and again only after exec. */
 +		std::atomic<bool> _allowCsStateRegistration{false};
 +		std::vector<uint8_t> _csBlob;
 +		std::vector<uint8_t> _csEntitlements;
@@ -1691,7 +1695,7 @@ index c97be30..dcba643 100644
  		bool _dead = false;
  		std::shared_ptr<Process> _selfReference = nullptr;
  		std::vector<uint32_t> _groups;
-@@ -194,6 +217,22 @@ namespace DarlingServer {
+@@ -194,6 +221,22 @@ namespace DarlingServer {
  		std::string executablePath() const;
  		void setExecutablePath(std::string path);
  
@@ -1822,7 +1826,7 @@ index e35221c..cb399e1 100755
  
  ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..7fd366d 100644
+index cc10f1d..68a72aa 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
 @@ -18,27 +18,102 @@
@@ -1979,8 +1983,8 @@ index cc10f1d..7fd366d 100644
  			// HACK
  			// we shouldn't need to access _dtapeTask; Process should provide a method for this (but it doesn't yet because i'm not sure how to make that API feel at-home in C++)
  			dtape_task_uidgid(process->_dtapeTask, _body.new_uid, _body.new_gid, &uid, &gid);
-+			if (_body.new_uid >= 0)
-+				process->setUid((uid_t) _body.new_uid);
++			// Guest audit-token updates are not host credential changes.
++			process->setUid(process->hostUid());
  		} else {
  			code = -ESRCH;
  		}
@@ -2070,7 +2074,7 @@ index cc10f1d..7fd366d 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
-@@ -1040,6 +1223,245 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+@@ -1040,6 +1223,236 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
  	_sendReply(code, fullLength);
  }
  
@@ -2223,17 +2227,8 @@ index cc10f1d..7fd366d 100644
 +			if (auto maybeTargetProcess = processRegistry().lookupEntryByNSID(_body.pid)) {
 +				auto target = *maybeTargetProcess;
 +				bool isSelf = (caller == target);
-+				if (!isSelf) {
-+					struct dc_cs_state targetState = {};
-+					std::vector<uint8_t> blob;
-+					std::vector<uint8_t> entitlements;
-+					std::vector<uint8_t> derEntitlements;
-+					target->copyCsState(&targetState, &blob, &entitlements, &derEntitlements);
-+					if (caller->uid() != 0 &&
-+					    (targetState.flags & DC_CS_GET_TASK_ALLOW) == 0) {
-+						code = -EPERM;
-+					}
-+				}
++				if (!isSelf && !target->allowsDebugFrom(*caller, false))
++					code = -EPERM;
 +				if (code == 0)
 +					flags = target->updateCsFlags(_body.set_flags, _body.clear_flags, _body.valid);
 +			} else {
@@ -2854,7 +2849,7 @@ index 414c1d6..a7f5a94 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..1258def 100644
+index 9cd7b81..f6b87cf 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,17 +25,34 @@
@@ -2892,7 +2887,7 @@ index 9cd7b81..1258def 100644
  	int pidfd = (pipe >= 0) ? pipe : syscall(SYS_pidfd_open, _pid, 0);
  	if (pidfd < 0) {
  		throw std::system_error(errno, std::generic_category(), "Failed to open pidfd for process");
-@@ -66,8 +83,15 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
+@@ -66,11 +83,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
  				parentProcess = *maybeParentProcess;
  				_parentProcess = parentProcess;
  			}
@@ -2910,7 +2905,11 @@ index 9cd7b81..1258def 100644
  		}
  	}
  
-@@ -78,8 +102,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
++	_isForkChild = (parentProcess != nullptr);
+ 	if (parentProcess) {
+ 		std::shared_lock parentLock(parentProcess->_rwlock);
+ 
+@@ -78,8 +103,19 @@ DarlingServer::Process::Process(ID id, NSID nsid, Architecture architecture, int
  		_vchrootDescriptor = parentProcess->_vchrootDescriptor;
  		_cachedVchrootPath = parentProcess->_cachedVchrootPath;
  
@@ -2931,7 +2930,7 @@ index 9cd7b81..1258def 100644
  	}
  
  	// NOTE: see thread.cpp for why it's okay to use `this` here
-@@ -93,6 +128,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -93,6 +129,7 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  	_pid(-1),
  	_nspid(0)
  {
@@ -2939,7 +2938,7 @@ index 9cd7b81..1258def 100644
  #if __x86_64__
  	_architecture = Architecture::x86_64;
  #elif __i386__
-@@ -109,6 +145,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -109,6 +146,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  
  DarlingServer::Process::~Process() {
  	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
@@ -2950,7 +2949,7 @@ index 9cd7b81..1258def 100644
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -221,6 +261,20 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -221,6 +262,20 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  		return false;
  	}
  
@@ -2971,7 +2970,7 @@ index 9cd7b81..1258def 100644
  	local.iov_base = localBuffer;
  	local.iov_len = length;
  
-@@ -245,6 +299,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +300,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -3016,20 +3015,34 @@ index 9cd7b81..1258def 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -283,6 +375,12 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -278,11 +371,26 @@ bool DarlingServer::Process::writeMemory(uintptr_t remoteAddress, const void* lo
+ 	return _readOrWriteMemory(true, remoteAddress, const_cast<void*>(localBuffer), length, errorCode);
+ };
+ 
++void DarlingServer::Process::_prepareCsStateForCheckin(bool didExec) {
++	std::lock_guard csLock(_csMutex);
++	if (didExec) {
++		_csState = {};
++		_csState.version = DC_CS_STATE_VERSION;
++		_csBlob.clear();
++		_csEntitlements.clear();
++		_csDerEntitlements.clear();
++	}
++	_allowCsStateRegistration.store(didExec || (!_isForkChild && _initialCsCheckinPending));
++	_initialCsCheckinPending = false;
++}
++
+ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+ 	std::unique_lock lock(_rwlock);
  
  	bool didExec = _pendingReplacement;
  
-+	{
-+		std::lock_guard csLock(_csMutex);
-+		if (didExec || !_csState.verified)
-+			_allowCsStateRegistration.store(true);
-+	}
++	_prepareCsStateForCheckin(didExec);
 +
  	if (didExec) {
  		// exec case
  
-@@ -369,7 +467,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +477,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -3049,7 +3062,7 @@ index 9cd7b81..1258def 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +574,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +584,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -3157,7 +3170,7 @@ index 9cd7b81..1258def 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +681,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +691,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -3220,7 +3233,7 @@ index 9cd7b81..1258def 100644
  
  		info.protection = 0;
  
-@@ -607,6 +839,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -607,6 +849,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
@@ -3347,7 +3360,7 @@ index 9cd7b81..1258def 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +1009,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +1019,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -4299,10 +4312,10 @@ index 0000000..9ba30d2
 +}
 diff --git a/src/dc_codesign.c b/src/dc_codesign.c
 new file mode 100644
-index 0000000..d075704
+index 0000000..239003b
 --- /dev/null
 +++ b/src/dc_codesign.c
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,622 @@
 +/*
 + * dc_codesign.c - bounded Mach-O code signature parser.
 + *
@@ -4637,25 +4650,15 @@ index 0000000..d075704
 +	return 0;
 +}
 +
-+static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
++static int parse_one_codedirectory(struct dc_image *img, const struct dc_blob *blob,
++                                   char *err, size_t errlen)
 +{
-+	const uint8_t *cd = NULL;
-+	uint32_t cd_len = 0;
++	const uint8_t *cd = img->data + img->sig_offset + blob->offset;
++	uint32_t cd_len = blob->length;
 +	uint64_t need;
 +	uint32_t hash_off, ident_off, n_special, n_code;
 +	uint32_t code_limit32 = 0;
 +	uint64_t code_limit = 0;
-+
-+	for (uint32_t i = 0; i < img->blob_count; i++) {
-+		if (img->blobs[i].type == DC_BLOB_CODEDIRECTORY) {
-+			if (cd)
-+				return fail(err, errlen, "multiple CodeDirectory blobs");
-+			cd = img->data + img->sig_offset + img->blobs[i].offset;
-+			cd_len = img->blobs[i].length;
-+		}
-+	}
-+	if (!cd)
-+		return fail(err, errlen, "no CodeDirectory blob");
 +
 +	if (cd_len < CD_MIN_SIZE)
 +		return fail(err, errlen, "CodeDirectory shorter than v0 header");
@@ -4818,6 +4821,43 @@ index 0000000..d075704
 +	}
 +
 +	return 0;
++}
++
++/* XNU preference: SHA-384, full SHA-256, truncated SHA-256, SHA-1. */
++static unsigned hash_rank(uint32_t type)
++{
++    switch (type) {
++    case DC_HASHTYPE_SHA1: return 1;
++    case DC_HASHTYPE_SHA256_TRUNCATED: return 2;
++    case DC_HASHTYPE_SHA256: return 3;
++    case DC_HASHTYPE_SHA384: return 4;
++    default: return 0;
++    }
++}
++
++static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
++{
++    struct dc_image best;
++    unsigned best_rank = 0, seen_slots = 0, seen_ranks = 0;
++    for (uint32_t i = 0; i < img->blob_count; i++) {
++        const struct dc_blob *blob = &img->blobs[i];
++        unsigned slot;
++        if (blob->type == DC_BLOB_CODEDIRECTORY) slot = 0;
++        else if (blob->type >= 0x1000 && blob->type <= 0x1004) slot = blob->type - 0x1000 + 1;
++        else continue;
++        if (seen_slots & (1u << slot)) return fail(err, errlen, "duplicate CodeDirectory slot");
++        seen_slots |= 1u << slot;
++        struct dc_image candidate = *img;
++        if (parse_one_codedirectory(&candidate, blob, err, errlen) != 0) return -1;
++        unsigned rank = hash_rank(candidate.hash_type);
++        if (!rank || (seen_ranks & (1u << rank)))
++            return fail(err, errlen, "unsupported or duplicate CodeDirectory hash type");
++        seen_ranks |= 1u << rank;
++        if (rank > best_rank) { best = candidate; best_rank = rank; }
++    }
++    if (!best_rank) return fail(err, errlen, "no CodeDirectory blob");
++    *img = best;
++    return 0;
 +}
 +
 +int dc_parse(const uint8_t *data, size_t size, struct dc_image *img,

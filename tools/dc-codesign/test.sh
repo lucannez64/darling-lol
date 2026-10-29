@@ -68,13 +68,15 @@ cdhash_ok() {
 
 # --- ad-hoc ---------------------------------------------------------------
 cp "$input" "$tmp/adhoc.dylib"
-if "$RCODESIGN" sign --binary-identifier com.example.adhoc "$tmp/adhoc.dylib" >/dev/null 2>&1; then
+if "$RCODESIGN" sign --digest sha256 --binary-identifier com.example.adhoc "$tmp/adhoc.dylib" >/dev/null 2>&1; then
 	"$here/dc-codesign" info "$tmp/adhoc.dylib" > "$tmp/adhoc.info" 2>"$tmp/adhoc.err" \
 		&& ok "ad-hoc: parse" || bad "ad-hoc: parse ($(cat "$tmp/adhoc.err"))"
 
 	ref=$("$RCODESIGN" print-signature-info "$tmp/adhoc.dylib" 2>/dev/null)
-	ref_sha1=$(printf '%s\n' "$ref" | awk '/slot: CodeDirectory/{f=1;next} f&&/sha1:/{print $2; exit}')
-	ref_sha256=$(printf '%s\n' "$ref" | awk '/slot: CodeDirectory/{f=1;next} f&&/sha256:/{print $2; exit}')
+	# Old deployment targets add a SHA-1 primary even with explicit SHA-256;
+	# rcodesign prints the requested SHA-256 alternate after that primary.
+	ref_sha1=$(printf '%s\n' "$ref" | awk '/slot:/{f=($0 ~ /CodeDirectory/)} f&&/sha1:/{v=$2} END{print v}')
+	ref_sha256=$(printf '%s\n' "$ref" | awk '/slot:/{f=($0 ~ /CodeDirectory/)} f&&/sha256:/{v=$2} END{print v}')
 	our_sha1=$(field "$tmp/adhoc.info" cd.sha1)
 	our_sha256=$(field "$tmp/adhoc.info" cd.sha256)
 
@@ -112,6 +114,48 @@ if "$RCODESIGN" sign --binary-identifier com.example.adhoc "$tmp/adhoc.dylib" >/
 	fi
 else
 	miss "ad-hoc signing (rcodesign failed)"
+fi
+
+# --- mixed CodeDirectories: macOS chooses SHA-256 over primary SHA-1 --------
+cp "$input" "$tmp/multi.dylib"
+if "$RCODESIGN" sign --digest sha1 --digest sha256 "$tmp/multi.dylib" >"$tmp/multi-sign.out" 2>&1; then
+    "$RCODESIGN" print-signature-info "$tmp/multi.dylib" >"$tmp/multi.ref"
+    ref=$(awk '/slot:.*CodeDirectory Alternate #0/{f=1;next} f&&/sha256:/{print $2;exit}' "$tmp/multi.ref")
+    cdhash_ok "$tmp/multi.dylib" "mixed SHA-1/SHA-256: strongest cdhash" "$(printf '%s' "$ref" | cut -c1-40)"
+    "$here/dc-codesign" info "$tmp/multi.dylib" >"$tmp/multi.info"
+    if [ "$(field "$tmp/multi.info" cd.hash_type)" = 2 ] &&
+        "$here/dc-codesign" verify "$tmp/multi.dylib" >/dev/null 2>&1; then
+        ok "mixed SHA-1/SHA-256: selected page hashes verify"
+    else
+        bad "mixed SHA-1/SHA-256: selected page hashes verify"
+    fi
+    # Even the unselected primary must be structurally valid.
+    cp "$tmp/multi.dylib" "$tmp/multi-bad.dylib"
+    python3 - "$tmp/multi-bad.dylib" <<'PYFIX'
+import struct, sys
+p = sys.argv[1]
+data = bytearray(open(p, 'rb').read())
+ncmds = struct.unpack_from('<I', data, 16)[0]
+command = 32
+for _ in range(ncmds):
+    cmd, size = struct.unpack_from('<II', data, command)
+    if cmd == 0x1d:
+        signature = struct.unpack_from('<I', data, command + 8)[0]
+        primary = struct.unpack_from('>I', data, signature + 16)[0]
+        data[signature + primary] ^= 1
+        break
+    command += size
+else:
+    raise SystemExit('no signature command')
+open(p, 'wb').write(data)
+PYFIX
+    if "$here/dc-codesign" info "$tmp/multi-bad.dylib" >/dev/null 2>&1; then
+        bad "malformed unselected CodeDirectory is rejected"
+    else
+        ok "malformed unselected CodeDirectory is rejected"
+    fi
+else
+    bad "mixed CodeDirectory signing ($(cat "$tmp/multi-sign.out"))"
 fi
 
 # --- entitlements ---------------------------------------------------------

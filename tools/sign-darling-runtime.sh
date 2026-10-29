@@ -19,6 +19,7 @@
 #   --quiet           only print the summary
 #
 # With no DIR and no --sdk/--prefix, both defaults are used.
+# Only SDK roots are trusted automatically; overlays require explicit --trust.
 #
 # Idempotent: files that already carry a CodeDirectory are skipped unless
 # --force. Relocatable objects (MH_OBJECT) are skipped because they are not
@@ -44,6 +45,7 @@ force=0
 verify=1
 thin=1
 trust=0
+sdk_selected=0
 no_trust=0
 trust_store=""
 allow_running=0
@@ -58,13 +60,13 @@ usage() {
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; [ "$no_trust" -eq 1 ] || trust=1 ;;
+	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; sdk_selected=1 ;;
 	--prefix)
 		prefix_root=${DPREFIX:-${HOME}/.darling}
 		for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
 			[ -d "$d" ] && roots="$roots $d"
 		done
-		explicit=1; [ "$no_trust" -eq 1 ] || trust=1 ;;
+		explicit=1 ;;
 	--dry-run) dry=1 ;;
 	--force) force=1 ;;
 	--verify) verify=1 ;;
@@ -83,7 +85,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$explicit" -eq 0 ]; then
-	[ "$no_trust" -eq 1 ] || trust=1
+	sdk_selected=1
 	roots="/usr/local/libexec/darling"
 	prefix_root=${DPREFIX:-${HOME}/.darling}
 	for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
@@ -100,7 +102,8 @@ if [ -z "$RCODESIGN" ] || [ ! -x "$RCODESIGN" ]; then
 	echo "sign-darling-runtime.sh: rcodesign not found (install apple-codesign)" >&2
 	exit 2
 fi
-if [ "$trust" -eq 1 ] && { [ -z "$DCT" ] || [ ! -f "$DCT" ]; }; then
+if { [ "$trust" -eq 1 ] || { [ "$sdk_selected" -eq 1 ] && [ "$no_trust" -eq 0 ]; }; } &&
+    { [ -z "$DCT" ] || [ ! -f "$DCT" ]; }; then
 	echo "sign-darling-runtime.sh: trust-cache tool not found at $DCT" >&2
 	exit 2
 fi
@@ -117,7 +120,11 @@ trust_entries=$tmp/trust-entries
 : > "$trust_entries"
 
 trust_hash() {
-	[ "$trust" -eq 1 ] || return 0
+	# Automatic trust is confined to the SDK, even with --sdk --prefix.
+	[ "$trust" -eq 1 ] || {
+		[ "$sdk_selected" -eq 1 ] && [ "$no_trust" -eq 0 ] &&
+		    [ "$root" = /usr/local/libexec/darling ]
+	} || return 0
 	[ "$dry" -eq 0 ] || return 0
 	hash=$("$DCC" cdhash "$1" 2>/dev/null) || return 1
 	[ -n "$hash" ] || return 1
@@ -247,7 +254,7 @@ for root in $roots; do
 	done < "$tmp/files"
 done
 
-if [ "$trust" -eq 1 ] && [ "$dry" -eq 0 ] && [ -s "$trust_entries" ]; then
+if [ "$dry" -eq 0 ] && [ -s "$trust_entries" ]; then
 	if [ -z "$trust_store" ]; then
 		trust_store=$(python3 "$DCT" default-store) || {
 			echo "trust-store FAILED: cannot determine default store" >&2

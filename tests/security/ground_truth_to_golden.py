@@ -183,9 +183,9 @@ def render_markdown(golden):
     if golden.get("source", {}).get("run_id"):
         out.append(f"Source run: `{golden['source']['run_id']}`.")
         out.append("")
-    out.append("> Caveat: runner VMs boot with SIP disabled (`csrutil status`), so")
-    out.append("> these values describe a CI VM, not a stock Mac. Flags and ABI")
-    out.append("> shapes are still representative; SIP enforcement is not.")
+    out.append("> Caveat: these measurements describe the listed CI environments.")
+    out.append("> SIP status is reported per runner; unavailable observations do not")
+    out.append("> establish security state or stock-Mac behavior.")
     out.append("")
 
     out.append("## Environments")
@@ -216,7 +216,7 @@ def render_markdown(golden):
             ents = f"{p['entitlements_length']} bytes"
         else:
             ents = "unavailable"
-        status_failed = p.get("status_rc") not in (None, 0)
+        status_failed = p.get("status_rc") not in (None, 0) or p.get("status_flags") is None
         if status_failed:
             status = f"unavailable (rc={p['status_rc']} errno={p.get('status_errno', 0)})"
             decoded = "(unavailable)"
@@ -236,9 +236,9 @@ def render_markdown(golden):
         )
     out.append("")
     out.append(
-        "A linker-signed binary with no team therefore reports "
-        "`CS_VALID|CS_LINKER_SIGNED|CS_DYLD_PLATFORM|CS_SIGNED` and `ENOENT` for "
-        "`CS_OPS_TEAMID`. An empty entitlements blob returns success with length 0."
+        "Flags, team-ID errors and entitlement lengths above describe each "
+        "collected result. Failed or unavailable calls establish no flags or "
+        "successful empty-entitlements behavior."
     )
     out.append("")
 

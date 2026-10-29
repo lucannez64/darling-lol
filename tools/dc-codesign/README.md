@@ -30,6 +30,8 @@ Exit codes: `0` ok, `1` parse/verification failure, `2` usage/IO error.
 - Mach-O magic/endianness (64-bit LE/BE; fat binaries are rejected).
 - Load-command bounds, exactly one `LC_CODE_SIGNATURE`.
 - SuperBlob magic/length/count and every blob `offset + length`.
+- Primary and alternate CodeDirectories (slots 0 and 0x1000–0x1004): validate
+  candidates and select the strongest supported hash for cdhash/page checks.
 - CodeDirectory version-gated field sizes (v0x20100 … v0x20500).
 - `hashOffset`/`nSpecialSlots`/`nCodeSlots` arithmetic without overflow.
 - hash type ↔ hash size consistency; identifier/team-id NUL termination.

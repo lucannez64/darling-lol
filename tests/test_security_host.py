@@ -18,7 +18,7 @@ def added_file(patch, path):
 
 
 def function(source, name):
-    match = re.search(r'^([ \t]*)[^\n]*\b' + name + r'\([^\n]*\)\s*\{[\s\S]*?^\1\}', source, re.M)
+    match = re.search(r'^([ \t]*)[^\n]*\b' + name + r'\([^\n]*\)\s*(?:const\s*)?\{[\s\S]*?^\1\}', source, re.M)
     if not match:
         raise AssertionError('missing policy function ' + name)
     return match.group()
@@ -98,7 +98,7 @@ static int sip_stat_inode(const char *path, uint64_t *dev, uint64_t *ino) {
 '''
         registry = source[source.index('#define SIP_INODE_CAPACITY'):source.index('#ifdef __NR_newfstatat')]
         code = preamble + '\n'.join(function(source, name) for name in ('has_path', 'path_is', 'normalize_path'))
-        code += '\n' + registry + '\n' + function(source, 'sip_remember_path') + '\n' + function(source, 'dc_sip_check_write')
+        code += '\n' + registry + '\n' + function(source, 'sip_remember_path') + '\n' + function(source, 'dc_sip_check_write') + '\n' + function(source, 'dc_sip_check_tree_move')
         with tempfile.TemporaryDirectory() as tmp:
             prefix = Path(tmp)
             (prefix / 'System').mkdir()
@@ -112,7 +112,10 @@ static int sip_stat_inode(const char *path, uint64_t *dev, uint64_t *ino) {
  const char *names[] = {"/System/target", "/tmp/alias", "/usr/local/alias"};
  for (int i = 0; i < 3; i++) { snprintf(path, sizeof(path), "%s%s", prefix, names[i]); assert(dc_sip_check_write(path) == -EPERM); }
  snprintf(path, sizeof(path), "%s/usr/local/new-file", prefix); assert(dc_sip_check_write(path) == 0);
- puts("PASS learned inode restrictions survive /usr/local aliases");
+ const char *ancestors[] = {"/private", "/private/var", "/Library", "/"};
+ for (int i = 0; i < 4; i++) { snprintf(path, sizeof(path), "%s%s", prefix, ancestors[i]); assert(dc_sip_check_tree_move(path) == -EPERM); }
+ snprintf(path, sizeof(path), "%s/usr/local/example", prefix); assert(dc_sip_check_tree_move(path) == 0);
+ puts("PASS learned inode restrictions survive /usr/local aliases and protected ancestor moves");
 }
 '''
             result = self.compile_run(code)

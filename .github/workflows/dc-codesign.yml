@@ -6,6 +6,7 @@ on:
       - "tools/dc-codesign/**"
       - "tests/security/**"
       - "tests/test_security_host.py"
+      - "tests/test_security_review.py"
       - "patches/**"
       - ".github/workflows/dc-codesign.yml"
   pull_request:
@@ -13,6 +14,7 @@ on:
       - "tools/dc-codesign/**"
       - "tests/security/**"
       - "tests/test_security_host.py"
+      - "tests/test_security_review.py"
       - "patches/**"
   workflow_dispatch:
 
@@ -41,7 +43,7 @@ jobs:
           rcodesign --version
 
       - name: Host security policies
-        run: python3 -m unittest discover -s tests -p 'test_security_host.py'
+        run: python3 -m unittest discover -s tests -p 'test_security*.py'
 
       - name: Unit tests (cross-check against rcodesign)
         working-directory: tools/dc-codesign
