@@ -76,9 +76,6 @@ def replacement_changes(repo,old,patch):
 
 def prepare_patch(repo,patch,previous):
     already=applies(repo,patch,reverse=True)
-    if not already and applies(repo,patch):
-        run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
-        return
     # A reverse check also succeeds on supersets of a patch. Look for obsolete
     # hunks even if a previous run has already recorded the new patch text.
     seen={hashlib.sha256(patch.encode()).digest()}
@@ -94,6 +91,9 @@ def prepare_patch(repo,patch,previous):
         except subprocess.CalledProcessError:
             run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=old,text=True)
             raise
+        return
+    if not already and applies(repo,patch):
+        run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
         return
     if not already:
         raise SystemExit(f"{repo}: patch neither applies nor matches an earlier applied version; "

@@ -7,11 +7,18 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 @unittest.skipUnless(shutil.which('git'), 'Git required')
 class PatchUpgradeTests(unittest.TestCase):
     def setUp(self):
+        # Hooks can export repository-location/config variables; keep every Git
+        # command, including the extracted preparation functions, in the fixture.
+        environment = patch.dict(os.environ, {k: v for k, v in os.environ.items()
+                                             if not k.startswith('GIT_')}, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         tree = ast.parse((Path(__file__).resolve().parents[1] / 'scripts/prepare.py').read_text())
         definitions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
                        and n.name in ('run', 'applies', 'replacement_changes', 'prepare_patch')]
@@ -23,6 +30,8 @@ class PatchUpgradeTests(unittest.TestCase):
         self.git('init', '-q')
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'user.name', 'Fixture')
+        self.git('config', 'commit.gpgsign', 'false')
+        self.git('config', 'core.hooksPath', str(self.repo / 'no-hooks'))
         self.base = ''.join(f'line {i}\n' for i in range(60))
         self.new = self.base.replace('line 40\n', 'line 40\ncollectionBehavior\n')
         self.old = self.new.replace('line 5\n', 'line 5\ncollectionBehavior\n')
@@ -54,6 +63,20 @@ class PatchUpgradeTests(unittest.TestCase):
         self.assertEqual(self.git('write-tree'), index)
         self.assertEqual((self.repo / 'untracked').read_text(), 'keep me')
         self.assertEqual((self.repo / 'notes').read_text(), 'staged user work\n')
+
+    def test_disjoint_old_hunk_is_removed_before_direct_apply(self):
+        old = self.base.replace('line 5\n', 'line 5\ncollectionBehavior\n')
+        self.header.write_text(old)
+        old_patch = self.git('diff', 'HEAD', '--', 'window.h')
+        self.assertFalse(self.ns['applies'](self.repo, self.patch, reverse=True))
+        self.assertTrue(self.ns['applies'](self.repo, self.patch))
+        self.prepare([old_patch])
+        self.assertEqual(self.header.read_text(), self.new)
+
+    def test_first_apply_without_an_old_patch(self):
+        self.header.write_text(self.base)
+        self.prepare()
+        self.assertEqual(self.header.read_text(), self.new)
 
     def test_current_patch_is_not_rewritten(self):
         before = self.header.stat().st_mtime_ns
