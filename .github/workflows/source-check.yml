@@ -41,7 +41,7 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_close_league_client_in_game.py'
       - run: python -m unittest discover -s tests -p 'test_recover_stale_client.py'
       - run: python -m unittest discover -s tests -p 'test_launchd_orphan_reaping.py'
-      - run: python -m unittest discover -s tests -p 'test_prepare_inspection.py'
+      - run: python -m unittest discover -s tests -p 'test_prepare*.py'
       - run: python -m unittest discover -s tests -p 'test_ifmedia.py'
       - run: python -m unittest discover -s tests -p 'test_clean_stale_helpers.py'
       - run: python -m unittest discover -s tests -p 'test_hide_league_client_in_game.py'

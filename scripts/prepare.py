@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fetch pinned Darling sources and apply each patch to its owning repository."""
-import argparse,json,os,subprocess,tempfile,sys
+import argparse,hashlib,json,os,subprocess,tempfile,sys
 from pathlib import Path
 # --check-only must not create import caches in the source package either.
 sys.dont_write_bytecode=True
@@ -54,6 +54,51 @@ def repair(checkout):
 def applies(repo,patch,reverse=False):
     return subprocess.run(['git','-C',str(repo),'apply',*(['--reverse'] if reverse else []),'--check','-'],input=patch,text=True,
                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+def replacement_changes(repo,old,patch):
+    """Test an old-to-new transition against working files in a private index."""
+    paths=set(subprocess.check_output(['git','-C',str(repo),'diff','--name-only','-z','HEAD']).split(b'\0'))
+    for text in (old,patch):
+        stats=subprocess.check_output(['git','-C',str(repo),'apply','--numstat','-z','-'],input=text.encode())
+        paths.update(row.split(b'\t',2)[2] for row in stats.split(b'\0') if row)
+    paths.discard(b'')
+    with tempfile.TemporaryDirectory(prefix='darling-upgrade-index-') as tmp:
+        env=dict(os.environ,GIT_INDEX_FILE=str(Path(tmp)/'index'))
+        run(['git','-C',str(repo),'read-tree','HEAD'],env=env)
+        run(['git','-C',str(repo),'update-index','--add','--remove','-z','--stdin'],
+            input=b'\0'.join(sorted(paths))+b'\0',env=env)
+        before=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env)
+        for text,reverse in ((old,True),(patch,False)):
+            result=subprocess.run(['git','-C',str(repo),'apply','--cached',
+                *(['--reverse'] if reverse else []),'--whitespace=nowarn','-'],
+                input=text,text=True,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if result.returncode:return False
+        return before!=subprocess.check_output(['git','-C',str(repo),'write-tree'],env=env)
+
+def prepare_patch(repo,patch,previous):
+    already=applies(repo,patch,reverse=True)
+    if not already and applies(repo,patch):
+        run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
+        return
+    # A reverse check also succeeds on supersets of a patch. Look for obsolete
+    # hunks even if a previous run has already recorded the new patch text.
+    seen={hashlib.sha256(patch.encode()).digest()}
+    for old in previous:
+        fingerprint=hashlib.sha256(old.encode()).digest()
+        if fingerprint in seen:continue
+        seen.add(fingerprint)
+        if not applies(repo,old,reverse=True) or not replacement_changes(repo,old,patch):continue
+        print(f"Replacing an earlier patch in {repo}",flush=True)
+        run(['git','-C',str(repo),'apply','--reverse','--whitespace=nowarn','-'],input=old,text=True)
+        try:
+            run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
+        except subprocess.CalledProcessError:
+            run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=old,text=True)
+            raise
+        return
+    if not already:
+        raise SystemExit(f"{repo}: patch neither applies nor matches an earlier applied version; "
+                         "the checkout has other edits. Commit or discard them, then run this again.")
+
 # The rendered text of each patch as last applied, so a later version can revert exactly it.
 applied=ROOT/'build/applied-patches'
 def record_patch(component,patch):
@@ -105,20 +150,7 @@ for component in manifest['components']:
             run(['git','-C',str(repo),'read-tree',component['revision']],env=env)
             run(['git','-C',str(repo),'apply','--cached','--check','--whitespace=nowarn','-'],input=patch,text=True,env=env)
     else:
-        already=applies(repo,patch,reverse=True)
-        if not already and not applies(repo,patch):
-            # An older version of this patch is applied (the checkout predates a pull). Revert exactly that
-            # version, never a reset, so other edits in the repository survive.
-            old=next((text for text in previous_patches(component) if applies(repo,text,reverse=True)),None)
-            if old is None:raise SystemExit(f"{component['path']}: {component['patch']} neither applies nor matches an earlier applied version; "
-                                             f"the checkout has other edits. Commit or discard them in {repo}, then run this again.")
-            print(f"Replacing the earlier {component['patch']} in {component['path']}",flush=True)
-            run(['git','-C',str(repo),'apply','--reverse','--whitespace=nowarn','-'],input=old,text=True)
-            if not applies(repo,patch):
-                run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=old,text=True)
-                raise SystemExit(f"{component['path']}: the new {component['patch']} does not apply to the pinned revision; the earlier version was restored")
-        if not already:
-            run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
+        prepare_patch(repo,patch,previous_patches(component))
         record_patch(component,patch)
     print(('Checked ' if a.check_only else 'Prepared ')+component['path'],flush=True)
 print('All',len(manifest['components']),'component patches validated' if a.check_only else 'component patches ready')

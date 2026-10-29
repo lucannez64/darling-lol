@@ -28,6 +28,20 @@ verbatim, so skim the bundle before sharing it. See
 [compatibility](COMPATIBILITY.md) for what the performance numbers mean and
 for verified machines.
 
+## Update still reports a duplicate NSWindow member
+
+An update after the Electron 43 patches can fail compiling `SecSharedCredential.m`
+with `duplicate member '_collectionBehavior'` in `AppKit/NSWindow.h`. The source
+fix removed an obsolete declaration, but older updater versions could mistake
+that older header for an already updated one.
+
+Pull the updater fix, then rerun your normal update command. Preparation checks
+recorded patches and repository history, replaces a compatible older patch, and
+preserves unrelated edits. It also recovers when an earlier update already
+recorded the new patch without removing the old declaration. You do not need to
+delete the build tree or the Darling prefix. If preparation reports conflicting
+local edits, inspect the named checkout before changing them.
+
 ## NixOS launcher fails before Riot opens
 
 A message saying Darling must be setuid root is not fixed by running `sudo`
