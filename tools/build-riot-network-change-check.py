@@ -3,10 +3,13 @@
 
 The probe asks whether Darling's SystemConfiguration raises a reachability or
 dynamic-store notification on its own, which is what would make Chromium abort
-an in-flight request with ERR_NETWORK_CHANGED. Run it inside the guest (the host path must be under the prefix):
+an in-flight request with ERR_NETWORK_CHANGED. Run it inside the guest; the
+host path must be under the configured prefix:
 
-    cp build/riot-network-change-check ~/.darling/Users/zero/netcheck
-    darling "$HOME/.darling/Users/zero/netcheck"
+    cp build/riot-network-change-check <prefix>/<guest_home>/netcheck
+    darling <prefix>/<guest_home>/netcheck
+
+The build prints both paths for the current configuration.
 """
 import json
 import shlex
@@ -42,9 +45,11 @@ def main():
                     '-framework', 'SystemConfiguration', '-framework', 'CoreFoundation',
                     '-o', str(binary)], check=True)
     print(f'Built {binary}')
+    guest_probe = Path(config['prefix']) / config['guest_home'].lstrip('/') / NAME
     print('Run inside the guest:')
-    print('  cp %s ~/.darling/Users/zero/netcheck' % binary)
-    print('  darling "$HOME/.darling/Users/zero/netcheck"')
+    print(f'  mkdir -p {shlex.quote(str(guest_probe.parent))}')
+    print(f'  cp {shlex.quote(str(binary))} {shlex.quote(str(guest_probe))}')
+    print(f'  darling {shlex.quote(str(guest_probe))}')
 
 
 if __name__ == '__main__':

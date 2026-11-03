@@ -5,10 +5,13 @@ The probe prints the %rdx secondary return register after sendto(), send()
 and write() inside the guest, so it can be compared with the host. Chromium
 reports ERR_NETWORK_CHANGED (-21) when that register is nonzero after a
 successful send, which is what the 142 client's local UI load and every TLS
-handshake hit before the trampoline cleared it. Run it inside the guest:
+handshake hit before the trampoline cleared it. Run it inside the guest; the
+host path must be under the configured prefix:
 
-    cp build/riot-sendto-rdx-check ~/.darling/Users/zero/rdxcheck
-    darling ~/.darling/Users/zero/rdxcheck
+    cp build/riot-sendto-rdx-check <prefix>/<guest_home>/rdxcheck
+    darling <prefix>/<guest_home>/rdxcheck
+
+The build prints both paths for the current configuration.
 """
 import json
 import shlex
@@ -46,6 +49,11 @@ def main():
     subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-nostdlib',
                     '-isysroot', config['sdk'], str(obj), '-lSystem', '-o', str(binary)], check=True)
     print(f'Built {binary}')
+    guest_probe = Path(config['prefix']) / config['guest_home'].lstrip('/') / 'rdxcheck'
+    print('Run inside the guest:')
+    print(f'  mkdir -p {shlex.quote(str(guest_probe.parent))}')
+    print(f'  cp {shlex.quote(str(binary))} {shlex.quote(str(guest_probe))}')
+    print(f'  darling {shlex.quote(str(guest_probe))}')
 
 
 if __name__ == '__main__':
