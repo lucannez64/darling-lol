@@ -121,7 +121,7 @@ class RiotClient142Tests(unittest.TestCase):
         for framework in bundle.glob('Contents/Frameworks/**/Electron Framework.framework/Electron Framework'):
             if framework.is_file():
                 return framework
-        self.skipTest(f'{bundle.name} has no Electron Framework')
+        self.fail(f'{bundle.name}: no Electron Framework image')
 
     def test_bundles_ship_electron_43(self):
         for bundle in self.bundles:
@@ -132,16 +132,19 @@ class RiotClient142Tests(unittest.TestCase):
             self.assertRegex(strings, r'Chrome/1[4-9][0-9]\.', f'{bundle.name}: unexpected Chromium version')
 
     def test_framework_stubs_cover_nonweak_imports(self):
-        electron = self.electron(self.bundles[0])
         missing = {}
-        for name in STUB_FRAMEWORKS:
-            binary = overlay_framework(self.home, name)
-            if binary is None:
-                self.skipTest(f'{name} stub not installed in {self.home}/RuntimeFrameworks')
-            exported = symbols(binary)
-            absent = sorted(symbol for symbol in imports_from(electron, name) if symbol not in exported)
-            if absent:
-                missing[name] = absent
+        for bundle in self.bundles:
+            electron = self.electron(bundle)
+            for name in STUB_FRAMEWORKS:
+                binary = overlay_framework(self.home, name)
+                if binary is None:
+                    missing[f'{bundle.name}:{name}'] = [
+                        f'stub not installed in {self.home}/RuntimeFrameworks']
+                    continue
+                exported = symbols(binary)
+                absent = sorted(symbol for symbol in imports_from(electron, name) if symbol not in exported)
+                if absent:
+                    missing[f'{bundle.name}:{name}'] = absent
         self.assertEqual({}, missing, 'framework stubs miss imports the client binds')
 
     def test_constant_literal_symbols_are_exported(self):
@@ -149,7 +152,8 @@ class RiotClient142Tests(unittest.TestCase):
         for framework, required in CONSTANTS.items():
             binary = overlay_framework(self.home, framework)
             if binary is None:
-                self.skipTest(f'{framework} overlay missing from {self.home}/RuntimeFrameworks')
+                missing[framework] = [f'overlay missing from {self.home}/RuntimeFrameworks']
+                continue
             have = symbols(binary)
             absent = [symbol for symbol in required if symbol not in have]
             if absent:

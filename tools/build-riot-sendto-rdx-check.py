@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Build tools/riot-sendto-rdx-check.c against the configured SDK.
 
-The probe prints the errno a plain TCP connect() returns inside the guest, so
-it can be compared with the host. Chromium reports ERR_NETWORK_CHANGED (-21)
-for the 142 client's local UI load and for every TLS handshake, and one of its
-errno mappings produces that code. Run it inside the guest:
+The probe prints the %rdx secondary return register after sendto(), send()
+and write() inside the guest, so it can be compared with the host. Chromium
+reports ERR_NETWORK_CHANGED (-21) when that register is nonzero after a
+successful send, which is what the 142 client's local UI load and every TLS
+handshake hit before the trampoline cleared it. Run it inside the guest:
 
     cp build/riot-sendto-rdx-check ~/.darling/Users/zero/rdxcheck
     darling ~/.darling/Users/zero/rdxcheck
