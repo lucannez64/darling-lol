@@ -7836,10 +7836,45 @@ index 9a489b386..9fe56cc3f 100644
  @implementation VNDetectBarcodesRequest
  
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
-diff --git a/src/libsandbox/src/sandbox.c b/src/libsandbox/src/sandbox.c
-index 5af5298aa..fb59ee5d1 100644
---- a/src/libsandbox/src/sandbox.c
-+++ b/src/libsandbox/src/sandbox.c
+diff --git i/src/libsandbox/include/sandbox/sandbox.h w/src/libsandbox/include/sandbox/sandbox.h
+index 50a7e632..dca8203c 100644
+--- i/src/libsandbox/include/sandbox/sandbox.h
++++ w/src/libsandbox/include/sandbox/sandbox.h
+@@ -21,19 +21,22 @@
+ #ifndef _sandbox_H_
+ #define _sandbox_H_
+ 
+-void* sandbox_apply(void);
++/* darling-lol: these follow Apple's and WTF's SandboxSPI.h, not the old
++ * placeholder shapes. A compiled profile is an opaque struct whose first
++ * fields Chromium reads as {builtin, data, size}; params is an opaque object. */
++int sandbox_apply(void* profile);
+ void* sandbox_apply_container(void);
+-void* sandbox_compile_entitlements(void);
+-void* sandbox_compile_file(void);
+-void* sandbox_compile_named(void);
+-void* sandbox_compile_string(void);
++void* sandbox_compile_entitlements(void* entitlements, void* params, char** error);
++void* sandbox_compile_file(const char* path, void* params, char** error);
++void* sandbox_compile_named(const char* name, void* params, char** error);
++void* sandbox_compile_string(const char* profile, void* params, char** error);
+ void* sandbox_container_paths_iterate_items(void);
+ void* sandbox_create_params(void);
+-void* sandbox_free_params(void);
+-void* sandbox_free_profile(void);
++void* sandbox_free_params(void* params);
++void sandbox_free_profile(void* profile);
+ void* sandbox_inspect_pid(void);
+ void* sandbox_inspect_smemory(void);
+-void* sandbox_set_param(void);
++int sandbox_set_param(void* params, const char* key, const char* value);
+ void* sandbox_set_user_state_item(void);
+ void* sandbox_user_state_item_buffer_create(void);
+ void* sandbox_user_state_item_buffer_destroy(void);
+diff --git i/src/libsandbox/src/sandbox.c w/src/libsandbox/src/sandbox.c
+index 5af5298a..ddbacfee 100644
+--- i/src/libsandbox/src/sandbox.c
++++ w/src/libsandbox/src/sandbox.c
 @@ -21,6 +21,8 @@
  #include <sandbox/sandbox.h>
  #include <stdlib.h>
@@ -7849,7 +7884,7 @@ index 5af5298aa..fb59ee5d1 100644
  
  static int verbose = 0;
  
-@@ -29,63 +31,105 @@ static void initme(void) {
+@@ -29,10 +31,118 @@ static void initme(void) {
      verbose = getenv("STUB_VERBOSE") != NULL;
  }
  
@@ -7862,35 +7897,26 @@ index 5af5298aa..fb59ee5d1 100644
 +static int64_t sandbox_extension_next_token = 1;
 +
 +int64_t sandbox_extension_issue_file(const char *path, uint32_t flags)
- {
--    if (verbose) puts("STUB: sandbox_apply called");
--    return NULL;
++{
 +    if (verbose) puts("STUB: sandbox_extension_issue_file called");
 +    (void)path; (void)flags;
 +    return sandbox_extension_next_token++;
- }
- 
--void* sandbox_apply_container(void)
++}
++
 +int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags)
- {
--    if (verbose) puts("STUB: sandbox_apply_container called");
--    return NULL;
++{
 +    if (verbose) puts("STUB: sandbox_extension_issue_mach called");
 +    (void)name; (void)flags;
 +    return sandbox_extension_next_token++;
- }
- 
--void* sandbox_compile_entitlements(void)
++}
++
 +int sandbox_extension_consume(int64_t token)
- {
--    if (verbose) puts("STUB: sandbox_compile_entitlements called");
--    return NULL;
++{
 +    if (verbose) puts("STUB: sandbox_extension_consume called");
 +    (void)token;
 +    return 0;
- }
- 
--void* sandbox_compile_file(void)
++}
++
 +int sandbox_extension_release(int64_t token)
 +{
 +    if (verbose) puts("STUB: sandbox_extension_release called");
@@ -7900,86 +7926,156 @@ index 5af5298aa..fb59ee5d1 100644
 +
 +/* darling-lol: compile/apply family. No seatbelt compiler exists, so
 + * "compiling" a profile yields a dummy handle and applying succeeds.
-+ * Signatures match Apple's (the old stubs had wrong shapes). */
++ *
++ * A compiled profile must have Apple's layout: Chromium compiles the policy in
++ * the browser, copies data/size into the message it sends to the child, and
++ * frees the profile. Returning a bare string there made that copy read past
++ * the allocation and take heap bytes as the length, which Chromium then fed to
++ * its allocator (the "invalid size" trap on startup). */
++struct darling_sandbox_profile {
++    char *builtin;
++    unsigned char *data;
++    size_t size;
++};
 +
-+void* sandbox_compile_string(const char *profile, char **errorbuf)
++static const char darling_compiled_profile[] = "darling-sandbox-stub";
++
++static void *darling_sandbox_profile_create(void)
++{
++    struct darling_sandbox_profile *profile = calloc(1, sizeof(*profile));
++    if (profile == NULL)
++        return NULL;
++    profile->data = malloc(sizeof(darling_compiled_profile));
++    if (profile->data == NULL) {
++        free(profile);
++        return NULL;
++    }
++    memcpy(profile->data, darling_compiled_profile, sizeof(darling_compiled_profile));
++    profile->size = sizeof(darling_compiled_profile);
++    return profile;
++}
++
++void* sandbox_compile_string(const char *profile, void *params, char **errorbuf)
 +{
 +    if (verbose) puts("STUB: sandbox_compile_string called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)profile;
-+    return strdup("darling-sandbox-stub");
++    (void)profile; (void)params;
++    return darling_sandbox_profile_create();
 +}
 +
-+void* sandbox_compile_file(const char *path, char **errorbuf)
- {
-     if (verbose) puts("STUB: sandbox_compile_file called");
--    return NULL;
++void* sandbox_compile_file(const char *path, void *params, char **errorbuf)
++{
++    if (verbose) puts("STUB: sandbox_compile_file called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)path;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_compile_named(void)
-+void* sandbox_compile_named(const char *name, char **errorbuf)
- {
-     if (verbose) puts("STUB: sandbox_compile_named called");
--    return NULL;
++    (void)path; (void)params;
++    return darling_sandbox_profile_create();
++}
++
++void* sandbox_compile_named(const char *name, void *params, char **errorbuf)
++{
++    if (verbose) puts("STUB: sandbox_compile_named called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)name;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_compile_string(void)
-+void* sandbox_compile_entitlements(void *entitlements, char **errorbuf)
- {
--    if (verbose) puts("STUB: sandbox_compile_string called");
--    return NULL;
++    (void)name; (void)params;
++    return darling_sandbox_profile_create();
++}
++
++void* sandbox_compile_entitlements(void *entitlements, void *params, char **errorbuf)
++{
 +    if (verbose) puts("STUB: sandbox_compile_entitlements called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)entitlements;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_container_paths_iterate_items(void)
-+int sandbox_apply(void *handle)
- {
--    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
--    return NULL;
-+    if (verbose) puts("STUB: sandbox_apply called");
-+    (void)handle;
-+    return 0;
- }
- 
--void* sandbox_create_params(void)
-+void sandbox_free_profile(void *handle)
- {
--    if (verbose) puts("STUB: sandbox_create_params called");
-+    if (verbose) puts("STUB: sandbox_free_profile called");
-+    free(handle);
++    (void)entitlements; (void)params;
++    return darling_sandbox_profile_create();
 +}
 +
-+void* sandbox_apply_container(void)
++int sandbox_apply(void *handle)
+ {
+     if (verbose) puts("STUB: sandbox_apply called");
+-    return NULL;
++    (void)handle;
++    return 0;
++}
++
++void sandbox_free_profile(void *handle)
 +{
-+    if (verbose) puts("STUB: sandbox_apply_container called");
++    if (verbose) puts("STUB: sandbox_free_profile called");
++    struct darling_sandbox_profile *profile = handle;
++    if (profile != NULL)
++        free(profile->data);
++    free(profile);
+ }
+ 
+ void* sandbox_apply_container(void)
+@@ -41,51 +151,23 @@ void* sandbox_apply_container(void)
      return NULL;
+ }
+ 
+-void* sandbox_compile_entitlements(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_entitlements called");
+-    return NULL;
+-}
+-
+-void* sandbox_compile_file(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_file called");
+-    return NULL;
+-}
+-
+-void* sandbox_compile_named(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_named called");
+-    return NULL;
+-}
+-
+-void* sandbox_compile_string(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_string called");
+-    return NULL;
+-}
+-
+ void* sandbox_container_paths_iterate_items(void)
+ {
+     if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
+     return NULL;
+ }
+ 
++/* darling-lol: a NULL parameter set is a failure to Chromium's seatbelt
++ * client, which then never compiles the profile. Hand out an empty one. */
+ void* sandbox_create_params(void)
+ {
+     if (verbose) puts("STUB: sandbox_create_params called");
+-    return NULL;
++    return calloc(1, sizeof(void *));
  }
  
 -void* sandbox_free_params(void)
-+void* sandbox_container_paths_iterate_items(void)
++void* sandbox_free_params(void *params)
  {
 -    if (verbose) puts("STUB: sandbox_free_params called");
-+    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
-     return NULL;
- }
- 
+-    return NULL;
+-}
+-
 -void* sandbox_free_profile(void)
-+void* sandbox_create_params(void)
- {
+-{
 -    if (verbose) puts("STUB: sandbox_free_profile called");
-+    if (verbose) puts("STUB: sandbox_create_params called");
++    free(params);
      return NULL;
  }
  
+@@ -101,10 +183,11 @@ void* sandbox_inspect_smemory(void)
+     return NULL;
+ }
+ 
+-void* sandbox_set_param(void)
++int sandbox_set_param(void *params, const char *key, const char *value)
+ {
+     if (verbose) puts("STUB: sandbox_set_param called");
+-    return NULL;
++    (void)params; (void)key; (void)value;
++    return 0;
+ }
+ 
+ void* sandbox_set_user_state_item(void)
 diff --git a/src/libsystem_coreservices/dirhelper.c b/src/libsystem_coreservices/dirhelper.c
 index f22f8213d..e7fbdc92e 100644
 --- a/src/libsystem_coreservices/dirhelper.c
