@@ -17,7 +17,9 @@ FILE = 'darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
 def patched_text(path):
     """Context and added lines of path's section: the file after the patch."""
     patch = PATCH.read_text()
-    match = re.search(r'(?ms)^diff --git a/%s b/%s\n(.*?)(?=^diff --git |\Z)' % (re.escape(path), re.escape(path)), patch)
+    match = re.search(
+        r'(?ms)^diff --git [ai]/%s [bw]/%s\n(.*?)(?=^diff --git |\Z)'
+        % (re.escape(path), re.escape(path)), patch)
     if not match:
         raise AssertionError(path + ' is not in patches/xnu.patch')
     body = match.group(1)
