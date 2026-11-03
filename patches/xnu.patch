@@ -7966,3 +7966,35 @@ index 0000000..04d64c1
 +    return error;
 +}
 +#endif
+diff --git i/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S w/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+index a26ae39..0fb6d6a 100644
+--- i/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
++++ w/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall.S
+@@ -11,6 +11,9 @@ Lentry_hook:
+ 	movq	(%r10,%rax,8), %r10
+ 	test	%r10, %r10
+ 	jz		.no_sys
++	# pipe() returns its second descriptor in %rdx (see sys_pipe)
++	cmpq	$42, %rax
++	je		.keep_rdx
+ 	# Re-push possible 7th and 8th arg
+ 	movq	24(%rsp), %r11
+ 	pushq	%r11
+@@ -18,6 +21,17 @@ Lentry_hook:
+ 	pushq	%r11
+ 	call	*%r10
+ 	addq	$16, %rsp
++	# XNU returns the second result value in %rdx, which is zero for every
++	# other syscall; callers such as Chromium's sendto wrapper check it
++	xorl	%edx, %edx
++	jmp		.std_ret
++.keep_rdx:
++	movq	24(%rsp), %r11
++	pushq	%r11
++	movq	24(%rsp), %r11
++	pushq	%r11
++	call	*%r10
++	addq	$16, %rsp
+ .std_ret:
+ Lexit_hook:
+ 	.space 13, 0x90
