@@ -71,37 +71,123 @@ index 91b5a2b..0f7b4eb 100644
          CFStringRef str = (CFStringRef) CF_OBJC_CALLV((NSError *)err, localizedRecoverySuggestion);
          return str ? (CFStringRef)CFRetain(str) : NULL;    // It's possible for localizedRecoverySuggestion to return nil
 diff --git a/CFForwardingPrep.S b/CFForwardingPrep.S
-index a399c43..f1a440f 100644
+index a399c43..7f01ce8 100644
 --- a/CFForwardingPrep.S
 +++ b/CFForwardingPrep.S
-@@ -217,7 +217,10 @@ __CF_forwarding_prep_1:
+@@ -216,26 +216,42 @@ __CF_forwarding_prep_1:
+     movq %rsp, %rbp
      .cfi_def_cfa_register rbp
  
-     // Copy args from regs into a stack var
+-    // Copy args from regs into a stack var
 -    subq   $0xd0, %rsp
-+    // darling-lol: 0xc0-0xef holds the return registers (rax, rdx, xmm0,
-+    // xmm1); the frame used to end at 0xd0, so the xmm slots overlapped the
-+    // saved rbp and the return address.
-+    subq   $0xf0, %rsp
-     movq   %rax, 0xb0(%rsp)
-     movapd %xmm7, 0xa0(%rsp)
-     movapd %xmm6, 0x90(%rsp)
-@@ -234,6 +237,15 @@ __CF_forwarding_prep_1:
-     movq   %rsi, 8(%rsp)
-     movq   %rdi, (%rsp)
- 
+-    movq   %rax, 0xb0(%rsp)
+-    movapd %xmm7, 0xa0(%rsp)
+-    movapd %xmm6, 0x90(%rsp)
+-    movapd %xmm5, 0x80(%rsp)
+-    movapd %xmm4, 0x70(%rsp)
+-    movapd %xmm3, 0x60(%rsp)
+-    movapd %xmm2, 0x50(%rsp)
+-    movapd %xmm1, 0x40(%rsp)
++    // Copy args from regs into a stack var.
++    // darling-lol: NSMethodSignature lays the frame out as a 0xe0 block whose
++    // stack arguments start at +0xe0 (0xd0 here, then the saved rbp and the
++    // return address), so that block must end right at rbp. The return
++    // storage goes below it: it used to sit at 0xc0-0xef and its xmm slots
++    // overwrote the saved rbp and the return address.
++    //   0x00-0x3f  return storage (rax, rdx, xmm0, xmm1)
++    //   0x40-0x10f the 0xe0 frame handed to ____forwarding___
++    subq   $0x110, %rsp
++    movq   %rax, 0xf0(%rsp)
++    movapd %xmm7, 0xe0(%rsp)
++    movapd %xmm6, 0xd0(%rsp)
++    movapd %xmm5, 0xc0(%rsp)
++    movapd %xmm4, 0xb0(%rsp)
++    movapd %xmm3, 0xa0(%rsp)
++    movapd %xmm2, 0x90(%rsp)
++    movapd %xmm1, 0x80(%rsp)
++    movapd %xmm0, 0x70(%rsp)
++    movq   %r9, 0x68(%rsp)
++    movq   %r8, 0x60(%rsp)
++    movq   %rcx, 0x58(%rsp)
++    movq   %rdx, 0x50(%rsp)
++    movq   %rsi, 0x48(%rsp)
++    movq   %rdi, 0x40(%rsp)
++
 +    // darling-lol: clear the return storage first, as the i386 path does. A
 +    // -forwardInvocation: that sets no return value (Darling's "v@:" stubs)
 +    // then returns nil/0 instead of whatever was on the stack.
 +    xorps  %xmm0, %xmm0
-+    movapd %xmm0, 0xc0(%rsp)
-+    movapd %xmm0, 0xd0(%rsp)
-+    movapd %xmm0, 0xe0(%rsp)
-+    movapd 0x30(%rsp), %xmm0
-+
-     movq   %rsp, %rdi
-     leaq   0xc0(%rsp), %rsi
++    movapd %xmm0, (%rsp)
++    movapd %xmm0, 0x10(%rsp)
++    movapd %xmm0, 0x20(%rsp)
+     movapd %xmm0, 0x30(%rsp)
+-    movq   %r9, 0x28(%rsp)
+-    movq   %r8, 0x20(%rsp)
+-    movq   %rcx, 0x18(%rsp)
+-    movq   %rdx, 0x10(%rsp)
+-    movq   %rsi, 8(%rsp)
+-    movq   %rdi, (%rsp)
+ 
+-    movq   %rsp, %rdi
+-    leaq   0xc0(%rsp), %rsi
++    leaq   0x40(%rsp), %rdi
++    movq   %rsp, %rsi
      call   ____forwarding___ // call through
+ 
+     cmpq   $0, %rax          // check for forwarding completion
+@@ -246,10 +262,10 @@ __CF_forwarding_prep_1:
+     // and jump back to our caller
+ 
+     // here's how we get the return values (see NSInvoke-x86.S)
+-    movq   0xc0(%rsp), %rax
+-    movq   0xc8(%rsp), %rdx
+-    movapd 0xd0(%rsp), %xmm0
+-    movapd 0xe0(%rsp), %xmm1
++    movq   (%rsp), %rax
++    movq   0x8(%rsp), %rdx
++    movapd 0x10(%rsp), %xmm0
++    movapd 0x20(%rsp), %xmm1
+ 
+     movq   %rbp, %rsp
+     pop    %rbp
+@@ -259,21 +275,22 @@ __CF_forwarding_prep_1:
+ Lfail:
+     // if we got a non-nil value, it's our forwarding target
+     movq   %rax, %rdi
+-    movq   0x80(%rsp), %rax
+-    movapd 0xa0(%rsp), %xmm7
+-    movapd 0x90(%rsp), %xmm6
+-    movapd 0x80(%rsp), %xmm5
+-    movapd 0x70(%rsp), %xmm4
+-    movapd 0x60(%rsp), %xmm3
+-    movapd 0x50(%rsp), %xmm2
+-    movapd 0x40(%rsp), %xmm1
+-    movapd 0x30(%rsp), %xmm0
+-    movq   0x28(%rsp), %r9
+-    movq   0x20(%rsp), %r8
+-    movq   0x18(%rsp), %rcx
+-    movq   0x10(%rsp), %rdx
+-    movq   8(%rsp), %rsi
+-    // movq   (%rsp), %rdi // self overwritten
++    // darling-lol: rax was saved at 0xf0; this used to reload xmm5's slot.
++    movq   0xf0(%rsp), %rax
++    movapd 0xe0(%rsp), %xmm7
++    movapd 0xd0(%rsp), %xmm6
++    movapd 0xc0(%rsp), %xmm5
++    movapd 0xb0(%rsp), %xmm4
++    movapd 0xa0(%rsp), %xmm3
++    movapd 0x90(%rsp), %xmm2
++    movapd 0x80(%rsp), %xmm1
++    movapd 0x70(%rsp), %xmm0
++    movq   0x68(%rsp), %r9
++    movq   0x60(%rsp), %r8
++    movq   0x58(%rsp), %rcx
++    movq   0x50(%rsp), %rdx
++    movq   0x48(%rsp), %rsi
++    // movq   0x40(%rsp), %rdi // self overwritten
+ 
+     movq   %rbp, %rsp
+     pop    %rbp
 diff --git a/CFRunLoop.c b/CFRunLoop.c
 index e932ea5..522bc72 100644
 --- a/CFRunLoop.c

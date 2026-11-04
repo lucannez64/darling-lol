@@ -102,9 +102,22 @@ class RiotClient142RemainingTests(unittest.TestCase):
 
     def test_forwarding_clears_return_storage(self):
         source = added_lines(patch_section('patches/corefoundation.patch', 'CFForwardingPrep.S'))
-        self.assertIn('subq   $0xf0, %rsp', source)
-        for offset in ('0xc0', '0xd0', '0xe0'):
+        # The 0x30 clear matches an original line, so it is context, not added.
+        for offset in ('', '0x10', '0x20'):
             self.assertIn(f'movapd %xmm0, {offset}(%rsp)', source)
+        self.assertIn('movq   %rsp, %rsi', source)
+
+    def test_forwarding_frame_matches_the_method_signature_layout(self):
+        # NSMethodSignature reads stack arguments at frame + 0xe0: the frame
+        # handed to ____forwarding___ must end 0x10 below them (saved rbp and
+        # return address), so the return storage has to sit below the frame.
+        source = added_lines(patch_section('patches/corefoundation.patch', 'CFForwardingPrep.S'))
+        self.assertIn('subq   $0x110, %rsp', source)
+        self.assertIn('leaq   0x40(%rsp), %rdi', source)
+        self.assertEqual(0x110 - 0x40, 0xe0 - 0x10)
+        self.assertIn('movq   %rdi, 0x40(%rsp)', source)
+        self.assertIn('movq   0xf0(%rsp), %rax', source)
+        self.assertNotIn('subq   $0xf0, %rsp', source)
 
     def test_struct_returning_window_methods_exist(self):
         # Darling's forwarding has no stret path, so a missing NSRect method
