@@ -60,7 +60,7 @@ class SystemProfileTests(unittest.TestCase):
         self.assertIn('darling-system.prop', installer)
         self.assertIn('[ ! -e "$prefix/private/etc/darling-system.prop" ]', installer)
 
-    def launcher_handoff(self, profile):
+    def launcher_handoff(self, profile, **extra):
         launcher = (ROOT / 'tools/run-riot-client.sh').read_text()
         start = launcher.index('system_prop=')
         end = launcher.index('# Opt-in partial recovery:')
@@ -74,6 +74,7 @@ class SystemProfileTests(unittest.TestCase):
                 'PATH': os.environ['PATH'], 'HOME': folder, 'prefix_dir': str(prefix),
                 'runner_dir': str(ROOT / 'tools'), 'RCLOL_PLATFORM_PROFILE': profile,
             }
+            env.update(extra)
             script = ('. "$1"; '
                       'printf "profile=%s\\ncpu=%s\\ngpu=%s\\nvram=%s\\nmetal_mac=%s\\nmetal_vram=%s\\n" '
                       '"$RCLOL_PLATFORM_PROFILE" "$RCLOL_CPU_BRAND" "$RCLOL_GPU_NAME" '
@@ -97,6 +98,12 @@ class SystemProfileTests(unittest.TestCase):
         self.assertEqual(compat['vram'], '4096')
         self.assertEqual(compat['metal_mac'], '1')
         self.assertEqual(compat['metal_vram'], '4096')
+
+    def test_compat_keeps_user_metal_overrides(self):
+        compat = self.launcher_handoff('compat', DARLING_METAL_MAC_GPU_NAME='0',
+                                       DARLING_METAL_VRAM_MB='8192')
+        self.assertEqual(compat['metal_mac'], '0')
+        self.assertEqual(compat['metal_vram'], '8192')
 
 
 if __name__ == '__main__':

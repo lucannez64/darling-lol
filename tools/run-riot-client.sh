@@ -87,14 +87,15 @@ export RCLOL_GPU_NAME="$gpu_name"
 export RCLOL_GPU_VRAM_MB="$gpu_vram"
 export RCLOL_GPU_UNIFIED="$gpu_unified"
 if [ "$profile" = compat ]; then
+ # User-supplied DARLING_METAL_* values win over the profile, as in HOST.
  case "$gpu_name" in
-  mac) export DARLING_METAL_MAC_GPU_NAME=1;;
+  mac) export DARLING_METAL_MAC_GPU_NAME="${DARLING_METAL_MAC_GPU_NAME:-1}";;
   host|'') ;;
-  *) export DARLING_METAL_GPU_NAME="$gpu_name";;
+  *) export DARLING_METAL_GPU_NAME="${DARLING_METAL_GPU_NAME:-$gpu_name}";;
  esac
- case "$gpu_vram" in ''|*[!0-9]*) ;; *) export DARLING_METAL_VRAM_MB="$gpu_vram";; esac
+ case "$gpu_vram" in ''|*[!0-9]*) ;; *) export DARLING_METAL_VRAM_MB="${DARLING_METAL_VRAM_MB:-$gpu_vram}";; esac
  # The kernel patch defaults to unified memory; 0 is the compatibility value.
- export DARLING_METAL_HOST_UNIFIED_MEMORY=0
+ export DARLING_METAL_HOST_UNIFIED_MEMORY="${DARLING_METAL_HOST_UNIFIED_MEMORY:-0}"
 else
  # HOST leaves the Metal name to the real host card and asks it to report the
  # host's memory model. User-supplied DARLING_METAL_* overrides still win.

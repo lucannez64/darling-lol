@@ -134,6 +134,20 @@ class SystemProfilerTests(unittest.TestCase):
         self.assertEqual(item['spdisplays_vendor'], 'NVIDIA (0x10de)')
         self.assertEqual(item['spdisplays_vram'], '4096 MB')
 
+    def test_standalone_run_reads_the_installed_profile(self):
+        prop = Path(self.folder.name) / 'darling-system.prop'
+        prop.write_text('profile=host\nprofile=compat\ncompat.gpu.name=mac\ncompat.gpu.vram=4096\n')
+        item = self.display(self.drm_root(), RCLOL_SYSTEM_PROP=str(prop))
+        self.assertEqual(item['sppci_model'], 'AMD Radeon Pro 5500M')
+        self.assertEqual(item['spdisplays_vram'], '4096 MB')
+
+    def test_launcher_handoff_wins_over_the_installed_profile(self):
+        prop = Path(self.folder.name) / 'darling-system.prop'
+        prop.write_text('profile=compat\ncompat.gpu.name=mac\ncompat.gpu.vram=4096\n')
+        item = self.display(self.drm_root(), RCLOL_SYSTEM_PROP=str(prop), RCLOL_PLATFORM_PROFILE='host',
+                            RCLOL_GPU_NAME='host', RCLOL_GPU_VRAM_MB='host')
+        self.assertNotEqual(item['sppci_model'], 'AMD Radeon Pro 5500M')
+
 
 if __name__ == '__main__':
     unittest.main()
