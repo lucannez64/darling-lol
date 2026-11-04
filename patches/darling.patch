@@ -1115,6 +1115,179 @@ index 7243e6a62..647c8aff7 100644
  }
  
  OSStatus AudioObjectRemovePropertyListener(AudioObjectID inObjectID,
+diff --git a/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm b/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm
+new file mode 100644
+index 0000000..02fb335
+--- /dev/null
++++ b/src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm
+@@ -0,0 +1,167 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling Developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// darling-lol: block-based property listeners and CATapDescription, linked by
++// the current Riot Client's Electron. The listeners are built on the
++// function-pointer API: each registration owns a copy of the block and the queue
++// it is delivered on.
++
++#include <CoreAudio/AudioHardware.h>
++#include <dispatch/dispatch.h>
++#include <Block.h>
++#include <stdlib.h>
++#include <string.h>
++#include <mutex>
++#include <vector>
++#import <objc/NSObject.h>
++#import <objc/runtime.h>
++
++namespace
++{
++
++struct BlockListener
++{
++	AudioObjectID object;
++	AudioObjectPropertyAddress address;
++	dispatch_queue_t queue;
++	AudioObjectPropertyListenerBlock block;
++};
++
++std::mutex g_listenersLock;
++std::vector<BlockListener*> g_listeners;
++
++bool sameAddress(const AudioObjectPropertyAddress& a, const AudioObjectPropertyAddress& b)
++{
++	return a.mSelector == b.mSelector && a.mScope == b.mScope && a.mElement == b.mElement;
++}
++
++OSStatus deliverToBlock(AudioObjectID inObjectID, UInt32 inNumberAddresses,
++		const AudioObjectPropertyAddress* inAddresses, void* inClientData)
++{
++	BlockListener* listener = static_cast<BlockListener*>(inClientData);
++	AudioObjectPropertyListenerBlock block = listener->block;
++
++	if (listener->queue == NULL)
++	{
++		block(inNumberAddresses, inAddresses);
++		return noErr;
++	}
++
++	// The addresses only live for this call; the block runs later on its queue.
++	size_t size = inNumberAddresses * sizeof(AudioObjectPropertyAddress);
++	AudioObjectPropertyAddress* copy = static_cast<AudioObjectPropertyAddress*>(malloc(size ? size : 1));
++	if (copy == NULL)
++		return kAudioHardwareUnspecifiedError;
++	memcpy(copy, inAddresses, size);
++	dispatch_async(listener->queue, ^{
++		block(inNumberAddresses, copy);
++		free(copy);
++	});
++	return noErr;
++}
++
++}
++
++extern "C" OSStatus AudioObjectAddPropertyListenerBlock(AudioObjectID inObjectID,
++		const AudioObjectPropertyAddress* inAddress, dispatch_queue_t inDispatchQueue,
++		AudioObjectPropertyListenerBlock inListener)
++{
++	if (inAddress == NULL || inListener == NULL)
++		return kAudioHardwareIllegalOperationError;
++
++	BlockListener* listener = new BlockListener{inObjectID, *inAddress, inDispatchQueue,
++		Block_copy(inListener)};
++	if (inDispatchQueue != NULL)
++		dispatch_retain(inDispatchQueue);
++
++	OSStatus status = AudioObjectAddPropertyListener(inObjectID, inAddress, deliverToBlock, listener);
++	if (status != noErr)
++	{
++		if (inDispatchQueue != NULL)
++			dispatch_release(inDispatchQueue);
++		Block_release(listener->block);
++		delete listener;
++		return status;
++	}
++
++	std::lock_guard<std::mutex> guard(g_listenersLock);
++	g_listeners.push_back(listener);
++	return noErr;
++}
++
++extern "C" OSStatus AudioObjectRemovePropertyListenerBlock(AudioObjectID inObjectID,
++		const AudioObjectPropertyAddress* inAddress, dispatch_queue_t inDispatchQueue,
++		AudioObjectPropertyListenerBlock inListener)
++{
++	if (inAddress == NULL || inListener == NULL)
++		return kAudioHardwareIllegalOperationError;
++
++	BlockListener* listener = NULL;
++	{
++		std::lock_guard<std::mutex> guard(g_listenersLock);
++		for (auto it = g_listeners.begin(); it != g_listeners.end(); ++it)
++		{
++			// Block_copy of a heap block returns the same block, so the caller's
++			// pointer identifies its registration.
++			if ((*it)->object == inObjectID && sameAddress((*it)->address, *inAddress)
++				&& (*it)->queue == inDispatchQueue && (*it)->block == inListener)
++			{
++				listener = *it;
++				g_listeners.erase(it);
++				break;
++			}
++		}
++	}
++	if (listener == NULL)
++		return kAudioHardwareUnknownPropertyError;
++
++	OSStatus status = AudioObjectRemovePropertyListener(inObjectID, inAddress, deliverToBlock, listener);
++	// A delivery already queued holds its own reference to the block.
++	if (listener->queue != NULL)
++		dispatch_release(listener->queue);
++	Block_release(listener->block);
++	delete listener;
++	return status;
++}
++
++// Process taps (macOS 14.2) are not supported; the class exists so the binary
++// links, and every message it does not implement returns nil or 0. CoreAudio
++// does not link Foundation, so unknown selectors are resolved with an IMP
++// instead of being forwarded.
++static id returnNil(id self, SEL _cmd, ...)
++{
++	return nil;
++}
++
++@interface CATapDescription : NSObject
++@end
++
++@implementation CATapDescription
++
+++ (BOOL)resolveClassMethod:(SEL)sel
++{
++	return class_addMethod(object_getClass(self), sel, (IMP) returnNil, "@@:");
++}
++
+++ (BOOL)resolveInstanceMethod:(SEL)sel
++{
++	return class_addMethod(self, sel, (IMP) returnNil, "@@:");
++}
++
++@end
 diff --git a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp b/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
 index f006ba51e..e0e4b4984 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
@@ -1266,17 +1439,25 @@ index f74d9b0c3..655e90d51 100644
  #endif /* AUDIOHARDWAREIMPL_H */
 -
 diff --git a/src/CoreAudio/CoreAudio/CMakeLists.txt b/src/CoreAudio/CoreAudio/CMakeLists.txt
-index 5f10c2f92..089c94127 100644
+index 5f10c2f..c595a9e 100644
 --- a/src/CoreAudio/CoreAudio/CMakeLists.txt
 +++ b/src/CoreAudio/CoreAudio/CMakeLists.txt
-@@ -8,6 +8,7 @@ set(coreaudio_sources
+@@ -8,6 +8,8 @@ set(coreaudio_sources
  	AudioHardware.cpp
      AudioHardwareImpl.cpp
      HostTime.mm
++    AudioHardwareBlocks.mm
 +    AudioConverterShim.c
      pulse/AudioHardwareImplPA.cpp
      pulse/AudioHardwareImplPAInput.cpp
      pulse/AudioHardwareImplPAOutput.cpp
+@@ -30,5 +32,6 @@ add_framework(CoreAudio
+         system
+         cxx
+         CoreFoundation
++        objc
+         pulse
+ )
 diff --git a/src/CoreAudio/CoreAudio/HostTime.mm b/src/CoreAudio/CoreAudio/HostTime.mm
 index 879fb48a1..fb99e99d1 100644
 --- a/src/CoreAudio/CoreAudio/HostTime.mm
@@ -3426,6 +3607,69 @@ index 102614203..9b80671a6 100644
  
  #endif /* AUDIOHARDWAREBASE_H */
 -
+diff --git a/src/frameworks/AVFAudio/src/AVFAudio.m b/src/frameworks/AVFAudio/src/AVFAudio.m
+index e991036..9bbab44 100644
+--- a/src/frameworks/AVFAudio/src/AVFAudio.m
++++ b/src/frameworks/AVFAudio/src/AVFAudio.m
+@@ -21,6 +21,7 @@
+ #include <AVFAudio/AVFAudio.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -28,3 +29,50 @@ __attribute__((constructor))
+ static void initme(void) {
+     verbose = getenv("STUB_VERBOSE") != NULL;
+ }
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: speech synthesis symbols linked by the current Riot Client. */
++const float AVSpeechUtteranceDefaultSpeechRate = 0.5f;
++const float AVSpeechUtteranceMaximumSpeechRate = 1.0f;
++
++RCLOL_NIL_STUB_CLASS(AVSpeechSynthesisVoice)
++RCLOL_NIL_STUB_CLASS(AVSpeechSynthesizer)
++RCLOL_NIL_STUB_CLASS(AVSpeechUtterance)
 diff --git a/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDevice.h b/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDevice.h
 index cb2896957..b2c25fbd4 100644
 --- a/src/frameworks/AVFoundation/include/AVFoundation/AVCaptureDevice.h
@@ -3533,6 +3777,85 @@ index cab525b91..4b3dd6541 100644
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
  }
+diff --git a/src/frameworks/AVFoundation/src/AVFoundation.m b/src/frameworks/AVFoundation/src/AVFoundation.m
+index 0c96288..e10101b 100644
+--- a/src/frameworks/AVFoundation/src/AVFoundation.m
++++ b/src/frameworks/AVFoundation/src/AVFoundation.m
+@@ -21,6 +21,7 @@
+ #include <AVFoundation/AVFoundation.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -93,3 +94,51 @@ void* NSArrayGetRGBAComponents(void) {
+     if (verbose) puts("STUB: NSArrayGetRGBAComponents called");
+     return NULL;
+ }
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: capture symbols linked by the current Riot Client. */
++NSString * const AVCaptureDeviceTypeBuiltInWideAngleCamera = @"AVCaptureDeviceTypeBuiltInWideAngleCamera";
++NSString * const AVCaptureDeviceTypeExternalUnknown = @"AVCaptureDeviceTypeExternalUnknown";
++NSString * const AVVideoCodecTypeJPEG = @"jpeg";
++
++RCLOL_NIL_STUB_CLASS(AVCaptureDeviceDiscoverySession)
++RCLOL_NIL_STUB_CLASS(AVCapturePhotoOutput)
++RCLOL_NIL_STUB_CLASS(AVCapturePhotoSettings)
+diff --git a/src/frameworks/AuthenticationServices/src/ASAuthorization.m b/src/frameworks/AuthenticationServices/src/ASAuthorization.m
+index 4383fef..cce980d 100644
+--- a/src/frameworks/AuthenticationServices/src/ASAuthorization.m
++++ b/src/frameworks/AuthenticationServices/src/ASAuthorization.m
+@@ -32,3 +32,10 @@
+ }
+ 
+ @end
++
++/* darling-lol: WebAuthn constants linked by the current Riot Client. */
++NSString * const ASAuthorizationErrorDomain = @"com.apple.AuthenticationServices.AuthorizationError";
++NSString * const ASAuthorizationPublicKeyCredentialAttestationKindNone = @"none";
++NSString * const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceDiscouraged = @"discouraged";
++NSString * const ASAuthorizationPublicKeyCredentialUserVerificationPreferencePreferred = @"preferred";
++NSString * const ASAuthorizationPublicKeyCredentialUserVerificationPreferenceRequired = @"required";
 diff --git a/src/frameworks/Carbon/HIToolbox/CMakeLists.txt b/src/frameworks/Carbon/HIToolbox/CMakeLists.txt
 index 3f0820484..7d310f61c 100644
 --- a/src/frameworks/Carbon/HIToolbox/CMakeLists.txt
@@ -3607,6 +3930,21 @@ index 347cb530c..f73278a35 100644
 +     * list. A NULL list would crash callers that unconditionally CFRelease. */
 +    return CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
 +}
+diff --git a/src/frameworks/Carbon/src/Carbon.c b/src/frameworks/Carbon/src/Carbon.c
+index a49d8c3..a389c5e 100644
+--- a/src/frameworks/Carbon/src/Carbon.c
++++ b/src/frameworks/Carbon/src/Carbon.c
+@@ -162,3 +162,10 @@ void GetKeys (KeyMap theKeys)
+ {
+ 
+ }
++
++/* darling-lol: linked by the current Riot Client. Darling has no Apple event
++ * dispatch, so report the event as not handled (eventNotHandledErr). */
++OSStatus AEProcessEvent(EventRef inEvent)
++{
++	return -9874;
++}
 diff --git a/src/frameworks/CoreLocation/include/CoreLocation/CLLocation.h b/src/frameworks/CoreLocation/include/CoreLocation/CLLocation.h
 index 090de1df2..fe1f95f3b 100644
 --- a/src/frameworks/CoreLocation/include/CoreLocation/CLLocation.h
@@ -3675,7 +4013,7 @@ index 0b927c40e..d186494e7 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/src/frameworks/CoreMedia/src/CoreMedia.c b/src/frameworks/CoreMedia/src/CoreMedia.c
-index 3d76e8103..4a975959c 100644
+index 3d76e81..a1d5c9a 100644
 --- a/src/frameworks/CoreMedia/src/CoreMedia.c
 +++ b/src/frameworks/CoreMedia/src/CoreMedia.c
 @@ -26,6 +26,32 @@
@@ -3711,6 +4049,13 @@ index 3d76e8103..4a975959c 100644
  static int verbose = 0;
  
  __attribute__((constructor))
+@@ -8082,3 +8108,6 @@ void* fig_post_a_symptom_guts(void) {
+     if (verbose) puts("STUB: fig_post_a_symptom_guts called");
+     return NULL;
+ }
++
++/* darling-lol: linked by the current Riot Client. */
++const CFStringRef kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding = CFSTR("ResetDecoderBeforeDecoding");
 diff --git a/src/frameworks/CoreServices/CMakeLists.txt b/src/frameworks/CoreServices/CMakeLists.txt
 index 3fac3be55..aae2c7435 100644
 --- a/src/frameworks/CoreServices/CMakeLists.txt
@@ -3723,6 +4068,70 @@ index 3fac3be55..aae2c7435 100644
  
  set_property(TARGET CoreServices APPEND_STRING PROPERTY
    LINK_FLAGS " -Wl,-reexported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/reexport.exp")
+diff --git a/src/frameworks/CoreServices/src/AE/stub.c b/src/frameworks/CoreServices/src/AE/stub.c
+index f01373e..638ce74 100644
+--- a/src/frameworks/CoreServices/src/AE/stub.c
++++ b/src/frameworks/CoreServices/src/AE/stub.c
+@@ -25,3 +25,47 @@ OSErr AEInstallEventHandler(
+     if (verbose) puts("STUB: AEInstallEventHandler called");
+     return noErr;
+ }
++
++/* darling-lol: Apple event calls linked by the current Riot Client. Darling has
++ * no Apple event transport: events are created empty, carry no parameters and
++ * cannot be sent. */
++static void rclolNullDesc(AEDesc* desc)
++{
++	if (desc != NULL) {
++		desc->descriptorType = 'null';
++		desc->dataHandle = NULL;
++	}
++}
++
++OSErr AECreateAppleEvent(AEEventClass theAEEventClass, AEEventID theAEEventID,
++		const AEAddressDesc* target, AEReturnID returnID, AETransactionID transactionID,
++		AppleEvent* result)
++{
++	rclolNullDesc(result);
++	return -1708; /* errAEEventNotHandled */
++}
++
++OSErr AEGetParamDesc(const AppleEvent* theAppleEvent, AEKeyword theAEKeyword,
++		DescType desiredType, AEDesc* result)
++{
++	rclolNullDesc(result);
++	return -1701; /* errAEDescNotFound */
++}
++
++OSErr AEPutParamDesc(AppleEvent* theAppleEvent, AEKeyword theAEKeyword, const AEDesc* theAEDesc)
++{
++	return noErr;
++}
++
++OSErr AERemoveEventHandler(AEEventClass theAEEventClass, AEEventID theAEEventID,
++		AEEventHandlerUPP handler, Boolean isSysHandler)
++{
++	return noErr;
++}
++
++OSStatus AESendMessage(const AppleEvent* event, AppleEvent* reply, AESendMode sendMode,
++		long timeOutInTicks)
++{
++	rclolNullDesc(reply);
++	return -600; /* procNotFound */
++}
+diff --git a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+index 5883ade..ee5fb07 100644
+--- a/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
++++ b/src/frameworks/CoreServices/src/CarbonCore/CoreServicesPriv.cpp
+@@ -9,3 +9,7 @@ Boolean _CSCheckFix(CFStringRef str)
+ 	return 0;
+ }
+ 
++// darling-lol: linked by the current Riot Client; there are no fixes to disable.
++extern "C" void _CSCheckFixDisable(void)
++{
++}
 diff --git a/src/frameworks/CoreServices/src/CarbonCore/UnicodeUtilities.cpp b/src/frameworks/CoreServices/src/CarbonCore/UnicodeUtilities.cpp
 index 094a9483d..84810f6ab 100644
 --- a/src/frameworks/CoreServices/src/CarbonCore/UnicodeUtilities.cpp
@@ -3740,6 +4149,21 @@ index 094a9483d..84810f6ab 100644
  
  	UniChar c;
  	if (virtualKeyCode >= tableIndex->keyToCharTableSize || tableNumber >= tableIndex->keyToCharTableCount)
+diff --git a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+index 44c8ac7..4556baa 100644
+--- a/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
++++ b/src/frameworks/CoreServices/src/FSEvents/FSEvents.m
+@@ -104,3 +104,10 @@ void FSEventStreamUnscheduleFromRunLoop(FSEventStreamRef streamRef, CFRunLoopRef
+ 	[((FSEventsImpl*) streamRef) unscheduleWithRunLoop: runLoop
+ 												mode: runLoopMode];
+ }
++
++/* darling-lol: linked by the current Riot Client. Streams start "now" here,
++ * so report the sentinel that means the same thing to FSEventStreamCreate. */
++FSEventStreamEventId FSEventsGetCurrentEventId(void)
++{
++	return kFSEventStreamEventIdSinceNow;
++}
 diff --git a/src/frameworks/CoreServices/src/FSEvents/FSEventsImpl.m b/src/frameworks/CoreServices/src/FSEvents/FSEventsImpl.m
 index cf9933a84..6651d50dc 100644
 --- a/src/frameworks/CoreServices/src/FSEvents/FSEventsImpl.m
@@ -4016,6 +4440,56 @@ index 854fa1e7f..8a76923c4 100644
 +		printf("STUB: LSSetDefaultRoleHandlerForContentType\n");
 +	return noErr;
 +}
+diff --git a/src/frameworks/CoreServices/src/SharedFileList/constants.c b/src/frameworks/CoreServices/src/SharedFileList/constants.c
+index 3e1f4fb..d33431b 100644
+--- a/src/frameworks/CoreServices/src/SharedFileList/constants.c
++++ b/src/frameworks/CoreServices/src/SharedFileList/constants.c
+@@ -23,3 +23,45 @@ struct OpaqueLSSharedFileListItemRef {};
+ static struct OpaqueLSSharedFileListItemRef _insertItemLast = { };
+ 
+ LSSharedFileListItemRef kLSSharedFileListItemLast = &_insertItemLast;
++
++/* darling-lol: login-item list calls linked by the current Riot Client. Darling
++ * has no shared file lists: creation fails, which callers already handle. */
++typedef struct OpaqueLSSharedFileListRef *LSSharedFileListRef;
++
++LSSharedFileListRef LSSharedFileListCreate(CFAllocatorRef inAllocator, CFStringRef inListType,
++		CFTypeRef listOptions)
++{
++	return NULL;
++}
++
++CFArrayRef LSSharedFileListCopySnapshot(LSSharedFileListRef inList, UInt32* outSnapshotSeed)
++{
++	if (outSnapshotSeed != NULL)
++		*outSnapshotSeed = 0;
++	return NULL;
++}
++
++LSSharedFileListItemRef LSSharedFileListInsertItemURL(LSSharedFileListRef inList,
++		LSSharedFileListItemRef insertAfterThisItem, CFStringRef inDisplayName, void* inIconRef,
++		CFURLRef inURL, CFDictionaryRef inPropertiesToSet, CFArrayRef inPropertiesToClear)
++{
++	return NULL;
++}
++
++CFTypeRef LSSharedFileListItemCopyProperty(LSSharedFileListItemRef inItem, CFStringRef inPropertyName)
++{
++	return NULL;
++}
++
++CFURLRef LSSharedFileListItemCopyResolvedURL(LSSharedFileListItemRef inItem, UInt32 inFlags,
++		CFErrorRef* outError)
++{
++	if (outError != NULL)
++		*outError = NULL;
++	return NULL;
++}
++
++OSStatus LSSharedFileListItemRemove(LSSharedFileListRef inList, LSSharedFileListItemRef inItem)
++{
++	return -10810; /* kLSUnknownErr */
++}
 diff --git a/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h b/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h
 index 09b70e4cb..2f7f5b89a 100644
 --- a/src/frameworks/CoreVideo/include/CoreVideo/CVBuffer.h
@@ -4062,7 +4536,7 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..99e0a5494 100644
+index 3e9cba2..cfe16ed 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 @@ -1,38 +1,887 @@
@@ -5145,8 +5619,33 @@ index 3e9cba226..99e0a5494 100644
  	return kCVReturnSuccess;
  }
  
+@@ -150,3 +1109,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
+ 	CGDisplayModeRelease(mode);
+ 	return time;
+ }
++
++// darling-lol: linked by the current Riot Client. Report the current host time
++// on the same 60 Hz video timeline the output callback uses.
++CVReturn CVDisplayLinkGetCurrentTime(CVDisplayLinkRef displayLink, CVTimeStamp* outTime)
++{
++	if (displayLink == NULL || outTime == NULL)
++		return kCVReturnInvalidArgument;
++	struct mach_timebase_info timebase;
++	mach_timebase_info(&timebase);
++	uint64_t periodMach = (1000000000ull / 60ull) * timebase.denom / timebase.numer;
++	uint64_t hostTime = mach_absolute_time();
++	memset(outTime, 0, sizeof(*outTime));
++	outTime->hostTime = hostTime;
++	outTime->videoTime = hostTime / periodMach;
++	outTime->videoTimeScale = 60;
++	outTime->videoRefreshPeriod = 1;
++	outTime->rateScalar = 1.0;
++	outTime->flags = kCVTimeStampHostTimeValid | kCVTimeStampVideoTimeValid |
++	    kCVTimeStampVideoRefreshPeriodValid | kCVTimeStampRateScalarValid;
++	return kCVReturnSuccess;
++}
 diff --git a/src/frameworks/CoreVideo/src/constants.c b/src/frameworks/CoreVideo/src/constants.c
-index 02f06704e..5d4fd4b2d 100644
+index 02f0670..1bb9021 100644
 --- a/src/frameworks/CoreVideo/src/constants.c
 +++ b/src/frameworks/CoreVideo/src/constants.c
 @@ -42,6 +42,11 @@ const CFStringRef kCVImageBufferTransferFunction_Linear = CFSTR("Linear");
@@ -5161,6 +5660,121 @@ index 02f06704e..5d4fd4b2d 100644
  
  const CFStringRef kCVPixelBufferIOSurfacePropertiesKey = CFSTR("IOSurfaceProperties");
  const CFStringRef kCVPixelBufferOpenGLCompatibilityKey = CFSTR("OpenGLCompatibility");
+@@ -53,3 +58,8 @@ const CFStringRef kCVPixelBufferWidthKey = CFSTR("Width");
+ const CFStringRef kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey = CFSTR("IOSurfaceOpenGLTextureCompatibility");
+ const CFStringRef kCVPixelBufferPoolMaximumBufferAgeKey = CFSTR("MaximumBufferAge");
+ const CFStringRef kCVPixelBufferPoolMinimumBufferCountKey = CFSTR("MinimumBufferCount");
++
++/* darling-lol: linked by the current Riot Client. */
++const CFStringRef kCVImageBufferAmbientViewingEnvironmentKey = CFSTR("AmbientViewingEnvironment");
++const CFStringRef kCVImageBufferColorPrimaries_DCI_P3 = CFSTR("DCI_P3");
++const CFStringRef kCVImageBufferColorPrimaries_P3_D65 = CFSTR("P3_D65");
+diff --git a/src/frameworks/CoreVideo/src/stubs.c b/src/frameworks/CoreVideo/src/stubs.c
+index f82aadb..a9e61c2 100644
+--- a/src/frameworks/CoreVideo/src/stubs.c
++++ b/src/frameworks/CoreVideo/src/stubs.c
+@@ -64,3 +64,101 @@ void* CVPixelBufferUnlockBaseAddress(void)
+ 	printf("STUB: %s\n", __PRETTY_FUNCTION__);
+ 	return NULL;
+ }
++
++/* darling-lol: pixel buffer calls linked by the current Riot Client. Darling
++ * creates no pixel buffers or pools, so creation reports kCVReturnUnsupported and
++ * the accessors describe an empty buffer. */
++#include <stdint.h>
++#include <stdbool.h>
++
++#define RCLOL_CV_UNSUPPORTED (-6663)
++
++struct rclol_cgrect { double x, y, width, height; };
++
++const void* CVBufferCopyAttachment(const void* buffer, const void* key, uint32_t* attachmentMode)
++{
++	if (attachmentMode != NULL)
++		*attachmentMode = 0;
++	return NULL;
++}
++
++bool CVBufferHasAttachment(const void* buffer, const void* key)
++{
++	return false;
++}
++
++void CVBufferSetAttachment(const void* buffer, const void* key, const void* value, uint32_t attachmentMode)
++{
++}
++
++struct rclol_cgrect CVImageBufferGetCleanRect(const void* imageBuffer)
++{
++	struct rclol_cgrect rect = { 0, 0, 0, 0 };
++	return rect;
++}
++
++int32_t CVPixelBufferCreateWithIOSurface(const void* allocator, const void* surface,
++		const void* pixelBufferAttributes, void** pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++size_t CVPixelBufferGetBytesPerRow(const void* pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetDataSize(const void* pixelBuffer)
++{
++	return 0;
++}
++
++size_t CVPixelBufferGetHeightOfPlane(const void* pixelBuffer, size_t planeIndex)
++{
++	return 0;
++}
++
++uint32_t CVPixelBufferGetPixelFormatType(const void* pixelBuffer)
++{
++	return 0;
++}
++
++/* No object ever has this type, so a CFGetTypeID comparison never matches. */
++unsigned long CVPixelBufferGetTypeID(void)
++{
++	return 0;
++}
++
++bool CVPixelBufferIsPlanar(const void* pixelBuffer)
++{
++	return false;
++}
++
++int32_t CVPixelBufferPoolCreate(const void* allocator, const void* poolAttributes,
++		const void* pixelBufferAttributes, void** poolOut)
++{
++	if (poolOut != NULL)
++		*poolOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++int32_t CVPixelBufferPoolCreatePixelBuffer(const void* allocator, const void* pool, void** pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++int32_t CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(const void* allocator, const void* pool,
++		const void* auxAttributes, void** pixelBufferOut)
++{
++	if (pixelBufferOut != NULL)
++		*pixelBufferOut = NULL;
++	return RCLOL_CV_UNSUPPORTED;
++}
++
++void CVPixelBufferPoolFlush(const void* pool, uint64_t options)
++{
++}
 diff --git a/src/frameworks/CryptoTokenKit/CMakeLists.txt b/src/frameworks/CryptoTokenKit/CMakeLists.txt
 index 6260e9b35..c02096039 100644
 --- a/src/frameworks/CryptoTokenKit/CMakeLists.txt
@@ -5245,6 +5859,75 @@ index 83f1793b8..acc09c088 100644
  #define DADISK_SIZE sizeof(struct __DADisk) - sizeof(CFRuntimeBase)
  
  static void
+diff --git a/src/frameworks/GameController/src/GameController.m b/src/frameworks/GameController/src/GameController.m
+index 7920f73..2b7f468 100644
+--- a/src/frameworks/GameController/src/GameController.m
++++ b/src/frameworks/GameController/src/GameController.m
+@@ -21,6 +21,7 @@
+ #include <GameController/GameController.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <objc/runtime.h>
+ 
+ static int verbose = 0;
+ 
+@@ -130,3 +131,56 @@ void* threadRunLoopSourceCallback(void)
+     if (verbose) puts("STUB: threadRunLoopSourceCallback called");
+     return NULL;
+ }
++
++/* darling-lol: a class the current Riot Client's Electron links against. Darling
++ * has no implementation, so a message NSObject does not implement returns nil or 0
++ * instead of raising or leaving a garbage return value. */
++static void rclolReturnZero(NSInvocation *invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature *rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation *)invocation { rclolReturnZero(invocation); } \
++	@end
++
++/* darling-lol: gamepad symbols linked by the current Riot Client. */
++NSString * const GCControllerDidConnectNotification = @"GCControllerDidConnectNotification";
++NSString * const GCControllerDidDisconnectNotification = @"GCControllerDidDisconnectNotification";
++const float GCHapticDurationInfinite = __builtin_inff();
++NSString * const GCHapticsLocalityDefault = @"Default";
++NSString * const GCHapticsLocalityLeftHandle = @"LeftHandle";
++NSString * const GCHapticsLocalityLeftTrigger = @"LeftTrigger";
++NSString * const GCHapticsLocalityRightHandle = @"RightHandle";
++NSString * const GCHapticsLocalityRightTrigger = @"RightTrigger";
++
++RCLOL_NIL_STUB_CLASS(GCDualSenseGamepad)
++RCLOL_NIL_STUB_CLASS(GCDualShockGamepad)
++RCLOL_NIL_STUB_CLASS(GCXboxGamepad)
 diff --git a/src/frameworks/IOSurface/include/IOSurface/IOSurfacePriv.h b/src/frameworks/IOSurface/include/IOSurface/IOSurfacePriv.h
 index d8aed37f1..dd6266cad 100644
 --- a/src/frameworks/IOSurface/include/IOSurface/IOSurfacePriv.h
@@ -7747,6 +8430,17 @@ index a700038d7..7bb98bf4b 100644
  
  #ifdef __cplusplus
  }
+diff --git a/src/frameworks/UserNotifications/src/UserNotifications.m b/src/frameworks/UserNotifications/src/UserNotifications.m
+index 70f527e..d049335 100644
+--- a/src/frameworks/UserNotifications/src/UserNotifications.m
++++ b/src/frameworks/UserNotifications/src/UserNotifications.m
+@@ -232,3 +232,6 @@ void* un_kCMTimeInvalid(void)
+     if (verbose) puts("STUB: un_kCMTimeInvalid called");
+     return NULL;
+ }
++
++/* darling-lol: linked by the current Riot Client. */
++NSString * const UNNotificationAttachmentOptionsTypeHintKey = @"UNNotificationAttachmentOptionsTypeHintKey";
 diff --git a/src/frameworks/VideoToolbox/include/VideoToolbox/VTCompressionProperties.h b/src/frameworks/VideoToolbox/include/VideoToolbox/VTCompressionProperties.h
 index 68242ee34..a9108c9c1 100644
 --- a/src/frameworks/VideoToolbox/include/VideoToolbox/VTCompressionProperties.h
@@ -7763,10 +8457,10 @@ index 68242ee34..a9108c9c1 100644
 +
  #endif
 diff --git a/src/frameworks/VideoToolbox/src/VTCompressionProperties.c b/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
-index 9e363904e..774557a64 100644
+index 9e36390..c019a74 100644
 --- a/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
 +++ b/src/frameworks/VideoToolbox/src/VTCompressionProperties.c
-@@ -30,3 +30,9 @@ const CFStringRef kVTCompressionPropertyKey_MaxFrameDelayCount = CFSTR("MaxFrame
+@@ -30,3 +30,14 @@ const CFStringRef kVTCompressionPropertyKey_MaxFrameDelayCount = CFSTR("MaxFrame
  const CFStringRef kVTCompressionPropertyKey_ExpectedFrameRate = CFSTR("ExpectedFrameRate");
  
  const CFStringRef kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = CFSTR("RequireHardwareAcceleratedVideoEncoder");
@@ -7776,6 +8470,25 @@ index 9e363904e..774557a64 100644
 +const CFStringRef kVTCompressionPropertyKey_TransferFunction = CFSTR("TransferFunction");
 +const CFStringRef kVTCompressionPropertyKey_YCbCrMatrix = CFSTR("YCbCrMatrix");
 +const CFStringRef kVTVideoEncoderSpecification_EnableLowLatencyRateControl = CFSTR("EnableLowLatencyRateControl");
++
++/* darling-lol: linked by the current Riot Client. */
++const CFStringRef kVTCompressionPropertyKey_EncoderID = CFSTR("EncoderID");
++const CFStringRef kVTEncodeFrameOptionKey_BaseFrameQP = CFSTR("BaseFrameQP");
++const CFStringRef kVTProfileLevel_HEVC_Main_AutoLevel = CFSTR("HEVC_Main_AutoLevel");
+diff --git a/src/frameworks/VideoToolbox/src/VideoToolbox.m b/src/frameworks/VideoToolbox/src/VideoToolbox.m
+index 70570c9..9f7822e 100644
+--- a/src/frameworks/VideoToolbox/src/VideoToolbox.m
++++ b/src/frameworks/VideoToolbox/src/VideoToolbox.m
+@@ -1533,3 +1533,9 @@ void* VTXPCMessageSetVideoFormatDescription(void)
+     if (verbose) puts("STUB: VTXPCMessageSetVideoFormatDescription called");
+     return NULL;
+ }
++
++/* darling-lol: linked by the current Riot Client. Darling has no supplemental
++ * decoders to register. */
++void VTRegisterSupplementalVideoDecoderIfAvailable(uint32_t codecType)
++{
++}
 diff --git a/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h b/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h
 index 62d827aa2..15383581b 100644
 --- a/src/frameworks/Vision/include/Vision/VNDetectBarcodesRequest.h
@@ -7807,6 +8520,30 @@ index 62d827aa2..15383581b 100644
  @interface VNDetectBarcodesRequest : NSObject
  
  @end
+diff --git a/src/libm/Source/Intel/xmm_log.c b/src/libm/Source/Intel/xmm_log.c
+index 336dfc9..b1a57f2 100644
+--- a/src/libm/Source/Intel/xmm_log.c
++++ b/src/libm/Source/Intel/xmm_log.c
+@@ -421,8 +421,17 @@ double log2( double x )
+ 	
+ 	// mainline: 0 < x < inf
+ 	if( _mm_istrue_sd( _mm_and_pd( xGTzero, xLTinf ) ) ) {
+-		xd = _xlog(xd);
+-		xd = _mm_mul_sdm(xd, &conversion);
++		// darling-lol: take the exponent apart first, so powers of two are
++		// exact (log(x) * conversion gave log2(4096) = 11.999...; Chromium's
++		// FFT truncates it and aborts). The mantissa is kept in
++		// [sqrt(1/2), sqrt(2)) to stay accurate near 1.
++		int exponent;
++		double mantissa = frexp( x, &exponent );
++		if( mantissa < 0x1.6a09e667f3bcdp-1 ) {
++			mantissa *= 2.0;
++			exponent--;
++		}
++		return (double) exponent + log( mantissa ) * conversion;
+ 	}
+ 	
+ 	// edge cases
 diff --git a/src/frameworks/Vision/src/VNDetectBarcodesRequest.m b/src/frameworks/Vision/src/VNDetectBarcodesRequest.m
 index 9a489b386..9fe56cc3f 100644
 --- a/src/frameworks/Vision/src/VNDetectBarcodesRequest.m
@@ -8028,7 +8765,7 @@ index f22f8213d..e7fbdc92e 100644
  				snprintf(p, limit, "%s/.cache/%s%s", home, dir_suffix ? dir_suffix : "", dir_suffix ? "/" : "");
  			else
 diff --git a/src/sandbox/sandbox.c b/src/sandbox/sandbox.c
-index f48cceb9e..9afa967db 100644
+index f48cceb..96dad3c 100644
 --- a/src/sandbox/sandbox.c
 +++ b/src/sandbox/sandbox.c
 @@ -10,7 +10,13 @@ const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT = SANDBOX_FILTER_NONE;
@@ -8161,6 +8898,25 @@ index f48cceb9e..9afa967db 100644
  	return -1;
  }
  
+@@ -173,4 +213,16 @@ int rootless_check_datavault_flag(const char* path, const char* storage_class) {
+ 
+ int sandbox_query_approval_policy_for_path(const char* query, const char* path, char **approval) {
+ 	return -1;
+-}
+\ No newline at end of file
++}
++
++/* darling-lol: process responsibility (libquarantine on macOS). Every process is
++ * responsible for itself here. */
++pid_t responsibility_get_pid_responsible_for_pid(pid_t pid)
++{
++	return pid;
++}
++
++int responsibility_spawnattrs_setdisclaim(void *attrs, int disclaim)
++{
++	return 0;
++}
 diff --git a/src/sandbox/sandbox.h b/src/sandbox/sandbox.h
 index 6fa2d088c..655554284 100644
 --- a/src/sandbox/sandbox.h

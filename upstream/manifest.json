@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 102,
+      "modified_files": 115,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -32,7 +32,8 @@
         "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c",
         "src/startup/mldr/include/dc_entitlements.h",
         "src/startup/mldr/include/dc_mseal.h",
-        "src/startup/mldr/include/dc_image_snapshot.h"
+        "src/startup/mldr/include/dc_image_snapshot.h",
+        "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm"
       ]
     },
     {
@@ -99,7 +100,7 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 5,
+      "modified_files": 6,
       "new_files": []
     },
     {
@@ -143,7 +144,7 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 4,
+      "modified_files": 5,
       "new_files": []
     },
     {
@@ -262,7 +263,7 @@
       "revision": "ae20248dc144beab899e38752f5a530f28a0ea56",
       "repository": "https://github.com/darlinghq/darling-metal.git",
       "patch": "patches/metal.patch",
-      "modified_files": 27,
+      "modified_files": 28,
       "new_files": [
         "include/Metal/MTLArgument.h",
         "include/Metal/MTLBlitCommandEncoder.h",
@@ -291,7 +292,7 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 9,
+      "modified_files": 11,
       "new_files": []
     },
     {
@@ -314,7 +315,9 @@
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c",
         "darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h",
-        "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h"
+        "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h",
+        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c"
       ]
     },
     {

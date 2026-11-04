@@ -70,6 +70,38 @@ index 91b5a2b..0f7b4eb 100644
      if (CF_IS_OBJC(CFErrorGetTypeID(), err)) {  // Since we have to return a retained result, we need to treat the toll-free bridging specially
          CFStringRef str = (CFStringRef) CF_OBJC_CALLV((NSError *)err, localizedRecoverySuggestion);
          return str ? (CFStringRef)CFRetain(str) : NULL;    // It's possible for localizedRecoverySuggestion to return nil
+diff --git a/CFForwardingPrep.S b/CFForwardingPrep.S
+index a399c43..f1a440f 100644
+--- a/CFForwardingPrep.S
++++ b/CFForwardingPrep.S
+@@ -217,7 +217,10 @@ __CF_forwarding_prep_1:
+     .cfi_def_cfa_register rbp
+ 
+     // Copy args from regs into a stack var
+-    subq   $0xd0, %rsp
++    // darling-lol: 0xc0-0xef holds the return registers (rax, rdx, xmm0,
++    // xmm1); the frame used to end at 0xd0, so the xmm slots overlapped the
++    // saved rbp and the return address.
++    subq   $0xf0, %rsp
+     movq   %rax, 0xb0(%rsp)
+     movapd %xmm7, 0xa0(%rsp)
+     movapd %xmm6, 0x90(%rsp)
+@@ -234,6 +237,15 @@ __CF_forwarding_prep_1:
+     movq   %rsi, 8(%rsp)
+     movq   %rdi, (%rsp)
+ 
++    // darling-lol: clear the return storage first, as the i386 path does. A
++    // -forwardInvocation: that sets no return value (Darling's "v@:" stubs)
++    // then returns nil/0 instead of whatever was on the stack.
++    xorps  %xmm0, %xmm0
++    movapd %xmm0, 0xc0(%rsp)
++    movapd %xmm0, 0xd0(%rsp)
++    movapd %xmm0, 0xe0(%rsp)
++    movapd 0x30(%rsp), %xmm0
++
+     movq   %rsp, %rdi
+     leaq   0xc0(%rsp), %rsi
+     call   ____forwarding___ // call through
 diff --git a/CFRunLoop.c b/CFRunLoop.c
 index e932ea5..522bc72 100644
 --- a/CFRunLoop.c
@@ -314,7 +346,7 @@ index 27864ad..e5cf047 100644
  	NSData.m
  	NSDateComponents.m
 diff --git a/NSArray.m b/NSArray.m
-index 30ac9df..b389210 100644
+index 30ac9df..3111ad1 100644
 --- a/NSArray.m
 +++ b/NSArray.m
 @@ -1232,6 +1232,15 @@ SINGLETON_RR()
@@ -333,6 +365,15 @@ index 30ac9df..b389210 100644
  - (void)makeObjectsPerformSelector:(SEL)sel
  {
      [self makeObjectsPerformSelector:sel withObject:nil];
+@@ -1730,7 +1739,7 @@ SINGLETON_RR()
+ + (instancetype)arrayWithContentsOfURL:(NSURL *)url error:(NSError**)error
+ {
+     NSArray* tmp = [self arrayWithContentsOfURL:url];
+-    if (tmp == nil) {
++    if (tmp == nil && error != NULL) {
+         *error = [NSError errorWithDomain:@"NSArrayErrorDomain" code:-1 userInfo:nil];
+     }
+     return tmp;
 diff --git a/NSConstantCollections.m b/NSConstantCollections.m
 new file mode 100644
 index 0000000..cebac5a
@@ -511,9 +552,27 @@ index 0000000..cebac5a
 +
 +@end
 diff --git a/NSDictionary.m b/NSDictionary.m
-index a3da56a..4678733 100644
+index a3da56a..64caf09 100644
 --- a/NSDictionary.m
 +++ b/NSDictionary.m
+@@ -509,7 +509,7 @@ SINGLETON_RR()
+     // TODO: we should actually pass along any error we get to the user so they have more info
+     // this is just a quick and dirty implementation
+     NSDictionary* tmp = [self dictionaryWithContentsOfURL:url];
+-    if (tmp == nil) {
++    if (tmp == nil && error != NULL) {
+         *error = [NSError errorWithDomain:@"NSDictionaryErrorDomain" code:-1 userInfo:nil];
+     }
+     return tmp;
+@@ -732,7 +732,7 @@ SINGLETON_RR()
+ - (id)initWithContentsOfURL:(NSURL *)url error:(NSError **)error
+ {
+     NSDictionary* tmp = [self initWithContentsOfURL:url];
+-    if (tmp == nil) {
++    if (tmp == nil && error != NULL) {
+         *error = [NSError errorWithDomain:@"NSDictionaryErrorDomain" code:-1 userInfo:nil];
+     }
+     return tmp;
 @@ -986,6 +986,15 @@ static NSString *_getDescription(id obj, id locale, int level)
      return success;
  }
@@ -663,7 +722,7 @@ index 7f15af6..f7d35ca 100644
  
  - (BOOL)_getValue:(void *)val forType:(CFNumberType)type
 diff --git a/NSURL.m b/NSURL.m
-index 1a020de..cf3bd11 100644
+index 1a020de..28f08b2 100644
 --- a/NSURL.m
 +++ b/NSURL.m
 @@ -43,6 +43,7 @@ NSString *const NSURLLinkCountKey = @"NSURLLinkCountKey";
@@ -674,3 +733,32 @@ index 1a020de..cf3bd11 100644
  NSString *const NSURLLocalizedTypeDescriptionKey = @"NSURLLocalizedTypeDescriptionKey";
  NSString *const NSURLLabelNumberKey = @"NSURLLabelNumberKey";
  NSString *const NSURLLabelColorKey = @"NSURLLabelColorKey";
+@@ -1117,3 +1118,28 @@ Boolean CFURLResourceIsReachable(CFURLRef url, CFErrorRef *error)
+ }
+ 
+ @end
++
++/* darling-lol: file security accessors linked by the current Riot Client's
++ * updater (ShipIt). Darling creates no CFFileSecurity objects, so there is never
++ * a mode to read and no change is applied. */
++#import <CoreFoundation/CFFileSecurity.h>
++
++Boolean CFFileSecurityGetMode(CFFileSecurityRef fileSec, mode_t *mode)
++{
++    return false;
++}
++
++Boolean CFFileSecuritySetMode(CFFileSecurityRef fileSec, mode_t mode)
++{
++    return false;
++}
++
++Boolean CFFileSecuritySetOwner(CFFileSecurityRef fileSec, uid_t owner)
++{
++    return false;
++}
++
++Boolean CFFileSecuritySetGroup(CFFileSecurityRef fileSec, gid_t group)
++{
++    return false;
++}
