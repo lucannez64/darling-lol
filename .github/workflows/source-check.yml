@@ -27,31 +27,6 @@ jobs:
       - run: python tools/riot-launcher-offline-check.py
       - run: python tools/riot-runtime-cleanup-offline-check.py
       - run: python tools/riot-cdn-dns-offline-check.py
-      - run: python -m unittest discover -s tests -p 'test_nix_fonts.py'
-      - run: python -m unittest discover -s tests -p 'test_nix_repairs.py'
-      - run: python -m unittest discover -s tests -p 'test_hidden_riot_recovery.py'
-      - run: python -m unittest discover -s tests -p 'test_desktop_run.py'
-      - run: python -m unittest discover -s tests -p 'test_desktop_entry.py'
-      - run: python -m unittest discover -s tests -p 'test_urlsession_runner.py'
-      - run: python -m unittest discover -s tests -p 'test_system_profiler.py'
-      - run: python -m unittest discover -s tests -p 'test_metal_device_info.py'
-      - run: python -m unittest discover -s tests -p 'test_indium_address_shadow.py' -v
-      - run: python -m unittest discover -s tests -p 'test_exec_guest.py'
-      - run: python -m unittest discover -s tests -p 'test_riot_electron43_frameworks.py'
-      - run: python -m unittest discover -s tests -p 'test_close_league_client_in_game.py'
-      - run: python -m unittest discover -s tests -p 'test_recover_stale_client.py'
-      - run: python -m unittest discover -s tests -p 'test_launchd_orphan_reaping.py'
-      - run: python -m unittest discover -s tests -p 'test_prepare*.py'
-      - run: python -m unittest discover -s tests -p 'test_ifmedia.py'
-      - run: python -m unittest discover -s tests -p 'test_clean_stale_helpers.py'
-      - run: python -m unittest discover -s tests -p 'test_hide_league_client_in_game.py'
-      - run: python -m unittest discover -s tests -p 'test_client_in_game_tricks.py'
-      - run: python -m unittest discover -s tests -p 'test_setup_portability.py'
-      - run: python -m unittest discover -s tests -p 'test_preflight.py'
-      - run: python -m unittest discover -s tests -p 'test_crash_report.py'
-      - run: python -m unittest discover -s tests -p 'test_doctor.py'
-      - run: python -m unittest discover -s tests -p 'test_perf_baseline.py'
-      - run: python -m unittest discover -s tests -p 'test_session_supervisor.py'
-      - run: python -m unittest discover -s tests -p 'test_riot_client_pin.py'
-      - run: python -m unittest discover -s tests -p 'test_security_host.py'
-      - run: python -m unittest discover -s tests -p 'test_security_review.py'
+      # Runs every tests/test_*.py, so new test files cannot be left out of CI.
+      - name: Full test suite
+        run: python -m unittest discover -s tests
