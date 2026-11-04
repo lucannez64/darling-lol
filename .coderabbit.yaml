@@ -1,0 +1,7 @@
+# Darling's security code is C/C++/Objective-C and the project does not use
+# Python-style docstrings. The docstring coverage percentage would measure
+# patched upstream functions, not documentation quality here.
+reviews:
+  pre_merge_checks:
+    docstrings:
+      mode: "off"

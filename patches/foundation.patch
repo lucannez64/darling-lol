@@ -1,5 +1,17 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 961a33b..a56cf72 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -125,6 +125,7 @@ set(foundation_sources
+ 	src/NSNotification.m
+ 	src/NSNotificationQueue.m
+ 	src/NSNumberFormatter.m
++	src/NSConstantNumber.m
+ 	src/NSNumber.m
+ 	src/NSObjCRuntime.m
+ 	src/NSObjectInternal.m
 diff --git a/include/Foundation/NSProcessInfo.h b/include/Foundation/NSProcessInfo.h
-index b3742a82e..f4d7b4d6d 100644
+index b3742a8..f4d7b4d 100644
 --- a/include/Foundation/NSProcessInfo.h
 +++ b/include/Foundation/NSProcessInfo.h
 @@ -50,6 +50,14 @@ NSOperatingSystemVersion;
@@ -23,8 +35,20 @@ index b3742a82e..f4d7b4d6d 100644
  #endif
 +
 +FOUNDATION_EXPORT NSString *const NSProcessInfoThermalStateDidChangeNotification;
+diff --git a/include/Foundation/NSURL.h b/include/Foundation/NSURL.h
+index 2da3da7..c7245b5 100644
+--- a/include/Foundation/NSURL.h
++++ b/include/Foundation/NSURL.h
+@@ -50,6 +50,7 @@ FOUNDATION_EXPORT NSString * const NSURLFileResourceTypeSymbolicLink;
+ FOUNDATION_EXPORT NSString * const NSURLFileResourceTypeSocket;
+ FOUNDATION_EXPORT NSString * const NSURLFileResourceTypeUnknown;
+ FOUNDATION_EXPORT NSString * const NSURLFileSizeKey;
++FOUNDATION_EXPORT NSString * const NSURLContentTypeKey;
+ FOUNDATION_EXPORT NSString * const NSURLFileAllocatedSizeKey;
+ FOUNDATION_EXPORT NSString * const NSURLTotalFileSizeKey;
+ FOUNDATION_EXPORT NSString * const NSURLTotalFileAllocatedSizeKey;
 diff --git a/include/Foundation/NSUserActivity.h b/include/Foundation/NSUserActivity.h
-index 80c92bc07..2a80df649 100644
+index 80c92bc..2a80df6 100644
 --- a/include/Foundation/NSUserActivity.h
 +++ b/include/Foundation/NSUserActivity.h
 @@ -21,3 +21,5 @@
@@ -33,6 +57,476 @@ index 80c92bc07..2a80df649 100644
  @end
 +
 +FOUNDATION_EXPORT NSString *const NSUserActivityTypeBrowsingWeb;
+diff --git a/src/NSAppleEventManager.m b/src/NSAppleEventManager.m
+index 194c5d0..6399cf8 100644
+--- a/src/NSAppleEventManager.m
++++ b/src/NSAppleEventManager.m
+@@ -1,6 +1,7 @@
+ #import <Foundation/NSAppleEventManager.h>
+ #import <Foundation/NSMethodSignature.h>
+ #import <Foundation/NSInvocation.h>
++#include <stdlib.h>
+ 
+ static NSAppleEventManager* instance = nil;
+ 
+@@ -17,11 +18,47 @@ static NSAppleEventManager* instance = nil;
+ }
+ 
+ - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
+-    return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++    return [NSMethodSignature signatureWithObjCTypes: "@@:"];
+ }
+ 
+ - (void)forwardInvocation:(NSInvocation *)anInvocation {
+     NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++
++    /* The generic signature above reserves an object return slot; callers of an
++     * unimplemented method still read the return slot. Leaving it untouched
++     * hands them stack garbage: Chromium read `currentAppleEvent` as an object
++     * pointer and crashed in objc_msgSend. Zero the return value so every
++     * forwarded method behaves like a stub returning nil/0/NO. */
++    NSMethodSignature *signature = [anInvocation methodSignature];
++    NSUInteger length = [signature methodReturnLength];
++    if (length > 0) {
++        void *zero = calloc(1, length);
++        [anInvocation setReturnValue: zero];
++        free(zero);
++    }
++}
++
++- (NSAppleEventDescriptor *)currentAppleEvent {
++    /* There is no Apple event being dispatched: Darling does not receive
++     * Carbon Apple events from the host. Apple returns nil outside of event
++     * handling, and callers test for that. */
++    return nil;
++}
++
++- (NSAppleEventDescriptor *)currentReplyAppleEvent {
++    return nil;
++}
++
++- (void)removeEventHandlerForEventClass:(AEEventClass)eventClass
++                             andEventID:(AEEventID)eventID
++{
++    /* Handlers registered by setEventHandler: are not dispatched yet, so
++     * there is nothing to remove. */
++}
++
++- (NSAppleEventManagerSuspensionID)suspendCurrentAppleEvent {
++    /* Suspending requires an event in flight, which never exists here. */
++    return NULL;
+ }
+ 
+ - (void) setEventHandler: (id) handler
+diff --git a/src/NSConstantNumber.m b/src/NSConstantNumber.m
+new file mode 100644
+index 0000000..26ced08
+--- /dev/null
++++ b/src/NSConstantNumber.m
+@@ -0,0 +1,287 @@
++//
++//  NSConstantNumber.m
++//  Foundation
++//
++//  The number literals clang emits when it knows their value at compile time.
++//  For a macOS 11 or newer runtime clang turns a literal such as `@42` into a
++//  statically allocated struct with the class, the @encode string and the value,
++//  binding the class to NSConstantIntegerNumber (or NSConstantDoubleNumber /
++//  NSConstantFloatNumber for floating point). Applications built that way fail
++//  to launch under Darling because these classes did not exist:
++//
++//      dyld: Symbol not found: _OBJC_CLASS_$_NSConstantIntegerNumber
++//
++//  The layouts below are the ones clang emits (CGObjCMac.cpp,
++//  GenerateConstantNSNumber):
++//
++//      struct { Class isa; const char *encoding; long long value; }
++//      struct { Class isa; double value; }
++//      struct { Class isa; float value; }
++//
++//  The instances are in the calling image's read-only data and live for the
++//  lifetime of the process, so retain/release are no-ops and copying returns the
++//  same object. Everything else goes through the ordinary NSNumber accessors so
++//  a constant number compares equal to the equivalent created number.
++
++#import <Foundation/NSNumber.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSObjCRuntime.h>
++#import <string.h>
++
++@interface NSConstantIntegerNumber : NSNumber {
++    const char *_encoding;
++    long long _value;
++}
++@end
++
++@interface NSConstantDoubleNumber : NSNumber {
++    double _value;
++}
++@end
++
++@interface NSConstantFloatNumber : NSNumber {
++    float _value;
++}
++@end
++
++static NSUInteger encodingSize(const char *encoding)
++{
++    switch (encoding ? encoding[0] : '\0')
++    {
++        case 'c':
++        case 'C':
++        case 'B':
++            return 1;
++        case 's':
++        case 'S':
++            return 2;
++        case 'i':
++        case 'I':
++        case 'f':
++            return 4;
++        case 'l':
++        case 'L':
++        case 'q':
++        case 'Q':
++        case 'd':
++            return 8;
++        default:
++            return 8;
++    }
++}
++
++static BOOL encodingIsUnsigned(const char *encoding)
++{
++    switch (encoding ? encoding[0] : '\0')
++    {
++        case 'C':
++        case 'S':
++        case 'I':
++        case 'L':
++        case 'Q':
++        case 'B':
++            return YES;
++        default:
++            return NO;
++    }
++}
++
++@implementation NSConstantIntegerNumber
++
++- (NSNumber *)boxedValue { return encodingIsUnsigned(_encoding) ? [NSNumber numberWithUnsignedLongLong:(unsigned long long)_value] : [NSNumber numberWithLongLong:_value]; }
++- (NSComparisonResult)compare:(NSNumber *)other
++{
++    return [[self boxedValue] compare:other];
++}
++- (NSUInteger)hash { return [[self boxedValue] hash]; }
++
++/* CFNumberCompare on the other side of a comparison expects a CFNumber; these
++ * objects are ordinary NSNumber subclasses, so compare through the accessors. */
++- (NSComparisonResult)_reverseCompare:(id)other
++{
++    NSComparisonResult result = [self compare:other];
++    if (result == NSOrderedAscending) return NSOrderedDescending;
++    if (result == NSOrderedDescending) return NSOrderedAscending;
++    return NSOrderedSame;
++}
++
++- (const char *)objCType
++{
++    return _encoding;
++}
++
++- (void)getValue:(void *)value
++{
++    switch (encodingSize(_encoding))
++    {
++        case 1: *(char *)value = (char)_value; break;
++        case 2: *(short *)value = (short)_value; break;
++        case 4: *(int *)value = (int)_value; break;
++        default: *(long long *)value = _value; break;
++    }
++}
++
++- (char)charValue { return (char)_value; }
++- (unsigned char)unsignedCharValue { return (unsigned char)_value; }
++- (short)shortValue { return (short)_value; }
++- (unsigned short)unsignedShortValue { return (unsigned short)_value; }
++- (int)intValue { return (int)_value; }
++- (unsigned int)unsignedIntValue { return (unsigned int)_value; }
++- (long)longValue { return (long)_value; }
++- (unsigned long)unsignedLongValue { return (unsigned long)_value; }
++- (long long)longLongValue { return _value; }
++- (unsigned long long)unsignedLongLongValue { return (unsigned long long)_value; }
++- (float)floatValue { return (float)[self doubleValue]; }
++- (double)doubleValue { return encodingIsUnsigned(_encoding) ? (double)(unsigned long long)_value : (double)_value; }
++- (BOOL)boolValue { return _value != 0; }
++- (NSInteger)integerValue { return (NSInteger)_value; }
++- (NSUInteger)unsignedIntegerValue { return (NSUInteger)_value; }
++
++- (NSString *)stringValue
++{
++    if (encodingIsUnsigned(_encoding))
++        return [NSString stringWithFormat:@"%llu", (unsigned long long)_value];
++    return [NSString stringWithFormat:@"%lld", _value];
++}
++
++- (NSString *)description
++{
++    return [self stringValue];
++}
++
++- (NSString *)descriptionWithLocale:(id)locale
++{
++    return [self description];
++}
++
++- (id)copyWithZone:(NSZone *)zone { return self; }
++- (id)retain { return self; }
++- (oneway void)release { }
++- (id)autorelease { return self; }
++- (NSUInteger)retainCount { return NSUIntegerMax; }
++- (void)dealloc { }
++
++@end
++
++@implementation NSConstantDoubleNumber
++
++- (NSNumber *)boxedValue { return [NSNumber numberWithDouble:_value]; }
++- (NSComparisonResult)compare:(NSNumber *)other
++{
++    return [[self boxedValue] compare:other];
++}
++- (NSUInteger)hash { return [[self boxedValue] hash]; }
++
++/* CFNumberCompare on the other side of a comparison expects a CFNumber; these
++ * objects are ordinary NSNumber subclasses, so compare through the accessors. */
++- (NSComparisonResult)_reverseCompare:(id)other
++{
++    NSComparisonResult result = [self compare:other];
++    if (result == NSOrderedAscending) return NSOrderedDescending;
++    if (result == NSOrderedDescending) return NSOrderedAscending;
++    return NSOrderedSame;
++}
++
++- (const char *)objCType { return @encode(double); }
++- (void)getValue:(void *)value { *(double *)value = _value; }
++- (char)charValue { return (char)_value; }
++- (unsigned char)unsignedCharValue { return (unsigned char)_value; }
++- (short)shortValue { return (short)_value; }
++- (unsigned short)unsignedShortValue { return (unsigned short)_value; }
++- (int)intValue { return (int)_value; }
++- (unsigned int)unsignedIntValue { return (unsigned int)_value; }
++- (long)longValue { return (long)_value; }
++- (unsigned long)unsignedLongValue { return (unsigned long)_value; }
++- (long long)longLongValue { return (long long)_value; }
++- (unsigned long long)unsignedLongLongValue { return (unsigned long long)_value; }
++- (float)floatValue { return (float)_value; }
++- (double)doubleValue { return _value; }
++- (BOOL)boolValue { return _value != 0.0; }
++- (NSInteger)integerValue { return (NSInteger)_value; }
++- (NSUInteger)unsignedIntegerValue { return (NSUInteger)_value; }
++
++- (NSString *)stringValue
++{
++    return [[self boxedValue] stringValue];
++}
++
++- (NSString *)description
++{
++    return [self stringValue];
++}
++
++- (NSString *)descriptionWithLocale:(id)locale
++{
++    return [self description];
++}
++
++- (id)copyWithZone:(NSZone *)zone { return self; }
++- (id)retain { return self; }
++- (oneway void)release { }
++- (id)autorelease { return self; }
++- (NSUInteger)retainCount { return NSUIntegerMax; }
++- (void)dealloc { }
++
++@end
++
++@implementation NSConstantFloatNumber
++
++- (NSNumber *)boxedValue { return [NSNumber numberWithFloat:_value]; }
++- (NSComparisonResult)compare:(NSNumber *)other
++{
++    return [[self boxedValue] compare:other];
++}
++- (NSUInteger)hash { return [[self boxedValue] hash]; }
++
++/* CFNumberCompare on the other side of a comparison expects a CFNumber; these
++ * objects are ordinary NSNumber subclasses, so compare through the accessors. */
++- (NSComparisonResult)_reverseCompare:(id)other
++{
++    NSComparisonResult result = [self compare:other];
++    if (result == NSOrderedAscending) return NSOrderedDescending;
++    if (result == NSOrderedDescending) return NSOrderedAscending;
++    return NSOrderedSame;
++}
++
++- (const char *)objCType { return @encode(float); }
++- (void)getValue:(void *)value { *(float *)value = _value; }
++- (char)charValue { return (char)_value; }
++- (unsigned char)unsignedCharValue { return (unsigned char)_value; }
++- (short)shortValue { return (short)_value; }
++- (unsigned short)unsignedShortValue { return (unsigned short)_value; }
++- (int)intValue { return (int)_value; }
++- (unsigned int)unsignedIntValue { return (unsigned int)_value; }
++- (long)longValue { return (long)_value; }
++- (unsigned long)unsignedLongValue { return (unsigned long)_value; }
++- (long long)longLongValue { return (long long)_value; }
++- (unsigned long long)unsignedLongLongValue { return (unsigned long long)_value; }
++- (float)floatValue { return _value; }
++- (double)doubleValue { return (double)_value; }
++- (BOOL)boolValue { return _value != 0.0f; }
++- (NSInteger)integerValue { return (NSInteger)_value; }
++- (NSUInteger)unsignedIntegerValue { return (NSUInteger)_value; }
++
++- (NSString *)stringValue
++{
++    return [[self boxedValue] stringValue];
++}
++
++- (NSString *)description
++{
++    return [self stringValue];
++}
++
++- (NSString *)descriptionWithLocale:(id)locale
++{
++    return [self description];
++}
++
++- (id)copyWithZone:(NSZone *)zone { return self; }
++- (id)retain { return self; }
++- (oneway void)release { }
++- (id)autorelease { return self; }
++- (NSUInteger)retainCount { return NSUIntegerMax; }
++- (void)dealloc { }
++
++@end
+diff --git a/src/NSNotificationCenter.m b/src/NSNotificationCenter.m
+index 0034834..05eaeba 100644
+--- a/src/NSNotificationCenter.m
++++ b/src/NSNotificationCenter.m
+@@ -12,10 +12,14 @@
+ #import "NSNotificationInternal.h"
+ #import <dispatch/dispatch.h>
+ #import <pthread.h>
++#import <objc/runtime.h>
++#import <objc/objc-internal.h>
+ 
+ @interface _NSNotificationObserver : NSObject
+ {
+ 	id _observer;
++    const void *_observerIdentity;
++    BOOL _observerIsUnsafe;
+ 	SEL _selector;
+ 	NSString* _name;
+ 	id _object;
+@@ -23,6 +27,7 @@
+ 	void (^_block)(NSNotification *note);
+ }
+ 
++- (BOOL)matchesObserver:(id)observer;
+ @property (nonatomic, readonly) id observer;
+ @property (nonatomic, readonly) SEL selector;
+ @property (nonatomic, readonly) NSString *name;
+@@ -35,7 +40,6 @@
+ 
+ @implementation _NSNotificationObserver
+ 
+-@synthesize observer = _observer;
+ @synthesize selector = _selector;
+ @synthesize name = _name;
+ @synthesize object = _object;
+@@ -47,7 +51,16 @@
+     self = [super init];
+     if (self)
+     {
+-        _observer = observer;
++        /* Observers are not retained, but macOS 10.11 and later also do not
++         * message an observer that has been deallocated without removing
++         * itself: the center holds a zeroing weak reference. A raw pointer
++         * here crashed Chromium, which relies on that guarantee. */
++        _observerIdentity = (const void *)observer;
++        // Some custom retain/release classes reject weak references. Preserve
++        // their previous unretained registration contract without a fatal store.
++        _observerIsUnsafe = observer != nil && objc_storeWeakOrNil(&_observer, observer) == nil;
++        if (_observerIsUnsafe)
++            _observer = observer;
+         _selector = selector;
+         _name = [name copy];
+         _object = object;
+@@ -57,8 +70,24 @@
+     return self;
+ }
+ 
++- (BOOL)matchesObserver:(id)observer
++{
++    /* Loading a weak reference returns nil once deallocation starts. */
++    return observer != nil ? _observerIdentity == (const void *)observer
++                           : [self observer] == nil;
++}
++
++- (id)observer
++{
++    /* _observer is a zeroing weak reference; read it through the runtime so a
++     * deallocated observer reads as nil instead of a dangling pointer. */
++    return _observerIsUnsafe ? _observer : objc_loadWeak(&_observer);
++}
++
+ - (void)dealloc
+ {
++    if (!_observerIsUnsafe)
++        objc_storeWeak(&_observer, nil);
+     [_name release];
+     [_queue release];
+     [_block release];
+@@ -81,9 +110,17 @@
+     {
+         _block(notif);
+     }
+-    else if (_observer != nil && _selector != NULL)
++    else if (_selector != NULL)
+     {
+-        [_observer performSelector:_selector withObject:notif];
++        /* Keep the observer alive for the duration of the callback; it may
++         * release itself (and the center's weak reference) from inside it. */
++        id observer = _observerIsUnsafe ? _observer : objc_loadWeakRetained(&_observer);
++        if (observer != nil)
++        {
++            [observer performSelector:_selector withObject:notif];
++            if (!_observerIsUnsafe)
++                [observer release];
++        }
+     }
+ }
+ 
+@@ -173,7 +210,7 @@
+     NSIndexSet *indicies = [_observers indexesOfObjectsPassingTest:^BOOL(_NSNotificationObserver *notifObserver, NSUInteger idx, BOOL *stop) {
+         // observer may be a user controlled object, or an instance of _NSNotificationObserver if the block version of 
+         // addObserverForName was used
+-        return notifObserver == observer || notifObserver.observer == observer;
++        return notifObserver == observer || [notifObserver matchesObserver:observer];
+     }];
+     [_observers removeObjectsAtIndexes:indicies];
+     pthread_mutex_unlock(&_observersLock);
+@@ -188,7 +225,7 @@
+         {
+             matchesObject = notifObserver.object == anObject;
+         }
+-        return notifObserver.observer == observer && matchesObject && [notifObserver.name isEqualToString:aName];
++        return [notifObserver matchesObserver:observer] && matchesObject && [notifObserver.name isEqualToString:aName];
+     }];
+     [_observers removeObjectsAtIndexes:indicies];
+     pthread_mutex_unlock(&_observersLock);
 diff --git a/src/NSProcessInfo.m b/src/NSProcessInfo.m
 index 1c21f17..420955a 100644
 --- a/src/NSProcessInfo.m
@@ -110,8 +604,18 @@ index 1c21f17..420955a 100644
  #endif
 +
 +NSString *const NSProcessInfoThermalStateDidChangeNotification = @"NSProcessInfoThermalStateDidChangeNotification";
+diff --git a/src/NSURL.m b/src/NSURL.m
+index d9913ee..09abc97 100644
+--- a/src/NSURL.m
++++ b/src/NSURL.m
+@@ -804,3 +804,5 @@ OBJC_PROTOCOL_IMPL_POP
+ 
+ @implementation NSURLQueryItem
+ @end
++
++NSString * const NSURLContentTypeKey = @"NSURLContentTypeKey";
 diff --git a/src/NSUserActivity.m b/src/NSUserActivity.m
-index 09c0a732b..53649d20b 100644
+index 09c0a73..53649d2 100644
 --- a/src/NSUserActivity.m
 +++ b/src/NSUserActivity.m
 @@ -34,3 +34,5 @@

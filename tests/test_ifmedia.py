@@ -13,7 +13,7 @@ class InterfaceMediaTests(unittest.TestCase):
     def test_media_queries_preserve_buffers_and_exclude_loopback(self):
         patch = (Path(__file__).resolve().parents[1] / 'patches/xnu.patch').read_text()
         section = patch.split('diff --git a/darling/src/libsystem_kernel/emulation/src/'
-                              'xnu_syscall/bsd/helper/ioctl/socket.c ', 1)[1]
+                              'xnu_syscall/bsd/helper/ioctl/socket.c ', 1)[1].split('\ndiff --git ', 1)[0]
         added = '\n'.join(line[1:] for line in section.splitlines()
                           if line.startswith('+') and not line.startswith('+++'))
         handler = added.split('\t\tcase SIOCGIFMEDIA:', 1)[1]

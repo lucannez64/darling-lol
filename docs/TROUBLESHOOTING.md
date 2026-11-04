@@ -28,6 +28,20 @@ verbatim, so skim the bundle before sharing it. See
 [compatibility](COMPATIBILITY.md) for what the performance numbers mean and
 for verified machines.
 
+## Update still reports a duplicate NSWindow member
+
+An update after the Electron 43 patches can fail compiling `SecSharedCredential.m`
+with `duplicate member '_collectionBehavior'` in `AppKit/NSWindow.h`. The source
+fix removed an obsolete declaration, but older updater versions could mistake
+that older header for an already updated one.
+
+Pull the updater fix, then rerun your normal update command. Preparation checks
+recorded patches and repository history, replaces a compatible older patch, and
+preserves unrelated edits. It also recovers when an earlier update already
+recorded the new patch without removing the old declaration. You do not need to
+delete the build tree or the Darling prefix. If preparation reports conflicting
+local edits, inspect the named checkout before changing them.
+
 ## NixOS launcher fails before Riot opens
 
 A message saying Darling must be setuid root is not fixed by running `sudo`
@@ -87,6 +101,63 @@ python3 tools/install-riot-memory-runtime.py --backup-dir "$HOME/darling-memory-
 
 If the destination library itself is root-owned, inspect the named path and its ownership before retrying with sudo. Do not run all setup/build steps as root or recursively change ownership of the system SDK. Backups and binaries are ignored by Git and must stay local.
 
+## Riot Client 142 replaces itself and then crashes (#154)
+
+Riot Client 142 ships Electron 43, which asks Darling for frameworks the runtime
+does not provide yet (`QuickLookUI`, `MediaPlayer`, `CoreHaptics`, `CoreML`,
+`ScreenCaptureKit` and others). The client downloads the update in the
+background and swaps it in on the next launch, so a working install turns into
+one that cannot open after a restart. Nothing in the prefix records the update:
+the bundle's `CFBundleShortVersionString` is still `1.0`.
+
+Until the runtime grows those frameworks, stay on the last release that runs:
+**141.0.7.5129**, release id `42E1358C87FB3ABC`. Check what is installed:
+
+```sh
+python3 tools/riot-client-pin.py --status
+```
+
+Run it from the repository, or use the rendered copy at
+`build/runtime/tools/riot-client-pin.py`; `--status` also shows whether self-update
+is on, which staged `.partial-*` bundle waits to replace it, and whether the
+client is running. `--json` prints the same state as JSON.
+
+To keep the installed client, with both clients and the game closed:
+
+```sh
+python3 tools/riot-client-pin.py --backup "$HOME/darling-backups" --pin --discard-partial
+```
+
+`--backup` copies the bundle and its `Metadata/Riot Client` release marker to
+`DIR/<release>` (with `cp --reflink=auto`, so it shares blocks where the
+filesystem supports it). `--pin` sets `enable_self_update: false` in
+`Contents/Resources/system.yaml`, the only line it rewrites, and `--discard-partial`
+removes the staged update so its next launch cannot resume. Add `--dry-run` to see
+the plan without changing anything.
+
+If a launch already installed 142, restore the kept bundle:
+
+```sh
+python3 tools/riot-client-pin.py --restore "$HOME/darling-backups/42E1358C87FB3ABC" --pin --discard-partial
+```
+
+Backup and restore run before pinning or discarding staged updates, so `--pin`
+applies to the restored bundle. The backup keeps the settings as they were before
+pinning. Restore also works in a fresh prefix. It stages the saved bundle and
+metadata before replacing either installed path; copy failures preserve the
+installation, and a failed swap rolls back both paths.
+
+The replaced bundle is renamed aside as `Riot Client.app.replaced-<timestamp>`,
+never deleted. Its release metadata is kept alongside it with a `.metadata`
+suffix, and the saved metadata is restored with the saved bundle. When a release
+that runs becomes available, `--unpin` turns
+self-update back on. Every write refuses to run while a Riot Client process is
+alive, because it would race the updater. `--discard-partial` deletes a
+directory, so it is accepted only together with `--pin` or `--unpin`.
+
+Pinning only keeps the macOS client. League itself keeps patching normally, and
+a game update that needs a newer client still has to wait for the 142 work.
+
 ## Updated library or server still behaves like the old version
 
 Atomic replacement preserves active process mappings. Darling also uses an overlay filesystem; updating its backing prefix from the host can leave an old file visible inside the active namespace. A fresh standalone guest check continued to report the old memory behavior despite the host path having the new checksum. Reopening only Riot does not replace this namespace.
@@ -107,6 +178,32 @@ The observed proportional resident footprint was roughly 4.3 GiB across Riot, Le
 The old kernel library returned success for Darwin allocator free/reuse hints without making any pages reclaimable. The replacement maps free/reusable hints to Linux `MADV_FREE`, and reuse to `MADV_POPULATE_WRITE`. The standalone 4 MiB buffer becomes reclaimable and returns to normal on reuse while preserving surviving data. This fixes a demonstrated runtime behavior, but does not explain all client allocations or prove a specific RAM reduction. Linux may retain lazily reclaimable pages in RSS while RAM is available. A five-minute idle observation did not show rapid client memory growth.
 
 Build/install the kernel library using [the incremental update steps](SETUP.md#updating-an-existing-runtime), then perform the manual restart when finished playing. Linux 5.14+ is required. Do not kill client helpers as an attempted memory optimization during play.
+
+## Guest resource limits differ from macOS (#154)
+
+Linux reports an unlimited resource as `~0ULL`, while Darwin uses
+`0x7FFFFFFFFFFFFFFF` (`RLIM_INFINITY` in `<sys/resource.h>`). The kernel library
+passed the Linux value straight through, so a guest that compares a limit
+against its own `RLIM_INFINITY` never matched, and any guest that casts the
+value to a signed 64-bit integer saw `-1`: Chromium's
+`gin::IsolateHolder::getDefaultIsolateParams` does `checked_cast<int64_t>` on
+`rlim_cur`, which traps with `SIGILL` during image initialization. The Riot
+Client 142 Electron build dies there before its first window, every launch.
+
+`getrlimit`/`setrlimit` now translate both directions, keep the descriptor-count
+adjustment below a representable value (an unlimited `RLIMIT_NOFILE` used to be
+decremented into `0x7FFFFFFFFFFFFFFE`), and refuse a guest request above
+Darwin's maximum with `EINVAL` instead of silently truncating it.
+
+`python3 tools/build-riot-rlimit-check.py` compiles the shipped `getrlimit.c`,
+`setrlimit.c` and `errno.c` for the host with the syscall trampoline shimmed to
+`prlimit64`, and asserts the conversions without starting a guest. It needs the
+prepared source tree; the run prints one line per case and `PASS rlimit
+conversion`.
+
+Rebuild and install the kernel library using [the incremental update
+steps](SETUP.md#updating-an-existing-runtime); guest processes must restart
+before the new library is mapped.
 
 ## Shaders are recompiled on every start
 
@@ -949,3 +1046,129 @@ fails, include the exception and whether a host overlay was enabled; redact
 account tokens from logs.
 
 Upstream source: [MangoHud 0.8.4 fdinfo scan](https://github.com/flightlessmango/MangoHud/blob/v0.8.4/src/gpu_fdinfo.cpp#L9).
+
+## Riot Client 142 fails to launch: Electron 43 frameworks and constant literals
+
+Riot Client 142 (`142.0.1.5150`, Electron 43, Chromium 150) needs two things
+Darling did not provide at the time. Either one stops the process in dyld before
+the first window, with the client's own crash handler reporting the reason:
+
+```
+dyld: Symbol not found: _OBJC_CLASS_$_QLPreviewPanel         (QuickLookUI)
+dyld: Symbol not found: _OBJC_CLASS_$_NSConstantIntegerNumber (Foundation)
+dyld: Symbol not found: ___NSArray0__struct                  (CoreFoundation)
+```
+
+The framed symbols are non-weak imports: the Electron Framework binds them
+whether the feature is used or not, so they cannot be left absent
+(ScreenCaptureKit and QuickLookThumbnailing are weak imports, and Chromium
+disables those features when they are missing).
+
+**Framework stubs.** `tools/build-riot-electron43-frameworks.py` builds and can
+install QuickLookUI, MediaPlayer, CoreML, CoreHaptics and Accessibility into the
+guest `RuntimeFrameworks` overlay, using the AppKit target's configured flags.
+Each source implements only the classes and constants the Electron Framework
+binds, with local state and no backing service: a media key does nothing, a
+haptic pattern never plays, CoreML refuses to load a model, and the Quick Look
+panel is empty.
+
+```sh
+python3 tools/build-riot-electron43-frameworks.py --install
+python3 tools/build-riot-electron43-frameworks.py \
+  --check '/path/to/Riot Client.app/Contents/Frameworks/Electron Framework.framework/Electron Framework'
+```
+
+`--check` lists every non-weak import of the given Mach-O that the stubs do not
+define and exits non-zero, so a later Electron update surfaces missing symbols as
+a build failure instead of a dyld abort. Replacing the stubs with real
+implementations would need a window server, a media pipeline and GPU compute;
+none of that is in scope here.
+
+**Constant literals.** Clang targeting macOS 11 or newer compiles `@42` and
+`@[@"a"]` into statically allocated objects rather than calls. Numbers bind to
+`NSConstantIntegerNumber`, `NSConstantDoubleNumber` or `NSConstantFloatNumber`;
+collections bind to `NSConstantArray` or `NSConstantDictionary`, and an empty
+`@[]`/`@{}` is a reference to the object `__NSArray0__struct` or
+`__NSDictionary0__struct`. Darling only had `__NSArray0__`/`__NSDictionary0__`,
+so the classes and objects are added by `patches/foundation.patch` and
+`patches/corefoundation.patch`.
+
+The instance layouts are exactly what clang emits (see `CGObjCMac.cpp`,
+`GenerateConstantNSArray`/`GenerateConstantNSDictionary`), so the classes need no
+special magic: they are ordinary `NSArray`, `NSDictionary` and `NSNumber`
+subclasses reading their own `_count`/`_objects`/`_encoding`/`_value` fields.
+The instances live in the calling image's read-only data for the lifetime of the
+process, so `retain`/`release` are no-ops, `copy` returns the same object, and
+`dealloc` never runs.
+
+A created number must also compare equal to a literal from either side.
+`__NSCFNumber -compare:` used to hand every argument to `CFNumberCompare`, which
+reads a CF runtime header; a constant literal has a plain object header, so the
+comparison returned an arbitrary order and `[NSNumber numberWithLongLong:42]
+isEqualToNumber:@42]` was false while the reverse was true. Non-CF numbers now
+compare through the `NSNumber` accessors (double, unsigned or signed as the
+encodings require), and the constant classes implement `_reverseCompare:`.
+
+Rebuild and install both overlays, then exit any guest process so the new
+libraries are mapped:
+
+```sh
+python3 build/runtime/tools/build-riot-corefoundation-runtime.py
+python3 build/runtime/tools/build-riot-foundation-runtime.py
+python3 tools/install-riot-foundation-runtime.py
+sh tools/install-riot-gpu-runtime.sh   # installs build/riot-CoreFoundation
+python3 tools/check-riot-constant-literals.py
+```
+
+The last command builds `tools/riot-electron43-frameworks/constant-literal-check.m`,
+checks that the installed overlay exports the constant classes, and runs the
+check inside the guest. It prints one `ok` line per property, then
+`PASS constant literals`; a missing class prints the overlay path and the symbol
+instead of failing later at a client's launch. The check must run with the
+overlay in `DYLD_FRAMEWORK_PATH`, which it sets itself. It is not part of
+`scripts/validate.py`: it needs a prepared tree, an installed prefix and a
+running Darling.
+
+**Current state.** With the stubs, the constant classes and the AppKit/CoreText
+additions above, 142 resolves every dyld import, starts the Electron main
+process, starts its static server, reads settings and feature flags, creates its
+window and a CGL context, then stops with `SIGTRAP` on a libdispatch worker
+thread right after the browser process enumerates three font faces. The trap is
+`int3` with no Chromium log line, so it is not a `CHECK` failure that prints; no
+C++ exception is raised near it. 141 (`42E1358C87FB3ABC`) still runs with the
+same runtime, so the remaining fault is specific to what Chromium 150 does in
+the browser process. `tools/riot-client-pin.py --restore
+~/darling-backups/42E1358C87FB3ABC` puts 141 back.
+
+The trap itself is now localized to V8's page allocator. The crashing function
+is the allocator that formats a `slotsize`/`spansize` message, and the fault is
+not a rejected mapping: a full 142 launch logs every protection change and
+mapping, and all of them succeed, including the 512 MB executable reservation
+and the 4.5 MB read-write range. The allocator aborts instead right after a
+`SetPermissions(addr, len, 3)` call whose length is zero, and that call never
+reaches Darling's `mprotect` (no zero-length protection call appears in the
+trace). The allocator frame also holds a poison-looking fourth argument,
+`0xBADBAD0062757480`, so the allocator is being handed a bogus size or
+granularity rather than being refused by the kernel. The remaining work is to
+follow that argument back through the allocator's caller and compare it with the
+Electron 28 (Chromium 117) code that 141 runs, where the same path succeeds.
+
+**Diagnostic noise on Omarchy.** Every guest crash is announced by Omarchy's
+crash watcher (`omarchy-crash-watch.service`), which reads systemd-coredump's
+journal entries, so a crashing 142 produces one notification per launch attempt.
+The watcher honours `OMARCHY_CRASH_IGNORE`, an extended regex matched against
+the executable's basename, which suppresses one program without touching
+anything else. To silence `mldr` only:
+
+```sh
+mkdir -p ~/.config/systemd/user/omarchy-crash-watch.service.d
+printf '[Service]\nEnvironment=OMARCHY_CRASH_IGNORE=^mldr$\n' \
+  > ~/.config/systemd/user/omarchy-crash-watch.service.d/mldr-ignore.conf
+systemctl --user daemon-reload
+systemctl --user restart omarchy-crash-watch.service
+```
+
+`mldr` is the Darling loader that hosts the guest, so this hides guest crashes
+as well as loader crashes. Remove the drop-in, then `daemon-reload` and restart
+the unit, to announce them again. Do not use `omarchy-toggle-crash-capture` for
+this: it disables crash notifications for the whole session.

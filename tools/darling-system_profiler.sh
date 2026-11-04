@@ -36,10 +36,12 @@ pci_name() { # vendor device (hex without 0x) -> "Vendor Model"
 }
 
 displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
- # Same switch as the Metal device name: a Mac profile presents the MacBookPro16,1
- # discrete GPU instead of the host card, so system_profiler and Metal agree.
- mac_spoof=0
- case "${DARLING_METAL_MAC_GPU_NAME:-}" in '') ;; 0) ;; *) mac_spoof=1;; esac
+ # Same switch as the Metal device name: report the MacBookPro16,1 compatibility
+ # GPU profile so system_profiler and Metal agree. This changes the reported
+ # platform identity only; it does not change the host, the driver, or the GPU
+ # that actually presents frames.
+ mac_gpu_profile=0
+ case "${DARLING_METAL_MAC_GPU_NAME:-}" in '') ;; 0) ;; *) mac_gpu_profile=1;; esac
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
   [ -r "$card/device/vendor" ] || continue
   vendor=$(sed 's/^0x//' "$card/device/vendor"); device=$(sed 's/^0x//' "$card/device/device")
@@ -49,7 +51,7 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
   fi
   name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
   bus=builtin
-  if [ "$mac_spoof" = 1 ]; then
+  if [ "$mac_gpu_profile" = 1 ]; then
    case "$vendor" in
     1002|10de) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
                vram=${DARLING_METAL_VRAM_MB:-4096}

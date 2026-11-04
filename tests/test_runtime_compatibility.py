@@ -126,6 +126,8 @@ static int sys_kill(int a, int b, int c) { ++calls; return 0; }
 static int dserver_rpc_ptrace_sigexc(int a, bool b) { ++calls; return 0; }
 static int dserver_rpc_tid_for_thread(void *a, int *b) { ++calls; *b = 1; return 0; }
 static int dserver_rpc_ptrace_thupdate(int a, int b) { ++calls; return 0; }
+/* ptrace.c includes csops.h; the extracted body keeps the call, not the include. */
+static int dc_cs_target_allows_debug(int pid) { (void)pid; return 1; }
 ''' + header + function(source, 'sys_ptrace') + '''
 int main(void) {
     for (int i = 0; i < 1000; ++i) assert(sys_ptrace(0x7fffffff, 0, NULL, 0) == -EINVAL);
