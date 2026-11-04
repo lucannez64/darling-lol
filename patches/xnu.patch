@@ -2004,7 +2004,7 @@ index f273989..058b985 100644
  	{ .oid = -1 }
  };
  
-@@ -71,6 +150,34 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +150,35 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
@@ -2033,13 +2033,14 @@ index f273989..058b985 100644
 +			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +		}
++		extern char* getenv(const char*);
 +		const char* memory = getenv("RCLOL_MEMORY_BYTES");
 +		if (memory != NULL && memory[0] != '\0')
-+			hinfo.max_mem = strtoull(memory, NULL, 10);
++			hinfo.max_mem = __simple_atoi(memory, NULL);
  	}
  
  	return &hinfo;
-@@ -83,6 +188,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +189,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -2053,7 +2054,7 @@ index f273989..058b985 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +281,49 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +282,49 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -2110,7 +2111,7 @@ index f273989..058b985 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +338,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +339,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }

@@ -53,7 +53,7 @@ class SystemProfileTests(unittest.TestCase):
         xnu = (ROOT / 'patches/xnu.patch').read_text()
         self.assertIn('getenv("RCLOL_CPU_BRAND")', xnu)
         self.assertIn('getenv("RCLOL_MEMORY_BYTES")', xnu)
-        self.assertIn('strtoull(memory, NULL, 10)', xnu)
+        self.assertIn('__simple_atoi(memory, NULL)', xnu)
 
     def test_install_runtime_preserves_an_existing_profile(self):
         installer = (ROOT / 'scripts/install-runtime.sh').read_text()
