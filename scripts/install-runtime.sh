@@ -45,12 +45,19 @@ if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
   python3 build/runtime/tools/install-riot-libs-runtime.py
 fi
 python3 build/runtime/tools/install-darling-system-profiler.py
+# Riot Client 142 (Electron 43) hard-links QuickLookUI, MediaPlayer, CoreML, CoreHaptics and
+# Accessibility; without these stubs in RuntimeFrameworks dyld aborts before the first window.
+python3 tools/build-riot-electron43-frameworks.py --install
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
 python3 build/runtime/tools/validate-riot-runtime.py
 # Sign the installed runtime and populate the local trust store. The base SDK
 # is signed only when this process can actually write it; the per-user
 # RuntimeLibraries/RuntimeFrameworks overlays are always signed.
 if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
+  if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
+    make -s -C "$repo/tools/dc-codesign" dc-codesign || \
+      echo 'dc-codesign did not build (it needs the OpenSSL headers)' >&2
+  fi
   sign_args="--prefix --quiet"
   if [ -w /usr/local/libexec/darling ]; then
     sign_args="--sdk $sign_args"
