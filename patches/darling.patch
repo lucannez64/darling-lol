@@ -8439,7 +8439,7 @@ index d9a7aea96..cc76f7a85 100644
  
  unsigned long commpage_address(bool _64bit)
 diff --git a/src/startup/mldr/elfcalls/elfcalls.c b/src/startup/mldr/elfcalls/elfcalls.c
-index 8f0b9e61f..38a9644c0 100644
+index 8f0b9e61..fd75d43b 100644
 --- a/src/startup/mldr/elfcalls/elfcalls.c
 +++ b/src/startup/mldr/elfcalls/elfcalls.c
 @@ -6,6 +6,7 @@
@@ -8450,7 +8450,20 @@ index 8f0b9e61f..38a9644c0 100644
  #include "elfcalls.h"
  #include "threads.h"
  #include <sys/un.h>
-@@ -86,6 +87,9 @@ static int __dserver_process_lifetime_pipe_refresh() {
+@@ -64,6 +65,12 @@ static const void* __dserver_socket_address(void) {
+ 
+ extern void __mldr_close_rpc_socket(int socket);
+ 
++extern struct dc_cs_local_state mldr_cs_state;
++
++static const struct dc_cs_local_state* get_cs_state(void) {
++	return &mldr_cs_state;
++}
++
+ extern int __mldr_create_process_lifetime_pipe(int* fds);
+ extern void __mldr_close_process_lifetime_pipe(int fd);
+ extern int __dserver_process_lifetime_pipe_fd;
+@@ -86,6 +93,9 @@ static int __dserver_process_lifetime_pipe_refresh() {
  
  void elfcalls_make(struct elf_calls* calls)
  {
@@ -8460,7 +8473,7 @@ index 8f0b9e61f..38a9644c0 100644
  	calls->dlopen = dlopen_simple;
  	calls->dlclose = dlclose;
  	calls->dlsym = dlsym;
-@@ -100,7 +104,16 @@ void elfcalls_make(struct elf_calls* calls)
+@@ -100,7 +110,16 @@ void elfcalls_make(struct elf_calls* calls)
  	calls->darling_thread_get_stack = __darling_thread_get_stack;
  
  	calls->get_errno = get_errno;
@@ -8478,32 +8491,331 @@ index 8f0b9e61f..38a9644c0 100644
  
  	calls->malloc = malloc;
  	calls->free = free;
-@@ -126,4 +139,5 @@ void elfcalls_make(struct elf_calls* calls)
+@@ -126,4 +145,6 @@ void elfcalls_make(struct elf_calls* calls)
  	calls->dserver_get_process_lifetime_pipe = __dserver_get_process_lifetime_pipe;
  	calls->dserver_process_lifetime_pipe_refresh = __dserver_process_lifetime_pipe_refresh;
  	calls->dserver_close_process_lifetime_pipe = __mldr_close_process_lifetime_pipe;
 +	calls->fork = fork;
++	calls->cs_state = get_cs_state;
  }
 diff --git a/src/startup/mldr/elfcalls/elfcalls.h b/src/startup/mldr/elfcalls/elfcalls.h
-index fee1bde87..bee86604b 100644
+index fee1bde8..14733ac4 100644
 --- a/src/startup/mldr/elfcalls/elfcalls.h
 +++ b/src/startup/mldr/elfcalls/elfcalls.h
-@@ -71,7 +71,9 @@ struct elf_calls
+@@ -5,6 +5,8 @@
+ #include <stdbool.h>
+ #include <stddef.h>
+ 
++struct dc_cs_local_state;
++
+ struct darling_thread_create_callbacks {
+ 	unsigned int (*thread_self_trap)(void);
+ 	void (*thread_set_tsd_base)(void*, int);
+@@ -71,7 +73,12 @@ struct elf_calls
  	int (*dserver_get_process_lifetime_pipe)(void);
  	int (*dserver_process_lifetime_pipe_refresh)(void);
  	void (*dserver_close_process_lifetime_pipe)(int fd);
 +
 +	// Host libc fork prepares native allocator and loader locks for the child.
 +	int (*fork)(void);
++
++	// Task-owned signing state filled by mldr before the guest starts.
++	const struct dc_cs_local_state* (*cs_state)(void);
  };
  
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82b..a227abee8 100644
+index 6617ef8..d758c1a 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
-@@ -154,7 +154,7 @@ int main(int argc, char** argv, char** envp)
+@@ -21,6 +21,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <sys/mman.h>
++#include <sys/syscall.h>
+ #include <unistd.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -42,6 +43,11 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/ptrace.h>
+ #include <pthread.h>
+ #include <sys/utsname.h>
++#include <darlingserver/cs_state.h>
++#include "dc_codesign.h"
++#include "dc_entitlements.h"
++#include "dc_mseal.h"
++#include "dc_image_snapshot.h"
+ 
+ #ifndef PAGE_SIZE
+ #	define PAGE_SIZE	4096
+@@ -70,7 +76,7 @@ static void reexec32(char** argv);
+ #endif
+ static void load32(int fd, bool expect_dylinker, struct load_results* lr);
+ static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
+-static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
++static void load(const char* path, int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
+ static int native_prot(int prot);
+ static void setup_space(struct load_results* lr, bool is_64_bit);
+ static void process_special_env(struct load_results* lr);
+@@ -106,6 +112,256 @@ void* __mldr_main_stack_top = NULL;
+ static int kernel_major = -1;
+ static int kernel_minor = -1;
+ 
++// darling-lol M3: signing state for this task. mldr fills it before the guest
++// starts and exposes it through struct elf_calls; after checkin it registers a
++// copy with darlingserver for cross-process csops queries.
++struct dc_cs_local_state mldr_cs_state;
++
++static long dc_native_image_size(int fd) {
++    struct stat st;
++    return fstat(fd, &st) == 0 ? st.st_size : -errno;
++}
++static long dc_native_image_create(void) {
++    long result = syscall(__NR_memfd_create, "darling-verified-image", 3);
++    return result < 0 ? -errno : result;
++}
++static long dc_native_image_read(int fd, void* data, unsigned long len, unsigned long offset) {
++    long result = pread(fd, data, len, (off_t)offset);
++    return result < 0 ? -errno : result;
++}
++static long dc_native_image_write(int fd, const void* data, unsigned long len) {
++    long result = write(fd, data, len);
++    return result < 0 ? -errno : result;
++}
++static long dc_native_image_seal(int fd) { return fcntl(fd, 1033, 15) == 0 ? 0 : -errno; }
++static void dc_native_image_close(int fd) { close(fd); }
++static const struct dc_image_ops dc_native_image_ops = {
++    dc_native_image_size, dc_native_image_create, dc_native_image_read,
++    dc_native_image_write, dc_native_image_seal, dc_native_image_close
++};
++
++static long dc_native_allocate(unsigned long length) {
++    void* p = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    return p == MAP_FAILED ? -errno : (long)p;
++}
++static long dc_native_protect(void* p, unsigned long length, int prot) {
++    return mprotect(p, length, prot) == 0 ? 0 : -errno;
++}
++static long dc_native_relocate(void* p, unsigned long length, void* target) {
++    void* moved = mremap(p, length, length, MREMAP_MAYMOVE | MREMAP_FIXED, target);
++    return moved == MAP_FAILED ? -errno : (long)moved;
++}
++static void dc_native_release(void* p, unsigned long length) { munmap(p, length); }
++static long dc_native_seal(void* p, unsigned long length) {
++#ifdef __NR_mseal
++    return syscall(__NR_mseal, p, length, 0) == 0 ? 0 : -errno;
++#else
++    return -ENOSYS;
++#endif
++}
++static const struct dc_seal_ops dc_native_seal_ops = {
++    dc_native_allocate, dc_native_protect, dc_native_relocate, dc_native_release, dc_native_seal
++};
++
++static bool entitlements_key_is_true(const uint8_t* data, size_t len, const char* key) {
++    return dc_entitlement_is_true(data, len, key);
++}
++
++static uint32_t flags_from_image(const struct dc_image* img, bool pages_ok)
++{
++	uint32_t flags = DC_CS_SIGNED;
++
++	if (pages_ok)
++		flags |= DC_CS_VALID;
++	flags |= img->cd_flags & (DC_CS_ADHOC | DC_CS_HARD | DC_CS_KILL |
++	    DC_CS_CHECK_EXPIRATION | DC_CS_RESTRICT | DC_CS_ENFORCEMENT |
++	    DC_CS_REQUIRE_LV | DC_CS_RUNTIME | DC_CS_LINKER_SIGNED);
++	if (entitlements_key_is_true(img->entitlements, img->entitlements_len, "get-task-allow") ||
++	    entitlements_key_is_true(img->entitlements, img->entitlements_len, "com.apple.security.get-task-allow"))
++		flags |= DC_CS_GET_TASK_ALLOW;
++	if (entitlements_key_is_true(img->entitlements, img->entitlements_len, "com.apple.private.security.installer"))
++		flags |= DC_CS_INSTALLER;
++	return flags;
++}
++
++// darling-lol M2/M3: loader gate. Verifies the Mach-O code signature before
++// the image is mapped and records the result for csops(). Policy comes from
++// DARLING_CODESIGN_ENFORCE:
++//   off (default) | warn | enforce
++// A parse or page-hash failure always leaves the state invalid. `off` only
++// suppresses logging and rejection; it still verifies so csops never fabricates
++// CS_VALID. An unknown policy fails closed. Enforced loads verify and map
++// the same sealed snapshot; symlinks retain normal exec-style resolution.
++static int codesign_gate(const char* path, int* out_fd)
++{
++	const char* policy = getenv("DARLING_CODESIGN_ENFORCE");
++	bool enforce = false, quiet = false, verbose;
++	struct stat st;
++	struct dc_image img;
++	struct dc_cs_state* state = &mldr_cs_state.state;
++	char err[512];
++	void* map;
++	int fd, r;
++
++	*out_fd = -1;
++	memset(&mldr_cs_state, 0, sizeof(mldr_cs_state));
++	state->version = DC_CS_STATE_VERSION;
++	state->verified = 1;
++	{
++		const char* sip = getenv("DARLING_SIP_ENFORCE");
++		state->sip_enabled = sip != NULL && sip[0] != '\0' &&
++		    strcmp(sip, "0") != 0 && strcmp(sip, "off") != 0 &&
++		    strcmp(sip, "false") != 0 && strcmp(sip, "no") != 0;
++	}
++
++	if (policy == NULL || policy[0] == '\0' ||
++	    strcmp(policy, "off") == 0 || strcmp(policy, "0") == 0) {
++		quiet = true;
++	} else if (strcmp(policy, "warn") == 0) {
++		enforce = false;
++	} else if (strcmp(policy, "enforce") == 0) {
++		enforce = true;
++	} else {
++		fprintf(stderr, "mldr: codesign: unknown policy '%s' (use off|warn|enforce)\n", policy);
++		return -1;
++	}
++	state->signing_enforce = enforce ? 1 : 0;
++	verbose = !quiet && getenv("DARLING_CODESIGN_VERBOSE") != NULL;
++
++	fd = open(path, O_RDONLY | O_CLOEXEC);
++	if (fd < 0) {
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, strerror(errno));
++		if (enforce) { errno = ENOEXEC; return -1; }
++		return 0;
++	}
++	if (fstat(fd, &st) != 0 || st.st_size <= 0) {
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: cannot stat\n", enforce ? "rejected" : "warning", path);
++		close(fd);
++		if (enforce) { errno = ENOEXEC; return -1; }
++		return 0;
++	}
++    // Verification and mapping must share immutable contents, not just an inode.
++    const char* msealPolicy = getenv("DARLING_MSEAL");
++    bool freezeImage = enforce || (msealPolicy &&
++        (!strcmp(msealPolicy, "1") || !strcmp(msealPolicy, "on") ||
++         !strcmp(msealPolicy, "true") || !strcmp(msealPolicy, "yes")));
++    if (freezeImage) {
++        long snapshot = dc_snapshot_image(fd, &dc_native_image_ops);
++        close(fd);
++        if (snapshot < 0) {
++            fprintf(stderr, "mldr: cannot snapshot image %s: %s\n", path, strerror((int)-snapshot));
++            errno = ENOEXEC;
++            return -1;
++        }
++        fd = (int)snapshot;
++        struct stat frozen;
++        if (fstat(fd, &frozen) != 0) { close(fd); errno = ENOEXEC; return -1; }
++        st.st_size = frozen.st_size;
++    }
++	*out_fd = fd;
++	state->image_dev = (uint64_t) st.st_dev;
++	state->image_ino = (uint64_t) st.st_ino;
++	state->image_size = (uint64_t) st.st_size;
++	state->image_mtime = (uint64_t) st.st_mtim.tv_sec * 1000000000ull +
++	    (uint64_t) st.st_mtim.tv_nsec;
++	state->image_ctime = (uint64_t) st.st_ctim.tv_sec * 1000000000ull +
++	    (uint64_t) st.st_ctim.tv_nsec;
++	snprintf(state->image_path, sizeof(state->image_path), "%s", path);
++
++	map = mmap(NULL, (size_t) st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
++	if (map == MAP_FAILED) {
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: cannot map\n", enforce ? "rejected" : "warning", path);
++		close(fd);
++		*out_fd = -1;
++		if (enforce) { errno = ENOEXEC; return -1; }
++		return 0;
++	}
++
++	err[0] = '\0';
++	r = dc_parse(map, (size_t) st.st_size, &img, err, sizeof(err));
++	if (r == 0)
++		r = dc_verify_pages(&img, err, sizeof(err));
++
++	if (r == 0) {
++		state->valid = 1;
++		state->flags = flags_from_image(&img, true);
++		state->hash_type = img.hash_type;
++		state->page_size_log2 = img.page_size_log2;
++		state->code_limit = img.code_limit;
++		state->image_offset = 0; /* thin images only at M3 */
++		state->cdhash_len = DC_CS_CDHASH_LEN;
++		memcpy(state->cdhash, img.cdhash, DC_CS_CDHASH_LEN);
++		if (img.teamid[0] != '\0') {
++			state->teamid_len = strlen(img.teamid);
++			snprintf(state->teamid, sizeof(state->teamid), "%s", img.teamid);
++		}
++		if (img.identifier[0] != '\0') {
++			state->identity_len = strlen(img.identifier);
++			snprintf(state->identity, sizeof(state->identity), "%s", img.identifier);
++		}
++		if (img.sig_size > 0 && img.sig_size <= DC_CS_MAX_BLOB) {
++			mldr_cs_state.blob = malloc((size_t) img.sig_size);
++			if (mldr_cs_state.blob != NULL) {
++				memcpy((void*) mldr_cs_state.blob, (const uint8_t*) map + img.sig_offset, (size_t) img.sig_size);
++				state->blob_len = (uint32_t) img.sig_size;
++			}
++		}
++		if (img.entitlements_len > 0 &&
++		    img.entitlements_len + 8 <= DC_CS_MAX_ENTITLEMENTS) {
++			/* Keep the 8-byte CS_GenericBlob header: csops returns the
++			 * complete entitlements blob, not just the XML payload. */
++			size_t total = img.entitlements_len + 8;
++			uint8_t* copy = malloc(total + 1);
++			if (copy != NULL) {
++				memcpy(copy, img.entitlements - 8, total);
++				copy[total] = '\0';
++				mldr_cs_state.entitlements = copy;
++				state->entitlements_len = (uint32_t) total;
++			}
++		}
++		state->lv_required = (img.cd_flags & (DC_CS_REQUIRE_LV | DC_CS_FORCED_LV | DC_CS_RUNTIME)) != 0;
++		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.security.cs.allow-dyld-environment-variables"))
++			state->darling_entitlements |= DC_CS_ENT_ALLOW_DYLD_ENV;
++		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.security.cs.disable-library-validation"))
++			state->darling_entitlements |= DC_CS_ENT_DISABLE_LV;
++		if (entitlements_key_is_true(img.entitlements, img.entitlements_len, "com.apple.private.security.clear-library-validation"))
++			state->darling_entitlements |= DC_CS_ENT_CLEAR_LV;
++		if (img.der_entitlements_len > 0 && img.der_entitlements_len <= DC_CS_MAX_DER_ENTITLEMENTS) {
++			uint8_t* copy = malloc(img.der_entitlements_len);
++			if (copy != NULL) {
++				memcpy(copy, img.der_entitlements, img.der_entitlements_len);
++				mldr_cs_state.der_entitlements = copy;
++				state->der_entitlements_len = (uint32_t) img.der_entitlements_len;
++			}
++		}
++	} else {
++		state->valid = 0;
++		state->flags = 0;
++	}
++
++	if (r != 0) {
++		if (!quiet)
++			fprintf(stderr, "mldr: codesign %s: %s: %s\n", enforce ? "rejected" : "warning", path, err);
++	} else if (verbose) {
++		fprintf(stderr, "mldr: codesign ok: %s cdhash=", path);
++		for (size_t i = 0; i < sizeof(img.cdhash); i++)
++			fprintf(stderr, "%02x", img.cdhash[i]);
++		fprintf(stderr, " pages=%u\n", img.pages_total);
++	}
++
++	munmap(map, (size_t) st.st_size);
++
++	if (r != 0 && enforce) {
++		close(fd);
++		errno = ENOEXEC;
++		return -1;
++	}
++	return 0;
++}
++
+ int main(int argc, char** argv, char** envp)
+ {
+ 	void** sp;
+@@ -154,14 +410,20 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -8512,7 +8824,47 @@ index 6617ef82b..a227abee8 100644
  
  	process_special_env(&mldr_load_results);
  
-@@ -563,6 +563,16 @@ static socket_bitmap_t socket_bitmap = {
++	int gate_fd = -1;
++	if (codesign_gate(filename, &gate_fd) != 0) {
++		fprintf(stderr, "mldr: refusing to load %s (code signing)\n", filename);
++		return 1;
++	}
++
+ #ifdef __i386__
+-	load(filename, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
++	load(filename, gate_fd, CPU_TYPE_X86, false, argv, &mldr_load_results); // accept i386 only
+ #else
+-	load(filename, 0, false, argv, &mldr_load_results);
++	load(filename, gate_fd, 0, false, argv, &mldr_load_results);
+ #endif
+ 
+ 	// this was previously necessary when we were loading the binary from the LKM
+@@ -280,16 +542,17 @@ int main(int argc, char** argv, char** envp)
+ 	__builtin_unreachable();
+ }
+ 
+-void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, char** argv, struct load_results* lr)
++void load(const char* path, int fd, cpu_type_t forced_arch, bool expect_dylinker, char** argv, struct load_results* lr)
+ {
+-	int fd;
+ 	uint32_t magic;
+ 
+-	fd = open(path, O_RDONLY);
+-	if (fd == -1)
+-	{
+-		fprintf(stderr, "Cannot open %s: %s\n", path, strerror(errno));
+-		exit(1);
++	if (fd < 0) {
++		fd = open(path, O_RDONLY);
++		if (fd == -1)
++		{
++			fprintf(stderr, "Cannot open %s: %s\n", path, strerror(errno));
++			exit(1);
++		}
+ 	}
+ 
+ 	// We need to read argv[1] and detect whether it's a 32 or 64-bit application.
+@@ -563,6 +826,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -8529,7 +8881,7 @@ index 6617ef82b..a227abee8 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +658,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +921,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -8541,7 +8893,7 @@ index 6617ef82b..a227abee8 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +688,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +951,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -8556,7 +8908,7 @@ index 6617ef82b..a227abee8 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +706,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +969,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -8582,7 +8934,7 @@ index 6617ef82b..a227abee8 100644
  		}
  	}
  
-@@ -698,6 +727,22 @@ out:
+@@ -698,6 +990,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -8605,7 +8957,7 @@ index 6617ef82b..a227abee8 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +752,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +1015,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -8625,7 +8977,7 @@ index 6617ef82b..a227abee8 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +810,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1073,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -8644,6 +8996,29 @@ index 6617ef82b..a227abee8 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
+@@ -889,6 +1184,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+ 	// keep our write end while closing the unused read end.
+ 	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
+ 
++	// Register the verified signing state with darlingserver for cross-process
++	// csops queries. The server assigns the generation used for pid-reuse and
++	// audit-token checks.
++	uint64_t cs_generation = 0;
++	int cs_ret = dserver_rpc_set_cs_state(
++	    &mldr_cs_state.state,
++	    mldr_cs_state.blob, mldr_cs_state.state.blob_len,
++	    mldr_cs_state.entitlements, mldr_cs_state.state.entitlements_len,
++	    mldr_cs_state.der_entitlements, mldr_cs_state.state.der_entitlements_len,
++	    &cs_generation);
++	if (cs_ret < 0) {
++		fprintf(stderr, "mldr: csops: failed to register signing state: %d\n", cs_ret);
++	} else {
++		mldr_cs_state.state.generation = cs_generation;
++	}
++
+ 	if (!lr->root_path) {
+ 		static char vchroot_buffer[4096];
+ 		uint64_t vchroot_path_length = 0;
 diff --git a/src/tools/open.m b/src/tools/open.m
 index 126bd394c..f62c2e0e8 100644
 --- a/src/tools/open.m
@@ -11368,6 +11743,873 @@ index 87db50d12..01a7b2a3e 100644
  	// std::ofstream m_dump;
  };
  
+diff --git a/src/startup/mldr/CMakeLists.txt b/src/startup/mldr/CMakeLists.txt
+index 5e4271a..ef6488e 100644
+--- a/src/startup/mldr/CMakeLists.txt
++++ b/src/startup/mldr/CMakeLists.txt
+@@ -1,3 +1,4 @@
++find_package(LibXml2 REQUIRED)
+ project(mldr)
+ 
+ cmake_minimum_required(VERSION 3.13)
+@@ -21,14 +22,17 @@ set(mldr_sources
+ 	commpage.c
+ 	elfcalls/elfcalls.c
+ 	elfcalls/threads.c
++	dc_codesign.c
+ )
+ 
+ add_executable(mldr ${mldr_sources})
++target_include_directories(mldr PRIVATE ${LIBXML2_INCLUDE_DIR})
+ 
+ target_compile_options(mldr PRIVATE -pthread)
+ target_link_options(mldr PRIVATE -pthread)
++target_compile_definitions(mldr PRIVATE _GNU_SOURCE)
+ 
+-target_link_libraries(mldr PRIVATE -lrt -ldl mldr_dserver_rpc -lm)
++target_link_libraries(mldr PRIVATE -lrt -ldl mldr_dserver_rpc -lm -lcrypto ${LIBXML2_LIBRARIES})
+ 
+ install(TARGETS mldr DESTINATION libexec/darling/usr/libexec/darling)
+ 
+@@ -36,6 +40,9 @@ configure_file(darling.conf.in darling.conf @ONLY)
+ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/darling.conf" DESTINATION lib/binfmt.d)
+ 
+ if (BUILD_TARGET_32BIT)
++	# Optional 32-bit loader target. The supported build is x86-64 only
++	# (TARGET_i386=OFF); enabling this also requires a 32-bit libcrypto and libxml2
++	# development package for dc_codesign.
+ 	add_library(mldr32_dserver_rpc STATIC ${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c)
+ 	add_dependencies(mldr32_dserver_rpc generate_dserver_rpc_wrappers)
+ 	target_compile_options(mldr32_dserver_rpc PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/resources/dserver-rpc-defs.h)
+@@ -45,11 +52,13 @@ if (BUILD_TARGET_32BIT)
+ 	target_include_directories(mldr32_dserver_rpc PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/..)
+ 
+ 	add_executable(mldr32 ${mldr_sources})
++	target_include_directories(mldr32 PRIVATE ${LIBXML2_INCLUDE_DIR})
+ 	target_compile_options(mldr32 PRIVATE -m32)
+ 	target_link_options(mldr32 PRIVATE -m32)
+ 	target_compile_options(mldr32 PRIVATE -pthread)
+ 	target_link_options(mldr32 PRIVATE -pthread)
+-	target_link_libraries(mldr32 PRIVATE -lrt -ldl mldr32_dserver_rpc)
++	target_compile_definitions(mldr32 PRIVATE _GNU_SOURCE)
++	target_link_libraries(mldr32 PRIVATE -lrt -ldl mldr32_dserver_rpc -lcrypto -lxml2)
+ 
+ 	install(TARGETS mldr32 DESTINATION libexec/darling/usr/libexec/darling)
+ endif()
+diff --git a/src/startup/mldr/dc_codesign.c b/src/startup/mldr/dc_codesign.c
+new file mode 100644
+index 0000000..239003b
+--- /dev/null
++++ b/src/startup/mldr/dc_codesign.c
+@@ -0,0 +1,622 @@
++/*
++ * dc_codesign.c - bounded Mach-O code signature parser.
++ *
++ * See dc_codesign.h for scope. Every offset read from the file is validated
++ * against the containing blob before use; malformed input returns -1 with a
++ * reason instead of reading out of bounds.
++ */
++
++#include "dc_codesign.h"
++
++#include <openssl/evp.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <string.h>
++
++#define CD_MIN_SIZE 44u
++#define CD_V_SCATTER 0x20100u
++#define CD_V_TEAMID 0x20200u
++#define CD_V_CODELIMIT64 0x20300u
++#define CD_V_EXECSEG 0x20400u
++#define CD_V_RUNTIME 0x20500u
++
++static uint32_t be32(const uint8_t *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
++static uint64_t be64(const uint8_t *p)
++{
++	return ((uint64_t)be32(p) << 32) | be32(p + 4);
++}
++
++static uint32_t le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static uint32_t rd32(const struct dc_image *img, const uint8_t *p)
++{
++	return img->big_endian ? be32(p) : le32(p);
++}
++
++static bool in_range(uint64_t total, uint64_t off, uint64_t len)
++{
++	return off <= total && len <= total - off;
++}
++
++static int fail(char *err, size_t errlen, const char *fmt, ...)
++{
++	va_list ap;
++
++	if (err && errlen) {
++		va_start(ap, fmt);
++		vsnprintf(err, errlen, fmt, ap);
++		va_end(ap);
++	}
++	return -1;
++}
++
++const char *dc_hash_name(uint32_t hash_type)
++{
++	switch (hash_type) {
++	case DC_HASHTYPE_SHA1: return "sha1";
++	case DC_HASHTYPE_SHA256: return "sha256";
++	case DC_HASHTYPE_SHA256_TRUNCATED: return "sha256-truncated";
++	case DC_HASHTYPE_SHA384: return "sha384";
++	default: return "unknown";
++	}
++}
++
++const char *dc_blob_type_name(uint32_t type)
++{
++	switch (type) {
++	case DC_BLOB_CODEDIRECTORY: return "CodeDirectory";
++	case DC_BLOB_REQUIREMENTS: return "Requirements";
++	case DC_BLOB_ENTITLEMENTS: return "Entitlements";
++	case DC_BLOB_DER_ENTITLEMENTS: return "DEREntitlements";
++	case DC_BLOB_CMS: return "CMSSignature";
++	default: return "other";
++	}
++}
++
++void dc_flags_to_string(uint32_t flags, char *out, size_t outlen)
++{
++	static const struct { uint32_t bit; const char *name; } names[] = {
++		{ 0x00000001, "CS_VALID" },
++		{ 0x00000002, "CS_ADHOC" },
++		{ 0x00000004, "CS_GET_TASK_ALLOW" },
++		{ 0x00000008, "CS_INSTALLER" },
++		{ 0x00000100, "CS_HARD" },
++		{ 0x00000200, "CS_KILL" },
++		{ 0x00000400, "CS_CHECK_EXPIRATION" },
++		{ 0x00000800, "CS_RESTRICT" },
++		{ 0x00001000, "CS_ENFORCEMENT" },
++		{ 0x00002000, "CS_REQUIRE_LV" },
++		{ 0x00004000, "CS_ENTITLEMENTS_VALIDATED" },
++		{ 0x00010000, "CS_RUNTIME" },
++		{ 0x00020000, "CS_LINKER_SIGNED" },
++	};
++	size_t used = 0;
++
++	if (!outlen)
++		return;
++	out[0] = '\0';
++	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++		if (!(flags & names[i].bit))
++			continue;
++		int n = snprintf(out + used, outlen - used, "%s%s",
++				 used ? "," : "", names[i].name);
++		if (n < 0 || (size_t)n >= outlen - used)
++			break;
++		used += (size_t)n;
++	}
++	if (!used)
++		snprintf(out, outlen, "0x%08x", flags);
++}
++
++static int hash_data(uint32_t hash_type, const uint8_t *buf, size_t len,
++		     uint8_t *out, size_t outcap, size_t *outlen)
++{
++	const EVP_MD *md;
++	unsigned int mdlen = 0;
++	uint8_t tmp[EVP_MAX_MD_SIZE];
++
++	switch (hash_type) {
++	case DC_HASHTYPE_SHA1: md = EVP_sha1(); break;
++	case DC_HASHTYPE_SHA256:
++	case DC_HASHTYPE_SHA256_TRUNCATED: md = EVP_sha256(); break;
++	case DC_HASHTYPE_SHA384: md = EVP_sha384(); break;
++	default: return -1;
++	}
++
++	if (EVP_Digest(buf, len, tmp, &mdlen, md, NULL) != 1)
++		return -1;
++
++	size_t want = mdlen;
++	if (hash_type == DC_HASHTYPE_SHA256_TRUNCATED)
++		want = 20;
++	if (want > outcap)
++		return -1;
++	memcpy(out, tmp, want);
++	if (outlen)
++		*outlen = want;
++	return 0;
++}
++
++static int expected_hash_size(uint32_t hash_type, uint32_t *size)
++{
++	switch (hash_type) {
++	case DC_HASHTYPE_SHA1: *size = 20; return 0;
++	case DC_HASHTYPE_SHA256: *size = 32; return 0;
++	case DC_HASHTYPE_SHA256_TRUNCATED: *size = 20; return 0;
++	case DC_HASHTYPE_SHA384: *size = 48; return 0;
++	default: return -1;
++	}
++}
++
++static int find_signature(struct dc_image *img, uint64_t *off, uint64_t *len,
++			  char *err, size_t errlen)
++{
++	uint32_t magic;
++	size_t header_size;
++	uint32_t ncmds, sizeofcmds;
++	uint64_t p;
++	unsigned found = 0;
++
++	if (img->size < 4)
++		return fail(err, errlen, "file shorter than a Mach-O magic");
++
++	magic = le32(img->data);
++	switch (magic) {
++	case 0xfeedfacfu:
++		img->is_64 = true;
++		img->big_endian = false;
++		break;
++	case 0xcffaedfeu:
++		img->is_64 = true;
++		img->big_endian = true;
++		break;
++	case 0xfeedfaceu:
++		img->is_64 = false;
++		img->big_endian = false;
++		break;
++	case 0xcefaedfeu:
++		img->is_64 = false;
++		img->big_endian = true;
++		break;
++	default:
++		return fail(err, errlen, "not a thin Mach-O (magic 0x%08x)", magic);
++	}
++
++	header_size = img->is_64 ? 32 : 28;
++	if (img->size < header_size)
++		return fail(err, errlen, "truncated Mach-O header");
++
++	img->cputype = rd32(img, img->data + 4);
++	ncmds = rd32(img, img->data + 16);
++	sizeofcmds = rd32(img, img->data + 20);
++
++	if (!in_range(img->size, header_size, sizeofcmds))
++		return fail(err, errlen, "sizeofcmds runs past end of file");
++
++	p = header_size;
++	for (uint32_t i = 0; i < ncmds; i++) {
++		if (!in_range(img->size, p, 8))
++			return fail(err, errlen, "load command header out of range");
++
++		uint32_t cmd = rd32(img, img->data + p);
++		uint32_t cmdsize = rd32(img, img->data + p + 4);
++
++		if (cmdsize < 8 || !in_range(img->size, p, cmdsize))
++			return fail(err, errlen, "bad load command size %u", cmdsize);
++
++		if (cmd == DC_LC_CODE_SIGNATURE) {
++			if (cmdsize < 16)
++				return fail(err, errlen, "LC_CODE_SIGNATURE too small");
++			*off = rd32(img, img->data + p + 8);
++			*len = rd32(img, img->data + p + 12);
++			found++;
++		}
++		p += cmdsize;
++	}
++
++	if (!found)
++		return fail(err, errlen, "no LC_CODE_SIGNATURE (unsigned image)");
++	if (found > 1)
++		return fail(err, errlen, "multiple LC_CODE_SIGNATURE commands");
++
++	if (!in_range(img->size, *off, *len))
++		return fail(err, errlen, "signature range outside the file");
++	if (*len < 12)
++		return fail(err, errlen, "signature smaller than a SuperBlob header");
++
++	return 0;
++}
++
++static int parse_superblob(struct dc_image *img, char *err, size_t errlen)
++{
++	const uint8_t *sb = img->data + img->sig_offset;
++	uint32_t magic = be32(sb);
++	uint32_t length = be32(sb + 4);
++	uint32_t count = be32(sb + 8);
++	uint64_t index_end;
++
++	if (magic != DC_CSMAGIC_EMBEDDED_SIGNATURE)
++		return fail(err, errlen, "bad SuperBlob magic 0x%08x", magic);
++	if (length < 12 || length > img->sig_size)
++		return fail(err, errlen, "SuperBlob length %u outside signature", length);
++	if (count == 0 || count > DC_MAX_BLOBS)
++		return fail(err, errlen, "unsupported blob count %u", count);
++
++	index_end = 12ull + 8ull * count;
++	if (index_end > length)
++		return fail(err, errlen, "blob index runs past SuperBlob");
++
++	img->superblob_length = length;
++	img->blob_count = count;
++
++	for (uint32_t i = 0; i < count; i++) {
++		const uint8_t *e = sb + 12 + 8 * i;
++		uint32_t type = be32(e);
++		uint32_t off = be32(e + 4);
++		uint64_t blen;
++
++		if (off < index_end || !in_range(length, off, 8))
++			return fail(err, errlen, "blob %u offset out of range", i);
++
++		blen = be32(sb + off + 4);
++		if (blen < 8 || !in_range(length, off, blen))
++			return fail(err, errlen, "blob %u length out of range", i);
++
++		img->blobs[i].type = type;
++		img->blobs[i].offset = off;
++		img->blobs[i].length = (uint32_t)blen;
++		img->blobs[i].magic = be32(sb + off);
++	}
++	return 0;
++}
++
++static int verify_special_blob(struct dc_image *img, uint32_t blob_type,
++			       uint32_t slot, uint32_t magic,
++			       char *err, size_t errlen)
++{
++	const struct dc_blob *blob = NULL;
++	const uint8_t *blob_data;
++	const uint8_t *slot_hash;
++	uint8_t digest[EVP_MAX_MD_SIZE];
++	size_t digest_len = 0;
++	uint32_t i;
++
++	if (!img->cd)
++		return fail(err, errlen, "CodeDirectory not parsed");
++
++	for (i = 0; i < img->blob_count; i++) {
++		if (img->blobs[i].type != blob_type)
++			continue;
++		if (blob != NULL)
++			return fail(err, errlen, "duplicate blob type %u", blob_type);
++		blob = &img->blobs[i];
++	}
++
++	if (slot > img->n_special_slots) {
++		/* The CodeDirectory does not reserve this slot. */
++		return blob == NULL ? 0 : fail(err, errlen, "special slot -%u missing", slot);
++	}
++	if ((uint64_t)slot * img->hash_size > img->hash_off)
++		return fail(err, errlen, "special slot -%u outside hash area", slot);
++
++	slot_hash = img->cd + img->hash_off - slot * img->hash_size;
++	if (blob == NULL) {
++		for (i = 0; i < img->hash_size; i++) {
++			if (slot_hash[i] != 0)
++				return fail(err, errlen,
++					    "special slot -%u is set but the blob is absent", slot);
++		}
++		return 0;
++	}
++
++	if (blob->magic != magic)
++		return fail(err, errlen, "special blob type %u has magic 0x%08x",
++			    blob_type, blob->magic);
++	blob_data = img->data + img->sig_offset + blob->offset;
++	if (be32(blob_data + 4) != blob->length)
++		return fail(err, errlen, "special blob type %u length mismatch", blob_type);
++	if (hash_data(img->hash_type, blob_data, blob->length, digest,
++		      sizeof(digest), &digest_len) != 0 ||
++	    digest_len != img->hash_size ||
++	    memcmp(digest, slot_hash, img->hash_size) != 0)
++		return fail(err, errlen, "special slot -%u hash mismatch", slot);
++	return 0;
++}
++
++static int parse_one_codedirectory(struct dc_image *img, const struct dc_blob *blob,
++                                   char *err, size_t errlen)
++{
++	const uint8_t *cd = img->data + img->sig_offset + blob->offset;
++	uint32_t cd_len = blob->length;
++	uint64_t need;
++	uint32_t hash_off, ident_off, n_special, n_code;
++	uint32_t code_limit32 = 0;
++	uint64_t code_limit = 0;
++
++	if (cd_len < CD_MIN_SIZE)
++		return fail(err, errlen, "CodeDirectory shorter than v0 header");
++	if (be32(cd) != DC_CSMAGIC_CODEDIRECTORY)
++		return fail(err, errlen, "bad CodeDirectory magic");
++	if (be32(cd + 4) != cd_len)
++		return fail(err, errlen, "CodeDirectory length field mismatch");
++
++	img->cd = cd;
++	img->cd_len = cd_len;
++	img->cd_version = be32(cd + 8);
++	img->cd_flags = be32(cd + 12);
++	hash_off = be32(cd + 16);
++	ident_off = be32(cd + 20);
++	n_special = be32(cd + 24);
++	n_code = be32(cd + 28);
++	code_limit32 = be32(cd + 32);
++	img->hash_size = cd[36];
++	img->hash_type = cd[37];
++	img->hash_off = hash_off;
++	img->page_size_log2 = cd[39];
++	img->n_special_slots = n_special;
++	img->n_code_slots = n_code;
++	img->code_limit = code_limit32;
++
++	if (be32(cd + 40) != 0)
++		return fail(err, errlen, "spare2 is not zero");
++
++	need = CD_MIN_SIZE;
++	if (img->cd_version >= CD_V_SCATTER)
++		need += 4;
++	if (img->cd_version >= CD_V_TEAMID)
++		need += 4;
++	if (img->cd_version >= CD_V_CODELIMIT64)
++		need += 4 + 8;
++	if (img->cd_version >= CD_V_EXECSEG)
++		need += 8 + 8 + 8;
++	if (img->cd_version >= CD_V_RUNTIME)
++		need += 4 + 4;
++	if (cd_len < need)
++		return fail(err, errlen, "CodeDirectory v0x%x truncated (need %llu)",
++			    img->cd_version, (unsigned long long)need);
++
++	if (img->hash_type == 0)
++		return fail(err, errlen, "unknown hash type %u", img->hash_type);
++	{
++		uint32_t want = 0;
++		if (expected_hash_size(img->hash_type, &want) != 0)
++			return fail(err, errlen, "unknown hash type %u", img->hash_type);
++		if (img->hash_size != want)
++			return fail(err, errlen, "hash size %u does not match type %s",
++				    img->hash_size, dc_hash_name(img->hash_type));
++	}
++
++	if (img->page_size_log2 < 9 || img->page_size_log2 > 30)
++		return fail(err, errlen, "invalid page size 2^%u", img->page_size_log2);
++
++	if (img->cd_version >= CD_V_CODELIMIT64) {
++		uint64_t limit64 = be64(cd + 56);
++		if (limit64)
++			code_limit = limit64;
++	}
++	if (code_limit == 0)
++		code_limit = code_limit32;
++	if (code_limit == 0)
++		return fail(err, errlen, "code limit is zero (no signed executable content)");
++	if (code_limit > img->size)
++		return fail(err, errlen, "code limit %llu beyond file size %zu",
++			    (unsigned long long)code_limit, img->size);
++	img->code_limit = code_limit;
++
++	if (ident_off == 0 || ident_off >= cd_len)
++		return fail(err, errlen, "identifier offset out of range");
++	{
++		size_t n = strnlen((const char *)cd + ident_off, cd_len - ident_off);
++		if (n == cd_len - ident_off)
++			return fail(err, errlen, "identifier is not NUL-terminated");
++		if (n >= sizeof(img->identifier))
++			return fail(err, errlen, "identifier too long");
++		memcpy(img->identifier, cd + ident_off, n + 1);
++	}
++
++	img->teamid[0] = '\0';
++	if (img->cd_version >= CD_V_TEAMID) {
++		uint32_t team_off = be32(cd + 48);
++		if (team_off) {
++			if (team_off >= cd_len)
++				return fail(err, errlen, "team id offset out of range");
++			size_t n = strnlen((const char *)cd + team_off, cd_len - team_off);
++			if (n == cd_len - team_off)
++				return fail(err, errlen, "team id is not NUL-terminated");
++			if (n >= sizeof(img->teamid))
++				return fail(err, errlen, "team id too long");
++			memcpy(img->teamid, cd + team_off, n + 1);
++		}
++	}
++
++	if ((uint64_t)n_special * img->hash_size > hash_off)
++		return fail(err, errlen, "special slots overlap header");
++	if (hash_off > cd_len ||
++	    (uint64_t)hash_off + (uint64_t)n_code * img->hash_size > cd_len)
++		return fail(err, errlen, "code slots run past CodeDirectory");
++
++	{
++		uint64_t page = 1ull << img->page_size_log2;
++		uint64_t want_slots = code_limit ? (code_limit + page - 1) / page : 0;
++		if (want_slots != n_code)
++			return fail(err, errlen,
++				    "slot count %u does not match code limit %llu / page %llu",
++				    n_code, (unsigned long long)code_limit,
++				    (unsigned long long)page);
++	}
++
++	{
++		uint8_t full[EVP_MAX_MD_SIZE];
++		size_t flen = 0;
++
++		if (hash_data(img->hash_type, cd, cd_len, full, sizeof(full), &flen) != 0 ||
++		    flen < DC_CDHASH_LEN) {
++			return fail(err, errlen, "failed to hash CodeDirectory");
++		}
++		memcpy(img->cdhash, full, DC_CDHASH_LEN);
++	}
++	if (hash_data(DC_HASHTYPE_SHA1, cd, cd_len, img->cd_sha1,
++		      sizeof(img->cd_sha1), NULL) != 0)
++		return fail(err, errlen, "failed to compute SHA-1 of CodeDirectory");
++	if (hash_data(DC_HASHTYPE_SHA256, cd, cd_len, img->cd_sha256,
++		      sizeof(img->cd_sha256), NULL) != 0)
++		return fail(err, errlen, "failed to compute SHA-256 of CodeDirectory");
++
++	/* Special slots bind requirements and entitlement blobs to the
++	 * CodeDirectory. Verify the complete blob (including its 8-byte
++	 * generic header) and reject a non-zero slot with no blob. */
++	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
++				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
++				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
++				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
++		return -1;
++
++	/* Embedded entitlements, both XML (type 5) and DER (type 7). */
++	for (uint32_t i = 0; i < img->blob_count; i++) {
++		const struct dc_blob *b = &img->blobs[i];
++		if (b->type != DC_BLOB_ENTITLEMENTS && b->type != DC_BLOB_DER_ENTITLEMENTS)
++			continue;
++		if (b->length <= 8)
++			return fail(err, errlen, "empty entitlements blob");
++		if (b->type == DC_BLOB_ENTITLEMENTS) {
++			if (b->magic != DC_CSMAGIC_EMBEDDED_ENTITLEMENTS)
++				return fail(err, errlen, "bad entitlements magic 0x%08x", b->magic);
++			img->entitlements = img->data + img->sig_offset + b->offset + 8;
++			img->entitlements_len = b->length - 8;
++		} else {
++			if (b->magic != DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS)
++				return fail(err, errlen, "bad DER entitlements magic 0x%08x", b->magic);
++			img->der_entitlements = img->data + img->sig_offset + b->offset + 8;
++			img->der_entitlements_len = b->length - 8;
++		}
++	}
++
++	return 0;
++}
++
++/* XNU preference: SHA-384, full SHA-256, truncated SHA-256, SHA-1. */
++static unsigned hash_rank(uint32_t type)
++{
++    switch (type) {
++    case DC_HASHTYPE_SHA1: return 1;
++    case DC_HASHTYPE_SHA256_TRUNCATED: return 2;
++    case DC_HASHTYPE_SHA256: return 3;
++    case DC_HASHTYPE_SHA384: return 4;
++    default: return 0;
++    }
++}
++
++static int parse_codedirectory(struct dc_image *img, char *err, size_t errlen)
++{
++    struct dc_image best;
++    unsigned best_rank = 0, seen_slots = 0, seen_ranks = 0;
++    for (uint32_t i = 0; i < img->blob_count; i++) {
++        const struct dc_blob *blob = &img->blobs[i];
++        unsigned slot;
++        if (blob->type == DC_BLOB_CODEDIRECTORY) slot = 0;
++        else if (blob->type >= 0x1000 && blob->type <= 0x1004) slot = blob->type - 0x1000 + 1;
++        else continue;
++        if (seen_slots & (1u << slot)) return fail(err, errlen, "duplicate CodeDirectory slot");
++        seen_slots |= 1u << slot;
++        struct dc_image candidate = *img;
++        if (parse_one_codedirectory(&candidate, blob, err, errlen) != 0) return -1;
++        unsigned rank = hash_rank(candidate.hash_type);
++        if (!rank || (seen_ranks & (1u << rank)))
++            return fail(err, errlen, "unsupported or duplicate CodeDirectory hash type");
++        seen_ranks |= 1u << rank;
++        if (rank > best_rank) { best = candidate; best_rank = rank; }
++    }
++    if (!best_rank) return fail(err, errlen, "no CodeDirectory blob");
++    *img = best;
++    return 0;
++}
++
++int dc_parse(const uint8_t *data, size_t size, struct dc_image *img,
++	     char *err, size_t errlen)
++{
++	int r;
++
++	if (!data || !img)
++		return fail(err, errlen, "null argument");
++	memset(img, 0, sizeof(*img));
++	img->data = data;
++	img->size = size;
++
++	r = find_signature(img, &img->sig_offset, &img->sig_size, err, errlen);
++	if (r != 0)
++		return r;
++	r = parse_superblob(img, err, errlen);
++	if (r != 0)
++		return r;
++	return parse_codedirectory(img, err, errlen);
++}
++
++int dc_verify_pages(struct dc_image *img, char *err, size_t errlen)
++{
++	uint64_t page_size;
++	uint32_t hash_off;
++
++	if (!img || !img->cd)
++		return fail(err, errlen, "image not parsed");
++
++	/* Re-check the special slots here as well: callers that parse once and
++	 * verify later must not use entitlements that are not bound to the
++	 * CodeDirectory. */
++	if (verify_special_blob(img, DC_BLOB_REQUIREMENTS, 2,
++				DC_CSMAGIC_REQUIREMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_ENTITLEMENTS, 5,
++				DC_CSMAGIC_EMBEDDED_ENTITLEMENTS, err, errlen) != 0 ||
++	    verify_special_blob(img, DC_BLOB_DER_ENTITLEMENTS, 7,
++				DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, err, errlen) != 0)
++		return -1;
++
++	page_size = 1ull << img->page_size_log2;
++	hash_off = be32(img->cd + 16);
++
++	img->pages_total = img->n_code_slots;
++	img->pages_failed = 0;
++	img->first_bad_page = 0;
++
++	for (uint32_t i = 0; i < img->n_code_slots; i++) {
++		uint64_t off = (uint64_t)i * page_size;
++		uint64_t remain;
++		size_t len;
++		uint8_t digest[64];
++		size_t dlen = 0;
++		const uint8_t *want = img->cd + hash_off + (size_t)i * img->hash_size;
++
++		if (off >= img->code_limit) {
++			img->pages_failed++;
++			if (!img->first_bad_page)
++				img->first_bad_page = i + 1;
++			continue;
++		}
++		remain = img->code_limit - off;
++		len = remain > page_size ? (size_t)page_size : (size_t)remain;
++		if (hash_data(img->hash_type, img->data + off, len,
++			      digest, sizeof(digest), &dlen) != 0 ||
++		    dlen != img->hash_size ||
++		    memcmp(digest, want, img->hash_size) != 0) {
++			img->pages_failed++;
++			if (!img->first_bad_page)
++				img->first_bad_page = i + 1;
++		}
++	}
++
++	img->pages_verified = true;
++	if (img->pages_failed)
++		return fail(err, errlen, "%u of %u code pages failed verification (first: %u)",
++			    img->pages_failed, img->pages_total, img->first_bad_page);
++	return 0;
++}
+diff --git a/src/startup/mldr/dc_codesign.h b/src/startup/mldr/dc_codesign.h
+new file mode 100644
+index 00000000..f2727207
+--- /dev/null
++++ b/src/startup/mldr/dc_codesign.h
+@@ -0,0 +1,120 @@
++/*
++ * dc_codesign.h - bounded parser for Mach-O code signatures.
++ *
++ * Part of the phase-M1 work in docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md.
++ * The parser is deliberately read-only and allocation-free: it points into the
++ * caller's file buffer and validates every offset before use.
++ *
++ * Hashing uses OpenSSL here. When this code moves into libsystem_kernel the
++ * hash backend must be swapped for CommonCrypto/corecrypto; the parser and the
++ * validation rules stay the same.
++ */
++
++#ifndef DC_CODESIGN_H
++#define DC_CODESIGN_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define DC_CDHASH_LEN 20
++#define DC_MAX_BLOBS 64
++#define DC_IDENT_MAX 256
++#define DC_TEAMID_MAX 64
++
++/* CS_SuperBlob magics (big-endian on disk). */
++#define DC_CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0u
++#define DC_CSMAGIC_CODEDIRECTORY 0xfade0c02u
++#define DC_CSMAGIC_REQUIREMENTS 0xfade0c01u
++#define DC_CSMAGIC_EMBEDDED_ENTITLEMENTS 0xfade7171u
++#define DC_CSMAGIC_EMBEDDED_DER_ENTITLEMENTS 0xfade7172u
++#define DC_CSMAGIC_BLOBWRAPPER 0xfade0b01u
++
++/* SuperBlob slot types. */
++#define DC_BLOB_CODEDIRECTORY 0u
++#define DC_BLOB_REQUIREMENTS 2u
++#define DC_BLOB_ENTITLEMENTS 5u
++#define DC_BLOB_DER_ENTITLEMENTS 7u
++#define DC_BLOB_CMS 0x10000u
++
++/* Mach-O. */
++#define DC_LC_CODE_SIGNATURE 0x1du
++
++/* CodeDirectory hash types. */
++#define DC_HASHTYPE_SHA1 1u
++#define DC_HASHTYPE_SHA256 2u
++#define DC_HASHTYPE_SHA256_TRUNCATED 3u
++#define DC_HASHTYPE_SHA384 4u
++
++struct dc_blob {
++	uint32_t type;
++	uint32_t offset;
++	uint32_t length;
++	uint32_t magic;
++};
++
++struct dc_image {
++	const uint8_t *data;
++	size_t size;
++
++	bool is_64;
++	bool big_endian;
++	uint32_t cputype;
++
++	uint64_t sig_offset;
++	uint64_t sig_size;
++	uint32_t superblob_length;
++	uint32_t blob_count;
++	struct dc_blob blobs[DC_MAX_BLOBS];
++
++	/* CodeDirectory, pointing into the file buffer. */
++	const uint8_t *cd;
++	size_t cd_len;
++	uint32_t cd_version;
++	uint32_t cd_flags;
++	uint32_t hash_type;
++	uint32_t hash_size;
++	uint32_t hash_off;
++	uint32_t page_size_log2;
++	uint32_t n_special_slots;
++	uint32_t n_code_slots;
++	uint64_t code_limit;
++	char identifier[DC_IDENT_MAX];
++	char teamid[DC_TEAMID_MAX];
++
++	/* Digests of the CodeDirectory blob. */
++	uint8_t cdhash[DC_CDHASH_LEN];
++	uint8_t cd_sha1[20];
++	uint8_t cd_sha256[32];
++
++	/* Embedded entitlements (type 5) and DER entitlements (type 7). */
++	const uint8_t *entitlements;
++	size_t entitlements_len;
++	const uint8_t *der_entitlements;
++	size_t der_entitlements_len;
++
++	/* Page-hash verification (filled by dc_verify_pages). */
++	bool pages_verified;
++	uint32_t pages_total;
++	uint32_t pages_failed;
++	uint32_t first_bad_page;
++};
++
++/*
++ * Parse a Mach-O image and its embedded signature. Returns 0 on success,
++ * -1 on error (err is always NUL-terminated).
++ */
++int dc_parse(const uint8_t *data, size_t size, struct dc_image *img,
++	     char *err, size_t errlen);
++
++/*
++ * Verify every code page hash against the CodeDirectory. Requires a parsed
++ * image. Returns 0 when all pages match, -1 otherwise.
++ */
++int dc_verify_pages(struct dc_image *img, char *err, size_t errlen);
++
++const char *dc_hash_name(uint32_t hash_type);
++const char *dc_blob_type_name(uint32_t type);
++void dc_flags_to_string(uint32_t flags, char *out, size_t outlen);
++
++#endif /* DC_CODESIGN_H */
+diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
+index 1e9ec25..0114e25 100644
+--- a/src/startup/mldr/loader.c
++++ b/src/startup/mldr/loader.c
+@@ -6,13 +6,14 @@
+ #include <stdio.h>
+ #include <stdbool.h>
+ #include <sys/mman.h>
++#include <sys/syscall.h>
+ #include <errno.h>
+ #include <string.h>
+ 
+ #include "loader.h"
+ 
+ static int native_prot(int prot);
+-static void load(const char* path, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
++static void load(const char* path, int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
+ static void setup_space(struct load_results* lr, bool is_64_bit);
+ static void* compatible_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+ 
+@@ -227,6 +228,30 @@ no_slide:
+ 				if (seg->vmaddr + slide + seg->vmsize > lr->vm_addr_max)
+ 					lr->vm_addr_max = seg->vmaddr + slide + seg->vmsize;
+ 
++				/* M5: seal the signed read-only ranges against later
++				 * mprotect/munmap/mmap(MAP_FIXED). mseal is available on
++				 * Linux >= 6.10; older kernels keep the previous behavior. */
++#ifdef __NR_mseal
++				{
++					const char* sealPolicy = getenv("DARLING_MSEAL");
++					bool sealEnabled = sealPolicy != NULL &&
++					    (strcmp(sealPolicy, "1") == 0 || strcmp(sealPolicy, "on") == 0 ||
++					     strcmp(sealPolicy, "true") == 0 || strcmp(sealPolicy, "yes") == 0);
++					if (sealEnabled && (seg->initprot & PROT_WRITE) == 0 &&
++					    (strcmp(seg->segname, "__TEXT") == 0 ||
++					     strcmp(seg->segname, "__LINKEDIT") == 0)) {
++						uintptr_t sealAddr = seg->vmaddr + slide;
++						size_t sealLen = PAGE_ROUNDUP(seg->vmsize);
++						long sealResult = dc_snapshot_and_seal((void*)sealAddr, sealLen,
++                        native_prot(seg->initprot), &dc_native_seal_ops);
++                    if (sealResult < 0 && sealResult != -ENOSYS) {
++							fprintf(stderr, "mldr: cannot seal %s at %p: %s\n",
++								seg->segname, (void*) sealAddr, strerror((int)-sealResult));
++						}
++					}
++				}
++#endif
++
+ 				if (strcmp(SEG_DATA, seg->segname) == 0)
+ 				{
+ 					// Look for section named __all_image_info for GDB integration
+@@ -308,7 +333,7 @@ no_slide:
+ 					exit(1);
+ 				}
+ 
+-				load(path, header.cputype, true, NULL, lr);
++				load(path, -1, header.cputype, true, NULL, lr);
+ 
+ 				break;
+ 			}
 diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
 index a68739ff..5c8eb836 100644
 --- a/src/launchd/src/core.c
@@ -11465,3 +12707,169 @@ index a68739ff..5c8eb836 100644
  }
  
  size_t
+diff --git a/src/startup/mldr/include/dc_entitlements.h b/src/startup/mldr/include/dc_entitlements.h
+new file mode 100644
+index 0000000..2033969
+--- /dev/null
++++ b/src/startup/mldr/include/dc_entitlements.h
+@@ -0,0 +1,63 @@
++/* Bounded, non-networked plist policy parsing shared by mldr and the server. */
++#ifndef DC_ENTITLEMENTS_H
++#define DC_ENTITLEMENTS_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#include <libxml/parser.h>
++#include <libxml/tree.h>
++
++static inline xmlNode* dc_next_element(xmlNode* node) {
++    while (node && (node->type == XML_COMMENT_NODE || node->type == XML_PI_NODE ||
++                    (node->type == XML_TEXT_NODE && xmlIsBlankNode(node)))) node = node->next;
++    return node;
++}
++static inline bool dc_xml_name(xmlNode* node, const char* name) {
++    return node && !node->ns && xmlStrEqual(node->name, (const xmlChar*)name);
++}
++static inline bool dc_entitlement_is_true(const uint8_t* data, size_t len, const char* key) {
++    if (!data || !key || !len || len > 1024 * 1024) return false;
++    while (len && data[len - 1] == 0) len--;
++    xmlDoc* doc = xmlReadMemory((const char*)data, (int)len, "entitlements.plist", NULL,
++        XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
++    if (!doc) return false;
++    bool result = false, seen = false;
++    /* A normal plist DOCTYPE is fine; custom entities and external DTDs are not
++     * policy input. No DTD loading or entity substitution options are enabled. */
++    if (doc->extSubset || (doc->intSubset &&
++        (doc->intSubset->entities || doc->intSubset->pentities))) goto done;
++    {
++        xmlNode* plist = xmlDocGetRootElement(doc);
++        if (!dc_xml_name(plist, "plist")) goto done;
++        xmlNode* dict = dc_next_element(plist->children);
++        if (!dc_xml_name(dict, "dict") || dc_next_element(dict->next)) goto done;
++        for (xmlNode* entry = dc_next_element(dict->children); entry;) {
++            if (!dc_xml_name(entry, "key") || entry->properties) { result = false; goto done; }
++            for (xmlNode* part = entry->children; part; part = part->next) {
++                if (part->type != XML_TEXT_NODE && part->type != XML_CDATA_SECTION_NODE) {
++                    result = false; goto done;
++                }
++            }
++            xmlNode* value = dc_next_element(entry->next);
++            if (!(dc_xml_name(value, "true") || dc_xml_name(value, "false") ||
++                  dc_xml_name(value, "string") || dc_xml_name(value, "data") ||
++                  dc_xml_name(value, "date") || dc_xml_name(value, "integer") ||
++                  dc_xml_name(value, "real") || dc_xml_name(value, "array") ||
++                  dc_xml_name(value, "dict"))) { result = false; goto done; }
++            xmlChar* name = xmlNodeGetContent(entry);
++            bool matches = name && xmlStrEqual(name, (const xmlChar*)key);
++            xmlFree(name);
++            if (matches) {
++                if (seen) { result = false; goto done; }
++                seen = true;
++                result = dc_xml_name(value, "true") && !value->children && !value->properties;
++            }
++            entry = dc_next_element(value->next);
++        }
++    }
++done:
++    xmlFreeDoc(doc);
++    return result;
++}
++#endif
+diff --git a/src/startup/mldr/include/dc_mseal.h b/src/startup/mldr/include/dc_mseal.h
+new file mode 100644
+index 0000000..fb3f73c
+--- /dev/null
++++ b/src/startup/mldr/include/dc_mseal.h
+@@ -0,0 +1,37 @@
++/* Replace a read-only file mapping with an anonymous snapshot before sealing.
++ * mseal alone does not stop writes to the original inode. Anonymous backing also
++ * prevents madvise from discarding COW pages and re-reading a modified file.
++ * Callbacks return negative errno on failure; addresses use the native long ABI.
++ */
++#ifndef DC_MSEAL_H
++#define DC_MSEAL_H
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++struct dc_seal_ops {
++    long (*allocate)(unsigned long);
++    long (*protect)(void*, unsigned long, int);
++    long (*relocate)(void*, unsigned long, void*);
++    void (*release)(void*, unsigned long);
++    long (*seal)(void*, unsigned long);
++};
++static inline int dc_vm_error(long value) {
++    return (unsigned long)value >= (unsigned long)-4095;
++}
++static inline long dc_snapshot_and_seal(void* address, unsigned long length, int prot,
++                                       const struct dc_seal_ops* ops) {
++    const unsigned long page = 4096; /* Darling's x86 guest page size. */
++    if (!length || ((uintptr_t)address & (page - 1)) ||
++        length > ~(unsigned long)0 - (page - 1) || !(prot & 1) || (prot & 2)) return -22;
++    length = (length + page - 1) & ~(page - 1);
++    long allocated = ops->allocate(length);
++    if (dc_vm_error(allocated)) return allocated;
++    void* snapshot = (void*)(uintptr_t)allocated;
++    memcpy(snapshot, address, length);
++    long result = ops->protect(snapshot, length, prot);
++    if (result < 0) { ops->release(snapshot, length); return result; }
++    result = ops->relocate(snapshot, length, address);
++    if (dc_vm_error(result)) { ops->release(snapshot, length); return result; }
++    return ops->seal(address, length);
++}
++#endif
+diff --git a/src/startup/mldr/include/dc_image_snapshot.h b/src/startup/mldr/include/dc_image_snapshot.h
+new file mode 100644
+index 0000000..04d64c1
+--- /dev/null
++++ b/src/startup/mldr/include/dc_image_snapshot.h
+@@ -0,0 +1,48 @@
++/* Immutable file snapshots bind verification and mapping to the same bytes.
++ * Callbacks normalize errors to negative errno and never change the source offset.
++ */
++#ifndef DC_IMAGE_SNAPSHOT_H
++#define DC_IMAGE_SNAPSHOT_H
++#include <stddef.h>
++enum { DC_F_SNAPSHOT_IMAGE = 0x40004443 };
++struct dc_image_ops {
++    long (*size)(int);
++    long (*create)(void);
++    long (*read)(int, void*, unsigned long, unsigned long);
++    long (*write)(int, const void*, unsigned long);
++    long (*seal)(int);
++    void (*close)(int);
++};
++static inline long dc_snapshot_image(int source, const struct dc_image_ops* ops) {
++    long length = ops->size(source);
++    if (length < 0) return length;
++    if (!length) return -22;
++    if ((unsigned long)length > 2UL * 1024 * 1024 * 1024) return -27;
++    long target = ops->create();
++    if (target < 0) return target;
++    unsigned long offset = 0;
++    long error = -5;
++    char buffer[16384];
++    while (offset < (unsigned long)length) {
++        unsigned long amount = (unsigned long)length - offset;
++        if (amount > sizeof(buffer)) amount = sizeof(buffer);
++        long got = ops->read(source, buffer, amount, offset);
++        if (got == -4) continue;
++        if (got <= 0) { error = got < 0 ? got : -5; goto fail; }
++        unsigned long written = 0;
++        while (written < (unsigned long)got) {
++            long put = ops->write((int)target, buffer + written, (unsigned long)got - written);
++            if (put == -4) continue;
++            if (put <= 0) { error = put < 0 ? put : -5; goto fail; }
++            written += (unsigned long)put;
++        }
++        offset += (unsigned long)got;
++    }
++    error = ops->seal((int)target);
++    if (error < 0) goto fail;
++    return target;
++fail:
++    ops->close((int)target);
++    return error;
++}
++#endif

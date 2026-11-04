@@ -8484,18 +8484,10 @@ index edb4562..581991d 100644
  - (NSSize) convertSize: (NSSize) size toView: (NSView *) viewOrNil;
  - (NSRect) convertRect: (NSRect) rect fromView: (NSView *) viewOrNil;
 diff --git a/AppKit/include/AppKit/NSWindow.h b/AppKit/include/AppKit/NSWindow.h
-index a83c4d7..65126ab 100644
+index a83c4d7..c6e8659 100644
 --- a/AppKit/include/AppKit/NSWindow.h
 +++ b/AppKit/include/AppKit/NSWindow.h
-@@ -157,6 +157,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
-     NSSize _maxSize;
-     NSSize _contentMinSize;
-     NSSize _contentMaxSize;
-+    NSWindowCollectionBehavior _collectionBehavior;
- 
-     NSWindow *_parentWindow;
-     NSMutableArray<NSWindow *> *_childWindows;
-@@ -188,6 +189,16 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -188,6 +188,16 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      int _cursorRectsDisabled;
      int _flushDisabled;
  
@@ -8512,7 +8504,7 @@ index a83c4d7..65126ab 100644
      BOOL _isOpaque;
      BOOL _isVisible;
      BOOL _isDocumentEdited;
-@@ -217,6 +228,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -217,6 +227,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      BOOL _showsToolbarButton;
      BOOL _ignoresMouseEvents;
      BOOL _isMovableByWindowBackground;
@@ -8520,7 +8512,7 @@ index a83c4d7..65126ab 100644
      BOOL _allowsToolTipsWhenApplicationIsInactive;
      BOOL _defaultButtonCellKeyEquivalentDisabled;
      BOOL _autorecalculatesKeyViewLoop;
-@@ -240,6 +252,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -240,6 +251,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      NSMutableArray *_drawers;
      NSToolbar *_toolbar;
      NSWindowAnimationContext *_animationContext;
@@ -8528,7 +8520,7 @@ index a83c4d7..65126ab 100644
  
      NSRect _savedFrame;
      NSPoint _mouseDownLocationInWindow;
-@@ -247,6 +260,9 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -247,6 +259,9 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
      NSUserInterfaceItemIdentifier _identifier;
  
      BOOL _isAccessible;
@@ -8538,7 +8530,7 @@ index a83c4d7..65126ab 100644
  }
  
  @property(class) BOOL allowsAutomaticWindowTabbing;
-@@ -425,6 +441,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -425,6 +440,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (NSButton *) standardWindowButton: (NSWindowButton) value;
  - (NSButtonCell *) defaultButtonCell;
  - (NSWindow *) attachedSheet;
@@ -8546,7 +8538,7 @@ index a83c4d7..65126ab 100644
  
  - (id) windowController;
  - (NSArray *) drawers;
-@@ -450,6 +467,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -450,6 +466,7 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  - (BOOL) isMainWindow;
  - (BOOL) isMiniaturized;
  - (BOOL) isMovable;
@@ -8554,7 +8546,7 @@ index a83c4d7..65126ab 100644
  - (BOOL) inLiveResize;
  - (BOOL) canBecomeKeyWindow;
  - (BOOL) canBecomeMainWindow;
-@@ -458,6 +476,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
+@@ -458,6 +475,30 @@ APPKIT_EXPORT const NSNotificationName NSWindowDidExposeNotification;
  
  - (NSPoint) convertBaseToScreen: (NSPoint) point;
  - (NSPoint) convertScreenToBase: (NSPoint) point;

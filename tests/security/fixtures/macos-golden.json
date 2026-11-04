@@ -1,0 +1,253 @@
+{
+  "schema": 1,
+  "source": {
+    "workflow": "security-ground-truth.yml",
+    "run_id": "40124165591",
+    "date": "2026-10-24"
+  },
+  "environments": [
+    {
+      "runner": "macos-14",
+      "macos": {
+        "product": "14.8.9",
+        "build": "23J631",
+        "darwin": "23.6.0",
+        "arch": "arm64"
+      },
+      "sip": "disabled",
+      "csr": {
+        "config": "0x0000006f",
+        "check_task_for_pid": 0,
+        "check_debugger": 0
+      },
+      "probe": {
+        "status_flags": "0x22020001",
+        "flag_names": [
+          "CS_VALID",
+          "CS_LINKER_SIGNED",
+          "CS_DYLD_PLATFORM",
+          "CS_SIGNED"
+        ],
+        "teamid": {
+          "rc": -1,
+          "errno": 2
+        },
+        "entitlements_length": 0,
+        "pidoffset": 0,
+        "child_status_flags": "0x22020001",
+        "child_matches_self": true
+      },
+      "binaries": [
+        {
+          "path": "/bin/ls",
+          "cdhash": "df6d7e0863cb3037b01ca57547481aaf3aa81293",
+          "platform": 15,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null
+        },
+        {
+          "path": "/usr/bin/true",
+          "cdhash": "fd06104a5e4ab5c5275fea8defcf241d890d6764",
+          "platform": 15,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null
+        },
+        {
+          "path": "/usr/lib/dyld",
+          "cdhash": "9b1f7f11b41c273d184f6aa9ccc85497e2988299",
+          "platform": 15,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null
+        },
+        {
+          "path": "/usr/bin/security",
+          "cdhash": "ee745a08e05d0b4b6a1a31838be485e71c07ac6e",
+          "platform": 15,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "com.apple.authorization.smartcard.override",
+            "com.apple.private.CoreAuthentication.SPI"
+          ]
+        },
+        {
+          "path": "/usr/sbin/spctl",
+          "cdhash": "656143560504407d4d542f959958cda36077e843",
+          "platform": 15,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "com.apple.private.iokit.nvram-csr"
+          ]
+        },
+        {
+          "path": "/usr/libexec/amfid",
+          "cdhash": "a1ab080e99109cd31bd6f00d6ff0a5abb88cc1e4",
+          "platform": 15,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "com.apple.private.amfi.developer-mode-control",
+            "com.apple.private.iokit.nvram-read-access",
+            "com.apple.private.iokit.nvram-write-access",
+            "com.apple.private.security.storage.amfid",
+            "com.apple.private.tcc.allow",
+            "com.apple.security.exception.iokit-user-client-class"
+          ]
+        },
+        {
+          "path": "/usr/libexec/trustd",
+          "cdhash": "fab03735005b30e4f6646102e3c44afc3d69c34a",
+          "platform": 15,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "application-identifier",
+            "com.apple.application-identifier",
+            "com.apple.private.amfi.version-restriction",
+            "com.apple.private.assets.accessible-asset-types",
+            "com.apple.private.keychain.certificates",
+            "com.apple.private.necp.match",
+            "com.apple.private.network.delegation-whitelist",
+            "com.apple.private.network.socket-delegate",
+            "com.apple.private.security.storage.SFAnalytics",
+            "com.apple.private.security.storage.trustd",
+            "com.apple.private.security.storage.trustd-private",
+            "com.apple.private.tcc.manager.check-by-audit-token",
+            "com.apple.private.trustd.FileHelp"
+          ]
+        }
+      ]
+    },
+    {
+      "runner": "macos-15",
+      "macos": {
+        "product": "15.7.9",
+        "build": "24G830",
+        "darwin": "24.6.0",
+        "arch": "arm64"
+      },
+      "sip": "disabled",
+      "csr": {
+        "config": "0x0000006f",
+        "check_task_for_pid": 0,
+        "check_debugger": 0
+      },
+      "probe": {
+        "status_flags": "0x22020001",
+        "flag_names": [
+          "CS_VALID",
+          "CS_LINKER_SIGNED",
+          "CS_DYLD_PLATFORM",
+          "CS_SIGNED"
+        ],
+        "teamid": {
+          "rc": -1,
+          "errno": 2
+        },
+        "entitlements_length": 0,
+        "pidoffset": 0,
+        "child_status_flags": "0x22020001",
+        "child_matches_self": true
+      },
+      "binaries": [
+        {
+          "path": "/bin/ls",
+          "cdhash": "72efae0707353da45c87a019a5ddd40bd3dc59f5",
+          "platform": 16,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null
+        },
+        {
+          "path": "/usr/bin/true",
+          "cdhash": "b14712f93da0dd2af5296acdd82ceb164026a5a7",
+          "platform": 16,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null
+        },
+        {
+          "path": "/usr/lib/dyld",
+          "cdhash": "b3d1812132e80c85347ca357a3b1c4ba2badf258",
+          "platform": 16,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null
+        },
+        {
+          "path": "/usr/bin/security",
+          "cdhash": "09f808b5a2a72cbc15f2a6058829557ec9c39362",
+          "platform": 16,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "com.apple.authorization.smartcard.override",
+            "com.apple.private.CoreAuthentication.SPI",
+            "com.apple.private.platformsso.security"
+          ]
+        },
+        {
+          "path": "/usr/sbin/spctl",
+          "cdhash": "116e663773751f656061ca4d7a63405dd91cb2f8",
+          "platform": 16,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "com.apple.private.iokit.nvram-csr"
+          ]
+        },
+        {
+          "path": "/usr/libexec/amfid",
+          "cdhash": "a2f13f7d01ca432ed73360e6932a7c28b73aa4b6",
+          "platform": 16,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "com.apple.developer.hardened-process",
+            "com.apple.private.amfi.developer-mode-control",
+            "com.apple.private.iokit.nvram-read-access",
+            "com.apple.private.iokit.nvram-write-access",
+            "com.apple.private.security.storage.amfid",
+            "com.apple.private.tcc.allow",
+            "com.apple.security.exception.iokit-user-client-class"
+          ]
+        },
+        {
+          "path": "/usr/libexec/trustd",
+          "cdhash": "a5f41fd75285dce4236dfe3fb8fd872cea58dcb5",
+          "platform": 16,
+          "cd_flags": "0x0",
+          "hash_type": "sha256",
+          "teamid": null,
+          "entitlement_keys": [
+            "application-identifier",
+            "com.apple.application-identifier",
+            "com.apple.private.amfi.version-restriction",
+            "com.apple.private.assets.accessible-asset-types",
+            "com.apple.private.assets.bypass-asset-types-check",
+            "com.apple.private.keychain.certificates",
+            "com.apple.private.necp.match",
+            "com.apple.private.network.delegation-whitelist",
+            "com.apple.private.network.socket-delegate",
+            "com.apple.private.security.storage.SFAnalytics",
+            "com.apple.private.security.storage.trustd",
+            "com.apple.private.security.storage.trustd-private",
+            "com.apple.private.tcc.manager.check-by-audit-token",
+            "com.apple.private.trustd.FileHelp"
+          ]
+        }
+      ]
+    }
+  ]
+}
