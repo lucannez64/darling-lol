@@ -2256,8 +2256,8 @@ index 4319355..122ad3a 100644
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -4,6 +4,9 @@
  #include <alloca.h>
-+#include <stdlib.h>
-+#include <string.h>
++extern char *getenv(const char *name);
++extern char *strstr(const char *s, const char *find), *strchr(const char *s, int c);
  
  #include <darling/emulation/common/simple.h>
 +#include <darling/emulation/common/cpu_topology.h>
