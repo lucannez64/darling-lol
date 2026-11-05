@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static const float diagonal = 0.70710678f;
 static const float normals[4][4] = {
@@ -60,6 +61,10 @@ static id<MTLRenderPipelineState> makePipeline(id<MTLDevice> device, id<MTLFunct
 int main(int argc, char** argv) {
     @autoreleasepool {
         if (argc != 2) { fprintf(stderr, "usage: %s shaders.metallib\n", argv[0]); return 2; }
+        if (access("/tmp/metal-async-encode", F_OK) != 0) {
+            fprintf(stderr, "this probe needs the game's encoding path: create the guest file /tmp/metal-async-encode and run it again\n");
+            return 2;
+        }
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) { fprintf(stderr, "no Metal device\n"); return 2; }
         NSData* shader = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:argv[1]]];
