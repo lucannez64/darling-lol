@@ -29,12 +29,26 @@ class VertexStepRateTests(unittest.TestCase):
 
     def test_device_enables_the_divisor_only_when_supported(self):
         device = added(section(patch_text(self.PATCH), 'src/indium/device.cpp'))
-        self.assertIn('if (vertexDivisor.vertexAttributeInstanceRateDivisor) {', device)
-        self.assertIn('VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME', device)
+        guard = device.index('if (vertexDivisor.vertexAttributeInstanceRateDivisor) {')
+        self.assertLess(guard, device.index('extensions.push_back(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME)'))
+
+    def test_divisors_are_checked_against_the_device_limit(self):
+        pipeline = added(section(patch_text(self.PATCH), 'src/indium/render-pipeline.cpp'))
+        self.assertLess(pipeline.index('maxVertexAttribDivisor()'), pipeline.index('vertexBindingDivisors.push_back'))
 
     def test_draws_never_bind_a_null_pipeline(self):
         encoder = added(section(patch_text(self.PATCH), 'src/indium/render-command-encoder.cpp'))
-        self.assertEqual(encoder.count('if (drawHasNoPipeline(pipeline)) return;'), 2)
+        guard = 'if (drawHasNoPipeline(pipeline)) return;'
+        bind = 'DynamicVK::vkCmdBindPipeline(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);'
+        self.assertEqual(encoder.count(guard), 2)
+        self.assertEqual(encoder.count(bind), 2)
+        for _ in range(2):
+            self.assertLess(encoder.index(guard), encoder.index(bind))
+            encoder = encoder[encoder.index(bind) + len(bind):]
+
+    def test_unbound_vertex_slots_never_pass_null_without_null_descriptor(self):
+        encoder = added(section(patch_text(self.PATCH), 'src/indium/render-command-encoder.cpp'))
+        self.assertIn('nullDescriptorEnabled() ? VK_NULL_HANDLE : _privateDevice->fallbackVertexBuffer()', encoder)
 
 
 class VertexAttributeReflectionTests(unittest.TestCase):

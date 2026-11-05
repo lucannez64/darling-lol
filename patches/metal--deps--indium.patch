@@ -823,7 +823,7 @@ index 8546daa..7e4993c 100644
  		void updateBindings();
  
 diff --git a/private-include/indium/device.private.hpp b/private-include/indium/device.private.hpp
-index 58f1794..78300fb 100644
+index 58f1794..bffe0dc 100644
 --- a/private-include/indium/device.private.hpp
 +++ b/private-include/indium/device.private.hpp
 @@ -13,6 +13,8 @@
@@ -856,7 +856,7 @@ index 58f1794..78300fb 100644
  		virtual std::shared_ptr<CommandQueue> newCommandQueue() override;
  		virtual std::shared_ptr<RenderPipelineState> newRenderPipelineState(const RenderPipelineDescriptor& descriptor) override;
  		virtual std::shared_ptr<ComputePipelineState> newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) override;
-@@ -73,6 +80,13 @@ namespace Indium {
+@@ -73,6 +80,16 @@ namespace Indium {
  		virtual void pollEvents(uint64_t timeoutNanoseconds) override;
  		virtual void wakeupEventLoop() override;
  
@@ -866,11 +866,14 @@ index 58f1794..78300fb 100644
 +		// VK_EXT_robustness2 nullDescriptor was enabled: null image views / vertex buffers are legal
 +		bool nullDescriptorEnabled() const { return _nullDescriptor; }
 +		bool vertexAttributeDivisorEnabled() const { return _vertexAttributeDivisor; }
++		uint32_t maxVertexAttribDivisor() const { return _maxVertexAttribDivisor; }
++		// zero-filled buffer for unbound vertex slots when nullDescriptor is not available
++		VkBuffer fallbackVertexBuffer();
 +
  		void waitForSemaphore(VkSemaphore semaphore, uint64_t targetValue, std::function<void()> callback);
  
  		/**
-@@ -86,6 +100,11 @@ namespace Indium {
+@@ -86,6 +103,11 @@ namespace Indium {
  		 * Similar to getTimelineSemaphore(), but wraps it in a shared pointer
  		 * that automatically releases the semaphore when all references to it die out.
  		 */
@@ -882,7 +885,7 @@ index 58f1794..78300fb 100644
  		std::shared_ptr<TimelineSemaphore> getWrappedTimelineSemaphore();
  
  		BinarySemaphore getBinarySemaphore(bool exportable = false);
-@@ -111,5 +130,38 @@ namespace Indium {
+@@ -111,5 +133,39 @@ namespace Indium {
  
  		INDIUM_PROPERTY(VkPhysicalDeviceMemoryProperties, m, M,emoryProperties);
  		INDIUM_PROPERTY_READONLY(Feature, f, F,eatures);
@@ -897,6 +900,7 @@ index 58f1794..78300fb 100644
 +		std::shared_ptr<SamplerState> _fallbackSampler;
 +		bool _nullDescriptor = false;
 +		bool _vertexAttributeDivisor = false;
++		uint32_t _maxVertexAttribDivisor = 1;
 +		std::mutex _graphicsQueueMutex;
 +		std::mutex _oneshotCommandPoolMutex;
 +	public:
@@ -2917,7 +2921,7 @@ index 5f62ad0..5957bec 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..ec3895e 100644
+index 322e186..347ed36 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,9 @@
@@ -3164,7 +3168,7 @@ index 322e186..ec3895e 100644
 +		memcpy(candidate.deviceUUID, idProperties.deviceUUID, 16);
 +		memcpy(candidate.driverUUID, idProperties.driverUUID, 16);
 +		candidates.push_back(candidate);
- 	}
++	}
 +
 +	// Resolve the explicit selection against the supported list. An explicit choice
 +	// is honoured even when it names a software (CPU) device, because the user asked
@@ -3212,7 +3216,7 @@ index 322e186..ec3895e 100644
 +	if (selectedIndex < 0) {
 +		appendDeviceLog("no usable supported Vulkan device found; Metal will have no device");
 +		return;
-+	}
+ 	}
 +
 +	DeviceCandidate& selected = candidates[selectedIndex];
 +	appendDeviceLog("selected name=\"" + std::string(selected.properties.deviceName) + "\""
@@ -3330,16 +3334,25 @@ index 322e186..ec3895e 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +573,8 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +573,17 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
 +	_nullDescriptor = robustness2.nullDescriptor == VK_TRUE && robustness2Enabled;
 +	_vertexAttributeDivisor = vertexDivisorEnabled;
++	if (vertexDivisorEnabled) {
++		VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT divisorProperties {};
++		divisorProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT;
++		VkPhysicalDeviceProperties2 properties2 {};
++		properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++		properties2.pNext = &divisorProperties;
++		DynamicVK::vkGetPhysicalDeviceProperties2(_physicalDevice, &properties2);
++		_maxVertexAttribDivisor = divisorProperties.maxVertexAttribDivisor;
++	}
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -297,6 +626,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -297,6 +635,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  };
  
  Indium::PrivateDevice::~PrivateDevice() {
@@ -3349,7 +3362,7 @@ index 322e186..ec3895e 100644
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +640,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +649,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3373,7 +3386,7 @@ index 322e186..ec3895e 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +666,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +675,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3386,7 +3399,7 @@ index 322e186..ec3895e 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -357,6 +706,8 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,6 +715,8 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -3395,7 +3408,7 @@ index 322e186..ec3895e 100644
  		funcInfo.bindings.insert(funcInfo.bindings.end(), info.bindings.begin(), info.bindings.end());
  		funcInfo.embeddedSamplers.insert(funcInfo.embeddedSamplers.end(), info.embeddedSamplers.begin(), info.embeddedSamplers.end());
  	}
-@@ -382,6 +733,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
+@@ -382,6 +742,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
  	return globalDeviceList.empty() ? nullptr : globalDeviceList.front();
  };
  
@@ -3415,7 +3428,7 @@ index 322e186..ec3895e 100644
  void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	// this is held for the entire duration of the poll so we can
  	// ensure we're the only one polling, which allows us to avoid
-@@ -393,9 +757,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -393,9 +766,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	const std::vector<VkSemaphore> semaphores = _eventLoopSemaphores;
  	const std::vector<uint64_t> values = _eventLoopWaitValues;
  	const std::vector<std::function<void()>> callbacks = _eventLoopCallbacks;
@@ -3451,7 +3464,7 @@ index 322e186..ec3895e 100644
  	VkSemaphoreWaitInfo info {};
  	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
  	info.semaphoreCount = semaphores.size();
-@@ -403,7 +793,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -403,7 +802,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	info.pValues = values.data();
  	info.flags = VK_SEMAPHORE_WAIT_ANY_BIT;
  
@@ -3472,7 +3485,7 @@ index 322e186..ec3895e 100644
  
  	if (result == VK_TIMEOUT) {
  		// timed out with no semaphores ready
-@@ -474,15 +876,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -474,15 +885,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  		_eventLoopSemaphores.push_back(semaphore);
  		_eventLoopWaitValues.push_back(targetValue);
  		_eventLoopCallbacks.push_back(callback);
@@ -3506,7 +3519,7 @@ index 322e186..ec3895e 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +922,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +931,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -3522,7 +3535,7 @@ index 322e186..ec3895e 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +975,160 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +984,166 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -3540,6 +3553,12 @@ index 322e186..ec3895e 100644
 +		_fallbackBuffer = newBuffer(zeros.data(), zeros.size(), ResourceOptions::StorageModeShared);
 +	}
 +	return _fallbackBuffer->gpuAddress();
++};
++
++VkBuffer Indium::PrivateDevice::fallbackVertexBuffer() {
++	fallbackBufferAddress();
++	std::scoped_lock lock(_fallbackMutex);
++	return std::dynamic_pointer_cast<PrivateBuffer>(_fallbackBuffer)->buffer();
 +};
 +
 +std::shared_ptr<Indium::SamplerState> Indium::PrivateDevice::fallbackSampler() {
@@ -3854,7 +3873,7 @@ index d56a213..648c05a 100644
 +const std::vector<Iridium::ArgumentInfo>& Indium::PrivateFunction::argumentInfo() const { return _functionInfo.arguments; }
 +const std::vector<Iridium::VertexAttributeInfo>& Indium::PrivateFunction::vertexAttributeInfo() const { return _functionInfo.vertexAttributes; }
 diff --git a/src/indium/render-command-encoder.cpp b/src/indium/render-command-encoder.cpp
-index b27ffe5..1119557 100644
+index b27ffe5..73b5c78 100644
 --- a/src/indium/render-command-encoder.cpp
 +++ b/src/indium/render-command-encoder.cpp
 @@ -1,3 +1,8 @@
@@ -4414,6 +4433,7 @@ index b27ffe5..1119557 100644
  
 -			if (metalIndex >= _functionResources[0].buffers.size()) {
 -				// technically, this requires the `nullDescriptor` feature, but we should never run into this case anyways.
+-				buffers[vulkanIndex] = VK_NULL_HANDLE;
 +			PrivateBuffer* privateBuffer = nullptr;
 +			size_t offset = 0;
 +			if (metalIndex < _functionResources[0].buffers.size()) {
@@ -4435,7 +4455,7 @@ index b27ffe5..1119557 100644
 +						fclose(file);
 +					}
 +				}
- 				buffers[vulkanIndex] = VK_NULL_HANDLE;
++				buffers[vulkanIndex] = _privateDevice->nullDescriptorEnabled() ? VK_NULL_HANDLE : _privateDevice->fallbackVertexBuffer();
  				offsets[vulkanIndex] = 0;
  			} else {
 -				auto [buffer, offset] = _functionResources[0].buffers[metalIndex];
@@ -4768,7 +4788,7 @@ index b27ffe5..1119557 100644
 +    DynamicVK::vkCmdPipelineBarrier(buf->commandBuffer(), stages, stages, VK_DEPENDENCY_BY_REGION_BIT, 1, &barrier, 0, nullptr, 0, nullptr);
 +}
 diff --git a/src/indium/render-pipeline.cpp b/src/indium/render-pipeline.cpp
-index 1b6bb3b..3837218 100644
+index 1b6bb3b..ecafc4b 100644
 --- a/src/indium/render-pipeline.cpp
 +++ b/src/indium/render-pipeline.cpp
 @@ -1,8 +1,13 @@
@@ -4845,7 +4865,7 @@ index 1b6bb3b..3837218 100644
  	std::vector<VkVertexInputAttributeDescription> vertexAttrDescs;
  
  	if (_vertexDescriptor) {
-@@ -92,20 +130,39 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -92,20 +130,42 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		for (const auto& [index, layout]: desc.layouts) {
  			VkVertexInputBindingDescription bindingDesc {};
  
@@ -4874,6 +4894,9 @@ index 1b6bb3b..3837218 100644
 +					if (!_privateDevice->vertexAttributeDivisorEnabled()) {
 +						throw std::runtime_error("per-instance step rates above 1 need VK_EXT_vertex_attribute_divisor");
 +					}
++					if (layout.stepRate > _privateDevice->maxVertexAttribDivisor()) {
++						throw std::runtime_error("per-instance step rate " + std::to_string(layout.stepRate) + " exceeds maxVertexAttribDivisor");
++					}
 +					vertexBindingDivisors.push_back({ static_cast<uint32_t>(vulkanIndex), static_cast<uint32_t>(layout.stepRate) });
 +				}
 +			} else if (layout.stepFunction != VertexStepFunction::PerVertex) {
@@ -4893,7 +4916,7 @@ index 1b6bb3b..3837218 100644
  
  			vertexBindingDescs.push_back(bindingDesc);
  		}
-@@ -133,6 +190,14 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -133,6 +193,14 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  	vertexInputState.vertexAttributeDescriptionCount = vertexAttrDescs.size();
  	vertexInputState.pVertexAttributeDescriptions = vertexAttrDescs.data();
  
@@ -4908,7 +4931,7 @@ index 1b6bb3b..3837218 100644
  	VkPipelineInputAssemblyStateCreateInfo inputAssemblyState {};
  	inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
  
-@@ -168,6 +233,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -168,6 +236,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		tmp.dstAlphaBlendFactor = blendFactorToVkBlendFactor(colorInfo.destinationAlphaBlendFactor);
  		tmp.alphaBlendOp = blendOperationToVkBlendOp(colorInfo.alphaBlendOperation);
  		tmp.colorWriteMask = colorWriteMaskToVkColorComponentFlags(colorInfo.writeMask);

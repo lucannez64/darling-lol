@@ -25,19 +25,16 @@ struct Case {
     NSUInteger rate;
     NSUInteger instances;
     int element;
-    bool sameNormals;
 };
 
 static const Case cases[] = {
-    {"per-instance rate 1, 3 instances", MTLVertexStepFunctionPerInstance, 1, 3, 2, false},
-    {"per-instance rate 2, 3 instances", MTLVertexStepFunctionPerInstance, 2, 3, 1, false},
-    {"per-instance rate 2, 5 instances", MTLVertexStepFunctionPerInstance, 2, 5, 2, false},
-    {"per-instance rate 3, 4 instances", MTLVertexStepFunctionPerInstance, 3, 4, 1, false},
-    {"per-instance rate 0, 3 instances", MTLVertexStepFunctionPerInstance, 0, 3, 0, false},
-    {"constant rate 0, 3 instances", MTLVertexStepFunctionConstant, 0, 3, 0, false},
-    {"per-vertex rate 1", MTLVertexStepFunctionPerVertex, 1, 1, 3, true},
-    {"per-vertex rate 0", MTLVertexStepFunctionPerVertex, 0, 1, 3, true},
-    {"per-patch cannot be created, draw is skipped", MTLVertexStepFunctionPerPatch, 1, 1, -1, false},
+    {"per-instance rate 1, 3 instances", MTLVertexStepFunctionPerInstance, 1, 3, 2},
+    {"per-instance rate 2, 3 instances", MTLVertexStepFunctionPerInstance, 2, 3, 1},
+    {"per-instance rate 2, 5 instances", MTLVertexStepFunctionPerInstance, 2, 5, 2},
+    {"per-instance rate 3, 4 instances", MTLVertexStepFunctionPerInstance, 3, 4, 1},
+    {"per-instance rate 0, 3 instances", MTLVertexStepFunctionPerInstance, 0, 3, 0},
+    {"constant rate 0, 3 instances", MTLVertexStepFunctionConstant, 0, 3, 0},
+    {"per-patch cannot be created, draw is skipped", MTLVertexStepFunctionPerPatch, 1, 1, -1},
 };
 
 static id<MTLRenderPipelineState> makePipeline(id<MTLDevice> device, id<MTLFunction> vertex, id<MTLFunction> fragment, MTLVertexStepFunction function, NSUInteger rate) {
@@ -99,8 +96,8 @@ int main(int argc, char** argv) {
         const float positions[3][4] = {{-1, -1, 0.5f, 1}, {3, -1, 0.5f, 1}, {-1, 3, 0.5f, 1}};
         id<MTLBuffer> positionBuffer = [device newBufferWithBytes:positions length:sizeof(positions) options:MTLResourceStorageModeShared];
         id<MTLBuffer> normalBuffer = [device newBufferWithBytes:normals length:sizeof(normals) options:MTLResourceStorageModeShared];
-        const float same[3][4] = {{normals[3][0], normals[3][1], normals[3][2], 0}, {normals[3][0], normals[3][1], normals[3][2], 0}, {normals[3][0], normals[3][1], normals[3][2], 0}};
-        id<MTLBuffer> sameBuffer = [device newBufferWithBytes:same length:sizeof(same) options:MTLResourceStorageModeShared];
+        const float perVertex[3][4] = {{normals[2][0], normals[2][1], normals[2][2], 0}, {normals[1][0], normals[1][1], normals[1][2], 0}, {normals[1][0], normals[1][1], normals[1][2], 0}};
+        id<MTLBuffer> perVertexBuffer = [device newBufferWithBytes:perVertex length:sizeof(perVertex) options:MTLResourceStorageModeShared];
         float uniforms[68] = {0};
         for (int matrix = 0; matrix < 4; ++matrix) for (int i = 0; i < 4; ++i) uniforms[matrix * 16 + i * 5] = 1;
         uniforms[66] = -1000; uniforms[67] = 1;
@@ -112,7 +109,7 @@ int main(int argc, char** argv) {
 
         __block unsigned failures = 0;
         unsigned total = 0;
-        auto run = ^(const char* name, id<MTLRenderPipelineState> first, id<MTLRenderPipelineState> second, id<MTLBuffer> elements, NSUInteger instances, const unsigned char* expected) {
+        auto run = ^(const char* name, id<MTLRenderPipelineState> first, id<MTLRenderPipelineState> second, id<MTLBuffer> elements, NSUInteger instances, const unsigned char* expected, unsigned column, unsigned row) {
             id<MTLTexture> target = [device newTextureWithDescriptor:targetDesc];
             id<MTLBuffer> readback = [device newBufferWithLength:16 * 16 * 4 options:MTLResourceStorageModeShared];
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -140,7 +137,7 @@ int main(int argc, char** argv) {
             [blit endEncoding];
             [commands commit];
             [commands waitUntilCompleted];
-            const unsigned char* pixel = (const unsigned char*) readback.contents + (8 * 16 + 8) * 4;
+            const unsigned char* pixel = (const unsigned char*) readback.contents + (row * 16 + column) * 4;
             bool ok = memcmp(pixel, expected, 4) == 0;
             if (!ok) ++failures;
             printf("%s: %s got=%u,%u,%u,%u want=%u,%u,%u,%u\n", ok ? "ok" : "FAIL", name, pixel[0], pixel[1], pixel[2], pixel[3], expected[0], expected[1], expected[2], expected[3]);
@@ -152,20 +149,29 @@ int main(int argc, char** argv) {
             id<MTLRenderPipelineState> pipeline = makePipeline(device, vertex, fragment, test.function, test.rate);
             if (!pipeline) { ++failures; printf("FAIL: %s: no pipeline\n", test.name); continue; }
             const unsigned char* expected = test.element < 0 ? clearColor : faceColors[elementFace[test.element]];
-            id<MTLBuffer> elements = test.sameNormals ? sameBuffer : normalBuffer;
-            run(test.name, pipeline, nil, elements, test.instances, expected);
+            run(test.name, pipeline, nil, normalBuffer, test.instances, expected, 8, 8);
+        }
+        for (NSUInteger rate = 0; rate <= 1; ++rate) {
+            id<MTLRenderPipelineState> pipeline = makePipeline(device, vertex, fragment, MTLVertexStepFunctionPerVertex, rate);
+            if (!pipeline) { ++failures; total += 2; printf("FAIL: per-vertex rate %lu: no pipeline\n", (unsigned long) rate); continue; }
+            char name[64];
+            total += 2;
+            snprintf(name, sizeof(name), "per-vertex rate %lu near the first vertex", (unsigned long) rate);
+            run(name, pipeline, nil, perVertexBuffer, 1, faceColors[elementFace[2]], 0, 15);
+            snprintf(name, sizeof(name), "per-vertex rate %lu toward the other vertices", (unsigned long) rate);
+            run(name, pipeline, nil, perVertexBuffer, 1, faceColors[elementFace[1]], 15, 8);
         }
         ++total;
         NSArray* attributes = vertex.vertexAttributes;
         MTLVertexAttribute* position = attributes.count == 2 ? attributes[0] : nil;
         MTLVertexAttribute* normal = attributes.count == 2 ? attributes[1] : nil;
-        const bool reported = position.attributeIndex == 0 && position.attributeType == MTLDataTypeFloat4 && position.active && normal.attributeIndex == 1 && normal.attributeType == MTLDataTypeFloat4 && normal.active;
+        const bool reported = [position.name isEqualToString:@"position"] && [normal.name isEqualToString:@"normal"] && position.attributeIndex == 0 && position.attributeType == MTLDataTypeFloat4 && position.active && normal.attributeIndex == 1 && normal.attributeType == MTLDataTypeFloat4 && normal.active;
         if (!reported) ++failures;
         printf("%s: vertex function reports its attributes count=%lu\n", reported ? "ok" : "FAIL", (unsigned long) attributes.count);
         id<MTLRenderPipelineState> broken = makePipeline(device, vertex, fragment, MTLVertexStepFunctionPerPatch, 1);
         id<MTLRenderPipelineState> working = makePipeline(device, vertex, fragment, MTLVertexStepFunctionPerInstance, 2);
         ++total;
-        run("a working pipeline still draws after a failed one", broken, working, normalBuffer, 3, faceColors[elementFace[1]]);
+        run("a working pipeline still draws after a failed one", broken, working, normalBuffer, 3, faceColors[elementFace[1]], 8, 8);
         printf("STEP_RATE_CHECK failures=%u cases=%u pass=%d\n", failures, total, failures == 0);
         return failures == 0 ? 0 : 1;
     }
