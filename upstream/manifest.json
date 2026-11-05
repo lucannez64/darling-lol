@@ -262,7 +262,7 @@
       "revision": "ae20248dc144beab899e38752f5a530f28a0ea56",
       "repository": "https://github.com/darlinghq/darling-metal.git",
       "patch": "patches/metal.patch",
-      "modified_files": 27,
+      "modified_files": 28,
       "new_files": [
         "include/Metal/MTLArgument.h",
         "include/Metal/MTLBlitCommandEncoder.h",

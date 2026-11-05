@@ -1561,10 +1561,10 @@ index f58184a..2c45608 100644
  		return nil;
  	}
 diff --git a/src/Metal/MTLLibrary.mm b/src/Metal/MTLLibrary.mm
-index 0feb46e..e0c0e93 100644
+index 0feb46e..3904d38 100644
 --- a/src/Metal/MTLLibrary.mm
 +++ b/src/Metal/MTLLibrary.mm
-@@ -1,6 +1,7 @@
+@@ -1,9 +1,62 @@
  // SPDX-FileCopyrightText: 2026 Darling Developers
  // SPDX-License-Identifier: MPL-2.0
  
@@ -1572,7 +1572,62 @@ index 0feb46e..e0c0e93 100644
  #import <Metal/MTLLibraryInternal.h>
  #import <Metal/MTLDevice.h>
  #import <Metal/stubs.h>
-@@ -27,10 +28,12 @@
++#include <string>
++
++#if DARLING_METAL_ENABLED
++static MTLDataType MTLDataTypeFromAIRTypeName(const std::string& name)
++{
++	static const struct { const char* base; MTLDataType scalar; } bases[] = {
++		{ "float", MTLDataTypeFloat }, { "half", MTLDataTypeHalf }, { "int", MTLDataTypeInt }, { "uint", MTLDataTypeUInt },
++		{ "short", MTLDataTypeShort }, { "ushort", MTLDataTypeUShort }, { "char", MTLDataTypeChar }, { "uchar", MTLDataTypeUChar },
++		{ "bool", MTLDataTypeBool },
++	};
++	for (const auto& entry: bases) {
++		const std::string base = entry.base;
++		if (name == base) return entry.scalar;
++		if (name.size() == base.size() + 1 && name.compare(0, base.size(), base) == 0 && name.back() >= '2' && name.back() <= '4') {
++			return static_cast<MTLDataType>(entry.scalar + (name.back() - '1'));
++		}
++	}
++	return MTLDataTypeNone;
++}
++#endif
++
++@interface MTLVertexAttribute ()
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithInfo: (const Iridium::VertexAttributeInfo&)info;
++#endif
++@end
++
++@implementation MTLVertexAttribute
++@synthesize name = _name;
++@synthesize attributeIndex = _attributeIndex;
++@synthesize attributeType = _attributeType;
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithInfo: (const Iridium::VertexAttributeInfo&)info
++{
++	self = [super init];
++	if (self != nil) {
++		_name = [[NSString alloc] initWithUTF8String: info.name.c_str()];
++		_attributeIndex = info.index;
++		_attributeType = MTLDataTypeFromAIRTypeName(info.typeName);
++	}
++	return self;
++}
++#endif
++- (BOOL)isActive { return YES; }
++- (BOOL)isPatchData { return NO; }
++- (BOOL)isPatchControlPointData { return NO; }
++- (void)dealloc
++{
++	[_name release];
++	[super dealloc];
++}
++@end
+ 
+ @implementation MTLFunctionInternal
+ 
+@@ -27,10 +80,22 @@
  	self = [super init];
  	if (self != nil) {
  		_function = function;
@@ -1583,10 +1638,20 @@ index 0feb46e..e0c0e93 100644
  		// cache the name
 -		_name = [NSString stringWithUTF8String: _function->name().c_str()];
 +		_name = [[NSString alloc] initWithUTF8String: _function->name().c_str()];
++
++		if (_functionType == MTLFunctionTypeVertex) {
++			NSMutableArray* attributes = [[NSMutableArray alloc] init];
++			for (const auto& info: _function->vertexAttributeInfo()) {
++				MTLVertexAttribute* attribute = [[MTLVertexAttribute alloc] initWithInfo: info];
++				[attributes addObject: attribute];
++				[attribute release];
++			}
++			_vertexAttributes = attributes;
++		}
  	}
  	return self;
  }
-@@ -121,7 +124,12 @@ MTL_UNSUPPORTED_CLASS
+@@ -121,7 +186,12 @@ MTL_UNSUPPORTED_CLASS
  
  - (id<MTLFunction>)newFunctionWithName: (NSString*)functionName
  {
@@ -3880,3 +3945,65 @@ new file mode 100644
 +MTL_UNSUPPORTED_CLASS
 +#endif
 +@end
+diff --git a/include/Metal/MTLLibrary.h b/include/Metal/MTLLibrary.h
+index 427df92..5ce8197 100644
+--- a/include/Metal/MTLLibrary.h
++++ b/include/Metal/MTLLibrary.h
+@@ -48,6 +48,57 @@ typedef NS_ENUM(NSUInteger, MTLLibraryType) {
+ 	MTLLibraryTypeDynamic = 1,
+ };
+ 
++typedef NS_ENUM(NSUInteger, MTLDataType) {
++	MTLDataTypeNone = 0,
++	MTLDataTypeStruct = 1,
++	MTLDataTypeArray = 2,
++	MTLDataTypeFloat = 3,
++	MTLDataTypeFloat2 = 4,
++	MTLDataTypeFloat3 = 5,
++	MTLDataTypeFloat4 = 6,
++	MTLDataTypeHalf = 16,
++	MTLDataTypeHalf2 = 17,
++	MTLDataTypeHalf3 = 18,
++	MTLDataTypeHalf4 = 19,
++	MTLDataTypeInt = 29,
++	MTLDataTypeInt2 = 30,
++	MTLDataTypeInt3 = 31,
++	MTLDataTypeInt4 = 32,
++	MTLDataTypeUInt = 33,
++	MTLDataTypeUInt2 = 34,
++	MTLDataTypeUInt3 = 35,
++	MTLDataTypeUInt4 = 36,
++	MTLDataTypeShort = 37,
++	MTLDataTypeShort2 = 38,
++	MTLDataTypeShort3 = 39,
++	MTLDataTypeShort4 = 40,
++	MTLDataTypeUShort = 41,
++	MTLDataTypeUShort2 = 42,
++	MTLDataTypeUShort3 = 43,
++	MTLDataTypeUShort4 = 44,
++	MTLDataTypeChar = 45,
++	MTLDataTypeChar2 = 46,
++	MTLDataTypeChar3 = 47,
++	MTLDataTypeChar4 = 48,
++	MTLDataTypeUChar = 49,
++	MTLDataTypeUChar2 = 50,
++	MTLDataTypeUChar3 = 51,
++	MTLDataTypeUChar4 = 52,
++	MTLDataTypeBool = 53,
++	MTLDataTypeBool2 = 54,
++	MTLDataTypeBool3 = 55,
++	MTLDataTypeBool4 = 56,
++};
++
++@interface MTLVertexAttribute : NSObject
++@property(readonly) NSString* name;
++@property(readonly) NSUInteger attributeIndex;
++@property(readonly) MTLDataType attributeType;
++@property(readonly, getter=isActive) BOOL active;
++@property(readonly, getter=isPatchData) BOOL patchData;
++@property(readonly, getter=isPatchControlPointData) BOOL patchControlPointData;
++@end
++
+ @protocol MTLFunction <NSObject>
+ 
+ @property(readonly) id<MTLDevice> device;
