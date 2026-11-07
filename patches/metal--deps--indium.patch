@@ -4789,7 +4789,34 @@ index 1b6bb3b..97a1116 100644
  	shaderStage.module = _vertexFunction->library()->shaderModule();
  	shaderStage.pName = vertexFunctionName.c_str();
  	stages.push_back(shaderStage);
-@@ -168,6 +205,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -92,10 +129,13 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 		for (const auto& [index, layout]: desc.layouts) {
+ 			VkVertexInputBindingDescription bindingDesc {};
+ 
+-			if (layout.stepRate != 1) {
++			// Metal's constant step always fetches the same element. Vulkan's
++			// zero stride provides that behavior for every vertex and instance.
++			const bool constant = layout.stepFunction == VertexStepFunction::Constant && layout.stepRate == 0;
++			if (!constant && layout.stepRate != 1) {
+ 				throw std::runtime_error("TODO: support step rates other than 1");
+ 			}
+-			if (layout.stepFunction != VertexStepFunction::PerVertex && layout.stepFunction != VertexStepFunction::PerInstance) {
++			if (!constant && layout.stepFunction != VertexStepFunction::PerVertex && layout.stepFunction != VertexStepFunction::PerInstance) {
+ 				throw std::runtime_error("TODO: support step functions other than per-vertex and per-instance");
+ 			}
+ 
+@@ -104,8 +144,8 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 			++currIndex;
+ 
+ 			bindingDesc.binding = vulkanIndex;
+-			bindingDesc.stride = layout.stride;
+-			bindingDesc.inputRate = (layout.stepFunction == VertexStepFunction::PerVertex) ? VK_VERTEX_INPUT_RATE_VERTEX : VK_VERTEX_INPUT_RATE_INSTANCE;
++			bindingDesc.stride = constant ? 0 : layout.stride;
++			bindingDesc.inputRate = (layout.stepFunction == VertexStepFunction::PerInstance) ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+ 
+ 			vertexBindingDescs.push_back(bindingDesc);
+ 		}
+@@ -168,6 +208,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		tmp.dstAlphaBlendFactor = blendFactorToVkBlendFactor(colorInfo.destinationAlphaBlendFactor);
  		tmp.alphaBlendOp = blendOperationToVkBlendOp(colorInfo.alphaBlendOperation);
  		tmp.colorWriteMask = colorWriteMaskToVkColorComponentFlags(colorInfo.writeMask);
