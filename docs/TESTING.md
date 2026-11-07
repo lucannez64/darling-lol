@@ -587,6 +587,24 @@ sh tools/riot-lsem-model/sensitivity-check.sh
 
 `extract-lsem.py` copies the shipped local-semaphore table and trap functions verbatim out of the patched `mach_traps.c`; it refuses to run if the generation-checked token compare-exchange or the negative destroy marker is missing. The model compiles that code with shims for the raw syscalls and server RPCs. It runs create/destroy churn with name reuse on 8 threads, waiter/signaler pairs, timed waits, `signal_all`, destroy while waiting, and the XNU ordering of `wait_signal`. Expected: `LSEM_MODEL checks=686 failed=0 spurious_success=0 lost_wakeup=0 steal=0 hang=0`. The sensitivity check re-breaks the protocol in a copy and must report failures: positive tombstone (`failed=5 spurious_success=1`), missing generation bump (`failed=2 spurious_success=400`). Outputs go to `build/riot-lsem-model`.
 
+## Metal vertex attribute reflection
+
+After building and installing the Metal, Indium and Iridium overlays:
+
+```sh
+python3 scripts/configure.py
+python3 build/runtime/tools/build-riot-metal-attribute-check.py
+darling shell env DYLD_FRAMEWORK_PATH=/Users/$USER/RuntimeFrameworks \
+  DYLD_LIBRARY_PATH=/Users/$USER/RuntimeLibraries \
+  "/Volumes/SystemRoot$PWD/build/riot-metal-attribute-check" \
+  "/Volumes/SystemRoot$PWD/build/darling-src/src/external/metal/deps/indium/test/cubemap/shaders.metallib"
+```
+
+The check loads the cubemap shader and verifies the names, indices, types and
+active flags of both vertex-attribute reflection APIs, as well as the absence
+of vertex attributes on a fragment function. Use the configured guest username
+in place of `$USER` if it differs from the host username.
+
 ## Metal bind model
 
 ```sh
