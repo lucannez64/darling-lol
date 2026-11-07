@@ -4789,7 +4789,34 @@ index 1b6bb3b..97a1116 100644
  	shaderStage.module = _vertexFunction->library()->shaderModule();
  	shaderStage.pName = vertexFunctionName.c_str();
  	stages.push_back(shaderStage);
-@@ -168,6 +205,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -92,10 +129,13 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 		for (const auto& [index, layout]: desc.layouts) {
+ 			VkVertexInputBindingDescription bindingDesc {};
+ 
+-			if (layout.stepRate != 1) {
++			// Metal's constant step always fetches the same element. Vulkan's
++			// zero stride provides that behavior for every vertex and instance.
++			const bool constant = layout.stepFunction == VertexStepFunction::Constant && layout.stepRate == 0;
++			if (!constant && layout.stepRate != 1) {
+ 				throw std::runtime_error("TODO: support step rates other than 1");
+ 			}
+-			if (layout.stepFunction != VertexStepFunction::PerVertex && layout.stepFunction != VertexStepFunction::PerInstance) {
++			if (!constant && layout.stepFunction != VertexStepFunction::PerVertex && layout.stepFunction != VertexStepFunction::PerInstance) {
+ 				throw std::runtime_error("TODO: support step functions other than per-vertex and per-instance");
+ 			}
+ 
+@@ -104,8 +144,8 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 			++currIndex;
+ 
+ 			bindingDesc.binding = vulkanIndex;
+-			bindingDesc.stride = layout.stride;
+-			bindingDesc.inputRate = (layout.stepFunction == VertexStepFunction::PerVertex) ? VK_VERTEX_INPUT_RATE_VERTEX : VK_VERTEX_INPUT_RATE_INSTANCE;
++			bindingDesc.stride = constant ? 0 : layout.stride;
++			bindingDesc.inputRate = (layout.stepFunction == VertexStepFunction::PerInstance) ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+ 
+ 			vertexBindingDescs.push_back(bindingDesc);
+ 		}
+@@ -168,6 +208,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		tmp.dstAlphaBlendFactor = blendFactorToVkBlendFactor(colorInfo.destinationAlphaBlendFactor);
  		tmp.alphaBlendOp = blendOperationToVkBlendOp(colorInfo.alphaBlendOperation);
  		tmp.colorWriteMask = colorWriteMaskToVkColorComponentFlags(colorInfo.writeMask);
@@ -6080,7 +6107,7 @@ index 21c501f..9f6663b 100644
  				++location;
  				_outputValueIDs.push_back(var);
  				builder.referenceGlobalVariable(var);
-@@ -472,13 +984,60 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -472,13 +984,67 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		auto type = llvmTypeToSPIRVType(builder, funcRetType);
  		auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
  		auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
@@ -6108,11 +6135,16 @@ index 21c501f..9f6663b 100644
 +        if (kind == "air.buffer") arg.type = BindingType::Buffer;
 +        else if (kind == "air.texture") arg.type = BindingType::Texture;
 +        else if (kind == "air.sampler") arg.type = BindingType::Sampler;
++        else if (kind == "air.vertex_input") arg.type = BindingType::VertexInput;
 +        else continue;
++        bool hasLocationIndex = false;
 +        for (size_t i = 2; i + 1 < info.size(); ++i) {
 +            if (!DynamicLLVM::LLVMIsAMDString(info[i])) continue;
 +            auto key = llvmMDStringToStringView(info[i]);
-+            if (key == "air.location_index") arg.index = DynamicLLVM::LLVMConstIntGetZExtValue(info[i+1]);
++            if (key == "air.location_index") {
++                arg.index = DynamicLLVM::LLVMConstIntGetZExtValue(info[i+1]);
++                hasLocationIndex = true;
++            }
 +            else if (key == "air.arg_name") arg.name = llvmMDStringToStringView(info[i+1]);
 +            else if (key == "air.arg_type_name") arg.typeName = llvmMDStringToStringView(info[i+1]);
 +            else if (key == "air.arg_type_size") arg.size = DynamicLLVM::LLVMConstIntGetZExtValue(info[i+1]);
@@ -6136,13 +6168,15 @@ index 21c501f..9f6663b 100644
 +                }
 +            }
 +        }
++        // Vertex attribute indices must come from AIR, not parameter order or a default.
++        if (arg.type == BindingType::VertexInput && !hasLocationIndex) continue;
 +        funcInfo.arguments.push_back(std::move(arg));
 +    }
 +
  
  	//
  	// analyze parameters and mark special values (like the vertex ID)
-@@ -519,7 +1078,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -519,7 +1085,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			auto kind = llvmMDStringToStringView(parameterInfo[1]);
  
  			if (kind == "air.buffer") {
@@ -6153,7 +6187,7 @@ index 21c501f..9f6663b 100644
  				auto addrPtrTypeInst = SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::PhysicalStorageBuffer, type, 8);
  				auto addrPtrType = builder.declareType(addrPtrTypeInst);
  				bufferMembers.push_back(SPIRV::Type::Member { addrPtrType, 8 * bufferIndex, {} });
-@@ -575,7 +1136,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -575,7 +1143,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			_parameterIDs.push_back(load);
  			builder.associateExistingResultID(load, llparamVal);
  			builder.setResultType(load, intType);
@@ -6176,7 +6210,7 @@ index 21c501f..9f6663b 100644
  			// find the location index info
  			size_t infoIdx = 0;
  			for (; infoIdx < parameterInfo.size(); ++infoIdx) {
-@@ -620,7 +1195,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -620,7 +1202,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Input);
  			auto load = builder.encodeLoad(type, var);
  
@@ -6185,7 +6219,7 @@ index 21c501f..9f6663b 100644
  			++paramLocation;
  
  			builder.referenceGlobalVariable(var);
-@@ -631,9 +1206,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -631,9 +1213,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			builder.setResultType(load, type);
  		} else if (kind == "air.vertex_input") {
  			auto type = llvmTypeToSPIRVType(builder, funcParamTypes[i]);
@@ -6206,7 +6240,7 @@ index 21c501f..9f6663b 100644
  
  			// find the location index info
  			size_t infoIdx = 0;
-@@ -761,14 +1345,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -761,14 +1352,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				realSampleType = fakeSampleType;
  			}
  
@@ -6234,7 +6268,7 @@ index 21c501f..9f6663b 100644
  			auto imagePtrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::UniformConstant, imageType, 8));
  			auto var = builder.addGlobalVariable(imagePtrType, SPIRV::StorageClass::UniformConstant);
  			//auto load = builder.encodeLoad(imageType, var);
-@@ -959,68 +1548,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -959,68 +1555,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  	enum class CFGType {
  		None = 0,
  		Selection,
@@ -6382,7 +6416,7 @@ index 21c501f..9f6663b 100644
  		if (isFirst) {
  			isFirst = false;
  
-@@ -1030,16 +1649,54 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1030,16 +1656,54 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			builder.insertLabel(builder.lookupResultID(reinterpret_cast<uintptr_t>(bb)));
  		}
  
@@ -6438,7 +6472,7 @@ index 21c501f..9f6663b 100644
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
  					builder.setResultType(resID, type);
-@@ -1048,6 +1705,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1048,6 +1712,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				// TODO: look into using physical addressing instead of logical addressing, which should simplify the translation process
  				//       (since i *think* that's the same addressing mode used by Metal code)
  
@@ -6457,7 +6491,7 @@ index 21c501f..9f6663b 100644
  				case LLVMGetElementPtr: {
  					auto base = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto targetType = DynamicLLVM::LLVMTypeOf(inst);
-@@ -1060,17 +1729,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1060,17 +1736,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						indices.push_back(llvmValueToResultID(builder, llindex));
  					}
  
@@ -6491,7 +6525,7 @@ index 21c501f..9f6663b 100644
  					// strangely enough, SPIR-V provides no instruction that can do an initial pointer offset like LLVM's GEP does.
  					// there's OpPtrAccessChain, which is tantalizingly named, but unfortunately that instruction doesn't work as expected
  					// either. i've tried using the raw index (i.e. in element units) and the multiplied index (i.e. in bytes), but no dice.
-@@ -1112,6 +1796,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1112,6 +1803,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						op = access;
  					}
  
@@ -6501,7 +6535,7 @@ index 21c501f..9f6663b 100644
  					auto resID = builder.encodeLoad(type, op, alignment);
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-@@ -1149,50 +1836,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1149,50 +1843,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeConvertUToF(type, llvmValueToResultID(builder, arg));
@@ -6554,7 +6588,7 @@ index 21c501f..9f6663b 100644
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeFConvert(type, llvmValueToResultID(builder, arg));
-@@ -1223,14 +1868,33 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1223,14 +1875,33 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto operand2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  
  						resID = builder.encodeFMax(type, llvmValueToResultID(builder, operand1), llvmValueToResultID(builder, operand2));
@@ -6591,7 +6625,7 @@ index 21c501f..9f6663b 100644
  				case LLVMFMul:
  				case LLVMFDiv:
  				case LLVMFAdd:
-@@ -1365,28 +2029,81 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1365,28 +2036,81 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto op1 = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto op2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  					auto predicate = DynamicLLVM::LLVMGetFCmpPredicate(inst);
@@ -6684,7 +6718,7 @@ index 21c501f..9f6663b 100644
  					if (DynamicLLVM::LLVMIsConditional(inst)) {
  						auto condition = DynamicLLVM::LLVMGetCondition(inst);
  						auto trueLabel = DynamicLLVM::LLVMBasicBlockAsValue(DynamicLLVM::LLVMGetSuccessor(inst, 0));
-@@ -1422,25 +2139,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1422,25 +2146,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto type = llvmTypeToSPIRVType(builder, lltype);
  
  					std::vector<std::pair<SPIRV::ResultID, SPIRV::ResultID>> variablesAndBlocks;
@@ -6726,7 +6760,7 @@ index 21c501f..9f6663b 100644
  
  					// ensure the resulting pointer storage class is the same as the input pointer storage class
  					auto typeInst = *builder.reverseLookupType(type);
-@@ -1474,6 +2204,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1474,6 +2211,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		}
  	}
  
