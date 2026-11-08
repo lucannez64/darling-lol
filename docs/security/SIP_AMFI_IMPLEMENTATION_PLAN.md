@@ -590,8 +590,11 @@ in `tests/security/fixtures/README.md`:
   `SET_ACTIVE_CONFIG` is not implemented. `openat` (write/create/truncate/
   append), `unlinkat`, `mkdirat`, `renameat`, `fchmodat`/`fchmod`,
   `fchownat`/`fchown`/`lchown`, `utimes`/`futimes`, `setxattr`/`fsetxattr`,
-  `truncate`/`ftruncate`, `linkat`, `symlinkat`, `rmdir` and writable
-  shared (`MAP_SHARED`) file-backed `mmap` call a shared path/fd policy. The
+  `removexattr`/`fremovexattr`, `chmod_extended`/`fchmod_extended`,
+  `setattrlist`/`fsetattrlist`/`setattrlistat` (times and access mask only),
+  `mkfifo`/`mknod`, `truncate`/`ftruncate`, `linkat`, `symlinkat`, `rmdir`
+  and writable shared (`MAP_SHARED`) file-backed `mmap` call a shared
+  path/fd policy. The
   policy allows
   `/usr/local` and rejects resolved `/System`, `/bin`, `/sbin`, `/usr`,
   `/private/etc`, `/private/var/db` and `/Library/Apple` paths. Protected
