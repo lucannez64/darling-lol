@@ -120,3 +120,90 @@ static int sip_stat_inode(const char *path, uint64_t *dev, uint64_t *ino) {
 '''
             result = self.compile_run(code)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fd_check_passes_a_real_buffer_and_refuses_truncation(self):
+        source = added_file('patches/xnu.patch',
+                            'darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c')
+        preamble = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+struct linux_stat { unsigned long st_dev; unsigned long st_ino; };
+struct vchroot_fdpath_args { int fd; char* path; unsigned int maxlen; };
+
+static int enabled;
+static int fdpath_mode;      /* 0 resolves, 1 ENAMETOOLONG, 2 EBADF */
+static int write_result;
+static int fdpath_calls;
+static char* seen_path;
+static unsigned int seen_maxlen;
+
+static int dc_sip_enabled(void) { return enabled; }
+static int sip_inode_is_protected(uint64_t dev, uint64_t ino) {
+ (void)dev; (void)ino; return 0;
+}
+static void sip_inode_remember(uint64_t dev, uint64_t ino) { (void)dev; (void)ino; }
+#define __NR_fstat 5
+#define LINUX_SYSCALL(nr, ...) ((void)(nr), -1)
+
+/* Mirrors vchroot_userspace.c: it writes through args->path and reports
+ * -ENAMETOOLONG when the capacity is too small for the resolved path. */
+static int vchroot_fdpath(struct vchroot_fdpath_args* args) {
+ const char* resolved = "/System/Library/private";
+ ++fdpath_calls;
+ seen_path = args->path;
+ seen_maxlen = args->maxlen;
+ if (args->path == NULL)
+  return -1;
+ if (fdpath_mode == 1)
+  return -ENAMETOOLONG;
+ if (fdpath_mode == 2)
+  return -EBADF;
+ if (args->maxlen <= strlen(resolved))
+  return -ENAMETOOLONG;
+ strcpy(args->path, resolved);
+ return 0;
+}
+static int dc_sip_check_guest_write(const char* path) {
+ assert(path != NULL);
+ return write_result;
+}
+'''
+        code = preamble + function(source, 'dc_sip_check_fd') + r'''
+int main(void) {
+ /* SIP off never resolves a descriptor. */
+ enabled = 0;
+ assert(dc_sip_check_fd(3) == 0);
+ assert(fdpath_calls == 0);
+
+ /* A protected fd path is refused, using a caller-owned buffer of the full
+  * resolved-path capacity. */
+ enabled = 1;
+ write_result = -EPERM;
+ assert(dc_sip_check_fd(3) == -EPERM);
+ assert(fdpath_calls == 1);
+ assert(seen_path != NULL);
+ assert(seen_maxlen >= 4096);
+
+ /* A path that does not fit is an unresolvable fd, not a clean check: before
+  * this fix the helper treated every resolver error as success. */
+ fdpath_mode = 1;
+ write_result = 0;
+ assert(dc_sip_check_fd(4) == -EPERM);
+ assert(seen_path != NULL && seen_maxlen >= 4096);
+
+ /* Any other resolver error still falls back to the inode check. */
+ fdpath_mode = 2;
+ assert(dc_sip_check_fd(5) == 0);
+
+ fdpath_mode = 0;
+ assert(dc_sip_check_fd(6) == 0);
+ puts("PASS fd SIP checks resolve through a real buffer and refuse truncation");
+}
+'''
+        result = self.compile_run(code)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

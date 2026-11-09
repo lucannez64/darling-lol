@@ -7133,7 +7133,7 @@ new file mode 100644
 index 0000000..f7b2428
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,312 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +
 +#include <errno.h>
@@ -7338,7 +7338,8 @@ index 0000000..f7b2428
 +
 +int dc_sip_check_fd(int fd) {
 +	struct linux_stat st;
-+	struct vchroot_fdpath_args args = { .fd = fd, .maxlen = sizeof(args.path) };
++	char path[4096];
++	struct vchroot_fdpath_args args = { .fd = fd, .path = path, .maxlen = sizeof(path) };
 +	uint64_t dev = 0, ino = 0;
 +	int check;
 +
@@ -7350,7 +7351,10 @@ index 0000000..f7b2428
 +		if (sip_inode_is_protected(dev, ino))
 +			return -EPERM;
 +	}
-+	if (vchroot_fdpath(&args) != 0)
++	check = vchroot_fdpath(&args);
++	if (check == -ENAMETOOLONG)
++		return -EPERM;
++	if (check != 0)
 +		return 0;
 +	check = dc_sip_check_guest_write(args.path);
 +	if (check != 0 && dev != 0)
