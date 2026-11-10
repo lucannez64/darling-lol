@@ -19,8 +19,9 @@ How a gap is reported depends on when dyld would hit it:
 
 - error: an image reached through load commands from an executable in the bundle needs a
   missing library, or a symbol dyld binds at load. Images with LC_DYLD_CHAINED_FIXUPS
-  (built for macOS 12 or later) bind every import at load, so any missing symbol stops
-  the client before its first window.
+  (built for macOS 12 or later) bind every import at load. Every executable is a starting
+  point, helpers included, so an error stops the process that loads that image: the client
+  itself, or a helper it starts later.
 - lazy: an image with LC_DYLD_INFO binds __la_symbol_ptr entries on first call. A missing
   lazily bound symbol only fails if the client calls it; a working client often has some.
 - dlopen only: images nothing links to (plug-ins and SDKs the client opens with dlopen,
@@ -28,8 +29,10 @@ How a gap is reported depends on when dyld would hit it:
 
 Only errors make the exit status non-zero.
 
-Run-time gaps, such as an Objective-C selector a stub does not implement, are out of reach
-of a static import check.
+Only images inside the bundle are checked. The imports of the runtime libraries they
+resolve to (Darling's frameworks, the RuntimeFrameworks stubs) are not, so a gap there can
+still stop dyld after a clean report. Run-time gaps, such as an Objective-C selector a stub
+does not implement, are out of reach of a static import check.
 
     python3 tools/check-guest-imports.py
     python3 tools/check-guest-imports.py "$HOME/.darling/Users/Shared/Riot Games/Riot Client.app"
@@ -40,11 +43,13 @@ import json
 import os
 import re
 import struct
+import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llvm_tools
 import riot_overlay_audit as audit
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,9 +92,20 @@ def thin_filetype(head):
     return struct.unpack_from('<I', head, 12)[0]
 
 
+def run_tool(*arguments):
+    """stdout of an LLVM tool. A run that fails stops the check: its empty output would
+    otherwise read as an image without dependencies or imports, i.e. a false clean report."""
+    result = subprocess.run((llvm_tools.require(arguments[0]), *arguments[1:]),
+                            capture_output=True, text=True, errors='replace')
+    if result.returncode:
+        raise SystemExit(f"{' '.join(arguments)} failed ({result.returncode}): "
+                         f"{result.stderr.strip()}")
+    return result.stdout
+
+
 def load_commands(path):
     """([(command, install name)], [rpath]) of the x86_64 image, in load-command order."""
-    text = audit.tool('llvm-objdump', '--macho', '--private-headers', '--arch=x86_64', str(path))
+    text = run_tool('llvm-objdump', '--macho', '--private-headers', '--arch=x86_64', str(path))
     dylibs, rpaths, command = [], [], None
     for line in text.splitlines():
         line = line.strip()
@@ -109,7 +125,7 @@ def load_commands(path):
 def imports(path):
     """[(symbol, library short name, weak)] of the x86_64 image, from llvm-nm -m."""
     out = []
-    text = audit.tool('llvm-nm', '-m', '-u', '--arch=x86_64', str(path))
+    text = run_tool('llvm-nm', '-m', '-u', '--arch=x86_64', str(path))
     for line in text.splitlines():
         match = re.search(r'\(undefined\)(.*?)external (\S+) \(from (.+)\)\s*$', line)
         if match:
@@ -121,13 +137,13 @@ def bind_kinds(path):
     """(chained, symbols bound at load, symbols bound lazily) for the x86_64 image.
 
     With LC_DYLD_CHAINED_FIXUPS every import is bound at load and the two sets are empty."""
-    headers = audit.tool('llvm-objdump', '--macho', '--private-headers', '--arch=x86_64', str(path))
+    headers = run_tool('llvm-objdump', '--macho', '--private-headers', '--arch=x86_64', str(path))
     if re.search(r'cmd LC_DYLD_CHAINED_FIXUPS$', headers, re.M):
         return True, frozenset(), frozenset()
 
     def symbols(option):
         found = set()
-        text = audit.tool('llvm-objdump', '--macho', option, '--arch=x86_64', str(path))
+        text = run_tool('llvm-objdump', '--macho', option, '--arch=x86_64', str(path))
         for line in text.splitlines():
             names = [token for token in line.split() if token.startswith('_')]
             if names:
@@ -169,7 +185,7 @@ class Checker:
     def exports(self, path):
         """Every name path exports, following LC_REEXPORT_DYLIB recursively."""
         names = set()
-        text = audit.tool('llvm-objdump', '--macho', '--exports-trie', '--arch=x86_64', str(path))
+        text = run_tool('llvm-objdump', '--macho', '--exports-trie', '--arch=x86_64', str(path))
         for line in text.splitlines():
             for token in line.split():
                 if token.startswith('_') or token.startswith('.objc'):
@@ -309,7 +325,7 @@ def print_report(report, bundle):
                 print(f"{level}: {rel(entry['image'])}: {len(names)} symbol(s) missing from "
                       f"{library}: {' '.join(sorted(names))}")
     if not report['errors']:
-        print('no missing imports in images the client loads at startup')
+        print("no missing imports in images reached from the bundle's executables")
 
 
 def main(argv=None):

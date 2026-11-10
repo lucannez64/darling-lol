@@ -78,7 +78,7 @@ class Fixture:
         return self.outputs.get(path, {}).get(option, '')
 
     def scan(self, bundle=None):
-        with patch.object(checker.audit, 'tool', side_effect=self.tool):
+        with patch.object(checker, 'run_tool', side_effect=self.tool):
             return checker.scan(bundle or self.bundle, self.config)
 
 
@@ -199,7 +199,7 @@ class ImportCheckTests(unittest.TestCase):
         out = io.StringIO()
         with patch.dict(os.environ, {'DPREFIX': str(self.fx.prefix)}), \
                 patch.object(checker, 'DEFAULT_BUNDLE', 'Users/Shared/Client.app'), \
-                patch.object(checker.audit, 'tool', side_effect=self.fx.tool), redirect_stdout(out):
+                patch.object(checker, 'run_tool', side_effect=self.fx.tool), redirect_stdout(out):
             status = checker.main(['--config', str(config)])
         self.assertEqual(status, 1)
         self.assertIn('error: Contents/MacOS/Client: 1 symbol(s) missing from /usr/lib/libSystem.B.dylib: _missing',
@@ -212,10 +212,29 @@ class ImportCheckTests(unittest.TestCase):
         config = self.fx.root / 'config.json'
         config.write_text(json.dumps(self.fx.config))
         out = io.StringIO()
-        with patch.object(checker.audit, 'tool', side_effect=self.fx.tool), redirect_stdout(out):
+        with patch.object(checker, 'run_tool', side_effect=self.fx.tool), redirect_stdout(out):
             status = checker.main(['--config', str(config), str(self.fx.bundle)])
         self.assertEqual(status, 0)
-        self.assertIn('no missing imports in images the client loads at startup', out.getvalue())
+        self.assertIn('no missing imports in images reached from the bundle\'s executables', out.getvalue())
+
+
+class ToolFailureTests(unittest.TestCase):
+    def test_failed_llvm_run_stops_the_check_instead_of_reading_as_clean(self):
+        # An LLVM tool that starts and fails prints nothing on stdout; reading that as
+        # "no imports" would report a clean bundle.
+        failed = checker.subprocess.CompletedProcess(['llvm-nm'], 1, '', 'llvm-nm: error: bad file')
+        with patch.object(checker.llvm_tools, 'require', return_value='/usr/bin/llvm-nm'), \
+                patch.object(checker.subprocess, 'run', return_value=failed):
+            with self.assertRaises(SystemExit) as raised:
+                checker.imports('/bundle/Client')
+        self.assertIn('llvm-nm: error: bad file', str(raised.exception))
+
+    def test_successful_llvm_run_returns_stdout(self):
+        done = checker.subprocess.CompletedProcess(['llvm-nm'], 0, 'output\n', '')
+        with patch.object(checker.llvm_tools, 'require', return_value='/usr/bin/llvm-nm'), \
+                patch.object(checker.subprocess, 'run', return_value=done) as run:
+            self.assertEqual(checker.run_tool('llvm-nm', '-u', 'x'), 'output\n')
+        self.assertEqual(run.call_args.args[0], ('/usr/bin/llvm-nm', '-u', 'x'))
 
 
 class MachoTests(unittest.TestCase):
