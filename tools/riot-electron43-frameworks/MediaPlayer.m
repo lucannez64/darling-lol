@@ -119,17 +119,28 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 }
 - (void)removeTarget:(id)target
 {
-	if (target)
-		[_targets removeObjectIdenticalTo:target];
-    else
-        [_targets removeAllObjects];
+	if (!target)
+	{
+		[_targets removeAllObjects];
+		return;
+	}
+	// Handler tokens are stored directly; action targets as non-retained NSValues.
+	[_targets removeObjectIdenticalTo:target];
+	for (NSInteger i = (NSInteger)[_targets count] - 1; i >= 0; i--)
+	{
+		id entry = [_targets objectAtIndex:i];
+		if ([entry isKindOfClass:[NSValue class]] && [entry nonretainedObjectValue] == target)
+			[_targets removeObjectAtIndex:i];
+	}
 }
 - (void)addTarget:(id)target action:(SEL)action
 {
-	// No command is ever delivered, so only the target is kept for removeTarget:.
+	// No command is ever delivered, so the target is only recorded for removeTarget:.
+	// Like other target-action APIs the command does not own it: keep a non-retained
+	// reference, so a recipient that is never removed is not kept alive.
 	(void)action;
 	if (target)
-		[_targets addObject:target];
+		[_targets addObject:[NSValue valueWithNonretainedObject:target]];
 }
 - (void)removeTarget:(id)target action:(SEL)action { [self removeTarget:target]; }
 - (BOOL)isEnabled { return YES; }

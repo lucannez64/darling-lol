@@ -35,6 +35,12 @@ class SecurityExportListTests(unittest.TestCase):
             '${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecExports.exp-in',
             '${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecAccessControlExports.exp-in',
             '${CMAKE_CURRENT_SOURCE_DIR}/../keychain/SecureObjectSync/SOSExports.exp-in',
+            # nested: SecExports.exp-in includes the two .list files and SOSViews.exp-in,
+            # which includes ViewList.list (SOSExports.exp-in includes SOSViews.exp-in too)
+            '${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecPolicy.list',
+            '${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecPolicyChecks.list',
+            '${CMAKE_CURRENT_SOURCE_DIR}/../keychain/SecureObjectSync/SOSViews.exp-in',
+            '${CMAKE_CURRENT_SOURCE_DIR}/../keychain/SecureObjectSync/ViewList.list',
         ):
             self.assertIn(included, source)
 
@@ -50,6 +56,17 @@ class SecurityExportListTests(unittest.TestCase):
                 f'set_property(TARGET Security_${{APPLE_ARCH_{arch}}}_firstpass Security_${{APPLE_ARCH_{arch}}}\n'
                 f'\t\tAPPEND PROPERTY LINK_DEPENDS ${{CMAKE_CURRENT_BINARY_DIR}}/Security.${{APPLE_ARCH_{arch}}}.exp',
                 source)
+
+
+class ManifestTests(unittest.TestCase):
+    def test_security_modified_files_matches_the_patch(self):
+        import json
+        manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
+        entry = next(c for c in manifest['components'] if c['patch'] == 'patches/security.patch')
+        text = (ROOT / 'patches/security.patch').read_text()
+        files = set(re.findall(r'^diff --git \w/(\S+) ', text, re.M))
+        new = set(entry.get('new_files', []))
+        self.assertEqual(entry['modified_files'], len(files - new))
 
 
 if __name__ == '__main__':

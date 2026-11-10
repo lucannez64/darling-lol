@@ -165,6 +165,15 @@ int main() {
             with self.subTest(selector=selector):
                 self.assertRegex(command, rf'-\s*\([^)]*\)\s*{selector}\s*\{{')
 
+    def test_media_player_does_not_retain_action_targets(self):
+        # Target-action recipients are not owned by the command; Electron removes its
+        # delegate with removeTarget: when it goes away.
+        source = (frameworks.SOURCES / 'MediaPlayer.m').read_text()
+        command = source.split('@implementation MPRemoteCommand\n', 1)[1].split('@end', 1)[0]
+        add_target = command.split('addTarget:(id)target action:(SEL)action', 1)[1].split('\n}', 1)[0]
+        self.assertIn('valueWithNonretainedObject:target', add_target)
+        self.assertNotIn('addObject:target]', add_target)
+
     def test_guest_check_covers_every_constant_class(self):
         check = (frameworks.SOURCES / 'constant-literal-check.m').read_text()
         for name in CONSTANT_CLASSES:
