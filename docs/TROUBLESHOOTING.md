@@ -158,6 +158,41 @@ directory, so it is accepted only together with `--pin` or `--unpin`.
 Pinning only keeps the macOS client. League itself keeps patching normally, and
 a game update that needs a newer client still has to wait for the 142 work.
 
+## Check a new Riot Client release for missing imports
+
+When a client update stops in dyld (`Symbol not found`, `Library not loaded`),
+dyld only names the first gap. `tools/check-guest-imports.py` lists all of them
+at once, without starting the guest:
+
+```sh
+python3 tools/check-guest-imports.py
+python3 tools/check-guest-imports.py "$HOME/darling-backups/<release>/Riot Client.app"
+python3 tools/check-guest-imports.py --json report.json
+```
+
+With no argument it checks `<prefix>/Users/Shared/Riot Games/Riot Client.app`
+(`prefix` from `build/config.json`, or `DPREFIX`). It resolves each library the
+way the launcher's guest does: `RuntimeFrameworks` and `RuntimeLibraries` in the
+guest home first, then the prefix, then the installed SDK. It follows
+`LC_REEXPORT_DYLIB`, and resolves `@rpath` through the whole load chain. Every
+gap goes into one of three groups:
+
+- **error**: something an image the client loads at startup needs. A missing
+  library, or a missing symbol bound at load. Images with
+  `LC_DYLD_CHAINED_FIXUPS` (built for macOS 12 or later, such as Riot Client 143's
+  Electron) bind every import at load. Any error here stops the client before
+  its first window.
+- **lazy (fails only if called)**: a symbol an older image binds on first call.
+  A working client can have several of these. Riot Client 141's Electron
+  references Carbon and AudioToolbox functions it never calls.
+- **dlopen only**: images nothing in the bundle links to, such as the Krisp and
+  Voicemod voice SDKs. They only matter when the client opens them.
+
+The exit status is 1 when there is at least one error. A clean report does not
+prove the client runs: a missing Objective-C method only shows up at run time,
+as an `unrecognized selector` exception (see `MediaPlayer` in
+`tools/riot-electron43-frameworks`).
+
 ## Updated library or server still behaves like the old version
 
 Atomic replacement preserves active process mappings. Darling also uses an overlay filesystem; updating its backing prefix from the host can leave an old file visible inside the active namespace. A fresh standalone guest check continued to report the old memory behavior despite the host path having the new checksum. Reopening only Riot does not replace this namespace.
