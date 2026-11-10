@@ -218,6 +218,60 @@ class ImportCheckTests(unittest.TestCase):
         self.assertIn('no missing imports in images reached from the bundle\'s executables', out.getvalue())
 
 
+class LoadContextTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self.tmp.name)
+        system(self.fx)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_reexport_cycle_terminates_and_keeps_both_libraries_exports(self):
+        lib = self.fx.sdk / 'usr/lib'
+        self.fx.file(lib / 'libA.dylib', exports=trie('_a'),
+                     private_headers=headers(('LC_REEXPORT_DYLIB', '/usr/lib/libB.dylib')))
+        self.fx.file(lib / 'libB.dylib', exports=trie('_b'),
+                     private_headers=headers(('LC_REEXPORT_DYLIB', '/usr/lib/libA.dylib')))
+        self.fx.file(self.fx.bundle / 'Contents/MacOS/Client', MH_EXECUTE,
+                     private_headers=headers(('LC_LOAD_DYLIB', '/usr/lib/libA.dylib'),
+                                             ('LC_LOAD_DYLIB', '/usr/lib/libB.dylib'), chained=True),
+                     nm=undefined(('_b', 'libA', False), ('_a', 'libB', False)))
+        self.assertEqual(self.fx.scan()['errors'], [])
+
+    def test_shared_image_is_checked_in_every_executables_context(self):
+        # Both executables load the same framework; its @rpath dependency only exists
+        # under the first executable's rpath, so the second one must report it.
+        bundle = self.fx.bundle / 'Contents'
+        self.fx.file(bundle / 'A/Libs/Dep.dylib', exports=trie('_dep'))
+        self.fx.file(bundle / 'Shared/Shared',
+                     private_headers=headers(('LC_LOAD_DYLIB', '@rpath/Dep.dylib'), chained=True),
+                     nm=undefined(('_dep', 'Dep', False)))
+        for name, rpath in (('A', '@executable_path/Libs'), ('B', '@executable_path/Libs')):
+            self.fx.file(bundle / f'{name}/{name}', MH_EXECUTE,
+                         private_headers=headers(('LC_RPATH', rpath),
+                                                 ('LC_LOAD_DYLIB', '@executable_path/../Shared/Shared'),
+                                                 chained=True))
+        report = self.fx.scan()
+        self.assertEqual(report['reached'], 4)
+        self.assertEqual([e['missing_libraries'] for e in report['errors']], [['@rpath/Dep.dylib']])
+        self.assertTrue(report['errors'][0]['image'].endswith('Shared/Shared'))
+
+    def test_reexport_resolves_through_the_loading_context(self):
+        # The framework re-exports @rpath/Sub.dylib, which only the executable's rpath finds.
+        bundle = self.fx.bundle / 'Contents'
+        self.fx.file(bundle / 'Frameworks/Sub.dylib', exports=trie('_sub'))
+        self.fx.file(bundle / 'Frameworks/Umbrella.framework/Umbrella',
+                     private_headers=headers(('LC_REEXPORT_DYLIB', '@rpath/Sub.dylib')),
+                     exports=trie('_umbrella'))
+        self.fx.file(bundle / 'MacOS/Client', MH_EXECUTE,
+                     private_headers=headers(('LC_RPATH', '@executable_path/../Frameworks'),
+                                             ('LC_LOAD_DYLIB', '@rpath/Umbrella.framework/Umbrella'),
+                                             chained=True),
+                     nm=undefined(('_sub', 'Umbrella', False)))
+        self.assertEqual(self.fx.scan()['errors'], [])
+
+
 class ToolFailureTests(unittest.TestCase):
     def test_failed_llvm_run_stops_the_check_instead_of_reading_as_clean(self):
         # An LLVM tool that starts and fails prints nothing on stdout; reading that as

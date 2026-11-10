@@ -45,7 +45,6 @@ import re
 import struct
 import subprocess
 import sys
-from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -174,39 +173,75 @@ def expand(rpaths, declaring_image, executable):
 
 
 class Checker:
+    """Resolution and per-image facts, memoized: one image is checked once per load context
+    (executable and inherited rpath chain), and its LLVM output is read only once."""
+
     def __init__(self, config):
         self.config = config
+        self._memo = {}
+
+    def _cached(self, kind, key, compute):
+        memo = self._memo.setdefault(kind, {})
+        if key not in memo:
+            memo[key] = compute()
+        return memo[key]
+
+    def load(self, path):
+        return self._cached('load', path, lambda: load_commands(path))
+
+    def imports(self, path):
+        return self._cached('imports', path, lambda: imports(path))
+
+    def binds(self, path):
+        return self._cached('binds', path, lambda: bind_kinds(path))
 
     def resolve(self, install, origin, rpaths, executable):
         config = dict(self.config, game=str(executable or origin))
         return audit.resolve(install, str(origin), rpaths, config)
 
-    @lru_cache(maxsize=None)
-    def exports(self, path):
-        """Every name path exports, following LC_REEXPORT_DYLIB recursively."""
-        names = set()
-        text = run_tool('llvm-objdump', '--macho', '--exports-trie', '--arch=x86_64', str(path))
-        for line in text.splitlines():
-            for token in line.split():
-                if token.startswith('_') or token.startswith('.objc'):
-                    names.add(token)
-                    break
-        dylibs, rpaths = load_commands(path)
-        own = expand(rpaths, path, None)
-        for command, install in dylibs:
-            if command == 'LC_REEXPORT_DYLIB':
-                target = self.resolve(install, path, own, None)
-                if target is not None and target != path:
-                    names |= self.exports(target)
-        return frozenset(names)
+    def direct_exports(self, path):
+        def compute():
+            names = set()
+            text = run_tool('llvm-objdump', '--macho', '--exports-trie', '--arch=x86_64', str(path))
+            for line in text.splitlines():
+                for token in line.split():
+                    if token.startswith('_') or token.startswith('.objc'):
+                        names.add(token)
+                        break
+            return frozenset(names)
+        return self._cached('direct', path, compute)
+
+    def exports(self, path, inherited=(), executable=None):
+        """Every name path exports, with the libraries it re-exports (LC_REEXPORT_DYLIB,
+        transitively). Each re-export resolves as dyld would load it: through the re-exporting
+        library's LC_RPATHs, then the chain it was loaded with. Cycles end at a library
+        already collected."""
+        key = (path, tuple(inherited), executable)
+
+        def compute():
+            names, seen, stack = set(), set(), [(path, tuple(inherited))]
+            while stack:
+                library, chain = stack.pop()
+                if library in seen:
+                    continue
+                seen.add(library)
+                names |= self.direct_exports(library)
+                dylibs, rpaths = self.load(library)
+                own = tuple(expand(rpaths, library, executable)) + chain
+                for command, install in dylibs:
+                    if command == 'LC_REEXPORT_DYLIB':
+                        target = self.resolve(install, library, list(own), executable)
+                        if target is not None and target not in seen:
+                            stack.append((target, own))
+            return frozenset(names)
+        return self._cached('exports', key, compute)
 
     def check_image(self, image, rpaths, executable):
         """(missing libraries, missing symbols, lazily bound missing symbols, resolved
-        dependencies) for one image."""
-        dylibs, own = load_commands(image)
+        dependencies) for one image in one load context."""
+        dylibs, own = self.load(image)
         chain = expand(own, image, executable) + list(rpaths)
         libraries, symbols, lazy, resolved, by_name = [], [], [], {}, {}
-        chained, eager, lazily = None, frozenset(), frozenset()
         for command, install in dylibs:
             target = self.resolve(install, image, chain, executable)
             by_name.setdefault(short_name(install), (command, install, target))
@@ -215,7 +250,7 @@ class Checker:
                     libraries.append(install)
                 continue
             resolved[target] = chain
-        for symbol, library, weak in imports(image):
+        for symbol, library, weak in self.imports(image):
             if weak or symbol in IGNORED_SYMBOLS or library in ('dynamically looked up',
                                                                'flat-namespace'):
                 continue
@@ -226,9 +261,8 @@ class Checker:
             command, install, target = entry
             if target is None:
                 continue  # reported as a missing library (or a weak one)
-            if symbol not in self.exports(target):
-                if chained is None:
-                    chained, eager, lazily = bind_kinds(image)
+            if symbol not in self.exports(target, chain, executable):
+                chained, eager, lazily = self.binds(image)
                 only_lazy = not chained and symbol in lazily and symbol not in eager
                 (lazy if only_lazy else symbols).append((symbol, install, str(target)))
         return libraries, symbols, lazy, resolved
@@ -254,41 +288,47 @@ def scan(bundle, config):
     checker = Checker(config)
     images = images_in(bundle)
     executables = sorted(path for path, kind in images.items() if kind == MH_EXECUTE)
-    report = {'bundle': str(bundle), 'executables': [str(p) for p in executables],
-              'errors': [], 'lazy': [], 'dlopen_only_gaps': []}
-    checked = set()
+    report = {'bundle': str(bundle), 'executables': [str(p) for p in executables]}
+    # One entry per image and group, merged over every load context it was checked in.
+    groups = {'errors': {}, 'lazy': {}, 'dlopen_only_gaps': {}}
 
-    def entry(image, libraries, symbols):
-        return {'image': str(image), 'missing_libraries': libraries,
-                'missing_symbols': [{'symbol': s, 'library': l, 'resolved': r}
-                                    for s, l, r in symbols]}
+    def record(group, image, libraries, symbols):
+        if not (libraries or symbols):
+            return
+        entry = groups[group].setdefault(image, {'libraries': {}, 'symbols': {}})
+        for library in libraries:
+            entry['libraries'].setdefault(library, None)
+        for symbol, library, resolved in symbols:
+            entry['symbols'].setdefault((symbol, library), resolved)
 
-    def visit(image, rpaths, executable, reached):
-        libraries, symbols, lazy, resolved = checker.check_image(image, rpaths, executable)
-        if not reached:
-            if libraries or symbols or lazy:
-                report['dlopen_only_gaps'].append(entry(image, libraries, symbols + lazy))
-            return resolved
-        if libraries or symbols:
-            report['errors'].append(entry(image, libraries, symbols))
-        if lazy:
-            report['lazy'].append(entry(image, [], lazy))
-        return resolved
-
+    # An image is checked once per load context: the executable and the rpath chain it
+    # inherits decide how its @rpath and @executable_path dependencies resolve.
+    reached, contexts = set(), set()
     for executable in executables:
-        queue = [(executable, [])]
+        queue = [(executable, ())]
         while queue:
             image, rpaths = queue.pop(0)
-            if image in checked:
+            context = (image, rpaths, executable)
+            if context in contexts:
                 continue
-            checked.add(image)
-            for target, chain in visit(image, rpaths, executable, True).items():
-                if target in images and target not in checked:
-                    queue.append((target, chain))
-    for image in sorted(set(images) - checked):
-        visit(image, [], None, False)
-    report['reached'] = len(checked)
-    report['dlopen_only'] = len(images) - len(checked)
+            contexts.add(context)
+            reached.add(image)
+            libraries, symbols, lazy, resolved = checker.check_image(image, list(rpaths), executable)
+            record('errors', image, libraries, symbols)
+            record('lazy', image, [], lazy)
+            for target, chain in resolved.items():
+                if target in images and (target, tuple(chain), executable) not in contexts:
+                    queue.append((target, tuple(chain)))
+    for image in sorted(set(images) - reached):
+        libraries, symbols, lazy, _ = checker.check_image(image, [], None)
+        record('dlopen_only_gaps', image, libraries, symbols + lazy)
+    for group, entries in groups.items():
+        report[group] = [{'image': str(image), 'missing_libraries': list(entry['libraries']),
+                          'missing_symbols': [{'symbol': s, 'library': l, 'resolved': r}
+                                              for (s, l), r in entry['symbols'].items()]}
+                         for image, entry in entries.items()]
+    report['reached'] = len(reached)
+    report['dlopen_only'] = len(images) - len(reached)
     return report
 
 
