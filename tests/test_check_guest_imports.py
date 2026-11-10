@@ -257,6 +257,23 @@ class LoadContextTests(unittest.TestCase):
         self.assertEqual([e['missing_libraries'] for e in report['errors']], [['@rpath/Dep.dylib']])
         self.assertTrue(report['errors'][0]['image'].endswith('Shared/Shared'))
 
+    def test_load_cycle_between_images_with_rpaths_terminates(self):
+        # Mach-O allows images that load each other. Each hop prepends the image's own
+        # LC_RPATHs, so without deduplicating the chain no context would repeat.
+        bundle = self.fx.bundle / 'Contents'
+        self.fx.file(bundle / 'Frameworks/A.dylib',
+                     private_headers=headers(('LC_RPATH', '@loader_path/a'),
+                                             ('LC_LOAD_DYLIB', '@loader_path/B.dylib'), chained=True))
+        self.fx.file(bundle / 'Frameworks/B.dylib',
+                     private_headers=headers(('LC_RPATH', '@loader_path/b'),
+                                             ('LC_LOAD_DYLIB', '@loader_path/A.dylib'), chained=True))
+        self.fx.file(bundle / 'MacOS/Client', MH_EXECUTE,
+                     private_headers=headers(('LC_RPATH', '@executable_path/../Frameworks'),
+                                             ('LC_LOAD_DYLIB', '@rpath/A.dylib'), chained=True))
+        report = self.fx.scan()
+        self.assertEqual(report['reached'], 3)
+        self.assertEqual(report['errors'], [])
+
     def test_reexport_resolves_through_the_loading_context(self):
         # The framework re-exports @rpath/Sub.dylib, which only the executable's rpath finds.
         bundle = self.fx.bundle / 'Contents'

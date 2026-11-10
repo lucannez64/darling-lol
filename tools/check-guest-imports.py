@@ -240,7 +240,10 @@ class Checker:
         """(missing libraries, missing symbols, lazily bound missing symbols, resolved
         dependencies) for one image in one load context."""
         dylibs, own = self.load(image)
-        chain = expand(own, image, executable) + list(rpaths)
+        # The image's own LC_RPATHs come first, then the inherited chain. A repeated rpath
+        # never changes what dyld finds (the first one wins), and keeping only the first
+        # occurrence keeps the set of chains finite when images load each other.
+        chain = list(dict.fromkeys(expand(own, image, executable) + list(rpaths)))
         libraries, symbols, lazy, resolved, by_name = [], [], [], {}, {}
         for command, install in dylibs:
             target = self.resolve(install, image, chain, executable)
