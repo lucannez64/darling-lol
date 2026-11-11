@@ -330,10 +330,10 @@ index d543e32..e320a3a 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSAppearance.m b/AppKit/NSAppearance.m
-index acb1985..aa40891 100644
+index acb19858..ed2a77c6 100644
 --- a/AppKit/NSAppearance.m
 +++ b/AppKit/NSAppearance.m
-@@ -18,6 +18,11 @@
+@@ -18,6 +18,12 @@
  */
  
  #import <AppKit/NSAppearance.h>
@@ -342,15 +342,26 @@ index acb1985..aa40891 100644
 +#import <AppKit/NSWindow.h>
 +#import <Foundation/NSSet.h>
 +#import <objc/runtime.h>
++#include <pthread.h>
  
  NSString *const NSAppearanceNameAqua = @"NSAppearanceNameAqua";
  NSString *const NSAppearanceNameDarkAqua = @"NSAppearanceNameDarkAqua";
-@@ -40,11 +45,58 @@ NSString *const NSAppearanceNameAccessibilityHighContrastVibrantDark =
+@@ -40,11 +46,79 @@ NSString *const NSAppearanceNameAccessibilityHighContrastVibrantDark =
  NSString *const NSAppearanceNameControlStrip =
          @"NSAppearanceNameControlStrip"; // Undocumented
  
 +static char NSAppearanceNameKey;
-+static __thread NSAppearance *sCurrentDrawingAppearance;
++static pthread_key_t currentAppearanceKey;
++static pthread_once_t currentAppearanceOnce = PTHREAD_ONCE_INIT;
++static int currentAppearanceKeyError;
++
++static void releaseThreadAppearance(void *value) {
++    [(NSAppearance *)value release];
++}
++
++static void createCurrentAppearanceKey(void) {
++    currentAppearanceKeyError = pthread_key_create(&currentAppearanceKey, releaseThreadAppearance);
++}
 +
  @implementation NSAppearance
  
@@ -378,17 +389,27 @@ index acb1985..aa40891 100644
 +}
 +
 ++ (NSAppearance *) currentDrawingAppearance {
-+    return sCurrentDrawingAppearance;
++    pthread_once(&currentAppearanceOnce, createCurrentAppearanceKey);
++    return currentAppearanceKeyError == 0 ? pthread_getspecific(currentAppearanceKey) : nil;
 +}
 +
 +/* darling-lol: the appearance set for the current thread, else the
 + * application's. Darling draws Aqua. */
 ++ (NSAppearance *) currentAppearance {
-+    return sCurrentDrawingAppearance ?: [NSApp effectiveAppearance];
++    return [self currentDrawingAppearance] ?: [NSApp effectiveAppearance];
 +}
 +
 ++ (void) setCurrentAppearance: (NSAppearance *) appearance {
-+    sCurrentDrawingAppearance = appearance;
++    pthread_once(&currentAppearanceOnce, createCurrentAppearanceKey);
++    if (currentAppearanceKeyError != 0)
++        return;
++    NSAppearance *previous = pthread_getspecific(currentAppearanceKey);
++    NSAppearance *next = [appearance retain];
++    if (pthread_setspecific(currentAppearanceKey, next) != 0) {
++        [next release];
++        return;
++    }
++    [previous release];
 +}
 +
 +- (BOOL) allowsVibrancy {
@@ -396,17 +417,18 @@ index acb1985..aa40891 100644
 +}
 +
 +- (void) performAsCurrentDrawingAppearance: (void (^)(void)) block {
-+    NSAppearance *previous = sCurrentDrawingAppearance;
-+    sCurrentDrawingAppearance = self;
++    NSAppearance *previous = [[NSAppearance currentDrawingAppearance] retain];
++    [NSAppearance setCurrentAppearance: self];
 +    @try {
 +        block();
 +    } @finally {
-+        sCurrentDrawingAppearance = previous;
++        [NSAppearance setCurrentAppearance: previous];
++        [previous release];
 +    }
  }
  
  - (void) encodeWithCoder: (NSCoder *) aCoder {
-@@ -62,3 +114,33 @@ NSString *const NSAppearanceNameControlStrip =
+@@ -62,3 +136,33 @@ NSString *const NSAppearanceNameControlStrip =
  }
  
  @end

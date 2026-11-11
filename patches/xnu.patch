@@ -4656,10 +4656,10 @@ index 10f39a5..29747d4 100644
  		current = next;
  		token = strtok_r(NULL, ".", &saveptr);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-index 10c412b..c9d8b8d 100644
+index 10c412b..2a8f36e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-@@ -3,27 +3,125 @@
+@@ -3,27 +3,109 @@
  #include <sys/errno.h>
  
  #include <darling/emulation/conversion/errno.h>
@@ -4720,15 +4720,6 @@ index 10c412b..c9d8b8d 100644
 +	return mode;
 +}
 +
-+// Linux before 5.14 does not know MADV_POPULATE_WRITE and rejects it even for
-+// an empty range, which a kernel that knows it accepts.
-+static int populate_write_supported(void)
-+{
-+	static int supported = -1;
-+	if (supported < 0)
-+		supported = LINUX_SYSCALL(__NR_madvise, NULL, 0, LINUX_MADV_POPULATE_WRITE) == 0;
-+	return supported;
-+}
  
  long sys_madvise(void* addr, unsigned long len, int advice)
  {
@@ -4776,16 +4767,9 @@ index 10c412b..c9d8b8d 100644
  
  	ret = LINUX_SYSCALL(__NR_madvise, addr, len, advice);
  
-+	// darling-lol: Darwin accepts REUSE on any mapped range, and allocators
-+	// check the result (Chromium's PartitionAlloc treats a failure as out of
-+	// memory). Linux refuses to write-prefault a range that is not writable
-+	// (PROT_NONE or read-only reservations). Such a range has no dirty page
-+	// left to reclaim lazily, so there is nothing to cancel: report success.
-+	// The address was checked above, so EINVAL here means such a range, unless
-+	// the kernel does not support the prefault at all; then the error stands.
-+	if (advice == LINUX_MADV_POPULATE_WRITE && (ret == -LINUX_EFAULT || ret == -LINUX_EPERM ||
-+	    (ret == -LINUX_EINVAL && populate_write_supported())))
-+		ret = 0;
++	// A failed write-prefault may leave pages lazily reclaimable, even
++	// after mprotect removes write access. Preserve that failure: success
++	// would incorrectly promise that REUSE cancelled lazy reclaim.
 +
  	if (ret < 0)
  		ret = errno_linux_to_bsd(ret);

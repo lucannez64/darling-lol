@@ -214,12 +214,50 @@ class RiotClient142RemainingTests(unittest.TestCase):
         function = source.split('CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust) {', 1)[1].split('\n}', 1)[0]
         self.assertNotIn('_certificates', function)
 
-    def test_reuse_errors_survive_bad_input_and_old_kernels(self):
-        source = added_lines(patch_section('patches/xnu.patch',
-                                           KERNEL + 'src/xnu_syscall/bsd/impl/mman/madvise.c'))
-        self.assertIn('static int populate_write_supported(void)', source)
-        self.assertIn('(ret == -LINUX_EINVAL && populate_write_supported())', source)
-        self.assertIn("if (((unsigned long) addr & 4095) != 0)", source)
+    def test_reuse_does_not_hide_failure_on_readonly_lazy_free_pages(self):
+        import test_runtime_compatibility as helpers
+        source = helpers.CompatibilityChecks.patched(
+            self, 'xnu', KERNEL + 'src/xnu_syscall/bsd/impl/mman/madvise.c')
+        body = helpers.function(source, 'sys_madvise')
+        program = r"""
+#define _GNU_SOURCE
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <errno.h>
+#include <assert.h>
+#include <string.h>
+#undef MADV_FREE
+#define MADV_FREE 5
+#define MADV_FREE_REUSABLE 7
+#define MADV_FREE_REUSE 8
+#define LINUX_MADV_FREE 8
+#define LINUX_MADV_POPULATE_WRITE 23
+static unsigned long thp_huge_page_size = 2097152;
+static int host_thp_mode(void) { return 0; }
+static int errno_linux_to_bsd(int value) { return value; }
+static long host_madvise(void *addr, unsigned long len, int advice) {
+ long result = syscall(SYS_madvise, addr, len, advice);
+ return result < 0 ? -errno : result;
+}
+#define LINUX_SYSCALL(nr, addr, len, advice) host_madvise(addr, len, advice)
+""" + body + r"""
+int main(void) {
+ unsigned long size = sysconf(_SC_PAGESIZE);
+ void *page = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+ assert(page != MAP_FAILED);
+ memset(page, 0x5a, size);
+ assert(sys_madvise(page, size, MADV_FREE_REUSABLE) == 0);
+ assert(mprotect(page, size, PROT_READ) == 0);
+ assert(sys_madvise(page, size, MADV_FREE_REUSE) < 0);
+ assert(mprotect(page, size, PROT_READ | PROT_WRITE) == 0);
+ assert(sys_madvise(page, size, MADV_FREE_REUSE) == 0);
+ assert(mprotect(page, size, PROT_NONE) == 0);
+ assert(sys_madvise(page, size, MADV_FREE_REUSE) < 0);
+ assert(munmap(page, size) == 0);
+}
+"""
+        helpers.CompatibilityChecks.run_c(self, program)
 
     def test_ported_parts_do_not_redefine_what_main_has(self):
         # main provides these classes and functions already; the port must not
