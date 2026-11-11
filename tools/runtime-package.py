@@ -284,6 +284,11 @@ def validate(manifest, members):
         parts = safe_relative(name)
         key = '/'.join(parts)
         if member.isdir():
+            if key in expected:
+                raise PackageError('directory conflicts with package entry: %s' % name)
+            for parent in PurePosixPath(key).parents:
+                if parent.as_posix() in expected:
+                    raise PackageError('directory has a non-directory ancestor: %s' % name)
             continue
         if key not in expected:
             raise PackageError('unexpected archive member: %s' % name)

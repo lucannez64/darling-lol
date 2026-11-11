@@ -164,6 +164,28 @@ class RuntimePackageTests(unittest.TestCase):
             package_tool.install(self.archive, target)
         self.assertFalse((target / 'RuntimeLibraries/a').exists())
 
+    def test_archive_directory_cannot_be_under_a_manifest_file(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        good = target / 'RuntimeLibraries/good'
+        good.write_bytes(b'old')
+        write_package(self.archive, {'RuntimeLibraries/good': b'new',
+                                     'RuntimeLibraries/conflict': b'file'}, {})
+        # Rewrite the archive with a directory not represented in the manifest.
+        with tarfile.open(self.archive, 'r:gz') as source:
+            entries = [(member, source.extractfile(member).read() if member.isreg() else None)
+                       for member in source.getmembers()]
+        with tarfile.open(self.archive, 'w:gz') as archive:
+            for member, data in entries:
+                archive.addfile(member, io.BytesIO(data) if data is not None else None)
+            directory = tarfile.TarInfo('RuntimeLibraries/conflict/child')
+            directory.type = tarfile.DIRTYPE
+            archive.addfile(directory)
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertEqual(good.read_bytes(), b'old')
+        self.assertFalse((target / 'RuntimeLibraries/conflict').exists())
+
     def test_traversal_path_is_refused(self):
         manifest = {
             'schema': package_tool.SCHEMA,

@@ -35,6 +35,11 @@ python3 tools/runtime-package.py install \
   --prefix "$HOME/.darling"
 ```
 
+For a freshly initialized guest home that has no runtime overlays yet, add
+`--guest-home "$HOME/.darling/Users/<guest-user>"` to the install command,
+using the existing guest home. Automatic home selection only finds homes
+that already contain runtime overlays.
+
 `--destdir DIR` writes below `DIR` instead of the guest home, which is what a
 package build stages into `$pkgdir`. `--dry-run` lists the entries without
 writing.
