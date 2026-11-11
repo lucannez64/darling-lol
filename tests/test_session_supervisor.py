@@ -528,7 +528,7 @@ class FailureReportingTests(unittest.TestCase):
         code, output, seen = self.run_supervisor(['true'], guest_log=self.logs)
         self.assertEqual(code, 0)
         self.assertNotIn('client exited with status', output)
-        self.assertNotIn('last guest log line', output)
+        self.assertNotIn('last available guest log line', output)
         self.assertEqual(seen['note'], '')
 
     def test_missing_log_directory_still_reports_status(self):
@@ -537,7 +537,7 @@ class FailureReportingTests(unittest.TestCase):
             ['sh', '-c', 'exit 2'], guest_log=missing)
         self.assertEqual(code, 2)
         self.assertIn('client exited with status 2', output)
-        self.assertNotIn('last guest log line', output)
+        self.assertNotIn('last available guest log line', output)
 
     def test_cleanup_gone_message_carries_the_status(self):
         output = io.StringIO()
