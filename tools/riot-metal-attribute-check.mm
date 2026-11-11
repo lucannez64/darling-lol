@@ -8,6 +8,28 @@ static void require(bool condition, const char* message) {
     if (!condition) { fprintf(stderr, "FAIL: %s\n", message); exit(1); }
 }
 
+static MTLAttribute* findStageInput(NSArray<MTLAttribute*>* inputs, NSUInteger attributeIndex) {
+    for (MTLAttribute* input in inputs) {
+        if (input.attributeIndex == attributeIndex) return input;
+    }
+    return nil;
+}
+
+static void checkStageInputMatching(NSArray<MTLAttribute*>* inputs) {
+    MTLAttribute* position = findStageInput(inputs, 0);
+    MTLAttribute* normal = findStageInput(inputs, 1);
+    require(position != nil && normal != nil, "stage input matching fixtures exist");
+    NSArray<MTLAttribute*>* reordered = @[normal, position];
+    require(findStageInput(reordered, 0) == position, "reordered position matched by index");
+    require(findStageInput(reordered, 1) == normal, "reordered normal matched by index");
+    NSArray<MTLAttribute*>* sparse = @[normal];
+    require(findStageInput(sparse, 1) == normal, "sparse input matched beyond array bounds");
+    require(findStageInput(sparse, 0) == nil, "missing sparse input returns nil");
+    require(findStageInput(reordered, 2) == nil, "missing trailing input returns nil");
+    require(findStageInput(@[], 0) == nil, "empty input array returns nil");
+    fprintf(stderr, "PASS: stage inputs match by index for reordered, sparse and missing inputs\n");
+}
+
 int main(int argc, char** argv) {
     @autoreleasepool {
         require(argc == 2, "expected cubemap metallib path");
@@ -26,7 +48,8 @@ int main(int argc, char** argv) {
         require(attributes.count == 2, "two active vertex inputs");
         bool position = false, normal = false;
         for (MTLVertexAttribute* attribute in attributes) {
-            MTLAttribute* stage = vertex.stageInputAttributes[attribute.attributeIndex];
+            MTLAttribute* stage = findStageInput(vertex.stageInputAttributes, attribute.attributeIndex);
+            require(stage != nil, "matching stage input exists");
             require(stage.attributeIndex == attribute.attributeIndex && stage.attributeType == attribute.attributeType &&
                     [stage.name isEqualToString:attribute.name] && stage.active, "stage input metadata agrees");
             require(attribute.active && attribute.attributeType == MTLDataTypeFloat4, "active float4 attribute");
@@ -35,6 +58,7 @@ int main(int argc, char** argv) {
             else require(false, "unexpected attribute index");
         }
         require(position && normal, "indices 0 and 1 reflected");
+        checkStageInputMatching(vertex.stageInputAttributes);
         id<MTLFunction> fragment = [library newFunctionWithName:@"fragment_cube_lookup"];
         require(fragment != nil && fragment.vertexAttributes == nil, "fragment has no vertex attributes");
         [fragment release]; [vertex release]; [library release];

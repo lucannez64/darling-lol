@@ -849,12 +849,13 @@ index 58f1794..75266fd 100644
  		virtual std::shared_ptr<CommandQueue> newCommandQueue() override;
  		virtual std::shared_ptr<RenderPipelineState> newRenderPipelineState(const RenderPipelineDescriptor& descriptor) override;
  		virtual std::shared_ptr<ComputePipelineState> newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) override;
-@@ -73,6 +80,12 @@ namespace Indium {
+@@ -73,6 +80,13 @@ namespace Indium {
  		virtual void pollEvents(uint64_t timeoutNanoseconds) override;
  		virtual void wakeupEventLoop() override;
  
 +		// device address of a zero-filled 64 KiB buffer; never 0
 +		uint64_t fallbackBufferAddress();
++		const std::shared_ptr<Buffer>& fallbackBuffer();
 +		std::shared_ptr<SamplerState> fallbackSampler();
 +		// VK_EXT_robustness2 nullDescriptor was enabled: null image views / vertex buffers are legal
 +		bool nullDescriptorEnabled() const { return _nullDescriptor; }
@@ -862,7 +863,7 @@ index 58f1794..75266fd 100644
  		void waitForSemaphore(VkSemaphore semaphore, uint64_t targetValue, std::function<void()> callback);
  
  		/**
-@@ -86,6 +99,11 @@ namespace Indium {
+@@ -86,6 +100,11 @@ namespace Indium {
  		 * Similar to getTimelineSemaphore(), but wraps it in a shared pointer
  		 * that automatically releases the semaphore when all references to it die out.
  		 */
@@ -874,7 +875,7 @@ index 58f1794..75266fd 100644
  		std::shared_ptr<TimelineSemaphore> getWrappedTimelineSemaphore();
  
  		BinarySemaphore getBinarySemaphore(bool exportable = false);
-@@ -111,5 +129,37 @@ namespace Indium {
+@@ -111,5 +130,37 @@ namespace Indium {
  
  		INDIUM_PROPERTY(VkPhysicalDeviceMemoryProperties, m, M,emoryProperties);
  		INDIUM_PROPERTY_READONLY(Feature, f, F,eatures);
@@ -1252,6 +1253,19 @@ index a41b951..2f670e9 100644
 +        std::array<bool, 2> _boundStageHasBuffers {};
  	};
  };
+diff --git a/private-include/indium/render-pipeline.private.hpp b/private-include/indium/render-pipeline.private.hpp
+--- a/private-include/indium/render-pipeline.private.hpp
++++ b/private-include/indium/render-pipeline.private.hpp
+@@ -40,6 +40,9 @@ namespace Indium {
+ 
+ 			const FunctionInfo& vertexFunctionInfo();
+ 			const FunctionInfo& fragmentFunctionInfo();
++			// Reject unbound fetches that cannot fit in the finite zero buffer.
++			// Zero stride is independent of draw ranges, including indexed draws.
++			void validateVertexBufferFallback(size_t metalIndex, size_t length) const;
+ 
+ 			INDIUM_PROPERTY_READONLY_OBJECT(PrivateDevice, p, P,rivateDevice);
+ 
 diff --git a/private-include/indium/texture.private.hpp b/private-include/indium/texture.private.hpp
 index ccc27bb..e40e40c 100644
 --- a/private-include/indium/texture.private.hpp
@@ -3489,7 +3503,7 @@ index 322e186..f712c7a 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +950,160 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +950,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -3500,13 +3514,17 @@ index 322e186..f712c7a 100644
 +    return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
 +}
 +
-+uint64_t Indium::PrivateDevice::fallbackBufferAddress() {
++const std::shared_ptr<Indium::Buffer>& Indium::PrivateDevice::fallbackBuffer() {
 +	std::scoped_lock lock(_fallbackMutex);
 +	if (!_fallbackBuffer) {
 +		std::vector<char> zeros(64 * 1024, 0);
 +		_fallbackBuffer = newBuffer(zeros.data(), zeros.size(), ResourceOptions::StorageModeShared);
 +	}
-+	return _fallbackBuffer->gpuAddress();
++	return _fallbackBuffer;
++};
++
++uint64_t Indium::PrivateDevice::fallbackBufferAddress() {
++	return fallbackBuffer()->gpuAddress();
 +};
 +
 +std::shared_ptr<Indium::SamplerState> Indium::PrivateDevice::fallbackSampler() {
@@ -4205,7 +4223,7 @@ index b27ffe5..dd7434d 100644
  	DynamicVK::vkCmdSetScissorWithCount(buf->commandBuffer(), tmp.size(), tmp.data());
  };
  
-@@ -287,43 +454,217 @@ void Indium::PrivateRenderCommandEncoder::setBlendColor(float red, float green,
+@@ -287,43 +454,229 @@ void Indium::PrivateRenderCommandEncoder::setBlendColor(float red, float green,
  	DynamicVK::vkCmdSetBlendConstants(buf->commandBuffer(), tmp);
  };
  
@@ -4369,6 +4387,24 @@ index b27ffe5..dd7434d 100644
 -		offsets.resize(vertexInputBindings.size());
 +	if (!vertexInputBindings.empty() &&
 +        (_lastVertexResourceRevision != _functionResources[0].revision || _lastVertexBindingPSO != _privatePSO.get())) {
++        const auto vertexBufferAt = [&](size_t metalIndex) -> PrivateBuffer* {
++            if (metalIndex >= _functionResources[0].buffers.size()) return nullptr;
++            return metalIndex < _resolvedResources[0].buffers.size() ?
++                _resolvedResources[0].buffers[metalIndex].value :
++                dynamic_cast<PrivateBuffer*>(_functionResources[0].buffers[metalIndex].first.get());
++        };
++        PrivateBuffer* fallback = nullptr;
++        if (!_privateDevice->nullDescriptorEnabled()) {
++            // Validate every missing slot before touching the binding cache.
++            // A rejected draw must not make a later draw skip a required bind.
++            for (const auto metalIndex : vertexInputBindings) {
++                if (vertexBufferAt(metalIndex)) continue;
++                if (!fallback)
++                    fallback = dynamic_cast<PrivateBuffer*>(_privateDevice->fallbackBuffer().get());
++                if (!fallback) throw std::runtime_error("Cannot create unbound vertex buffer fallback");
++                _privatePSO->validateVertexBufferFallback(metalIndex, fallback->length());
++            }
++        }
 +        auto& buffers = _lastVertexBuffers;
 +        auto& offsets = _lastVertexOffsets;
 +        bool vertexBindingsChanged = buffers.size() < vertexInputBindings.size();
@@ -4380,19 +4416,13 @@ index b27ffe5..dd7434d 100644
  
 -			if (metalIndex >= _functionResources[0].buffers.size()) {
 -				// technically, this requires the `nullDescriptor` feature, but we should never run into this case anyways.
-+			PrivateBuffer* privateBuffer = nullptr;
-+			size_t offset = 0;
-+			if (metalIndex < _functionResources[0].buffers.size()) {
-+				const auto& [buffer, bufferOffset] = _functionResources[0].buffers[metalIndex];
-+				privateBuffer = metalIndex < _resolvedResources[0].buffers.size() ?
-+                    _resolvedResources[0].buffers[metalIndex].value : dynamic_cast<PrivateBuffer*>(buffer.get());
-+				offset = bufferOffset;
-+			}
++			auto* privateBuffer = vertexBufferAt(metalIndex);
++			const size_t offset = privateBuffer ? _functionResources[0].buffers[metalIndex].second : 0;
 +            const auto previousBuffer = buffers[vulkanIndex];
 +            const auto previousOffset = offsets[vulkanIndex];
 +			if (!privateBuffer) {
-+				// the pipeline fetches vertices from a Metal buffer index the app never bound. Device creation enables
-+				// nullDescriptor so VK_NULL_HANDLE is legal here (reads return zero); before that this faulted the GPU at address 0.
++				// Null descriptors read zero at any fetch index. Otherwise only the
++				// zero-stride, in-bounds accesses checked above may use the zero buffer.
 +				static unsigned unboundLogged = 0;
 +				if (unboundLogged < 20) {
 +					++unboundLogged;
@@ -4401,7 +4431,8 @@ index b27ffe5..dd7434d 100644
 +						fclose(file);
 +					}
 +				}
- 				buffers[vulkanIndex] = VK_NULL_HANDLE;
+-				buffers[vulkanIndex] = VK_NULL_HANDLE;
++				buffers[vulkanIndex] = fallback ? fallback->buffer() : VK_NULL_HANDLE;
  				offsets[vulkanIndex] = 0;
  			} else {
 -				auto [buffer, offset] = _functionResources[0].buffers[metalIndex];
@@ -4441,7 +4472,7 @@ index b27ffe5..dd7434d 100644
  	auto buf = _privateCommandBuffer.lock();
  
  	// bind the pipeline with the right topology class for this primitive
-@@ -343,20 +684,26 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
+@@ -343,20 +696,26 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
  		default:
  			throw BadEnumValue();
  	}
@@ -4474,7 +4505,7 @@ index b27ffe5..dd7434d 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount) {
-@@ -368,22 +715,42 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
+@@ -368,22 +727,42 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
  };
  
  void Indium::PrivateRenderCommandEncoder::setVertexBytes(const void* bytes, size_t length, size_t index) {
@@ -4520,7 +4551,7 @@ index b27ffe5..dd7434d 100644
  	}
  };
  
-@@ -391,12 +758,14 @@ void Indium::PrivateRenderCommandEncoder::setVertexBufferOffset(size_t offset, s
+@@ -391,12 +770,14 @@ void Indium::PrivateRenderCommandEncoder::setVertexBufferOffset(size_t offset, s
  	_functionResources[0].setBufferOffset(offset, index);
  };
  
@@ -4537,7 +4568,7 @@ index b27ffe5..dd7434d 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) {
-@@ -411,28 +780,34 @@ void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vect
+@@ -411,28 +792,34 @@ void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vect
  	}
  };
  
@@ -4576,7 +4607,7 @@ index b27ffe5..dd7434d 100644
  	}
  };
  
-@@ -440,12 +815,14 @@ void Indium::PrivateRenderCommandEncoder::setFragmentBufferOffset(size_t offset,
+@@ -440,12 +827,14 @@ void Indium::PrivateRenderCommandEncoder::setFragmentBufferOffset(size_t offset,
  	_functionResources[1].setBufferOffset(offset, index);
  };
  
@@ -4593,7 +4624,7 @@ index b27ffe5..dd7434d 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) {
-@@ -460,17 +837,22 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
+@@ -460,17 +849,22 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
  	}
  };
  
@@ -4619,7 +4650,7 @@ index b27ffe5..dd7434d 100644
  	auto buf = _privateCommandBuffer.lock();
  
  	// bind the pipeline with the right topology class for this primitive
-@@ -490,39 +872,62 @@ void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType pr
+@@ -490,39 +884,62 @@ void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType pr
  		default:
  			throw BadEnumValue();
  	}
@@ -4700,7 +4731,7 @@ index b27ffe5..dd7434d 100644
  	DynamicVK::vkCmdSetDepthWriteEnable(buf->commandBuffer(), desc.depthWriteEnabled ? VK_TRUE : VK_FALSE);
  	DynamicVK::vkCmdSetDepthCompareOp(buf->commandBuffer(), compareFunctionToVkCompareOp(desc.depthCompareFunction));
  	DynamicVK::vkCmdSetDepthTestEnable(buf->commandBuffer(), VK_TRUE);
-@@ -694,3 +1099,18 @@ void Indium::PrivateRenderCommandEncoder::useResources(const std::vector<std::sh
+@@ -694,3 +1111,18 @@ void Indium::PrivateRenderCommandEncoder::useResources(const std::vector<std::sh
  	// TODO: check what Metal does in this case. this is just an educated guess
  	useResources(resources, usage, RenderStages::Vertex | RenderStages::Fragment | RenderStages::Tile | RenderStages::Object | RenderStages::Mesh);
  };
@@ -4737,7 +4768,7 @@ index 1b6bb3b..97a1116 100644
  
  #include <stdexcept>
  
-@@ -22,9 +27,33 @@ Indium::PrivateRenderPipelineState::PrivateRenderPipelineState(std::shared_ptr<P
+@@ -22,9 +27,94 @@ Indium::PrivateRenderPipelineState::PrivateRenderPipelineState(std::shared_ptr<P
  
  	_vertexFunction = std::dynamic_pointer_cast<PrivateFunction>(descriptor.vertexFunction);
  	_fragmentFunction = std::dynamic_pointer_cast<PrivateFunction>(descriptor.fragmentFunction);
@@ -4772,9 +4803,70 @@ index 1b6bb3b..97a1116 100644
 +	_descriptorSetLayouts.processFunction(_vertexFunction, 0, true);
 +	_descriptorSetLayouts.processFunction(_fragmentFunction, 1, true);
  };
++
++void Indium::PrivateRenderPipelineState::validateVertexBufferFallback(size_t metalIndex, size_t length) const {
++	// A finite buffer cannot cover arbitrary vertex/instance indices. In
++	// particular, indexed draws can fetch beyond any CPU-known draw range.
++	const auto& descriptor = _vertexDescriptor.value();
++	const auto& layout = descriptor.layouts.at(metalIndex);
++	const bool constant = layout.stepFunction == VertexStepFunction::Constant && layout.stepRate == 0;
++	if (!constant && layout.stride != 0) {
++		throw std::runtime_error("Unbound vertex buffer " + std::to_string(metalIndex) +
++			": nonzero stride requires nullDescriptor support");
++	}
++	const auto attributeSize = [](VertexFormat format) -> size_t {
++		switch (format) {
++			case VertexFormat::UChar: case VertexFormat::Char:
++			case VertexFormat::UCharNormalized: case VertexFormat::CharNormalized:
++				return 1;
++			case VertexFormat::UChar2: case VertexFormat::Char2:
++			case VertexFormat::UChar2Normalized: case VertexFormat::Char2Normalized:
++			case VertexFormat::UShort: case VertexFormat::Short:
++			case VertexFormat::UShortNormalized: case VertexFormat::ShortNormalized:
++			case VertexFormat::Half:
++				return 2;
++			case VertexFormat::UChar3: case VertexFormat::Char3:
++			case VertexFormat::UChar3Normalized: case VertexFormat::Char3Normalized:
++				return 3;
++			case VertexFormat::UChar4: case VertexFormat::Char4:
++			case VertexFormat::UChar4Normalized: case VertexFormat::Char4Normalized:
++			case VertexFormat::UShort2: case VertexFormat::Short2:
++			case VertexFormat::UShort2Normalized: case VertexFormat::Short2Normalized:
++			case VertexFormat::Half2: case VertexFormat::Float:
++			case VertexFormat::Int: case VertexFormat::UInt:
++			case VertexFormat::Int1010102Normalized: case VertexFormat::UInt1010102Normalized:
++			case VertexFormat::UChar4Normalized_BGRA:
++				return 4;
++			case VertexFormat::UShort3: case VertexFormat::Short3:
++			case VertexFormat::UShort3Normalized: case VertexFormat::Short3Normalized:
++			case VertexFormat::Half3:
++				return 6;
++			case VertexFormat::UShort4: case VertexFormat::Short4:
++			case VertexFormat::UShort4Normalized: case VertexFormat::Short4Normalized:
++			case VertexFormat::Half4: case VertexFormat::Float2:
++			case VertexFormat::Int2: case VertexFormat::UInt2:
++				return 8;
++			case VertexFormat::Float3: case VertexFormat::Int3: case VertexFormat::UInt3:
++				return 12;
++			case VertexFormat::Float4: case VertexFormat::Int4: case VertexFormat::UInt4:
++				return 16;
++			default:
++				throw std::runtime_error("Unsupported vertex format for unbound buffer fallback");
++		}
++	};
++	for (const auto& [index, attribute] : descriptor.attributes) {
++		if (attribute.bufferIndex != metalIndex) continue;
++		const auto size = attributeSize(attribute.format);
++		// Subtract only after checking the offset: offset + size may overflow.
++		if (attribute.offset > length || size > length - attribute.offset) {
++			throw std::runtime_error("Unbound vertex buffer " + std::to_string(metalIndex) +
++				": attribute " + std::to_string(index) + " exceeds zero-buffer fallback");
++		}
++	}
++};
  
  Indium::PrivateRenderPipelineState::~PrivateRenderPipelineState() {
-@@ -67,6 +96,14 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -67,6 +157,14 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  	shaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
  
  	shaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -4789,7 +4881,7 @@ index 1b6bb3b..97a1116 100644
  	shaderStage.module = _vertexFunction->library()->shaderModule();
  	shaderStage.pName = vertexFunctionName.c_str();
  	stages.push_back(shaderStage);
-@@ -92,10 +129,13 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -92,10 +190,13 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		for (const auto& [index, layout]: desc.layouts) {
  			VkVertexInputBindingDescription bindingDesc {};
  
@@ -4805,7 +4897,7 @@ index 1b6bb3b..97a1116 100644
  				throw std::runtime_error("TODO: support step functions other than per-vertex and per-instance");
  			}
  
-@@ -104,8 +144,8 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -104,8 +205,8 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  			++currIndex;
  
  			bindingDesc.binding = vulkanIndex;
@@ -4816,7 +4908,7 @@ index 1b6bb3b..97a1116 100644
  
  			vertexBindingDescs.push_back(bindingDesc);
  		}
-@@ -168,6 +208,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -168,6 +269,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		tmp.dstAlphaBlendFactor = blendFactorToVkBlendFactor(colorInfo.destinationAlphaBlendFactor);
  		tmp.alphaBlendOp = blendOperationToVkBlendOp(colorInfo.alphaBlendOperation);
  		tmp.colorWriteMask = colorWriteMaskToVkColorComponentFlags(colorInfo.writeMask);
@@ -6107,7 +6199,7 @@ index 21c501f..9f6663b 100644
  				++location;
  				_outputValueIDs.push_back(var);
  				builder.referenceGlobalVariable(var);
-@@ -472,13 +984,67 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -472,13 +984,69 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		auto type = llvmTypeToSPIRVType(builder, funcRetType);
  		auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
  		auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
@@ -6167,6 +6259,8 @@ index 21c501f..9f6663b 100644
 +                    j += 5;
 +                }
 +            }
++            else continue;
++            ++i; // Recognized keys consume the following operand; standalone flags do not.
 +        }
 +        // Vertex attribute indices must come from AIR, not parameter order or a default.
 +        if (arg.type == BindingType::VertexInput && !hasLocationIndex) continue;

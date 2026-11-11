@@ -322,7 +322,7 @@
       "revision": "8423a7d2f053167030d2bc4a227f96243c740667",
       "repository": "https://github.com/darlinghq/indium.git",
       "patch": "patches/metal--deps--indium.patch",
-      "modified_files": 36,
+      "modified_files": 37,
       "new_files": [
         "private-include/indium/counters.private.hpp",
         "private-include/indium/deferred-blit-encoder.private.hpp",

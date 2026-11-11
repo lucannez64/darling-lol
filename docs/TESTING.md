@@ -600,10 +600,42 @@ darling shell env DYLD_FRAMEWORK_PATH=/Users/$USER/RuntimeFrameworks \
   "/Volumes/SystemRoot$PWD/build/darling-src/src/external/metal/deps/indium/test/cubemap/shaders.metallib"
 ```
 
-The check loads the cubemap shader and verifies the names, indices, types and
-active flags of both vertex-attribute reflection APIs, as well as the absence
-of vertex attributes on a fragment function. Use the configured guest username
-in place of `$USER` if it differs from the host username.
+The check loads the existing cubemap shader and verifies the names, indices,
+types and active flags of both vertex-attribute reflection APIs, as well as the
+absence of vertex attributes on a fragment function. It then calls the same
+stage-input matching helper used for that metadata comparison with the real
+reflected inputs reversed, and with only input 1 retained (its index is beyond
+the singleton array's bounds). It checks object identity for both reordered
+matches and the sparse match, and requires `nil` for a missing sparse input,
+an absent trailing index and an empty array. No additional shaders or game
+assets are needed.
+
+Expected: `PASS: stage inputs match by index for reordered, sparse and missing inputs`
+and `PASS: vertex shader attributes retain real indices and types`. A failed
+assertion prints `FAIL:` and exits nonzero; check both success markers because
+some Darling launchers do not propagate the guest exit status. Run only this
+standalone probe with clients and the game closed. Use the configured guest
+username in place of `$USER` if it differs from the host username.
+
+The AIR metadata scan also has an offline behavioral check using synthetic LLVM
+metadata, including a name that resembles a metadata key and a standalone flag:
+
+```sh
+python3 -m unittest discover -s tests -p test_air_reflection_metadata.py
+```
+
+The zero-buffer fallback's stride and attribute bounds are checked against
+Indium's prepared headers with:
+
+```sh
+python3 -m unittest discover -s tests -p test_vertex_buffer_fallback.py
+```
+
+On devices without `nullDescriptor`, a missing zero-stride vertex buffer uses
+the zero-filled fallback only when every attribute fits. Missing buffers with
+nonzero stride are rejected because a finite fallback cannot cover arbitrary
+vertex or instance indices. This offline check does not exercise Vulkan or
+establish hardware compatibility.
 
 ## Metal bind model
 
