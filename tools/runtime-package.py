@@ -86,6 +86,8 @@ def collect(home):
     files, links, directories = [], [], []
     for root in ROOTS:
         base = home / root
+        if base.is_symlink():
+            raise PackageError('symlinked runtime root: %s' % base)
         if not base.is_dir():
             raise PackageError('missing runtime root: %s' % base)
         for current, names, filenames in os.walk(base, followlinks=False):
@@ -131,11 +133,13 @@ def build_manifest(home, files, links, label):
 
 def safe_relative(name):
     """A package path that stays inside a runtime root."""
-    if not name or name.startswith('/') or '\\' in name:
+    if not isinstance(name, str) or not name or name.startswith('/') or '\\' in name:
         raise PackageError('unsafe package path: %r' % name)
     parts = PurePosixPath(name).parts
     if any(part in ('..', '.') for part in parts):
         raise PackageError('unsafe package path: %r' % name)
+    if '/'.join(parts) != name:
+        raise PackageError('noncanonical package path: %r' % name)
     if not parts or parts[0] not in ROOTS:
         raise PackageError('path outside the runtime roots: %r' % name)
     return parts
@@ -160,6 +164,35 @@ def check_link(name, target):
     return target
 
 
+def check_links(entries):
+    """Resolve composed package symlinks, including .. after another symlink."""
+    links = {entry['path']: check_link(entry['path'], entry['target']) for entry in entries}
+    for name in links:
+        root = safe_relative(name)[0]
+        pending = list(PurePosixPath(name).parts)
+        resolved = []
+        hops = 0
+        while pending:
+            part = pending.pop(0)
+            if part == '.':
+                continue
+            if part == '..':
+                if len(resolved) <= 1:
+                    raise PackageError('composed symlink escapes %s: %s' % (root, name))
+                resolved.pop()
+                continue
+            resolved.append(part)
+            key = '/'.join(resolved)
+            if key in links:
+                hops += 1
+                if hops > 40:
+                    raise PackageError('symlink cycle: %s' % name)
+                resolved.pop()
+                pending = list(PurePosixPath(links[key]).parts) + pending
+        if not resolved or resolved[0] != root:
+            raise PackageError('composed symlink escapes %s: %s' % (root, name))
+
+
 def add_bytes(archive, name, data, mode=0o644, mtime=0):
     info = tarfile.TarInfo(name)
     info.size = len(data)
@@ -173,6 +206,7 @@ def add_bytes(archive, name, data, mode=0o644, mtime=0):
 def export(home, output, label):
     directories, files, links = collect(home)
     manifest = build_manifest(home, files, links, label)
+    check_links(manifest['symlinks'])
     data = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()
     stamp = int(os.environ.get('SOURCE_DATE_EPOCH', '0') or 0)
     output = Path(output)
@@ -252,6 +286,7 @@ def validate(manifest, members):
             raise PackageError('not a regular file: %s' % name)
         if kind == 'link' and not member.issym():
             raise PackageError('not a symlink: %s' % name)
+    check_links(manifest.get('symlinks', []))
     missing = sorted(set(expected) - set(members))
     if missing:
         raise PackageError('missing archive members: %s' % ', '.join(missing[:5]))
@@ -270,18 +305,44 @@ def destination(root, name):
 
 def install(package, root, dry_run=False, out=print):
     manifest, members, archive = read_package(package)
-    validate(manifest, members)
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix='.runtime-package-', dir=root))
+    staging = None
     installed = removed = 0
+    root = Path(root)
     try:
-        for entry in manifest['files']:
+        validate(manifest, members)
+        if root.is_symlink():
+            raise PackageError('refusing symlinked destination root: %s' % root)
+        if not dry_run:
+            root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix='.runtime-package-',
+                                       dir=None if dry_run else root))
+        prepared = []
+        directories = [destination(root, name) for name, member in members.items()
+                       if member.isdir()]
+        entries = [(entry, False) for entry in manifest['files']]
+        entries += [(entry, True) for entry in manifest['symlinks']]
+        # Preflight all destinations before staging or changing installed files.
+        for entry, is_link in entries:
             target = destination(root, entry['path'])
-            member = members[entry['path']]
+            if target.is_dir() and not target.is_symlink():
+                raise PackageError('refusing to replace directory: %s' % target)
+            for parent in target.parents:
+                if parent == root:
+                    break
+                if parent.exists() and not parent.is_dir():
+                    raise PackageError('destination parent is not a directory: %s' % parent)
             staged = staging / hashlib.sha256(entry['path'].encode()).hexdigest()
+            prepared.append((entry, is_link, target, staged))
+        for directory in directories:
+            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                raise PackageError('refusing to replace directory: %s' % directory)
+        # Prepare every byte, checksum, mode and symlink before the first replace.
+        for entry, is_link, target, staged in prepared:
+            if is_link:
+                os.symlink(entry['target'], staged)
+                continue
             digest = hashlib.sha256()
-            with archive.extractfile(member) as source, open(staged, 'wb') as sink:
+            with archive.extractfile(members[entry['path']]) as source, open(staged, 'wb') as sink:
                 while True:
                     block = source.read(CHUNK)
                     if not block:
@@ -290,33 +351,24 @@ def install(package, root, dry_run=False, out=print):
                     sink.write(block)
             if digest.hexdigest() != entry['sha256']:
                 raise PackageError('checksum mismatch: %s' % entry['path'])
-            if dry_run:
-                out('would install %s' % entry['path'])
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.is_symlink() or target.exists():
-                if target.is_dir() and not target.is_symlink():
-                    raise PackageError('refusing to replace directory: %s' % target)
-                target.unlink()
-                removed += 1
             os.chmod(staged, entry['mode'])
-            os.replace(staged, target)
-            installed += 1
-        for entry in manifest['symlinks']:
-            target = destination(root, entry['path'])
-            link = check_link(entry['path'], entry['target'])
-            if dry_run:
-                out('would link %s -> %s' % (entry['path'], link))
-                continue
+        if dry_run:
+            for entry, is_link, target, staged in prepared:
+                out('would link %s -> %s' % (entry['path'], entry['target']) if is_link
+                    else 'would install %s' % entry['path'])
+            return manifest
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+        for entry, is_link, target, staged in prepared:
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink() or target.exists():
-                target.unlink()
                 removed += 1
-            os.symlink(link, target)
+            os.replace(staged, target)
             installed += 1
     finally:
         archive.close()
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
     out('installed %d entries (%d replaced) into %s' % (installed, removed, root))
     return manifest
 

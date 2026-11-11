@@ -52,7 +52,9 @@ The archive is untrusted input:
   ancestors are symlinks.
 
 A checksum mismatch, an unexpected member, or an escaping link aborts the
-install and leaves the existing overlay untouched.
+install and leaves the existing overlay untouched. All entries and destination
+collisions are checked before replacement begins. Each replacement is atomic;
+an I/O failure during replacement can still leave a partially updated set.
 
 ## What this covers
 

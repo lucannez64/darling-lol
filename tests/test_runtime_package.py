@@ -117,6 +117,44 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertFalse((target / 'RuntimeLibraries/libGL.dylib').exists())
         self.assertEqual(list(target.glob('.runtime-package-*')), [])
 
+    def test_later_checksum_failure_preserves_every_old_file(self):
+        files = {'RuntimeLibraries/a': b'new-a', 'RuntimeLibraries/b': b'bad-b'}
+        manifest = {'schema': package_tool.SCHEMA, 'files': [
+            {'path': name, 'size': len(data), 'mode': 0o644,
+             'sha256': hashlib.sha256(data if name.endswith('/a') else b'expected').hexdigest()}
+            for name, data in files.items()], 'symlinks': []}
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        for name in ('a', 'b'):
+            (target / 'RuntimeLibraries' / name).write_bytes(b'old-' + name.encode())
+        write_package(self.archive, files, {}, manifest)
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        for name in ('a', 'b'):
+            self.assertEqual((target / 'RuntimeLibraries' / name).read_bytes(), b'old-' + name.encode())
+
+    def test_later_directory_collision_preserves_earlier_file(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries/b').mkdir(parents=True)
+        (target / 'RuntimeLibraries/a').write_bytes(b'old')
+        write_package(self.archive, {'RuntimeLibraries/a': b'new', 'RuntimeLibraries/b': b'bad'}, {})
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertEqual((target / 'RuntimeLibraries/a').read_bytes(), b'old')
+
+    def test_composed_symlink_escape_is_refused(self):
+        # Both targets stay in the root lexically, but a -> b/.. and b -> .
+        # resolves a outside RuntimeLibraries after b is followed.
+        write_package(self.archive, {}, {'RuntimeLibraries/a': 'b/..', 'RuntimeLibraries/b': '.'})
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, self.root / 'target')
+
+    def test_dry_run_does_not_create_destination(self):
+        package_tool.export(self.home, self.archive, 'test')
+        target = self.root / 'absent'
+        package_tool.install(self.archive, target, dry_run=True, out=lambda _: None)
+        self.assertFalse(target.exists())
+
     def test_traversal_path_is_refused(self):
         manifest = {
             'schema': package_tool.SCHEMA,
