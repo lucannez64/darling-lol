@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..6650f54 100644
+index 5b2e765..e86a749 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -92,7 +92,15 @@ index 5b2e765..6650f54 100644
  	src/xnu_syscall/bsd/impl/misc/proc_info.c
  	src/xnu_syscall/bsd/impl/misc/ptrace.c
  	src/xnu_syscall/bsd/impl/misc/reboot.c
-@@ -359,6 +363,11 @@ set(emulation_sources
+@@ -162,6 +166,7 @@ set(xnu_syscall_bsd_sources
+ 	src/xnu_syscall/bsd/impl/misc/syscall.c
+ 	src/xnu_syscall/bsd/impl/misc/sysctl.c
+ 	src/xnu_syscall/bsd/impl/misc/thread_selfid.c
++	src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+ 	src/xnu_syscall/bsd/impl/mman/madvise.c
+ 	src/xnu_syscall/bsd/impl/mman/mman.c
+ 	src/xnu_syscall/bsd/impl/mman/msync.c
+@@ -359,6 +364,11 @@ set(emulation_sources
  	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
  )
  
@@ -2623,7 +2631,7 @@ index 8c6d5d9..6fd1acf 100644
  }
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
-index 7d5ef80..46debb8 100644
+index 7d5ef80..c8672bb 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/bsd_syscall_table.c
 @@ -24,6 +24,7 @@
@@ -2642,7 +2650,15 @@ index 7d5ef80..46debb8 100644
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/proc_info.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/ptrace.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/reboot.h>
-@@ -427,6 +429,7 @@ void* __bsd_syscall_table[600] = {
+@@ -53,6 +55,7 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/syscall.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/sysctl.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfid.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfusage.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/madvise.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/msync.h>
+@@ -427,6 +430,7 @@ void* __bsd_syscall_table[600] = {
  	[369] = sys_kevent64,
  	[372] = sys_thread_selfid,
  	[374] = sys_kevent_qos,
@@ -2650,7 +2666,7 @@ index 7d5ef80..46debb8 100644
  	[394] = sys_pselect,
  	[395] = sys_pselect_nocancel,
  	[396] = sys_read_nocancel,
-@@ -462,6 +465,7 @@ void* __bsd_syscall_table[600] = {
+@@ -462,6 +466,7 @@ void* __bsd_syscall_table[600] = {
  	[441] = sys_guarded_open_np,
  	[442] = sys_guarded_close_np,
  	[443] = sys_guarded_kqueue_np,
@@ -2658,7 +2674,12 @@ index 7d5ef80..46debb8 100644
  	[461] = sys_getattrlistbulk,
  	[462] = sys_clonefileat,
  	[463] = sys_openat,
-@@ -483,6 +487,7 @@ void* __bsd_syscall_table[600] = {
+@@ -479,10 +484,12 @@ void* __bsd_syscall_table[600] = {
+ 	[475] = sys_mkdirat,
+ 	[476] = sys_getattrlistat,
+ 	[478] = sys_bsdthread_ctl,
++	[482] = sys_thread_selfusage,
+ 	[483] = sys_csrctl,
  	[500] = sys_getentropy,
  	[515] = sys_ulock_wait,
  	[516] = sys_ulock_wake,
@@ -3019,10 +3040,34 @@ index f273989..938f00d 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..83ad15c 100644
+index bd9cdc2..61fe056 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -139,18 +139,23 @@ sysctl_handler(handle_boottime)
+@@ -23,6 +23,7 @@
+ enum {
+ 	_KERN_MSGBUF = 1000,
+ 	_KERN_OSPRODUCTVERSION,
++	_KERN_HV_VMM_PRESENT,
+ 
+ 	_KERN_SEMMNS = 1000,
+ };
+@@ -46,6 +47,7 @@ static sysctl_handler(handle_usrstack64);
+ static sysctl_handler(handle_sysv_semmns);
+ static sysctl_handler(handle_osproductversion);
+ static sysctl_handler(handle_osrevision);
++static sysctl_handler(handle_hv_vmm_present);
+ 
+ extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
+ extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
+@@ -76,6 +78,7 @@ const struct known_sysctl sysctls_kern[] = {
+ 	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
+ 	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
+ 	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
++	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
+ 	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
+ 	{ .oid = -1 }
+ };
+@@ -139,18 +142,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -3052,6 +3097,26 @@ index bd9cdc2..83ad15c 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
+@@ -342,3 +350,19 @@ static sysctl_handler(handle_osrevision) {
+ 	*oldlen = sizeof(*ovalue);
+ 	return 0;
+ }
++
++// Whether the host runs under a hypervisor, from the CPUID hypervisor bit
++// (leaf 1, ECX bit 31), as XNU reports it. Chromium's renderer CHECKs that this
++// sysctl exists.
++static sysctl_handler(handle_hv_vmm_present) {
++	int value = 0;
++
++	sysctl_handle_size(sizeof(int));
++#if defined(__i386__) || defined(__x86_64__)
++	unsigned int eax = 1, ebx, ecx = 0, edx;
++	__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
++	value = (ecx >> 31) & 1;
++#endif
++	*((int*) old) = value;
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 index 4319355..da10132 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
@@ -4591,12 +4656,14 @@ index 10f39a5..29747d4 100644
  		current = next;
  		token = strtok_r(NULL, ".", &saveptr);
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-index 10c412b..adb7e24 100644
+index 10c412b..2a8f36e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mman/madvise.c
-@@ -4,23 +4,97 @@
+@@ -3,27 +3,109 @@
+ #include <sys/errno.h>
  
  #include <darling/emulation/conversion/errno.h>
++#include <darling/emulation/conversion/duct_errno.h>
  #include <darling/emulation/common/base.h>
 +#include <darling/emulation/common/simple.h>
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
@@ -4652,6 +4719,7 @@ index 10c412b..adb7e24 100644
 +	__atomic_store_n(&thp_mode, mode, __ATOMIC_RELEASE);
 +	return mode;
 +}
++
  
  long sys_madvise(void* addr, unsigned long len, int advice)
  {
@@ -4689,6 +4757,8 @@ index 10c412b..adb7e24 100644
 +		// range is no longer lazily reclaimable when REUSE returns, and a
 +		// caller may reuse a page range that an earlier free hint marked.
 +		// Only a write-prefault of that particular page cancels its laziness.
++		if (((unsigned long) addr & 4095) != 0)
++			return -EINVAL;
 +		advice = LINUX_MADV_POPULATE_WRITE;
 +	} else if (advice >= 5) {
 +		// Other OS X/BSD-specific hints do not share Linux's numeric values.
@@ -4696,6 +4766,13 @@ index 10c412b..adb7e24 100644
 +	}
  
  	ret = LINUX_SYSCALL(__NR_madvise, addr, len, advice);
+ 
++	// A failed write-prefault may leave pages lazily reclaimable, even
++	// after mprotect removes write access. Preserve that failure: success
++	// would incorrectly promise that REUSE cancelled lazy reclaim.
++
+ 	if (ret < 0)
+ 		ret = errno_linux_to_bsd(ret);
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/accept.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/network/accept.c
 index 4daa631..5aeedd0 100644
@@ -5514,6 +5591,29 @@ index 1098510..1741d5a 100644
 +	    buf->f_mntfromname, sizeof(buf->f_mntfromname));
  	return 0;
  }
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c
+index fc2cdb7..9bc58e6 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/mkfifo.c
+@@ -7,6 +7,7 @@
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ #include <darling/emulation/common/bsdthread/per_thread_wd.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/other/mach/lkm.h>
+ 
+@@ -29,6 +30,10 @@ long sys_mkfifo(const char* path, unsigned int mode)
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
++
+ 	#if defined(__NR_mknod)
+ 		ret = LINUX_SYSCALL(__NR_mknod, vc.path, mode | LINUX_S_IFIFO, 0);
+ 	#else
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
 index a6a5162..2155dc4 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
@@ -5757,6 +5857,29 @@ index be89afd..96bc339 100644
  	ret = LINUX_SYSCALL(__NR_gettimeofday, &ltv, tz);
  	if (ret < 0)
  	{
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c
+index e2c5634..9dfdac8 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/chmod_extended.c
+@@ -4,6 +4,7 @@
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ #include <darling/emulation/common/bsdthread/per_thread_wd.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ 
+ long sys_chmod_extended(const char* path, int uid, int gid, int mode, void* xsec)
+@@ -19,6 +20,10 @@ long sys_chmod_extended(const char* path, int uid, int gid, int mode, void* xsec
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
++
+ 	#if defined(__NR_chmod)
+ 		ret = LINUX_SYSCALL(__NR_chmod, vc.path, mode);
+ 	#else
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/close.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/close.c
 index 6fad87f..e77e786 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/close.c
@@ -5778,6 +5901,52 @@ index 6fad87f..e77e786 100644
  	if (ret < 0)
  		ret = errno_linux_to_bsd(ret);
  	else
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c
+index 87f0d90..8abba57 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/fchmod_extended.c
+@@ -5,6 +5,7 @@
+ 
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/conversion/errno.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ 
+ long sys_fchmod_extended(int fd, int uid, int gid, int mode, void* xsec)
+@@ -16,6 +17,10 @@ long sys_fchmod_extended(int fd, int uid, int gid, int mode, void* xsec)
+ 		return 0;
+ 	}
+ 
++	ret = dc_sip_check_fd(fd);
++	if (ret != 0)
++		return ret;
++
+ 	ret = LINUX_SYSCALL2(__NR_fchmod, fd, mode);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c
+index 8ae6ae0..08f95f3 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/mknod.c
+@@ -6,6 +6,7 @@
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/common/bsdthread/per_thread_wd.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ 
+ long sys_mknod(const char* path, int mode, int dev)
+ {
+@@ -21,6 +22,10 @@ long sys_mknod(const char* path, int mode, int dev)
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
++
+ 	#if defined(__NR_mknod)
+ 		ret = LINUX_SYSCALL(__NR_mknod, vc.path, mode, dev);
+ 	#else
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/read.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/read.c
 index bafb315..1e8dd67 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/read.c
@@ -5800,6 +5969,37 @@ index bafb315..1e8dd67 100644
  	if (ret < 0)
  	{
  		// When the slave side of a PTY is closed, Linux produces -EIO on the master side.
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c
+index 543b8cf..afc3970 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/xattr/setattrlist_generic.c
+@@ -4,6 +4,7 @@
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/conversion/common_at.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
+ #include <darling/emulation/linux_premigration/vchroot_expand.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ 
+@@ -82,6 +83,18 @@ struct xnu_attrlist* alist, void *attributeBuffer, __SIZE_TYPE__ bufferSize, uns
+ 	if ((alist->forkattr & FORK_SUPPORTED) != alist->forkattr)
+ 		return -EINVAL;
+ 
++	/* Times and the access mask mutate the inode; refuse protected files
++	 * before the first write, like utimes() and fchmodat() already do. */
++	if (alist->commonattr & COMMON_SUPPORTED) {
++#if HAS_PATH
++		rv = dc_sip_check_write(vc.path);
++#else
++		rv = dc_sip_check_fd(fd);
++#endif
++		if (rv != 0)
++			return rv;
++	}
++
+ 	next = (char*) attributeBuffer;
+ 
+ 	if (alist->commonattr & ATTR_CMN_CRTIME)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fgetxattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fgetxattr.c
 index 6dca738..3d864d2 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fgetxattr.c
@@ -5830,14 +6030,15 @@ index 6dca738..3d864d2 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c
-index adaff44..eb445fe 100644
+index adaff44..009b437 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/fremovexattr.c
-@@ -2,16 +2,19 @@
+@@ -2,16 +2,24 @@
  
  #include <darling/emulation/common/base.h>
  #include <darling/emulation/conversion/errno.h>
 +#include <darling/emulation/conversion/xattr/name.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
  
  long sys_fremovexattr(int fd, const char* name, int options)
@@ -5845,6 +6046,10 @@ index adaff44..eb445fe 100644
  	int ret;
 +	char linux_name[1024];
  
++	ret = dc_sip_check_fd(fd);
++	if (ret != 0)
++		return ret;
++
 +	name = xattr_name_to_linux(name, linux_name, sizeof(linux_name));
  	ret = LINUX_SYSCALL(__NR_fremovexattr, fd, name);
  
@@ -5991,47 +6196,53 @@ index f4740ec..bc88090 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c
-index 628a4f7..705b845 100644
+index 628a4f7..5b75aa6 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/removexattr.c
-@@ -2,6 +2,9 @@
+@@ -2,6 +2,10 @@
  
  #include <darling/emulation/common/base.h>
  #include <darling/emulation/conversion/errno.h>
 +#include <darling/emulation/conversion/xattr/name.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +#include <darling/emulation/linux_premigration/vchroot_expand.h>
 +#include <darling/emulation/common/bsdthread/per_thread_wd.h>
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
  
  #define XATTR_NOFOLLOW	1
-@@ -9,14 +12,26 @@
+@@ -9,14 +13,30 @@
  long sys_removexattr(const char* path, const char* name, int options)
  {
  	int ret;
 +	char linux_name[1024];
-+
+ 
+-	if (options & XATTR_NOFOLLOW)
+-		ret = LINUX_SYSCALL(__NR_lremovexattr, path, name);
+-	else
+-		ret = LINUX_SYSCALL(__NR_removexattr, path, name);
 +	struct vchroot_expand_args vc;
 +	vc.flags = (options & XATTR_NOFOLLOW) ? 0 : VCHROOT_FOLLOW;
 +	vc.dfd = get_perthread_wd();
-+
+ 
 +	strcpy(vc.path, path);
 +	ret = vchroot_expand(&vc);
-+	if (ret < 0)
-+		return errno_linux_to_bsd(ret);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
++	ret = dc_sip_check_write(vc.path);
++	if (ret != 0)
++		return ret;
 +
 +	name = xattr_name_to_linux(name, linux_name, sizeof(linux_name));
- 
- 	if (options & XATTR_NOFOLLOW)
--		ret = LINUX_SYSCALL(__NR_lremovexattr, path, name);
++
++	if (options & XATTR_NOFOLLOW)
 +		ret = LINUX_SYSCALL(__NR_lremovexattr, vc.path, name);
- 	else
--		ret = LINUX_SYSCALL(__NR_removexattr, path, name);
++	else
 +		ret = LINUX_SYSCALL(__NR_removexattr, vc.path, name);
- 
- 	if (ret < 0)
--		return errno_linux_to_bsd(ret);
++
++	if (ret < 0)
 +		return xattr_errno_to_bsd(ret);
- 
++
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/setxattr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/xattr/setxattr.c
@@ -8120,10 +8331,10 @@ index 7fe0b4e..7e00a00 100644
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
 new file mode 100644
-index 0000000..f7b2428
+index 0000000..983fb6c
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,313 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +
 +#include <errno.h>
@@ -8133,6 +8344,7 @@ index 0000000..f7b2428
 +#include <stdint.h>
 +
 +#include <darling/emulation/common/base.h>
++#include <darling/emulation/conversion/duct_errno.h>
 +#include <darling/emulation/conversion/common_at.h>
 +#include <darling/emulation/conversion/stat/common.h>
 +#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
@@ -8328,7 +8540,8 @@ index 0000000..f7b2428
 +
 +int dc_sip_check_fd(int fd) {
 +	struct linux_stat st;
-+	struct vchroot_fdpath_args args = { .fd = fd, .maxlen = sizeof(args.path) };
++	char path[4096];
++	struct vchroot_fdpath_args args = { .fd = fd, .path = path, .maxlen = sizeof(path) };
 +	uint64_t dev = 0, ino = 0;
 +	int check;
 +
@@ -8340,7 +8553,10 @@ index 0000000..f7b2428
 +		if (sip_inode_is_protected(dev, ino))
 +			return -EPERM;
 +	}
-+	if (vchroot_fdpath(&args) != 0)
++	check = vchroot_fdpath(&args);
++	if (check == -LINUX_ENAMETOOLONG)
++		return -EPERM;
++	if (check != 0)
 +		return 0;
 +	check = dc_sip_check_guest_write(args.path);
 +	if (check != 0 && dev != 0)
@@ -9321,4 +9537,44 @@ index 0000000..bfe2626
 +		}
 +	}
 +	return state == 1 ? copy : 0;
++}
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
+new file mode 100644
+index 0000000..ca3afa3
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
+@@ -0,0 +1,6 @@
++#ifndef LINUX_THREAD_SELFUSAGE_H
++#define LINUX_THREAD_SELFUSAGE_H
++
++long sys_thread_selfusage(void);
++
++#endif // LINUX_THREAD_SELFUSAGE_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+new file mode 100644
+index 0000000..85e0663
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c
+@@ -0,0 +1,22 @@
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/thread_selfusage.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/conversion/errno.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++#define LINUX_CLOCK_THREAD_CPUTIME_ID 3
++
++// The calling thread's CPU time in mach absolute time units, which are
++// nanoseconds here (mach_timebase_info reports 1/1).
++VISIBLE // made visible for xtrace
++long sys_thread_selfusage(void)
++{
++	struct { long tv_sec; long tv_nsec; } ts;
++	int ret;
++
++	ret = LINUX_SYSCALL(__NR_clock_gettime, LINUX_CLOCK_THREAD_CPUTIME_ID, &ts);
++	if (ret < 0)
++		return 0;
++
++	return ts.tv_sec * 1000000000L + ts.tv_nsec;
 +}

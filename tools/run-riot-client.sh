@@ -291,7 +291,8 @@ fi
 # RCLOL_STOP_AFTER_CLIENT_SECONDS=N to stop once the client window has been
 # gone for N seconds with no game running.
 exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
-  --darling "${darling_bin:-darling}" --runtime-at-start "$runtime_at_start" -- \
+  --darling "${darling_bin:-darling}" --runtime-at-start "$runtime_at_start" \
+  --guest-log "$prefix_dir$guest_path/Library/Logs/Riot Games/Riot Client" -- \
   python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
   MAC_CHROMIUM_TMPDIR="${MAC_CHROMIUM_TMPDIR:-/private/tmp}" \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
