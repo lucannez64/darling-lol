@@ -158,6 +158,52 @@ directory, so it is accepted only together with `--pin` or `--unpin`.
 Pinning only keeps the macOS client. League itself keeps patching normally, and
 a game update that needs a newer client still has to wait for the 142 work.
 
+## Check a new Riot Client release for missing imports
+
+When a client update stops in dyld (`Symbol not found`, `Library not loaded`),
+dyld only names the first gap. `tools/check-guest-imports.py` lists the gaps in
+the bundle's own images at once, without starting the guest:
+
+```sh
+python3 tools/check-guest-imports.py
+python3 tools/check-guest-imports.py "$HOME/darling-backups/<release>/Riot Client.app"
+python3 tools/check-guest-imports.py --json report.json
+```
+
+With no argument it checks `<prefix>/Users/Shared/Riot Games/Riot Client.app`
+(`prefix` from `build/config.json`, or `DPREFIX`). It resolves each library the
+way the launcher's guest does: `RuntimeFrameworks` and `RuntimeLibraries` in the
+guest home first, then the prefix, then the installed SDK. It follows
+`LC_REEXPORT_DYLIB`, and resolves `@rpath` through the whole load chain. Every
+gap goes into one of three groups:
+
+- **error**: a missing library, or a missing symbol bound at load, in an image
+  reached from any executable in the bundle. Images with `LC_DYLD_CHAINED_FIXUPS`
+  (built for macOS 12 or later, such as Riot Client 143's Electron) bind every
+  import at load. Every executable is a starting point, helpers included, so an
+  error stops the process that loads that image. When that image is the client's
+  own, as with 143's Electron Framework, the client stops before its first
+  window. When it is a helper the client starts later (an updater or a crash
+  handler), the failure only comes when that helper runs.
+- **lazy (fails only if called)**: a symbol an older image binds on first call.
+  A working client can have several of these. Riot Client 141's Electron
+  references Carbon and AudioToolbox functions it never calls.
+- **dlopen only**: images nothing in the bundle links to, such as the Krisp and
+  Voicemod voice SDKs. They only matter when the client opens them.
+
+The exit status is 1 when there is at least one error. If an LLVM tool fails on
+an image, the check stops with that tool's error instead of reporting the image
+as clean.
+
+A clean report does not prove the client runs:
+
+- Only images inside the bundle are checked. The imports of the runtime
+  libraries they resolve to (Darling's frameworks, the `RuntimeFrameworks`
+  stubs) are not, so a missing dependency there can still stop dyld.
+- A missing Objective-C method only shows up at run time, as an
+  `unrecognized selector` exception (see `MediaPlayer` in
+  `tools/riot-electron43-frameworks`).
+
 ## Updated library or server still behaves like the old version
 
 Atomic replacement preserves active process mappings. Darling also uses an overlay filesystem; updating its backing prefix from the host can leave an old file visible inside the active namespace. A fresh standalone guest check continued to report the old memory behavior despite the host path having the new checksum. Reopening only Riot does not replace this namespace.
@@ -731,6 +777,18 @@ With the window visual and compositor draw buffer fixes (#22) and the RPC socket
 
 If the game window stays black on NVIDIA, check `metal-device.log` as described in [Check which GPU rendered](#check-which-gpu-rendered).
 
+On an RTX 3060 with driver 615.78.08, a practice game rejected a Metal
+constant vertex layout (`stepFunction=Constant`, `stepRate=0`). Indium now
+maps this layout to a zero-stride Vulkan vertex binding, so every vertex reads
+the same element. That stopped the immediate failure, but the window remained
+black: the game repeatedly queried vertex attributes and received `nil`, and
+the vertex streams used by the shader were not bound. Iridium now preserves the
+AIR vertex-input names, indices and types, and Metal exposes them through
+`vertexAttributes` and `stageInputAttributes`. The reporter confirmed that
+the practice game renders after installing both changes. A separate warning
+about an unbound constant buffer at slot 29 remains and needs investigation;
+this successful observation does not establish that every scene works.
+
 ## Vulkan device or ICD selection
 
 The Metal wrapper renders with Vulkan and hands each frame to an OpenGL (EGL)
@@ -1139,27 +1197,31 @@ running Darling.
 
 **Current state.** With the stubs, the constant classes and the AppKit/CoreText
 additions above, 142 resolves every dyld import, starts the Electron main
-process, starts its static server, reads settings and feature flags, creates its
-window and a CGL context, then stops with `SIGTRAP` on a libdispatch worker
-thread right after the browser process enumerates three font faces. The trap is
-`int3` with no Chromium log line, so it is not a `CHECK` failure that prints; no
-C++ exception is raised near it. 141 (`42E1358C87FB3ABC`) still runs with the
-same runtime, so the remaining fault is specific to what Chromium 150 does in
-the browser process. `tools/riot-client-pin.py --restore
-~/darling-backups/42E1358C87FB3ABC` puts 141 back.
+process and renders its UI. Its local page load used to fail with
+`ERR_NETWORK_CHANGED`; the cause was the BSD syscall return register, described
+below. With that fix the page loads, the client's config RPC answers, and the
+login window appears. Everything after sign-in and League patching is still
+untested. 141 (`42E1358C87FB3ABC`) still runs with the same runtime.
 
-The trap itself is now localized to V8's page allocator. The crashing function
-is the allocator that formats a `slotsize`/`spansize` message, and the fault is
-not a rejected mapping: a full 142 launch logs every protection change and
-mapping, and all of them succeed, including the 512 MB executable reservation
-and the 4.5 MB read-write range. The allocator aborts instead right after a
-`SetPermissions(addr, len, 3)` call whose length is zero, and that call never
-reaches Darling's `mprotect` (no zero-length protection call appears in the
-trace). The allocator frame also holds a poison-looking fourth argument,
-`0xBADBAD0062757480`, so the allocator is being handed a bogus size or
-granularity rather than being refused by the kernel. The remaining work is to
-follow that argument back through the allocator's caller and compare it with the
-Electron 28 (Chromium 117) code that 141 runs, where the same path succeeds.
+**The syscall return register.** Chromium 150's
+`WORK_AROUND_CRBUG_40064248` (`net/socket/socket_apple.h`) treats a nonzero
+secondary syscall return register (`%rdx` on x86-64) after a successful
+`sendto`, `send` or `write` as proof of crbug 40064248 and returns
+`ERR_NETWORK_CHANGED`. XNU clears `%rdx` for every BSD syscall except
+`pipe()`. Darling's `__darling_bsd_syscall` left it holding the `size`
+argument, so every non-empty send looked bogus. The `%rdx` hunk in
+`patches/xnu.patch` clears it before the shared return and keeps it only for
+`SYS_pipe`.
+
+`tools/riot-sendto-rdx-check.c` reports the value and secondary return register
+for `sendto`, `send` and `write`; on a pre-fix library it prints `rdx=0x5`
+after a five-byte send, and `rdx=0x0` with the fix.
+`tests/test_riot_client_syscall_return.py` fails if the clearing is dropped.
+`tools/riot-socket-errno-check.c` and
+`tools/build-riot-network-change-check.py` rule out the other candidates:
+socket errno values and `poll`/`SO_ERROR` behave normally, and
+SystemConfiguration raises no reachability or dynamic-store notification. The
+`libnetwork` path monitor from #162 is not needed for this failure either.
 
 **Diagnostic noise on Omarchy.** Every guest crash is announced by Omarchy's
 crash watcher (`omarchy-crash-watch.service`), which reads systemd-coredump's

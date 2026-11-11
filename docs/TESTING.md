@@ -587,6 +587,56 @@ sh tools/riot-lsem-model/sensitivity-check.sh
 
 `extract-lsem.py` copies the shipped local-semaphore table and trap functions verbatim out of the patched `mach_traps.c`; it refuses to run if the generation-checked token compare-exchange or the negative destroy marker is missing. The model compiles that code with shims for the raw syscalls and server RPCs. It runs create/destroy churn with name reuse on 8 threads, waiter/signaler pairs, timed waits, `signal_all`, destroy while waiting, and the XNU ordering of `wait_signal`. Expected: `LSEM_MODEL checks=686 failed=0 spurious_success=0 lost_wakeup=0 steal=0 hang=0`. The sensitivity check re-breaks the protocol in a copy and must report failures: positive tombstone (`failed=5 spurious_success=1`), missing generation bump (`failed=2 spurious_success=400`). Outputs go to `build/riot-lsem-model`.
 
+## Metal vertex attribute reflection
+
+After building and installing the Metal, Indium and Iridium overlays:
+
+```sh
+python3 scripts/configure.py
+python3 build/runtime/tools/build-riot-metal-attribute-check.py
+darling shell env DYLD_FRAMEWORK_PATH=/Users/$USER/RuntimeFrameworks \
+  DYLD_LIBRARY_PATH=/Users/$USER/RuntimeLibraries \
+  "/Volumes/SystemRoot$PWD/build/riot-metal-attribute-check" \
+  "/Volumes/SystemRoot$PWD/build/darling-src/src/external/metal/deps/indium/test/cubemap/shaders.metallib"
+```
+
+The check loads the existing cubemap shader and verifies the names, indices,
+types and active flags of both vertex-attribute reflection APIs, as well as the
+absence of vertex attributes on a fragment function. It then calls the same
+stage-input matching helper used for that metadata comparison with the real
+reflected inputs reversed, and with only input 1 retained (its index is beyond
+the singleton array's bounds). It checks object identity for both reordered
+matches and the sparse match, and requires `nil` for a missing sparse input,
+an absent trailing index and an empty array. No additional shaders or game
+assets are needed.
+
+Expected: `PASS: stage inputs match by index for reordered, sparse and missing inputs`
+and `PASS: vertex shader attributes retain real indices and types`. A failed
+assertion prints `FAIL:` and exits nonzero; check both success markers because
+some Darling launchers do not propagate the guest exit status. Run only this
+standalone probe with clients and the game closed. Use the configured guest
+username in place of `$USER` if it differs from the host username.
+
+The AIR metadata scan also has an offline behavioral check using synthetic LLVM
+metadata, including a name that resembles a metadata key and a standalone flag:
+
+```sh
+python3 -m unittest discover -s tests -p test_air_reflection_metadata.py
+```
+
+The zero-buffer fallback's stride and attribute bounds are checked against
+Indium's prepared headers with:
+
+```sh
+python3 -m unittest discover -s tests -p test_vertex_buffer_fallback.py
+```
+
+On devices without `nullDescriptor`, a missing zero-stride vertex buffer uses
+the zero-filled fallback only when every attribute fits. Missing buffers with
+nonzero stride are rejected because a finite fallback cannot cover arbitrary
+vertex or instance indices. This offline check does not exercise Vulkan or
+establish hardware compatibility.
+
 ## Metal bind model
 
 ```sh
