@@ -81,6 +81,10 @@ def hash_file(path):
     return digest.hexdigest()
 
 
+def traversal_error(error):
+    raise PackageError('cannot traverse runtime tree: %s' % error) from error
+
+
 def collect(home):
     """Files, symlinks and directories below the two runtime roots."""
     files, links, directories = [], [], []
@@ -90,7 +94,7 @@ def collect(home):
             raise PackageError('symlinked runtime root: %s' % base)
         if not base.is_dir():
             raise PackageError('missing runtime root: %s' % base)
-        for current, names, filenames in os.walk(base, followlinks=False):
+        for current, names, filenames in os.walk(base, followlinks=False, onerror=traversal_error):
             names.sort()
             relative = Path(current).relative_to(home)
             directories.append(relative.as_posix())
@@ -164,10 +168,9 @@ def check_link(name, target):
     return target
 
 
-def check_links(entries, destination_root=None, replaced=()):
+def check_links(entries):
     """Resolve composed package symlinks, including .. after another symlink."""
     links = {entry['path']: check_link(entry['path'], entry['target']) for entry in entries}
-    replaced = set(replaced)
     for name in links:
         root = safe_relative(name)[0]
         pending = list(PurePosixPath(name).parts)
@@ -185,12 +188,6 @@ def check_links(entries, destination_root=None, replaced=()):
             resolved.append(part)
             key = '/'.join(resolved)
             target = links.get(key)
-            if target is None and destination_root is not None and key not in replaced:
-                existing = Path(destination_root).joinpath(*resolved)
-                if existing.is_symlink():
-                    target = os.readlink(existing)
-                    if target.startswith('/'):
-                        raise PackageError('package link traverses absolute destination symlink: %s' % name)
             if target is not None:
                 hops += 1
                 if hops > 40:
@@ -199,6 +196,24 @@ def check_links(entries, destination_root=None, replaced=()):
                 pending = list(PurePosixPath(target).parts) + pending
         if not resolved or resolved[0] != root:
             raise PackageError('composed symlink escapes %s: %s' % (root, name))
+
+
+def preserved_links(root, replaced):
+    """Links that remain installed after all package entries replace their paths."""
+    links = []
+    for runtime_root in ROOTS:
+        base = Path(root) / runtime_root
+        if base.is_symlink():
+            raise PackageError('symlinked destination runtime root: %s' % base)
+        if not base.exists():
+            continue
+        for current, directories, files in os.walk(base, followlinks=False, onerror=traversal_error):
+            for name in directories + files:
+                path = Path(current) / name
+                relative = path.relative_to(root).as_posix()
+                if relative not in replaced and path.is_symlink():
+                    links.append({'path': relative, 'target': os.readlink(path)})
+    return links
 
 
 def add_bytes(archive, name, data, mode=0o644, mtime=0):
@@ -388,8 +403,8 @@ def install(package, root, dry_run=False, out=print):
                 raise PackageError('refusing to replace directory: %s' % directory)
         # Package entries replace these existing paths; all other destination
         # links survive and must be included when checking the resulting tree.
-        check_links(manifest['symlinks'], root,
-                    replaced=[entry['path'] for entry, _ in entries])
+        replaced = {entry['path'] for entry, _ in entries}
+        check_links(manifest['symlinks'] + preserved_links(root, replaced))
         # Prepare every byte, checksum, mode and symlink before the first replace.
         for entry, is_link, target, staged in prepared:
             if is_link:

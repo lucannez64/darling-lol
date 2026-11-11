@@ -257,6 +257,44 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertEqual(good.read_bytes(), b'old')
         self.assertFalse((target / 'RuntimeLibraries/newdir').exists())
 
+    def test_replacement_cannot_make_a_preserved_link_escape(self):
+        target = self.root / 'target'
+        libraries = target / 'RuntimeLibraries'
+        (libraries / 'sub').mkdir(parents=True)
+        (libraries / 'secret').write_bytes(b'inside')
+        (target / 'secret').write_bytes(b'outside')
+        os.symlink('sub', libraries / 'pivot')
+        os.symlink('pivot/../secret', libraries / 'preserved')
+        self.assertEqual((libraries / 'preserved').read_bytes(), b'inside')
+        write_package(self.archive, {}, {'RuntimeLibraries/pivot': '.'})
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertEqual(os.readlink(libraries / 'pivot'), 'sub')
+        self.assertEqual((libraries / 'preserved').read_bytes(), b'inside')
+
+    def test_contained_preserved_link_follows_a_valid_package_replacement(self):
+        target = self.root / 'target'
+        libraries = target / 'RuntimeLibraries'
+        (libraries / 'sub').mkdir(parents=True)
+        (libraries / 'sub/secret').write_bytes(b'old')
+        os.symlink('sub', libraries / 'pivot')
+        os.symlink('pivot/secret', libraries / 'preserved')
+        write_package(self.archive, {'RuntimeLibraries/new/secret': b'new'},
+                      {'RuntimeLibraries/pivot': 'new'})
+        package_tool.install(self.archive, target, out=lambda _: None)
+        self.assertEqual((libraries / 'preserved').read_bytes(), b'new')
+
+    @unittest.skipIf(os.geteuid() == 0, 'root bypasses directory read permissions')
+    def test_export_refuses_unreadable_subtrees_without_publishing_an_archive(self):
+        framework = self.home / 'RuntimeFrameworks/Foo.framework'
+        framework.chmod(0)
+        try:
+            with self.assertRaises(package_tool.PackageError):
+                package_tool.export(self.home, self.archive, 'test')
+        finally:
+            framework.chmod(0o755)
+        self.assertFalse(self.archive.exists())
+
     def test_traversal_path_is_refused(self):
         manifest = {
             'schema': package_tool.SCHEMA,
