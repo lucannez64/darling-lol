@@ -188,8 +188,9 @@ the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a diff
 file for diagnostics.
 
 The profile does not contain serial numbers, UUIDs, MLB/ROM values, tokens or
-account data. Those remain local platform-identity metadata managed by
-`tools/configure-darling-platform.py`; see the sections above. The profile does
+account data. Serial numbers, UUIDs and MLB/ROM values are managed separately by
+`tools/configure-darling-platform.py`; the tool does not manage tokens or account
+data. See the sections above for platform-identity metadata. The profile does
 not replace the host hardware, driver or GPU that presents frames. It does not
 establish licensing, authentication, or acceptance by a third-party service.
 
@@ -214,6 +215,8 @@ reports the host card name, device and VRAM. In the opt-in `compat` profile an A
 card is reported as `AMD Radeon Pro 5500M`, vendor `0x1002`, device `0x7340`, bus
 PCIe and VRAM from `compat.gpu.vram` (4096 by default); an Intel card is reported
 as `Intel UHD Graphics 630` on bus Built-In with shared memory. NVIDIA cards keep
-their host name in both profiles, matching `MTLDevice.name`. `RCLOL_GPU_*`
+host-derived names in both profiles. The profiler uses the PCI ID database and
+can fall back to `NVIDIA Graphics`; Metal uses the Vulkan device name, so the
+two names may differ. `RCLOL_GPU_*`
 variables are the launcher-to-guest handoff; `RCLOL_SYSTEM_ROOT` is a test-only
 host-root override.
