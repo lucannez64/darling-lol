@@ -1626,10 +1626,10 @@ index f58184a..88ec70f 100644
  		return nil;
  	}
 diff --git a/src/Metal/MTLLibrary.mm b/src/Metal/MTLLibrary.mm
-index 0feb46e..a88794f 100644
+index 0feb46e..703c437 100644
 --- a/src/Metal/MTLLibrary.mm
 +++ b/src/Metal/MTLLibrary.mm
-@@ -1,6 +1,7 @@
+@@ -1,10 +1,108 @@
  // SPDX-FileCopyrightText: 2026 Darling Developers
  // SPDX-License-Identifier: MPL-2.0
  
@@ -1637,7 +1637,108 @@ index 0feb46e..a88794f 100644
  #import <Metal/MTLLibraryInternal.h>
  #import <Metal/MTLDevice.h>
  #import <Metal/stubs.h>
-@@ -27,10 +28,12 @@
+ 
++#if DARLING_METAL_ENABLED
++// AIR type names use the Metal scalar/vector/matrix spelling. Unknown names
++// deliberately remain MTLDataTypeNone rather than being guessed from storage.
++static MTLDataType dataTypeForVertexInput(const std::string& name)
++{
++	static const struct {
++		const char* name;
++		size_t length;
++		MTLDataType type;
++	} types[] = {
++		{"float", 5, MTLDataTypeFloat},
++		{"half", 4, MTLDataTypeHalf},
++		{"int", 3, MTLDataTypeInt},
++		{"uint", 4, MTLDataTypeUInt},
++		{"short", 5, MTLDataTypeShort},
++		{"ushort", 6, MTLDataTypeUShort},
++		{"char", 4, MTLDataTypeChar},
++		{"uchar", 5, MTLDataTypeUChar},
++		{"bool", 4, MTLDataTypeBool},
++		{"long", 4, MTLDataTypeLong},
++		{"ulong", 5, MTLDataTypeULong},
++	};
++	for (const auto& type : types) {
++		if (name.compare(0, type.length, type.name) != 0)
++			continue;
++		if (name.size() == type.length)
++			return type.type;
++		if (name.size() == type.length + 1 && name[type.length] >= '2' && name[type.length] <= '4')
++			return static_cast<MTLDataType>(type.type + name[type.length] - '1');
++		if ((type.type == MTLDataTypeFloat || type.type == MTLDataTypeHalf) &&
++		    name.size() == type.length + 3 &&
++		    name[type.length] >= '2' && name[type.length] <= '4' &&
++		    name[type.length + 1] == 'x' &&
++		    name[type.length + 2] >= '2' && name[type.length + 2] <= '4')
++			return static_cast<MTLDataType>(type.type + 4 +
++				(name[type.length] - '2') * 3 + name[type.length + 2] - '2');
++	}
++	return MTLDataTypeNone;
++}
++
++@interface MTLVertexAttribute (Internal)
++- (instancetype)initWithInfo: (const Iridium::ArgumentInfo&)info;
++@end
++
++@interface MTLAttribute (Internal)
++- (instancetype)initWithInfo: (const Iridium::ArgumentInfo&)info;
++@end
++#endif
++
++@implementation MTLVertexAttribute
++@synthesize name = _name;
++@synthesize attributeIndex = _attributeIndex;
++@synthesize attributeType = _attributeType;
++- (BOOL)isActive { return YES; }
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithInfo: (const Iridium::ArgumentInfo&)info
++{
++	self = [super init];
++	if (self) {
++		_name = [[NSString alloc] initWithUTF8String: info.name.c_str()];
++		_attributeIndex = info.index;
++		_attributeType = dataTypeForVertexInput(info.typeName);
++	}
++	return self;
++}
++#endif
++- (void)dealloc
++{
++	[_name release];
++	[super dealloc];
++}
++@end
++
++@implementation MTLAttribute
++@synthesize name = _name;
++@synthesize attributeIndex = _attributeIndex;
++@synthesize attributeType = _attributeType;
++- (BOOL)isActive { return YES; }
++#if DARLING_METAL_ENABLED
++- (instancetype)initWithInfo: (const Iridium::ArgumentInfo&)info
++{
++	self = [super init];
++	if (self) {
++		_name = [[NSString alloc] initWithUTF8String: info.name.c_str()];
++		_attributeIndex = info.index;
++		_attributeType = dataTypeForVertexInput(info.typeName);
++	}
++	return self;
++}
++#endif
++- (void)dealloc
++{
++	[_name release];
++	[super dealloc];
++}
++@end
++
+ @implementation MTLFunctionInternal
+ 
+ #if DARLING_METAL_ENABLED
+@@ -27,10 +125,31 @@
  	self = [super init];
  	if (self != nil) {
  		_function = function;
@@ -1648,10 +1749,29 @@ index 0feb46e..a88794f 100644
  		// cache the name
 -		_name = [NSString stringWithUTF8String: _function->name().c_str()];
 +		_name = [[NSString alloc] initWithUTF8String: _function->name().c_str()];
++
++		if (_functionType == MTLFunctionTypeVertex) {
++			NSMutableArray* vertexAttributes = [[NSMutableArray alloc] init];
++			NSMutableArray* stageInputAttributes = [[NSMutableArray alloc] init];
++			for (const auto& info : _function->argumentInfo()) {
++				if (info.type != Iridium::BindingType::VertexInput)
++					continue;
++				MTLVertexAttribute* vertexAttribute = [[MTLVertexAttribute alloc] initWithInfo: info];
++				MTLAttribute* stageInputAttribute = [[MTLAttribute alloc] initWithInfo: info];
++				[vertexAttributes addObject: vertexAttribute];
++				[stageInputAttributes addObject: stageInputAttribute];
++				[vertexAttribute release];
++				[stageInputAttribute release];
++			}
++			_vertexAttributes = [vertexAttributes copy];
++			_stageInputAttributes = [stageInputAttributes copy];
++			[vertexAttributes release];
++			[stageInputAttributes release];
++		}
  	}
  	return self;
  }
-@@ -121,13 +124,31 @@ MTL_UNSUPPORTED_CLASS
+@@ -121,13 +240,31 @@ MTL_UNSUPPORTED_CLASS
  
  - (id<MTLFunction>)newFunctionWithName: (NSString*)functionName
  {
@@ -3777,9 +3897,10 @@ new file mode 100644
 +#endif
 diff --git a/src/Metal/MTLArgument.mm b/src/Metal/MTLArgument.mm
 new file mode 100644
+index 0000000..c20d4cc
 --- /dev/null
 +++ b/src/Metal/MTLArgument.mm
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,79 @@
 +#import <Metal/MTLArgumentInternal.h>
 +@implementation MTLStructMember
 +@synthesize name=_name, offset=_offset;
@@ -3815,6 +3936,7 @@ new file mode 100644
 +static NSArray* argumentsForFunction(std::shared_ptr<Indium::Function> function) {
 +    NSMutableArray* result=[NSMutableArray array];
 +    if(function)for(const auto& info:function->argumentInfo()){
++        if(info.type==Iridium::BindingType::VertexInput)continue;
 +        MTLArgument* argument=[[MTLArgument alloc] initWithInfo:info];[result addObject:argument];[argument release];
 +    }
 +    return result;
@@ -4033,3 +4155,97 @@ index dfe5174..d9282ad 100644
 +RCLOL_NIL_STUB_CLASS(MTLCounterSampleBufferDescriptor)
 +RCLOL_NIL_STUB_CLASS(MTLFunctionConstantValues)
 +RCLOL_NIL_STUB_CLASS(MTLIndirectCommandBufferDescriptor)
+diff --git a/include/Metal/MTLLibrary.h b/include/Metal/MTLLibrary.h
+index 427df92..7574bb2 100644
+--- a/include/Metal/MTLLibrary.h
++++ b/include/Metal/MTLLibrary.h
+@@ -15,8 +15,87 @@ METAL_DECLARATIONS_BEGIN
+ @protocol MTLDevice;
+ @protocol MTLArgumentEncoder;
+ 
+-@class MTLVertexAttribute;
+-@class MTLAttribute;
++typedef NS_ENUM(NSUInteger, MTLDataType) {
++	MTLDataTypeNone = 0,
++	MTLDataTypeStruct = 1,
++	MTLDataTypeArray = 2,
++	MTLDataTypeFloat = 3,
++	MTLDataTypeFloat2 = 4,
++	MTLDataTypeFloat3 = 5,
++	MTLDataTypeFloat4 = 6,
++	MTLDataTypeFloat2x2 = 7,
++	MTLDataTypeFloat2x3 = 8,
++	MTLDataTypeFloat2x4 = 9,
++	MTLDataTypeFloat3x2 = 10,
++	MTLDataTypeFloat3x3 = 11,
++	MTLDataTypeFloat3x4 = 12,
++	MTLDataTypeFloat4x2 = 13,
++	MTLDataTypeFloat4x3 = 14,
++	MTLDataTypeFloat4x4 = 15,
++	MTLDataTypeHalf = 16,
++	MTLDataTypeHalf2 = 17,
++	MTLDataTypeHalf3 = 18,
++	MTLDataTypeHalf4 = 19,
++	MTLDataTypeHalf2x2 = 20,
++	MTLDataTypeHalf2x3 = 21,
++	MTLDataTypeHalf2x4 = 22,
++	MTLDataTypeHalf3x2 = 23,
++	MTLDataTypeHalf3x3 = 24,
++	MTLDataTypeHalf3x4 = 25,
++	MTLDataTypeHalf4x2 = 26,
++	MTLDataTypeHalf4x3 = 27,
++	MTLDataTypeHalf4x4 = 28,
++	MTLDataTypeInt = 29,
++	MTLDataTypeInt2 = 30,
++	MTLDataTypeInt3 = 31,
++	MTLDataTypeInt4 = 32,
++	MTLDataTypeUInt = 33,
++	MTLDataTypeUInt2 = 34,
++	MTLDataTypeUInt3 = 35,
++	MTLDataTypeUInt4 = 36,
++	MTLDataTypeShort = 37,
++	MTLDataTypeShort2 = 38,
++	MTLDataTypeShort3 = 39,
++	MTLDataTypeShort4 = 40,
++	MTLDataTypeUShort = 41,
++	MTLDataTypeUShort2 = 42,
++	MTLDataTypeUShort3 = 43,
++	MTLDataTypeUShort4 = 44,
++	MTLDataTypeChar = 45,
++	MTLDataTypeChar2 = 46,
++	MTLDataTypeChar3 = 47,
++	MTLDataTypeChar4 = 48,
++	MTLDataTypeUChar = 49,
++	MTLDataTypeUChar2 = 50,
++	MTLDataTypeUChar3 = 51,
++	MTLDataTypeUChar4 = 52,
++	MTLDataTypeBool = 53,
++	MTLDataTypeBool2 = 54,
++	MTLDataTypeBool3 = 55,
++	MTLDataTypeBool4 = 56,
++	MTLDataTypeLong = 81,
++	MTLDataTypeLong2 = 82,
++	MTLDataTypeLong3 = 83,
++	MTLDataTypeLong4 = 84,
++	MTLDataTypeULong = 85,
++	MTLDataTypeULong2 = 86,
++	MTLDataTypeULong3 = 87,
++	MTLDataTypeULong4 = 88,
++};
++
++@interface MTLVertexAttribute : NSObject
++@property(readonly) NSString* name;
++@property(readonly) NSUInteger attributeIndex;
++@property(readonly) MTLDataType attributeType;
++@property(readonly, getter=isActive) BOOL active;
++@end
++
++@interface MTLAttribute : NSObject
++@property(readonly) NSString* name;
++@property(readonly) NSUInteger attributeIndex;
++@property(readonly) MTLDataType attributeType;
++@property(readonly, getter=isActive) BOOL active;
++@end
+ @class MTLFunctionConstant;
+ @class MTLArgument;
+ 

@@ -731,6 +731,18 @@ With the window visual and compositor draw buffer fixes (#22) and the RPC socket
 
 If the game window stays black on NVIDIA, check `metal-device.log` as described in [Check which GPU rendered](#check-which-gpu-rendered).
 
+On an RTX 3060 with driver 615.78.08, a practice game rejected a Metal
+constant vertex layout (`stepFunction=Constant`, `stepRate=0`). Indium now
+maps this layout to a zero-stride Vulkan vertex binding, so every vertex reads
+the same element. That stopped the immediate failure, but the window remained
+black: the game repeatedly queried vertex attributes and received `nil`, and
+the vertex streams used by the shader were not bound. Iridium now preserves the
+AIR vertex-input names, indices and types, and Metal exposes them through
+`vertexAttributes` and `stageInputAttributes`. The reporter confirmed that
+the practice game renders after installing both changes. A separate warning
+about an unbound constant buffer at slot 29 remains and needs investigation;
+this successful observation does not establish that every scene works.
+
 ## Vulkan device or ICD selection
 
 The Metal wrapper renders with Vulkan and hands each frame to an OpenGL (EGL)
