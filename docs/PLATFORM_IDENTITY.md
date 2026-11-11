@@ -171,6 +171,33 @@ Previewing a fresh identity generates a sample; only `--write` makes it stable.
 To restore host-derived defaults after provisioning, remove both identity files
 while stopped, so a later provisioning run cannot reimport the legacy copy.
 
+## Hardware presentation profile
+
+`tools/system.prop` is the single source for the CPU, GPU, VRAM and memory
+values that the launcher exports to the patched guest. `scripts/install-runtime.sh`
+copies it to `$DPREFIX/private/etc/darling-system.prop` once; later updates keep an
+existing file so a user's choice is not reset. The launcher reads the installed
+copy first and falls back to the checkout copy.
+
+`profile=host` is the default. It reports the real host CPU, GPU, VRAM and memory.
+`profile=compat` is opt-in and reports the MacBookPro16,1 compatibility values
+(`i7-9750H`, `Radeon Pro 5500M` on AMD, `UHD Graphics 630` on Intel, 4096 MB VRAM
+and 16 GiB). NVIDIA cards keep their own name in both profiles so the game does
+not take another vendor's driver path. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
+the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
+file for diagnostics.
+
+The profile does not contain serial numbers, UUIDs, MLB/ROM values, tokens or
+account data. Serial numbers, UUIDs and MLB/ROM values are managed separately by
+`tools/configure-darling-platform.py`; the tool does not manage tokens or account
+data. See the sections above for platform-identity metadata. The profile does
+not replace the host hardware, driver or GPU that presents frames. It does not
+establish licensing, authentication, or acceptance by a third-party service.
+
+The current compat profile also enables a Security fallback: when the
+notarization lookup returns false, it treats the code as notarized without
+validating an offline ticket. This is not equivalent to macOS notarization.
+
 ## system_profiler
 
 The prefix's `/usr/sbin/system_profiler` (installed by
@@ -183,11 +210,13 @@ override saved by this tool. A field the guest does not provide is left out.
 `python3 -m unittest tests.test_system_profiler` checks the output with stub
 commands.
 
-`SPDisplaysDataType` reads the host DRM cards. With `DARLING_METAL_MAC_GPU_NAME`
-set (the launcher default), an AMD or NVIDIA host card is reported as the
-`MacBookPro16,1` discrete GPU: `AMD Radeon Pro 5500M`, vendor `0x1002`, device
-`0x7340`, bus PCIe and VRAM from `DARLING_METAL_VRAM_MB` (4096 by default; a
-value that is not a positive decimal keeps the default). An Intel card is
-reported as `Intel UHD Graphics 630` on bus Built-In with shared memory, as
-`MTLDevice.name` does. This keeps the display report consistent with Metal;
-without the variable the host card is reported as-is.
+`SPDisplaysDataType` reads the host DRM cards. In the default `host` profile it
+reports the host card name, device and VRAM. In the opt-in `compat` profile an AMD
+card is reported as `AMD Radeon Pro 5500M`, vendor `0x1002`, device `0x7340`, bus
+PCIe and VRAM from `compat.gpu.vram` (4096 by default); an Intel card is reported
+as `Intel UHD Graphics 630` on bus Built-In with shared memory. NVIDIA cards keep
+host-derived names in both profiles. The profiler uses the PCI ID database and
+can fall back to `NVIDIA Graphics`; Metal uses the Vulkan device name, so the
+two names may differ. `RCLOL_GPU_*`
+variables are the launcher-to-guest handoff; `RCLOL_SYSTEM_ROOT` is a test-only
+host-root override.
