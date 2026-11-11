@@ -20,6 +20,11 @@ stops the session once a managed League/Riot window has been absent for N
 seconds and no game process is running. It is off by default and never stops
 when the window state cannot be read.
 
+A failed client exit is reported with its status, and, when --guest-log names
+the client's log directory, with the last available line of its newest log file, labelled as possibly historical. That
+turns a bare "runtime and guest processes are gone" into the reason the guest
+died, such as a dyld "Library not loaded" abort.
+
 Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
 alone when the launcher exits.
 
@@ -271,7 +276,8 @@ def stop_processes(members, kill=os.kill, sleep=time.sleep, proc_root=Path('/pro
 
 def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.run,
             kill=os.kill, sleep=time.sleep, out=sys.stdout, own_namespace=None,
-            term_grace=TERM_GRACE, kill_grace=KILL_GRACE, clock=time.monotonic):
+            term_grace=TERM_GRACE, kill_grace=KILL_GRACE, clock=time.monotonic,
+            note=''):
     """Shut down the runtime, then stop anything left in the guest namespace."""
     if namespace is None:
         namespace = prefix_namespace(prefix, proc_root)
@@ -294,7 +300,7 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
         members = prefix_only(prefix, proc_root)
         identities = {pid: process_identity(proc) for pid, proc in members}
     if not members:
-        log('runtime and guest processes are gone', out)
+        log('runtime and guest processes are gone%s' % note, out)
         return []
     log('stopping %d leftover guest process(es)' % len(members), out)
     remaining = stop_processes(members, kill=kill, sleep=sleep,
@@ -310,6 +316,36 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
     else:
         log('guest session stopped', out)
     return remaining
+
+
+def newest_guest_log(directory, pattern='*.log'):
+    """Newest log file below directory, or None when there is none."""
+    if not directory:
+        return None
+    try:
+        candidates = [path for path in Path(directory).rglob(pattern)
+                      if path.is_file()]
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except (OSError, ValueError):
+        return None
+
+
+def last_log_line(path, chunk=65536):
+    """Last non-blank line of a log file, or None when unreadable."""
+    if path is None:
+        return None
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - chunk))
+            lines = handle.read().decode(errors='replace').splitlines()
+    except (OSError, ValueError):
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if line:
+            return line[:300]
+    return None
 
 
 def runtime_alive(prefix, proc_root=Path('/proc')):
@@ -391,7 +427,7 @@ def idle_decision(seen_client, idle_since, now, windows, game, seconds):
 def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
-                   own_namespace=None, runtime_at_start=None):
+                   own_namespace=None, runtime_at_start=None, guest_log=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
@@ -450,17 +486,25 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+    status = code if code >= 0 else 128 - code
+    if status != 0:
+        # A crash used to look like a clean shutdown: say that the client
+        # failed, and quote its newest log line so the cause is visible.
+        log('client exited with status %d' % status, out)
+        line = last_log_line(newest_guest_log(guest_log))
+        if line:
+            log('last available guest log line (possibly from an earlier session): %s' % line, out)
     if not owns_runtime:
         log('another session owns this runtime; leaving it running', out)
         remaining = []
     else:
         namespace = namespace or prefix_namespace(prefix, proc_root)
+        note = '' if status == 0 else ' (client exited with status %d)' % status
         remaining = cleanup(prefix, darling, namespace, proc_root=proc_root, run=run,
                             kill=kill, sleep=sleep, out=out,
-                            own_namespace=own_namespace)
+                            own_namespace=own_namespace, note=note)
     if stop:
         log('interrupted by signal %d' % stop[0], out)
-    status = code if code >= 0 else 128 - code
     # A surviving guest process is a failed cleanup, not a clean exit.
     return (status or 1) if remaining else status
 
@@ -485,6 +529,8 @@ def main(argv=None):
     parser.add_argument('--runtime-at-start', choices=('running', 'stopped'),
                         help='runtime state captured before launcher startup helpers')
     parser.add_argument('--darling', help='loader used for a graceful shutdown')
+    parser.add_argument('--guest-log', type=Path,
+                        help='guest log directory reported when the client fails')
     parser.add_argument('--stop-after', type=int,
                         default=env_seconds('RCLOL_STOP_AFTER_CLIENT_SECONDS'),
                         help='stop after the client window has been gone this many seconds')
@@ -501,7 +547,8 @@ def main(argv=None):
         parser.error('a command is required after --')
     clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT', '1') != '0'
     return run_supervised(command, prefix, args.darling, stop_after=max(0, args.stop_after),
-                          clean=clean, runtime_at_start=args.runtime_at_start)
+                          clean=clean, runtime_at_start=args.runtime_at_start,
+                          guest_log=args.guest_log)
 
 
 if __name__ == '__main__':

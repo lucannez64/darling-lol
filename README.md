@@ -172,6 +172,8 @@ sh scripts/run.sh
 
 For updating single components, [incremental update instructions](docs/SETUP.md#updating-an-existing-runtime) explain the server and memory installers, user-owned backups and the full Darling restart needed to activate replacements. Perform activation only after manually exiting the game and both clients.
 
+A built runtime can also be shipped without the toolchain: `tools/runtime-package.py` exports `RuntimeLibraries`/`RuntimeFrameworks` into a reproducible archive with a hashed manifest and installs it into another prefix or a distribution staging directory. See [prebuilt runtime overlays](docs/PACKAGING.md).
+
 ## Layout
 
 ```
