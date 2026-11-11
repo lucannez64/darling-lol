@@ -7893,7 +7893,7 @@ index 5af5298a..ddbacfee 100644
 + * issues a token in the browser, passes it to a child and consumes it there.
 + * Real tokens are a char*; with no enforcement behind them, issue a dummy
 + * token and accept any non-NULL one. (These live in libsandbox.dylib on
-+ * macOS, hence here and not in libsystem_sandbox.) */
++ * macOS; libsystem_sandbox also exports these for newer SDK imports.) */
 +char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
 +{
 +    if (verbose) puts("STUB: sandbox_extension_issue_file called");
@@ -8121,7 +8121,7 @@ index f22f8213d..e7fbdc92e 100644
  				snprintf(p, limit, "%s/.cache/%s%s", home, dir_suffix ? dir_suffix : "", dir_suffix ? "/" : "");
  			else
 diff --git a/src/sandbox/sandbox.c b/src/sandbox/sandbox.c
-index f48cceb9e..9afa967db 100644
+index f48cceb9e..899347afe 100644
 --- a/src/sandbox/sandbox.c
 +++ b/src/sandbox/sandbox.c
 @@ -10,7 +10,13 @@ const enum sandbox_filter_type SANDBOX_CHECK_NO_REPORT = SANDBOX_FILTER_NONE;
@@ -8254,6 +8254,39 @@ index f48cceb9e..9afa967db 100644
  	return -1;
  }
  
+@@ -173,4 +213,30 @@ int rootless_check_datavault_flag(const char* path, const char* storage_class) {
+ 
+ int sandbox_query_approval_policy_for_path(const char* query, const char* path, char **approval) {
+ 	return -1;
+-}
+\ No newline at end of file
++}
++
++/* Electron 43 also imports SeatbeltExtensions through libSystem, which
++ * re-exports this library. Match libsandbox's existing placeholder ABI;
++ * Darling still does not enforce a sandbox. */
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
++{
++    (void)extension_class; (void)path; (void)flags;
++    return strdup("darling-lol-stub");
++}
++
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags)
++{
++    (void)extension_class; (void)name; (void)flags;
++    return strdup("darling-lol-stub");
++}
++
++int64_t sandbox_extension_consume(const char *token)
++{
++    return token != NULL;
++}
++
++int sandbox_extension_release(int64_t handle)
++{
++    (void)handle;
++    return 0;
++}
 diff --git a/src/sandbox/sandbox.h b/src/sandbox/sandbox.h
 index 6fa2d088c..655554284 100644
 --- a/src/sandbox/sandbox.h
