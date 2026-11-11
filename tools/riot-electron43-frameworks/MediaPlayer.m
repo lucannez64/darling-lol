@@ -124,23 +124,25 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 		[_targets removeAllObjects];
 		return;
 	}
-	// Handler tokens are stored directly; action targets as non-retained NSValues.
+	// Handler tokens are stored directly; action targets only as their address, which is
+	// compared without ever turning it back into an object (it may be deallocated).
 	[_targets removeObjectIdenticalTo:target];
 	for (NSInteger i = (NSInteger)[_targets count] - 1; i >= 0; i--)
 	{
 		id entry = [_targets objectAtIndex:i];
-		if ([entry isKindOfClass:[NSValue class]] && [entry nonretainedObjectValue] == target)
+		if ([entry isKindOfClass:[NSValue class]] && [entry pointerValue] == (__bridge const void *)target)
 			[_targets removeObjectAtIndex:i];
 	}
 }
 - (void)addTarget:(id)target action:(SEL)action
 {
 	// No command is ever delivered, so the target is only recorded for removeTarget:.
-	// Like other target-action APIs the command does not own it: keep a non-retained
-	// reference, so a recipient that is never removed is not kept alive.
+	// Like other target-action APIs the command does not own it. Keep only its address:
+	// a recipient that is never removed is not kept alive, and a deallocated one is never
+	// handed back to ARC as a dangling object.
 	(void)action;
 	if (target)
-		[_targets addObject:[NSValue valueWithNonretainedObject:target]];
+		[_targets addObject:[NSValue valueWithPointer:(__bridge const void *)target]];
 }
 - (void)removeTarget:(id)target action:(SEL)action { [self removeTarget:target]; }
 - (BOOL)isEnabled { return YES; }
