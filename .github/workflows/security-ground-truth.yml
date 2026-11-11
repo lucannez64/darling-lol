@@ -32,6 +32,11 @@ jobs:
       - name: Run probe
         run: ./ground_truth > "ground-truth-${{ matrix.os }}.json"
 
+      - name: Build and run standalone Foundation compatibility probe
+        run: |
+          clang -O2 -Wall -Wextra -fblocks -framework Foundation tests/security/probe/foundation_compat.m -o foundation_compat
+          ./foundation_compat > "foundation-compat-${{ matrix.os }}.json"
+
       - name: Static signing and SIP info
         run: |
           out="codesign-${{ matrix.os }}.txt"
@@ -62,3 +67,4 @@ jobs:
           path: |
             ground-truth-*.json
             codesign-*.txt
+            foundation-compat-*.json
