@@ -53,8 +53,9 @@ The archive is untrusted input:
 - every symlink must be relative and must resolve inside its own runtime root;
 - every file hash is checked against the manifest before anything is moved into
   place, using a staging directory inside the destination;
-- the installer refuses to replace a directory, and refuses a destination whose
-  ancestors are symlinks.
+- the installer refuses to replace a directory, refuses a symlinked destination
+  root, and refuses symlinked ancestors below that root. Caller-selected parents
+  above the destination root may themselves be symlinks.
 
 A checksum mismatch, an unexpected member, or an escaping link aborts the
 install and leaves the existing overlay untouched. All entries and destination
