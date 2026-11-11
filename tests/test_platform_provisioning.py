@@ -51,6 +51,20 @@ class ProvisioningChecks(unittest.TestCase):
             self.assertEqual(value['ROM'][0] & 3, 2)
         self.assertEqual(len({v['IOPlatformUUID'] for v in values}), len(values))
 
+    def test_system_version_normalized_to_one_macos_identity(self):
+        stale = {'ProductName': 'macOS', 'ProductVersion': '11.7.4',
+                 'ProductUserVisibleVersion': '11.7.4', 'ProductBuildVersion': 'Darling',
+                 'iOSSupportVersion': '14.7', 'ProductCopyright': '2012-2023 Lubos Dolezel'}
+        out = plistlib.loads(platform.normalize_system_version(stale))
+        self.assertEqual(out['ProductVersion'], platform.EMULATED_PRODUCT_VERSION)
+        self.assertEqual(out['ProductUserVisibleVersion'], platform.EMULATED_PRODUCT_VERSION)
+        self.assertEqual(out['ProductBuildVersion'], platform.EMULATED_BUILD_VERSION)
+        self.assertNotIn('Darling', out['ProductBuildVersion'])
+        # Unrelated keys survive; the Darling copyright is replaced.
+        self.assertEqual(out['iOSSupportVersion'], '14.7')
+        self.assertNotIn('Dolezel', out['ProductCopyright'])
+        self.assertIn('Apple', out['ProductCopyright'])
+
     def test_preview_does_not_create_prefix(self):
         preview = json.loads(self.run_cli().stdout)
         self.assertIn('provisioning_UDID', preview['properties'])
@@ -62,7 +76,12 @@ class ProvisioningChecks(unittest.TestCase):
         legacy = self.prefix / 'private/etc/darling-smbios.conf'
         version = self.prefix / 'System/Library/CoreServices/SystemVersion.plist'
         self.assertEqual(platform.load(canonical), platform.load(legacy))
-        self.assertEqual(version.read_bytes(), self.version.read_bytes())
+        # The plist is normalized to the emulated macOS identity, not copied.
+        written = plistlib.loads(version.read_bytes())
+        self.assertEqual(written['ProductVersion'], platform.EMULATED_PRODUCT_VERSION)
+        self.assertEqual(written['ProductUserVisibleVersion'], platform.EMULATED_PRODUCT_VERSION)
+        self.assertEqual(written['ProductBuildVersion'], platform.EMULATED_BUILD_VERSION)
+        self.assertEqual(written['ProductName'], 'macOS')
         files = [canonical, legacy, version]
         snapshot = [(f.read_bytes(), f.stat().st_mtime_ns) for f in files]
         self.assertIn('unchanged', self.run_cli('--write').stdout)
@@ -125,7 +144,8 @@ class ProvisioningChecks(unittest.TestCase):
         target.write_bytes(original)
         self.run_cli('--write')
         self.assertEqual(target.with_name(target.name+'.before-platform-change').read_bytes(), original)
-        self.assertEqual(plistlib.loads(target.read_bytes()), self.metadata)
+        self.assertEqual(plistlib.loads(target.read_bytes()),
+                         plistlib.loads(platform.normalize_system_version(self.metadata)))
         target.unlink()
         target.symlink_to(self.version)
         before = platform.destination(self.prefix).read_bytes()
