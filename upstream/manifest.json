@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 126,
+      "modified_files": 115,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -33,7 +33,8 @@
         "src/startup/mldr/include/dc_entitlements.h",
         "src/startup/mldr/include/dc_mseal.h",
         "src/startup/mldr/include/dc_image_snapshot.h",
-        "src/startup/mldr/include/dc_macho_slice.h"
+        "src/startup/mldr/include/dc_macho_slice.h",
+        "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm"
       ]
     },
     {
@@ -65,10 +66,24 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 115,
+      "modified_files": 134,
       "new_files": [
         "QuartzCore/include/QuartzCore/CATransformLayer.h",
-        "AppKit/NSGeometryTrace.h"
+        "AppKit/NSGeometryTrace.h",
+        "AppKit/NSAccessibilityCustomAction.m",
+        "AppKit/NSColorSampler.m",
+        "AppKit/NSImageSymbolConfiguration.m",
+        "AppKit/NSMenuItemBadge.m",
+        "AppKit/NSNextStepFrame.m",
+        "AppKit/NSPreviewRepresentingActivityItem.m",
+        "AppKit/X11.backend/X11RelativeMouse.h",
+        "AppKit/include/AppKit/NSAccessibilityCustomAction.h",
+        "AppKit/include/AppKit/NSColorSampler.h",
+        "AppKit/include/AppKit/NSImageSymbolConfiguration.h",
+        "AppKit/include/AppKit/NSMenuItemBadge.h",
+        "AppKit/include/AppKit/NSPreviewRepresentingActivityItem.h",
+        "QuartzCore/CAEDRMetadata.m",
+        "QuartzCore/include/QuartzCore/CAEDRMetadata.h"
       ]
     },
     {
@@ -100,8 +115,10 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 5,
-      "new_files": []
+      "modified_files": 10,
+      "new_files": [
+        "NSConstantCollections.m"
+      ]
     },
     {
       "path": "src/external/curl",
@@ -144,8 +161,10 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 4,
-      "new_files": []
+      "modified_files": 10,
+      "new_files": [
+        "src/NSConstantNumber.m"
+      ]
     },
     {
       "path": "src/external/iokitd",
@@ -263,7 +282,7 @@
       "revision": "ae20248dc144beab899e38752f5a530f28a0ea56",
       "repository": "https://github.com/darlinghq/darling-metal.git",
       "patch": "patches/metal.patch",
-      "modified_files": 28,
+      "modified_files": 29,
       "new_files": [
         "include/Metal/MTLArgument.h",
         "include/Metal/MTLBlitCommandEncoder.h",
@@ -292,7 +311,7 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 14,
+      "modified_files": 16,
       "new_files": [
         "OSX/libsecurity_codesigning/lib/rclol_signing_trace.h"
       ]
@@ -302,7 +321,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 108,
+      "modified_files": 90,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
@@ -321,7 +340,9 @@
         "darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h",
         "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h",
         "darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h",
-        "darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c"
+        "darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c",
+        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c"
       ]
     },
     {

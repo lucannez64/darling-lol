@@ -196,8 +196,10 @@ int main(int argc, char** argv) {
     unsigned long callsBefore = madviseCalls;
     require(sys_madvise(memory, size, 0) == 0 && lastAdvice == 0 && madviseCalls == callsBefore + 1,
             "normal hint passthrough");
+    // An unaligned REUSE is refused before Linux sees it, with Darwin's EINVAL.
+    callsBefore = madviseCalls;
     require(sys_madvise(memory + 1, size - 1, 8) == -EINVAL, "unaligned reuse error");
-    require(conversions >= 1, "error translation hook");
+    require(madviseCalls == callsBefore && conversions == 0, "unaligned reuse reached Linux");
 
     require(munmap(mapping, size + HUGE_PAGE_SIZE) == 0, "unmap");
     printf("HOST_MADVISE pass=1 mode=%s madvise_calls=%lu sub_page_syscalls=%lu reclaimable_KiB=%lu "
