@@ -311,7 +311,7 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 15,
+      "modified_files": 16,
       "new_files": [
         "OSX/libsecurity_codesigning/lib/rclol_signing_trace.h"
       ]
