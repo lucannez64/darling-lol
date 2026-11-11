@@ -27,6 +27,13 @@ darling shell /usr/bin/true
 prefix=$prefix_dir
 mkdir -p "$prefix/private/tmp"
 chmod 1777 "$prefix/private/tmp"
+# The single hardware-presentation profile lives in the prefix so it survives
+# updates and can be edited without touching the checkout. Never replace an
+# existing profile: an update must not turn a user's HOST/COMPAT choice back on.
+if [ ! -e "$prefix/private/etc/darling-system.prop" ]; then
+  mkdir -p "$prefix/private/etc"
+  install -m 0644 build/runtime/tools/system.prop "$prefix/private/etc/darling-system.prop"
+fi
 # Build the system root store now that the prefix exists; Darling is stopped next anyway.
 python3 build/runtime/tools/ensure-darling-root-certificates.py || \
   echo 'Darling system root store not installed; the launcher retries it' >&2

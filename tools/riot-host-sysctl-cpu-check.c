@@ -29,6 +29,7 @@
 #include <mach/mach_init.h>
 
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_hw.h>
+#include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_machdep.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
 #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_unspec.h>
 #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
@@ -87,6 +88,22 @@ void copyout_string(const char* str, char* out, unsigned long* out_len) {
     memcpy(out, str, need);
     out[need - 1] = '\0';
     *out_len = need;
+}
+
+// The machdep.cpu.core_count / thread_count handlers fall back to
+// /proc/cpuinfo only when /sys detection fails (mode no-detect); the line
+// reader and the open/close wrappers only have to link.
+struct rdline_buffer;
+void _readline_init(struct rdline_buffer* buf) { (void)buf; }
+const char* _readline(int fd, struct rdline_buffer* buf) { (void)fd; (void)buf; return NULL; }
+long sys_open_nocancel(const char* filename, int flags, unsigned int mode) { (void)filename; (void)flags; (void)mode; return -1; }
+long close_internal(int fd) { (void)fd; return -1; }
+
+// common/cpu_identity.c reads /proc/self/environ through the guest syscall
+// bridge; forward to the host.
+long linux_syscall(long a1, long a2, long a3, long a4, long a5, long a6, int nr) {
+    long result = syscall(nr, a1, a2, a3, a4, a5, a6);
+    return result == -1 ? -errno : result;
 }
 
 // glibc has no strlcpy; sysctl_unspec.c declares it.
@@ -330,8 +347,136 @@ static void require_byname(const char* full_name, int expected) {
     require_value(entry, expected);
 }
 
+// ---------------------------------------------------------------------------
+// machdep.cpu.* (sysctl_machdep.c): the CPU identity node. In the host profile
+// every value is the host's own cpuid view; in the compat profile they come
+// from common/cpu_identity.c, the table the cpuid trap rewrites the game's
+// identity leaves to. Every one of these OIDs is CTLTYPE_INT: four bytes, not
+// a decimal string (they used to be written as strings, and family/model/
+// stepping read the wrong cpuid leaf with the wrong bit shifts).
+
+static void ref_cpuid(unsigned int leaf, unsigned int out[4]) {
+    __asm__ volatile ("cpuid"
+        : "=a"(out[0]), "=b"(out[1]), "=c"(out[2]), "=d"(out[3])
+        : "a"(leaf), "c"(0u));
+}
+
+static const struct known_sysctl* find_machdep(const char* name) {
+    for (const struct known_sysctl* entry = sysctls_machdep[0].subctls; entry->oid != -1; ++entry)
+        if (strcmp(entry->name, name) == 0)
+            return entry;
+    fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=%s missing from machdep.cpu\n", name);
+    exit(1);
+}
+
+static void machdep_string(const char* name, char* buf, unsigned long size) {
+    const struct known_sysctl* entry = find_machdep(name);
+    unsigned long len = size;
+    long rc = entry->handler(NULL, 0, buf, &len, NULL, 0);
+    if (rc != 0 || len == 0 || len > size) {
+        fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=%s rc=%ld len=%lu\n", name, rc, len);
+        exit(1);
+    }
+    buf[size - 1] = '\0';
+}
+
+static const char feature_names[32][7] = {
+    "FPU", "VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "", "SEP",
+    "MTRR", "PGE", "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI",
+    "MMX", "FXSR", "SSE", "SSE2", "SS", "HTT", "TM", "IA64", "PBE"
+};
+
+// The same list the check builds from a feature word, independently of the
+// source under test (the source used to decode the vendor ASCII as bits).
+static void feature_string(unsigned int edx, char* out, size_t size) {
+    size_t length = 0;
+    out[0] = '\0';
+    for (int i = 0; i < 32; ++i) {
+        if (i == 10 || i == 20 || !(edx & (1u << i)))
+            continue;
+        if (length != 0 && length + 1 < size)
+            out[length++] = ' ';
+        for (const char* p = feature_names[i]; *p && length + 1 < size; ++p)
+            out[length++] = *p;
+    }
+    out[length] = '\0';
+}
+
+static int machdep_mode(int compat) {
+    unsigned int leaf0[4], leaf1[4];
+    unsigned int max_basic, signature, edx;
+    char vendor[16], features[256], expected[256], brand[64];
+    char label[32];
+
+    ref_cpuid(0, leaf0);
+    ref_cpuid(1, leaf1);
+
+    if (compat) {
+        // The compat profile: i7-9750H (leaf 1 EAX 0x906ea, 6/0x9e/0xa).
+        max_basic = 0x16u;
+        signature = 0x000906eau;
+        edx = 0xbfebfbffu;
+        snprintf(vendor, sizeof(vendor), "GenuineIntel");
+        snprintf(label, sizeof(label), "compat");
+    } else {
+        max_basic = leaf0[0];
+        signature = leaf1[0];
+        edx = leaf1[3];
+        snprintf(vendor, sizeof(vendor), "%c%c%c%c%c%c%c%c%c%c%c%c",
+                 leaf0[1] & 0xff, (leaf0[1] >> 8) & 0xff, (leaf0[1] >> 16) & 0xff, leaf0[1] >> 24,
+                 leaf0[3] & 0xff, (leaf0[3] >> 8) & 0xff, (leaf0[3] >> 16) & 0xff, leaf0[3] >> 24,
+                 leaf0[2] & 0xff, (leaf0[2] >> 8) & 0xff, (leaf0[2] >> 16) & 0xff, leaf0[2] >> 24);
+        snprintf(label, sizeof(label), "host");
+    }
+
+    unsigned int base_family = (signature >> 8) & 0xfu;
+    unsigned int ext_family = (signature >> 20) & 0xffu;
+    unsigned int base_model = (signature >> 4) & 0xfu;
+    unsigned int ext_model = (signature >> 16) & 0xfu;
+    int family = (int)(base_family == 0xfu ? base_family + ext_family : base_family);
+    int model = (int)((base_family == 0x6u || base_family == 0xfu) ? ((ext_model << 4) | base_model) : base_model);
+    int stepping = (int)(signature & 0xfu);
+
+    require_value(find_machdep("max_basic"), (int)max_basic);
+    require_value(find_machdep("family"), family);
+    require_value(find_machdep("model"), model);
+    require_value(find_machdep("stepping"), stepping);
+
+    char got_vendor[16];
+    machdep_string("vendor", got_vendor, sizeof(got_vendor));
+    if (strcmp(got_vendor, vendor) != 0) {
+        fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=vendor '%s' expected '%s'\n", got_vendor, vendor);
+        return 1;
+    }
+
+    machdep_string("features", features, sizeof(features));
+    feature_string(edx, expected, sizeof(expected));
+    if (strcmp(features, expected) != 0) {
+        fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=features '%s' expected '%s'\n", features, expected);
+        return 1;
+    }
+
+    if (compat) {
+        // A profile brand from the launcher (tools/system.prop) wins.
+        machdep_string("brand_string", brand, sizeof(brand));
+        if (strcmp(brand, "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz") != 0) {
+            fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=brand '%s'\n", brand);
+            return 1;
+        }
+    }
+
+    printf("HOST_SYSCTL_MACHDEP pass=1 mode=%s max_basic=%d family=%d model=%d stepping=%d vendor=%s features=\"%s\"\n",
+           label, (int)max_basic, family, model, stepping, got_vendor, features);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const char* mode = argc > 1 ? argv[1] : "normal";
+
+    if (strcmp(mode, "machdep") == 0)
+        return machdep_mode(0);
+    if (strcmp(mode, "machdep-compat") == 0)
+        return machdep_mode(1);
 
     if (strcmp(mode, "affinity") == 0) {
         // Restrict this process to the first four online CPUs.

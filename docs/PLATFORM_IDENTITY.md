@@ -85,6 +85,23 @@ an older `.conf` never edits that source. Symlinks escaping the prefix are
 rejected. To restore the original defaults, remove the override file while the
 prefix is stopped, then restart it.
 
+## Recommended configuration
+
+Provision your own prefix instead of keeping Darling's base identity. Do not
+copy another user's identifiers. First-time runtime installation does this for
+new prefixes; existing prefixes without saved overrides need an explicit
+provisioning run. With the game and clients closed, stop the selected prefix,
+then follow the commands below. `--provision --write` fills missing identifiers
+and replaces the known shared defaults, while preserving an already custom
+identity. It does not rotate custom identifiers on every run.
+
+Also select `profile=compat` in
+`<prefix>/private/etc/darling-system.prop` for the recommended application
+compatibility configuration. See [setup](SETUP.md#recommended-identity-and-compatibility-profile)
+for file precedence and activation. This profile is independent of the saved
+serial and UUID; provisioning alone does not enable it. Full application support
+has not been established across machines.
+
 ## Opt-in provisioning
 
 Preview a fresh or repaired identity without writing anything:
@@ -137,9 +154,10 @@ order. It writes:
 - `private/etc/darling-platform.plist`: canonical runtime overrides.
 - `private/etc/darling-smbios.conf`: matching shell-quoted `SMBIOS_*` values,
   including `SMBIOS_PROVISIONING_UDID`; unrelated legacy settings are not exported.
-- `System/Library/CoreServices/SystemVersion.plist`: an exact copy of the selected
-  runtime's metadata, not a fabricated macOS release. The runtime root defaults
-  to the saved SDK path or `/usr/local/libexec/darling`; override with
+- `System/Library/CoreServices/SystemVersion.plist`: metadata normalized to the
+  emulated macOS version and build reported by the patched kernel (14.7 /
+  23H124). This does not install macOS. The source runtime root defaults to the
+  saved SDK path or `/usr/local/libexec/darling`; override with
   `--runtime-root /path/to/runtime`.
 
 A valid runtime version file is required. The command checks all destinations

@@ -18,7 +18,7 @@ archive = root / 'build/riot-security/libsecurity_codesigning.a'
 archive.parent.mkdir(exist_ok=True)
 shutil.copy2(parser / 'libsecurity_codesigning.a', archive)
 ar = shlex.split((parser / 'CMakeFiles/security_codesigning.dir/link.txt').read_text())[0]
-for name in ['reqparser', 'StaticCode']:
+for name in ['reqparser', 'StaticCode', 'SecStaticCode', 'SecRequirement', 'notarization']:
     obj = archive.parent / (name + '.cpp.o')
     subprocess.run(['clang++', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'],
                     *flags['CXX_FLAGS'], '-c', str(root / ('build/darling-src/src/external/security/OSX/libsecurity_codesigning/lib/' + name + '.cpp')),
