@@ -161,7 +161,8 @@ int main() {
                 self.assertRegex(center, rf'-\s*\(MPRemoteCommand \*\){selector}\s*\{{')
         for selector in (r'addTarget:\(id\)\w+ action:\(SEL\)\w+', r'removeTarget:\(id\)\w+',
                          r'addTargetWithHandler:\(id\)\w+', r'setEnabled:\(BOOL\)\w+',
-                         r'isActive', r'setActive:\(BOOL\)\w+', r'localizedTitle'):
+                         r'isActive', r'setActive:\(BOOL\)\w+', r'localizedTitle',
+                         r'setLocalizedTitle:\(NSString \*\)\w+'):
             with self.subTest(selector=selector):
                 self.assertRegex(command, rf'-\s*\([^)]*\)\s*{selector}\s*\{{')
 
@@ -171,8 +172,12 @@ int main() {
         source = (frameworks.SOURCES / 'MediaPlayer.m').read_text()
         command = source.split('@implementation MPRemoteCommand\n', 1)[1].split('@end', 1)[0]
         add_target = command.split('addTarget:(id)target action:(SEL)action', 1)[1].split('\n}', 1)[0]
-        self.assertIn('valueWithNonretainedObject:target', add_target)
+        # Only the address is kept: an object pointer handed back to ARC after the
+        # target was deallocated (nonretainedObjectValue) is undefined behaviour.
+        self.assertIn('valueWithPointer:(__bridge const void *)target', add_target)
         self.assertNotIn('addObject:target]', add_target)
+        self.assertNotIn('nonretainedObjectValue', command)
+        self.assertIn('pointerValue] == (__bridge const void *)target', command)
 
     def test_guest_check_covers_every_constant_class(self):
         check = (frameworks.SOURCES / 'constant-literal-check.m').read_text()
