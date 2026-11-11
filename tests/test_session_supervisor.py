@@ -463,5 +463,91 @@ class ManagedWindowTests(unittest.TestCase):
         self.assertIsNone(supervisor.managed_client_window(run))
 
 
+
+
+class FailureReportingTests(unittest.TestCase):
+    """A crashed client must not look like a clean shutdown (issue #174)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prefix = self.root / '.darling'
+        self.prefix.mkdir()
+        self.proc = self.root / 'proc'
+        self.proc.mkdir()
+        self.logs = self.root / 'logs'
+        self.logs.mkdir()
+
+    def run_supervisor(self, command, guest_log=None):
+        previous = supervisor.cleanup
+        seen = {}
+
+        def fake_cleanup(*_a, **kwargs):
+            seen['note'] = kwargs.get('note')
+            return []
+
+        supervisor.cleanup = fake_cleanup
+        self.addCleanup(setattr, supervisor, 'cleanup', previous)
+        output = io.StringIO()
+        code = supervisor.run_supervised(
+            command, self.prefix, None, proc_root=self.proc, poll=0,
+            run=lambda *_a, **_k: None, kill=lambda *_a: None,
+            sleep=lambda _s: None, out=output, guest_log=guest_log)
+        return code, output.getvalue(), seen
+
+    def test_abnormal_exit_reports_status_and_last_log_line(self):
+        (self.logs / 'Riot Client.log').write_text(
+            'booting\n'
+            'dyld: Library not loaded: /System/Library/Frameworks/QuickLookUI.framework\n'
+            'abort_with_payload: reason: dyld: No shared cache present\n\n')
+        code, output, seen = self.run_supervisor(
+            ['sh', '-c', 'exit 3'], guest_log=self.logs)
+        self.assertEqual(code, 3)
+        self.assertIn('client exited with status 3', output)
+        self.assertIn('last available guest log line (possibly from an earlier session): abort_with_payload: reason: dyld: '
+                      'No shared cache present', output)
+        self.assertEqual(seen['note'], ' (client exited with status 3)')
+
+    def test_newest_log_file_is_reported(self):
+        old = self.logs / 'old.log'
+        old.write_text('old failure\n')
+        new = self.logs / 'nested'
+        new.mkdir()
+        newest = new / 'new.log'
+        newest.write_text('newest failure\n')
+        os.utime(old, (1, 1))
+        os.utime(newest, (2, 2))
+        code, output, _seen = self.run_supervisor(
+            ['sh', '-c', 'exit 1'], guest_log=self.logs)
+        self.assertEqual(code, 1)
+        self.assertIn('last available guest log line (possibly from an earlier session): newest failure', output)
+
+    def test_clean_exit_reports_no_failure(self):
+        (self.logs / 'run.log').write_text('normal shutdown\n')
+        code, output, seen = self.run_supervisor(['true'], guest_log=self.logs)
+        self.assertEqual(code, 0)
+        self.assertNotIn('client exited with status', output)
+        self.assertNotIn('last available guest log line', output)
+        self.assertEqual(seen['note'], '')
+
+    def test_missing_log_directory_still_reports_status(self):
+        missing = self.root / 'absent'
+        code, output, _seen = self.run_supervisor(
+            ['sh', '-c', 'exit 2'], guest_log=missing)
+        self.assertEqual(code, 2)
+        self.assertIn('client exited with status 2', output)
+        self.assertNotIn('last available guest log line', output)
+
+    def test_cleanup_gone_message_carries_the_status(self):
+        output = io.StringIO()
+        remaining = supervisor.cleanup(
+            self.prefix, None, 'pid:[4026532000]', proc_root=self.proc,
+            own_namespace='pid:[1]', out=output, note=' (client exited with status 3)')
+        self.assertEqual(remaining, [])
+        self.assertIn('runtime and guest processes are gone (client exited with '
+                      'status 3)', output.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main()
