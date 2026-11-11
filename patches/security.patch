@@ -1,3 +1,53 @@
+diff --git a/OSX/libsecurity_codesigning/lib/SecRequirement.cpp b/OSX/libsecurity_codesigning/lib/SecRequirement.cpp
+index d89c9240..82853ac6 100644
+--- a/OSX/libsecurity_codesigning/lib/SecRequirement.cpp
++++ b/OSX/libsecurity_codesigning/lib/SecRequirement.cpp
+@@ -25,6 +25,7 @@
+ // SecRequirement - API frame for SecRequirement objects
+ //
+ #include "cs.h"
++#include "rclol_signing_trace.h"
+ #include "Requirements.h"
+ #include "reqparser.h"
+ #include "reqmaker.h"
+@@ -93,6 +94,7 @@ OSStatus SecRequirementCreateWithStringAndErrors(CFStringRef text, SecCSFlags fl
+ 	BEGIN_CSAPI
+ 	
+ 	checkFlags(flags);
++	rclol_signing_trace("SecRequirementCreateWithString", cfString(text).c_str(), flags, 0, 0);
+ 	CodeSigning::Required(requirementRef) = (new SecRequirement(parseRequirement(cfString(text)), true))->handle();
+ 
+ 	END_CSAPI_ERRORS
+diff --git a/OSX/libsecurity_codesigning/lib/SecStaticCode.cpp b/OSX/libsecurity_codesigning/lib/SecStaticCode.cpp
+index da60c8bc..043d41c0 100644
+--- a/OSX/libsecurity_codesigning/lib/SecStaticCode.cpp
++++ b/OSX/libsecurity_codesigning/lib/SecStaticCode.cpp
+@@ -25,6 +25,7 @@
+ // SecStaticCode - API frame for SecStaticCode objects
+ //
+ #include "cs.h"
++#include "rclol_signing_trace.h"
+ #include "StaticCode.h"
+ #include <security_utilities/cfmunge.h>
+ #include <security_utilities/logging.h>
+@@ -53,6 +54,7 @@ OSStatus SecStaticCodeCreateWithPath(CFURLRef path, SecCSFlags flags, SecStaticC
+ 	BEGIN_CSAPI
+ 
+ 	checkFlags(flags, kSecCSForceOnlineNotarizationCheck);
++	rclol_signing_trace("SecStaticCodeCreateWithPath", cfString(path).c_str(), flags, 0, 0);
+ 	CodeSigning::Required(staticCodeRef) = (new SecStaticCode(DiskRep::bestGuess(cfString(path).c_str()), flags))->handle();
+ 
+ 	END_CSAPI
+@@ -107,6 +109,9 @@ OSStatus SecStaticCodeCheckValidityWithErrors(SecStaticCodeRef staticCodeRef, Se
+ {
+ 	BEGIN_CSAPI
+ 
++	rclol_signing_trace("SecStaticCodeCheckValidityWithErrors",
++		requirementRef ? "with-requirement" : "no-requirement", flags, 0, 0);
++
+ 	checkFlags(flags,
+ 		  kSecCSReportProgress
+ 		| kSecCSCheckAllArchitectures
 diff --git a/OSX/libsecurity_codesigning/lib/StaticCode.cpp b/OSX/libsecurity_codesigning/lib/StaticCode.cpp
 index 0c4be9d3..0a3c75d9 100644
 --- a/OSX/libsecurity_codesigning/lib/StaticCode.cpp
@@ -29,6 +79,93 @@ index 0c4be9d3..0a3c75d9 100644
  			mLimitedAsync = new LimitedAsync(runMultiThreaded);
  		}
  
+diff --git a/OSX/libsecurity_codesigning/lib/notarization.cpp b/OSX/libsecurity_codesigning/lib/notarization.cpp
+index 6587dccd..a453767e 100644
+--- a/OSX/libsecurity_codesigning/lib/notarization.cpp
++++ b/OSX/libsecurity_codesigning/lib/notarization.cpp
+@@ -23,6 +23,8 @@
+ #include "SecAssessment.h"
+ #include "notarization.h"
+ #include <security_utilities/unix++.h>
++#include <stdlib.h>  // darling-lol: getenv for the compat-profile fallback
++#include <string.h>  // darling-lol: strcmp
+ 
+ typedef struct __attribute__((packed)) _package_trailer {
+ 	uint8_t magic[4];
+@@ -116,6 +118,26 @@ isNotarized(const Requirement::Context *context)
+ 		if (error.get() != NULL) {
+ 			secerror("Error checking with notarization daemon: %ld", CFErrorGetCode(error));
+ 		}
++		// darling-lol: SecAssessmentTicketLookup needs syspolicyd, which Darling
++		// does not run, so the lookup always fails with an XPC connection error
++		// (not a real "revoked"/"unknown" verdict). Fail-closed turns genuinely
++		// notarized binaries into "not notarized", which anti-cheat self-checks
++		// read as a tampered/unsupported environment. Under the compat profile
++		// only (default Darling behaviour is unchanged), treat a failed daemon
++		// lookup as notarized. A valid cdhash was required to reach this point,
++		// and requirements that demand notarization in practice also enforce the
++		// Apple anchor / Developer ID, which Darling validates normally.
++		// TODO(stapled): validate a stapled notarization ticket offline instead
++		// of assuming (see registerStapledTicketWithSystem / the package trailer
++		// extraction below for the ticket plumbing).
++		if (!is_notarized) {
++			const char *profile = getenv("RCLOL_PLATFORM_PROFILE");
++			if (profile != NULL && strcmp(profile, "compat") == 0) {
++				secinfo("notarization", "compat profile: notarization daemon "
++					"unavailable, treating code as notarized");
++				is_notarized = true;
++			}
++		}
+ 	}
+ #endif
+ 
+diff --git a/OSX/libsecurity_codesigning/lib/rclol_signing_trace.h b/OSX/libsecurity_codesigning/lib/rclol_signing_trace.h
+new file mode 100644
+index 00000000..e4c04257
+--- /dev/null
++++ b/OSX/libsecurity_codesigning/lib/rclol_signing_trace.h
+@@ -0,0 +1,41 @@
++// darling-lol: opt-in trace of the code-signing calls a loaded module makes.
++//
++// MVG validates code signatures through these system entry points; the module
++// itself is obfuscated, so the path/requirement it checks cannot be read
++// statically. This records what actually reaches the framework. It is OFF
++// unless the environment variable RCLOL_SIGNING_TRACE names a writable file,
++// appends only allowlisted fields (the API, the path or requirement text, the
++// flags and the result), and never touches MVG. No game logic is changed.
++#ifndef RCLOL_SIGNING_TRACE_H
++#define RCLOL_SIGNING_TRACE_H
++
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <time.h>
++
++static inline void rclol_signing_trace(const char* api, const char* detail,
++    unsigned int flags, int has_status, long status)
++{
++    const char* path = getenv("RCLOL_SIGNING_TRACE");
++    if (!path || !*path)
++        return;
++    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
++    if (fd < 0)
++        return;
++    char line[1200];
++    int n;
++    if (has_status)
++        n = snprintf(line, sizeof(line), "%ld %s flags=0x%x status=%ld detail=%.900s\n",
++            (long) time(NULL), api, flags, status, detail ? detail : "");
++    else
++        n = snprintf(line, sizeof(line), "%ld %s flags=0x%x detail=%.900s\n",
++            (long) time(NULL), api, flags, detail ? detail : "");
++    if (n > 0)
++        (void) write(fd, line, (size_t) (n < (int) sizeof(line) ? n : (int) sizeof(line) - 1));
++    close(fd);
++}
++
++#endif
 diff --git a/OSX/libsecurity_codesigning/lib/reqparser.cpp b/OSX/libsecurity_codesigning/lib/reqparser.cpp
 index e3657a19..26b8838a 100644
 --- a/OSX/libsecurity_codesigning/lib/reqparser.cpp

@@ -8573,10 +8573,45 @@ index 9a489b386..9fe56cc3f 100644
  @implementation VNDetectBarcodesRequest
  
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
-diff --git a/src/libsandbox/src/sandbox.c b/src/libsandbox/src/sandbox.c
-index 5af5298aa..fb59ee5d1 100644
---- a/src/libsandbox/src/sandbox.c
-+++ b/src/libsandbox/src/sandbox.c
+diff --git i/src/libsandbox/include/sandbox/sandbox.h w/src/libsandbox/include/sandbox/sandbox.h
+index 50a7e632..dca8203c 100644
+--- i/src/libsandbox/include/sandbox/sandbox.h
++++ w/src/libsandbox/include/sandbox/sandbox.h
+@@ -21,19 +21,22 @@
+ #ifndef _sandbox_H_
+ #define _sandbox_H_
+ 
+-void* sandbox_apply(void);
++/* darling-lol: these follow Apple's and WTF's SandboxSPI.h, not the old
++ * placeholder shapes. A compiled profile is an opaque struct whose first
++ * fields Chromium reads as {builtin, data, size}; params is an opaque object. */
++int sandbox_apply(void* profile);
+ void* sandbox_apply_container(void);
+-void* sandbox_compile_entitlements(void);
+-void* sandbox_compile_file(void);
+-void* sandbox_compile_named(void);
+-void* sandbox_compile_string(void);
++void* sandbox_compile_entitlements(void* entitlements, void* params, char** error);
++void* sandbox_compile_file(const char* path, void* params, char** error);
++void* sandbox_compile_named(const char* name, void* params, char** error);
++void* sandbox_compile_string(const char* profile, void* params, char** error);
+ void* sandbox_container_paths_iterate_items(void);
+ void* sandbox_create_params(void);
+-void* sandbox_free_params(void);
+-void* sandbox_free_profile(void);
++void* sandbox_free_params(void* params);
++void sandbox_free_profile(void* profile);
+ void* sandbox_inspect_pid(void);
+ void* sandbox_inspect_smemory(void);
+-void* sandbox_set_param(void);
++int sandbox_set_param(void* params, const char* key, const char* value);
+ void* sandbox_set_user_state_item(void);
+ void* sandbox_user_state_item_buffer_create(void);
+ void* sandbox_user_state_item_buffer_destroy(void);
+diff --git i/src/libsandbox/src/sandbox.c w/src/libsandbox/src/sandbox.c
+index 5af5298a..ddbacfee 100644
+--- i/src/libsandbox/src/sandbox.c
++++ w/src/libsandbox/src/sandbox.c
 @@ -21,6 +21,8 @@
  #include <sandbox/sandbox.h>
  #include <stdlib.h>
@@ -8586,137 +8621,195 @@ index 5af5298aa..fb59ee5d1 100644
  
  static int verbose = 0;
  
-@@ -29,63 +31,105 @@ static void initme(void) {
+@@ -29,10 +31,115 @@ static void initme(void) {
      verbose = getenv("STUB_VERBOSE") != NULL;
  }
  
 -void* sandbox_apply(void)
 +/* darling-lol: SeatbeltExtensions token family. Chromium's seatbelt client
-+ * issues/consumes/releases these around sandboxed child setup; without
-+ * enforcement we hand out dummy nonzero tokens and accept everything.
-+ * (These live in libsandbox.dylib on macOS, hence here and not in
-+ * libsystem_sandbox.) */
-+static int64_t sandbox_extension_next_token = 1;
-+
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags)
- {
--    if (verbose) puts("STUB: sandbox_apply called");
--    return NULL;
++ * issues a token in the browser, passes it to a child and consumes it there.
++ * Real tokens are a char*; with no enforcement behind them, issue a dummy
++ * token and accept any non-NULL one. (These live in libsandbox.dylib on
++ * macOS, hence here and not in libsystem_sandbox.) */
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags)
++{
 +    if (verbose) puts("STUB: sandbox_extension_issue_file called");
-+    (void)path; (void)flags;
-+    return sandbox_extension_next_token++;
- }
- 
--void* sandbox_apply_container(void)
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags)
- {
--    if (verbose) puts("STUB: sandbox_apply_container called");
--    return NULL;
++    (void)extension_class; (void)path; (void)flags;
++    return strdup("darling-lol-stub");
++}
++
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags)
++{
 +    if (verbose) puts("STUB: sandbox_extension_issue_mach called");
-+    (void)name; (void)flags;
-+    return sandbox_extension_next_token++;
- }
- 
--void* sandbox_compile_entitlements(void)
-+int sandbox_extension_consume(int64_t token)
- {
--    if (verbose) puts("STUB: sandbox_compile_entitlements called");
--    return NULL;
++    (void)extension_class; (void)name; (void)flags;
++    return strdup("darling-lol-stub");
++}
++
++int64_t sandbox_extension_consume(const char *token)
++{
 +    if (verbose) puts("STUB: sandbox_extension_consume called");
-+    (void)token;
-+    return 0;
- }
- 
--void* sandbox_compile_file(void)
-+int sandbox_extension_release(int64_t token)
++    return token != NULL;
++}
++
++int sandbox_extension_release(int64_t handle)
 +{
 +    if (verbose) puts("STUB: sandbox_extension_release called");
-+    (void)token;
++    (void)handle;
 +    return 0;
 +}
 +
 +/* darling-lol: compile/apply family. No seatbelt compiler exists, so
 + * "compiling" a profile yields a dummy handle and applying succeeds.
-+ * Signatures match Apple's (the old stubs had wrong shapes). */
++ *
++ * A compiled profile must have Apple's layout: Chromium compiles the policy in
++ * the browser, copies data/size into the message it sends to the child, and
++ * frees the profile. Returning a bare string there made that copy read past
++ * the allocation and take heap bytes as the length, which Chromium then fed to
++ * its allocator (the "invalid size" trap on startup). */
++struct darling_sandbox_profile {
++    char *builtin;
++    unsigned char *data;
++    size_t size;
++};
 +
-+void* sandbox_compile_string(const char *profile, char **errorbuf)
++static const char darling_compiled_profile[] = "darling-sandbox-stub";
++
++static void *darling_sandbox_profile_create(void)
++{
++    struct darling_sandbox_profile *profile = calloc(1, sizeof(*profile));
++    if (profile == NULL)
++        return NULL;
++    profile->data = malloc(sizeof(darling_compiled_profile));
++    if (profile->data == NULL) {
++        free(profile);
++        return NULL;
++    }
++    memcpy(profile->data, darling_compiled_profile, sizeof(darling_compiled_profile));
++    profile->size = sizeof(darling_compiled_profile);
++    return profile;
++}
++
++void* sandbox_compile_string(const char *profile, void *params, char **errorbuf)
 +{
 +    if (verbose) puts("STUB: sandbox_compile_string called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)profile;
-+    return strdup("darling-sandbox-stub");
++    (void)profile; (void)params;
++    return darling_sandbox_profile_create();
 +}
 +
-+void* sandbox_compile_file(const char *path, char **errorbuf)
- {
-     if (verbose) puts("STUB: sandbox_compile_file called");
--    return NULL;
++void* sandbox_compile_file(const char *path, void *params, char **errorbuf)
++{
++    if (verbose) puts("STUB: sandbox_compile_file called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)path;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_compile_named(void)
-+void* sandbox_compile_named(const char *name, char **errorbuf)
- {
-     if (verbose) puts("STUB: sandbox_compile_named called");
--    return NULL;
++    (void)path; (void)params;
++    return darling_sandbox_profile_create();
++}
++
++void* sandbox_compile_named(const char *name, void *params, char **errorbuf)
++{
++    if (verbose) puts("STUB: sandbox_compile_named called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)name;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_compile_string(void)
-+void* sandbox_compile_entitlements(void *entitlements, char **errorbuf)
- {
--    if (verbose) puts("STUB: sandbox_compile_string called");
--    return NULL;
++    (void)name; (void)params;
++    return darling_sandbox_profile_create();
++}
++
++void* sandbox_compile_entitlements(void *entitlements, void *params, char **errorbuf)
++{
 +    if (verbose) puts("STUB: sandbox_compile_entitlements called");
 +    if (errorbuf != NULL) *errorbuf = NULL;
-+    (void)entitlements;
-+    return strdup("darling-sandbox-stub");
- }
- 
--void* sandbox_container_paths_iterate_items(void)
-+int sandbox_apply(void *handle)
- {
--    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
--    return NULL;
-+    if (verbose) puts("STUB: sandbox_apply called");
-+    (void)handle;
-+    return 0;
- }
- 
--void* sandbox_create_params(void)
-+void sandbox_free_profile(void *handle)
- {
--    if (verbose) puts("STUB: sandbox_create_params called");
-+    if (verbose) puts("STUB: sandbox_free_profile called");
-+    free(handle);
++    (void)entitlements; (void)params;
++    return darling_sandbox_profile_create();
 +}
 +
-+void* sandbox_apply_container(void)
++int sandbox_apply(void *handle)
+ {
+     if (verbose) puts("STUB: sandbox_apply called");
+-    return NULL;
++    (void)handle;
++    return 0;
++}
++
++void sandbox_free_profile(void *handle)
 +{
-+    if (verbose) puts("STUB: sandbox_apply_container called");
++    if (verbose) puts("STUB: sandbox_free_profile called");
++    struct darling_sandbox_profile *profile = handle;
++    if (profile != NULL)
++        free(profile->data);
++    free(profile);
+ }
+ 
+ void* sandbox_apply_container(void)
+@@ -41,51 +151,23 @@ void* sandbox_apply_container(void)
      return NULL;
+ }
+ 
+-void* sandbox_compile_entitlements(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_entitlements called");
+-    return NULL;
+-}
+-
+-void* sandbox_compile_file(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_file called");
+-    return NULL;
+-}
+-
+-void* sandbox_compile_named(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_named called");
+-    return NULL;
+-}
+-
+-void* sandbox_compile_string(void)
+-{
+-    if (verbose) puts("STUB: sandbox_compile_string called");
+-    return NULL;
+-}
+-
+ void* sandbox_container_paths_iterate_items(void)
+ {
+     if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
+     return NULL;
+ }
+ 
++/* darling-lol: a NULL parameter set is a failure to Chromium's seatbelt
++ * client, which then never compiles the profile. Hand out an empty one. */
+ void* sandbox_create_params(void)
+ {
+     if (verbose) puts("STUB: sandbox_create_params called");
+-    return NULL;
++    return calloc(1, sizeof(void *));
  }
  
 -void* sandbox_free_params(void)
-+void* sandbox_container_paths_iterate_items(void)
++void* sandbox_free_params(void *params)
  {
 -    if (verbose) puts("STUB: sandbox_free_params called");
-+    if (verbose) puts("STUB: sandbox_container_paths_iterate_items called");
-     return NULL;
- }
- 
+-    return NULL;
+-}
+-
 -void* sandbox_free_profile(void)
-+void* sandbox_create_params(void)
- {
+-{
 -    if (verbose) puts("STUB: sandbox_free_profile called");
-+    if (verbose) puts("STUB: sandbox_create_params called");
++    free(params);
      return NULL;
  }
  
+@@ -101,10 +183,11 @@ void* sandbox_inspect_smemory(void)
+     return NULL;
+ }
+ 
+-void* sandbox_set_param(void)
++int sandbox_set_param(void *params, const char *key, const char *value)
+ {
+     if (verbose) puts("STUB: sandbox_set_param called");
+-    return NULL;
++    (void)params; (void)key; (void)value;
++    return 0;
+ }
+ 
+ void* sandbox_set_user_state_item(void)
 diff --git a/src/libsystem_coreservices/dirhelper.c b/src/libsystem_coreservices/dirhelper.c
 index f22f8213d..e7fbdc92e 100644
 --- a/src/libsystem_coreservices/dirhelper.c
@@ -8928,10 +9021,10 @@ index 6fa2d088c..655554284 100644
 +/* darling-lol: SeatbeltExtensions token family (used by Chromium).
 + * No enforcement exists, so issue dummy nonzero tokens and accept
 + * consume/release as no-ops. */
-+int64_t sandbox_extension_issue_file(const char *path, uint32_t flags);
-+int64_t sandbox_extension_issue_mach(const char *name, uint32_t flags);
-+int sandbox_extension_consume(int64_t token);
-+int sandbox_extension_release(int64_t token);
++char *sandbox_extension_issue_file(const char *extension_class, const char *path, uint32_t flags);
++char *sandbox_extension_issue_mach(const char *extension_class, const char *name, uint32_t flags);
++int64_t sandbox_extension_consume(const char *token);
++int sandbox_extension_release(int64_t handle);
 +
  int sandbox_issue_extension(const char *path, char **ext_token);
  int sandbox_issue_fs_extension(const char *path, uint64_t flags, char **ext_token);
@@ -9282,7 +9375,7 @@ index fee1bde8..14733ac4 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef8..d758c1a 100644
+index 6617ef82b..dff86b468 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -21,6 +21,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -9293,7 +9386,7 @@ index 6617ef8..d758c1a 100644
  #include <unistd.h>
  #include <stdio.h>
  #include <string.h>
-@@ -42,6 +43,11 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -42,6 +43,12 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  #include <sys/ptrace.h>
  #include <pthread.h>
  #include <sys/utsname.h>
@@ -9302,10 +9395,11 @@ index 6617ef8..d758c1a 100644
 +#include "dc_entitlements.h"
 +#include "dc_mseal.h"
 +#include "dc_image_snapshot.h"
++#include "dc_macho_slice.h"
  
  #ifndef PAGE_SIZE
  #	define PAGE_SIZE	4096
-@@ -70,7 +76,7 @@ static void reexec32(char** argv);
+@@ -70,7 +77,7 @@ static void reexec32(char** argv);
  #endif
  static void load32(int fd, bool expect_dylinker, struct load_results* lr);
  static void load_fat(int fd, cpu_type_t cpu, bool expect_dylinker, char** argv, struct load_results* lr);
@@ -9314,7 +9408,7 @@ index 6617ef8..d758c1a 100644
  static int native_prot(int prot);
  static void setup_space(struct load_results* lr, bool is_64_bit);
  static void process_special_env(struct load_results* lr);
-@@ -106,6 +112,256 @@ void* __mldr_main_stack_top = NULL;
+@@ -106,6 +113,275 @@ void* __mldr_main_stack_top = NULL;
  static int kernel_major = -1;
  static int kernel_minor = -1;
  
@@ -9398,12 +9492,27 @@ index 6617ef8..d758c1a 100644
 +// suppresses logging and rejection; it still verifies so csops never fabricates
 +// CS_VALID. An unknown policy fails closed. Enforced loads verify and map
 +// the same sealed snapshot; symlinks retain normal exec-style resolution.
-+static int codesign_gate(const char* path, int* out_fd)
++static int select_macho_slice(const uint8_t* data, size_t size, cpu_type_t forced_arch,
++    const struct load_results* lr, struct dc_macho_slice* slice)
++{
++#ifdef __x86_64__
++    const uint32_t host_cpu = DC_CPU_X86_64;
++#else
++    const uint32_t host_cpu = DC_CPU_X86;
++#endif
++    uint32_t preferences[4];
++    for (unsigned i = 0; i < 4; ++i)
++        preferences[i] = (uint32_t)lr->bprefs[i];
++    return dc_select_macho_slice(data, size, preferences, (uint32_t)forced_arch, host_cpu, slice);
++}
++
++static int codesign_gate(const char* path, int* out_fd, const struct load_results* lr)
 +{
 +	const char* policy = getenv("DARLING_CODESIGN_ENFORCE");
 +	bool enforce = false, quiet = false, verbose;
 +	struct stat st;
 +	struct dc_image img;
++	struct dc_macho_slice slice;
 +	struct dc_cs_state* state = &mldr_cs_state.state;
 +	char err[512];
 +	void* map;
@@ -9441,7 +9550,7 @@ index 6617ef8..d758c1a 100644
 +		if (enforce) { errno = ENOEXEC; return -1; }
 +		return 0;
 +	}
-+	if (fstat(fd, &st) != 0 || st.st_size <= 0) {
++	if (fstat(fd, &st) != 0 || st.st_size <= 0 || (uint64_t)st.st_size > SIZE_MAX) {
 +		if (!quiet)
 +			fprintf(stderr, "mldr: codesign %s: %s: cannot stat\n", enforce ? "rejected" : "warning", path);
 +		close(fd);
@@ -9487,7 +9596,11 @@ index 6617ef8..d758c1a 100644
 +	}
 +
 +	err[0] = '\0';
-+	r = dc_parse(map, (size_t) st.st_size, &img, err, sizeof(err));
++	r = select_macho_slice(map, (size_t)st.st_size, 0, lr, &slice);
++	if (r != 0)
++		snprintf(err, sizeof(err), "malformed Mach-O or no supported architecture");
++	else
++		r = dc_parse((const uint8_t*)map + slice.offset, (size_t)slice.size, &img, err, sizeof(err));
 +	if (r == 0)
 +		r = dc_verify_pages(&img, err, sizeof(err));
 +
@@ -9497,7 +9610,7 @@ index 6617ef8..d758c1a 100644
 +		state->hash_type = img.hash_type;
 +		state->page_size_log2 = img.page_size_log2;
 +		state->code_limit = img.code_limit;
-+		state->image_offset = 0; /* thin images only at M3 */
++		state->image_offset = slice.offset;
 +		state->cdhash_len = DC_CS_CDHASH_LEN;
 +		memcpy(state->cdhash, img.cdhash, DC_CS_CDHASH_LEN);
 +		if (img.teamid[0] != '\0') {
@@ -9511,7 +9624,7 @@ index 6617ef8..d758c1a 100644
 +		if (img.sig_size > 0 && img.sig_size <= DC_CS_MAX_BLOB) {
 +			mldr_cs_state.blob = malloc((size_t) img.sig_size);
 +			if (mldr_cs_state.blob != NULL) {
-+				memcpy((void*) mldr_cs_state.blob, (const uint8_t*) map + img.sig_offset, (size_t) img.sig_size);
++				memcpy((void*) mldr_cs_state.blob, img.data + img.sig_offset, (size_t) img.sig_size);
 +				state->blob_len = (uint32_t) img.sig_size;
 +			}
 +		}
@@ -9571,7 +9684,7 @@ index 6617ef8..d758c1a 100644
  int main(int argc, char** argv, char** envp)
  {
  	void** sp;
-@@ -154,14 +410,20 @@ int main(int argc, char** argv, char** envp)
+@@ -154,14 +430,20 @@ int main(int argc, char** argv, char** envp)
  	// allow any process to ptrace us
  	// the only process we really care about being able to do this is the server,
  	// but we can't just use the server's PID, since it lies outside our PID namespace.
@@ -9581,7 +9694,7 @@ index 6617ef8..d758c1a 100644
  	process_special_env(&mldr_load_results);
  
 +	int gate_fd = -1;
-+	if (codesign_gate(filename, &gate_fd) != 0) {
++	if (codesign_gate(filename, &gate_fd, &mldr_load_results) != 0) {
 +		fprintf(stderr, "mldr: refusing to load %s (code signing)\n", filename);
 +		return 1;
 +	}
@@ -9595,7 +9708,7 @@ index 6617ef8..d758c1a 100644
  #endif
  
  	// this was previously necessary when we were loading the binary from the LKM
-@@ -280,16 +542,17 @@ int main(int argc, char** argv, char** envp)
+@@ -280,16 +562,17 @@ int main(int argc, char** argv, char** envp)
  	__builtin_unreachable();
  }
  
@@ -9620,7 +9733,139 @@ index 6617ef8..d758c1a 100644
  	}
  
  	// We need to read argv[1] and detect whether it's a 32 or 64-bit application.
-@@ -563,6 +826,16 @@ static socket_bitmap_t socket_bitmap = {
+@@ -323,7 +606,8 @@ void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, char**
+ 		reexec32(argv);
+ #endif
+ 	}
+-	else if (magic == FAT_MAGIC || magic == FAT_CIGAM)
++	else if (magic == FAT_MAGIC || magic == FAT_CIGAM ||
++        magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64)
+ 	{
+ 		lseek(fd, 0, SEEK_SET);
+ 		load_fat(fd, forced_arch, expect_dylinker, argv, lr);
+@@ -338,98 +622,29 @@ void load(const char* path, cpu_type_t forced_arch, bool expect_dylinker, char**
+ }
+ 
+ static void load_fat(int fd, cpu_type_t forced_arch, bool expect_dylinker, char** argv, struct load_results* lr) {
+-	struct fat_header fhdr;
+-	struct fat_arch best_arch = {0};
+-	int bpref_index = -1;
+-
+-	best_arch.cputype = CPU_TYPE_ANY;
+-
+-	if (read(fd, &fhdr, sizeof(fhdr)) != sizeof(fhdr))
+-	{
+-		fprintf(stderr, "Cannot read fat file header.\n");
+-		exit(1);
+-	}
+-
+-	const bool swap = fhdr.magic == FAT_CIGAM;
+-
+-#define SWAP32(x) x = __bswap_32(x)
+-
+-	if (swap)
+-		SWAP32(fhdr.nfat_arch);
+-
+-	uint32_t i;
+-	for (i = 0; i < fhdr.nfat_arch; i++)
+-	{
+-		struct fat_arch arch;
+-
+-		if (read(fd, &arch, sizeof(arch)) != sizeof(arch))
+-		{
+-			fprintf(stderr, "Cannot read fat_arch header.\n");
+-			exit(1);
+-		}
+-
+-		if (swap)
+-		{
+-			SWAP32(arch.cputype);
+-			SWAP32(arch.cpusubtype);
+-			SWAP32(arch.offset);
+-			SWAP32(arch.size);
+-			SWAP32(arch.align);
+-		}
+-
+-		if (!forced_arch)
+-		{
+-			int j;
+-			for (j = 0; j < 4; j++)
+-			{
+-				if (lr->bprefs[j] && arch.cputype == lr->bprefs[j])
+-				{
+-					if (bpref_index == -1 || bpref_index > j)
+-					{
+-						best_arch = arch;
+-						bpref_index = j;
+-						break;
+-					}
+-				}
+-			}
+-
+-			if (bpref_index == -1)
+-			{
+-#if defined(__x86_64__)
+-				if (arch.cputype == CPU_TYPE_X86_64)
+-					best_arch = arch;
+-				else if (best_arch.cputype == CPU_TYPE_ANY && arch.cputype == CPU_TYPE_X86)
+-					best_arch = arch;
+-#elif defined(__i386__)
+-				if (arch.cputype == CPU_TYPE_X86)
+-					best_arch = arch;
+-#elif defined (__aarch64__)
+-	#error TODO: arm
+-#else
+-	#error Unsupported CPU architecture
+-#endif
+-			}
+-		}
+-		else
+-		{
+-			if (arch.cputype == forced_arch)
+-				best_arch = arch;
+-		}
+-	}
+-
+-	if (best_arch.cputype == CPU_TYPE_ANY)
+-	{
+-		fprintf(stderr, "No supported architecture found in fat binary.\n");
+-		exit(1);
+-	}
+-
+-	if (lseek(fd, best_arch.offset, SEEK_SET) == -1)
+-	{
+-		fprintf(stderr, "Cannot seek to selected arch in fat binary.\n");
+-		exit(1);
+-	}
+-
+-	if (best_arch.cputype & CPU_ARCH_ABI64) {
++    struct stat st;
++    struct dc_macho_slice slice;
++    if (fstat(fd, &st) != 0 || st.st_size <= 0 || (uint64_t)st.st_size > SIZE_MAX) {
++        fprintf(stderr, "Cannot stat universal Mach-O.\n");
++        exit(1);
++    }
++    void* map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
++    if (map == MAP_FAILED) {
++        fprintf(stderr, "Cannot map universal Mach-O headers.\n");
++        exit(1);
++    }
++    int selected = select_macho_slice(map, (size_t)st.st_size, forced_arch, lr, &slice);
++    munmap(map, (size_t)st.st_size);
++    if (selected != 0) {
++        fprintf(stderr, "Malformed Mach-O or no supported architecture.\n");
++        exit(1);
++    }
++    if (lseek(fd, (off_t)slice.offset, SEEK_SET) == -1) {
++        fprintf(stderr, "Cannot seek to selected arch in fat binary.\n");
++        exit(1);
++    }
++
++	if (slice.cpu & CPU_ARCH_ABI64) {
+ #ifdef __x86_64__
+ 		load64(fd, expect_dylinker, lr);
+ #elif __aarch64__
+@@ -563,6 +778,16 @@ static socket_bitmap_t socket_bitmap = {
  	.highest = -1,
  };
  
@@ -9637,7 +9882,7 @@ index 6617ef8..d758c1a 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +921,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +873,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
@@ -9649,7 +9894,7 @@ index 6617ef8..d758c1a 100644
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +951,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +903,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -9664,7 +9909,7 @@ index 6617ef8..d758c1a 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +969,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +921,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -9690,7 +9935,7 @@ index 6617ef8..d758c1a 100644
  		}
  	}
  
-@@ -698,6 +990,22 @@ out:
+@@ -698,6 +942,22 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -9713,7 +9958,7 @@ index 6617ef8..d758c1a 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +1015,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +967,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -9733,7 +9978,7 @@ index 6617ef8..d758c1a 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +1073,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1025,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -9752,7 +9997,7 @@ index 6617ef8..d758c1a 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1184,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1136,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  
@@ -13627,5 +13872,114 @@ index 0000000..04d64c1
 +fail:
 +    ops->close((int)target);
 +    return error;
++}
++#endif
+diff --git a/src/startup/mldr/include/dc_macho_slice.h b/src/startup/mldr/include/dc_macho_slice.h
+new file mode 100644
+--- /dev/null
++++ b/src/startup/mldr/include/dc_macho_slice.h
+@@ -0,0 +1,104 @@
++/* Bounded, allocation-free architecture selection shared by mldr's gate and loader. */
++#ifndef DC_MACHO_SLICE_H
++#define DC_MACHO_SLICE_H
++#include <stdint.h>
++#include <stddef.h>
++
++#define DC_CPU_X86 7u
++#define DC_CPU_X86_64 0x01000007u
++#define DC_MAX_FAT_ARCHES 64u
++
++struct dc_macho_slice { uint64_t offset, size; uint32_t cpu, subtype; };
++
++static uint32_t dc_slice_u32(const uint8_t *p, int big) {
++    if (big) return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
++    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | p[0];
++}
++static uint64_t dc_slice_u64(const uint8_t *p, int big) {
++    if (big) return ((uint64_t)dc_slice_u32(p, 1) << 32) | dc_slice_u32(p + 4, 1);
++    return ((uint64_t)dc_slice_u32(p + 4, 0) << 32) | dc_slice_u32(p, 0);
++}
++static int dc_slice_header(const uint8_t *p, uint64_t size, uint32_t *cpu, uint32_t *subtype) {
++    if (size < 28) return -1;
++    uint32_t magic = dc_slice_u32(p, 1);
++    int big, wide = 0;
++    switch (magic) {
++    case 0xfeedfaceu: big = 1; break;
++    case 0xcefaedfeu: big = 0; break;
++    case 0xfeedfacfu: big = 1; wide = 1; if (size < 32) return -1; break;
++    case 0xcffaedfeu: big = 0; wide = 1; if (size < 32) return -1; break;
++    default: return -1;
++    }
++    *cpu = dc_slice_u32(p + 4, big);
++    *subtype = dc_slice_u32(p + 8, big);
++    if (wide != ((*cpu & 0x01000000u) != 0)) return -1;
++    return 0;
++}
++
++/* Returns -1 for unsupported or malformed input. Does not validate signatures.
++ * host_cpu is the loader ABI; x86_64 may select x86 for re-execution in mldr32.
++ * Preferences retain the existing first-matching-preference behavior; otherwise
++ * prefer the native ABI, falling back to x86 only on an x86_64 host.
++ * Output is untouched on error. */
++static int dc_select_macho_slice(const uint8_t *data, size_t size,
++    const uint32_t preferences[4], uint32_t forced_cpu, uint32_t host_cpu,
++    struct dc_macho_slice *out) {
++    struct dc_macho_slice slices[DC_MAX_FAT_ARCHES];
++    unsigned count = 1;
++    if (!data || !out || size < 4 ||
++        (host_cpu != DC_CPU_X86 && host_cpu != DC_CPU_X86_64)) return -1;
++    uint32_t magic = dc_slice_u32(data, 1);
++    int fat = magic == 0xcafebabeu || magic == 0xbebafecau ||
++              magic == 0xcafebabfu || magic == 0xbfbafecau;
++    if (fat) {
++        if (size < 8) return -1;
++        int big = magic == 0xcafebabeu || magic == 0xcafebabfu;
++        int wide = magic == 0xcafebabfu || magic == 0xbfbafecau;
++        unsigned width = wide ? 32 : 20;
++        count = dc_slice_u32(data + 4, big);
++        if (!count || count > DC_MAX_FAT_ARCHES || count > (size - 8) / width) return -1;
++        uint64_t table_end = 8 + (uint64_t)count * width;
++        for (unsigned i = 0; i < count; ++i) {
++            const uint8_t *row = data + 8 + (size_t)i * width;
++            slices[i].cpu = dc_slice_u32(row, big);
++            slices[i].subtype = dc_slice_u32(row + 4, big);
++            slices[i].offset = wide ? dc_slice_u64(row + 8, big) : dc_slice_u32(row + 8, big);
++            slices[i].size = wide ? dc_slice_u64(row + 16, big) : dc_slice_u32(row + 12, big);
++            uint32_t align = dc_slice_u32(row + (wide ? 24 : 16), big);
++            if (align >= 63 || slices[i].offset < table_end || slices[i].offset > size ||
++                !slices[i].size || slices[i].size > size - slices[i].offset ||
++                (slices[i].offset & ((UINT64_C(1) << align) - 1))) return -1;
++            uint32_t cpu, subtype;
++            if (dc_slice_header(data + (size_t)slices[i].offset, slices[i].size, &cpu, &subtype) ||
++                cpu != slices[i].cpu || subtype != slices[i].subtype) return -1;
++            for (unsigned j = 0; j < i; ++j) {
++                if (slices[i].offset < slices[j].offset + slices[j].size &&
++                    slices[j].offset < slices[i].offset + slices[i].size) return -1;
++                if (slices[i].cpu == slices[j].cpu && slices[i].subtype == slices[j].subtype) return -1;
++            }
++        }
++    } else {
++        slices[0].offset = 0; slices[0].size = size;
++        if (dc_slice_header(data, size, &slices[0].cpu, &slices[0].subtype)) return -1;
++    }
++    int best = -1;
++    unsigned best_preference = 4;
++    for (unsigned i = 0; i < count; ++i) {
++        uint32_t cpu = slices[i].cpu;
++        if (cpu != host_cpu && !(host_cpu == DC_CPU_X86_64 && cpu == DC_CPU_X86)) continue;
++        if (forced_cpu) {
++            if (cpu == forced_cpu) best = (int)i;
++            continue;
++        }
++        unsigned preference = 4;
++        if (preferences) for (unsigned j = 0; j < 4; ++j) {
++            if (preferences[j] && preferences[j] == cpu) { preference = j; break; }
++        }
++        if (preference < best_preference) { best = (int)i; best_preference = preference; }
++        else if (best_preference == 4 && (cpu == host_cpu || best < 0)) best = (int)i;
++    }
++    if (best < 0) return -1;
++    *out = slices[best];
++    return 0;
 +}
 +#endif

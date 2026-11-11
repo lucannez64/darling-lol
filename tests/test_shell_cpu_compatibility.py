@@ -24,6 +24,15 @@ static unsigned reads;
 static bool read_string(const char* path, char* dst, int size) {
     ++reads; strcpy(dst, "5600000\\n"); return true;
 }
+/* The compat hardware profile short-circuits the probe; a switch here so both
+ * answers are exercised. */
+struct darling_cpu_identity { uint32_t base_mhz; };
+static int compat_on;
+static const struct darling_cpu_identity* darling_compat_cpu_identity(void) {
+    static const struct darling_cpu_identity identity = { 2600 };
+    return &identity;
+}
+static int darling_compat_profile_enabled(void) { return compat_on; }
 #define sysctl_handler(name) long name(void* old, unsigned long* oldlen)
 ''' + size_macro + handler + '''
 int main(void) {
@@ -42,6 +51,10 @@ int main(void) {
     assert(handle_cpufrequency(&hz, &length) == 0 && hz == 5600000000ULL && length == 8);
     uint32_t legacy = 0; length = sizeof(legacy);
     assert(handle_cpufrequency_compat(&legacy, &length) == 0 && length == 4 && legacy == (uint32_t)5600000000ULL);
+    compat_on = 1; reads = 0; hz = 17; length = sizeof(hz);
+    assert(handle_cpufrequency(&hz, &length) == 0 && hz == 2600000000ULL && length == 8 && reads == 0);
+    length = 4; hz = 17;
+    assert(handle_cpufrequency(&hz, &length) == -EINVAL && hz == 17);
 }
 ''')
 

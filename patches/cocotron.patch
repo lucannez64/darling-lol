@@ -2762,7 +2762,7 @@ index c3f5d05..dbd9317 100644
          @"NSTouchBarItemIdentifierCharacterPicker";
  
 diff --git a/AppKit/NSView.m b/AppKit/NSView.m
-index 8ac2bbd..a0fb4f3 100644
+index 8ac2bbd..305b604 100644
 --- a/AppKit/NSView.m
 +++ b/AppKit/NSView.m
 @@ -46,6 +46,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -2975,7 +2975,40 @@ index 8ac2bbd..a0fb4f3 100644
          }
  
          [_subviews
-@@ -2687,6 +2786,17 @@ static NSView *viewBeingPrinted = nil;
+@@ -2244,10 +2343,13 @@ static NSView *viewBeingPrinted = nil;
+     if (_rectsBeingRedrawn == NULL) {
+         NSView *opaqueAncestor = [self opaqueAncestor];
+         if (opaqueAncestor != self) {
+-            // Ask our opaque ancestor what to draw
+-            const NSRect *ancestorRects;
++            // Ask our opaque ancestor what to draw. opaqueAncestor is nil when
++            // nothing up the chain is opaque; a message to nil fills in nothing.
++            const NSRect *ancestorRects = NULL;
++            NSInteger ancestorRectsCount = 0;
+             [opaqueAncestor getRectsBeingDrawn: &ancestorRects
+-                                         count: &_rectsBeingRedrawnCount];
++                                         count: &ancestorRectsCount];
++            _rectsBeingRedrawnCount = ancestorRects ? ancestorRectsCount : 0;
+             if (_rectsBeingRedrawnCount) {
+                 _rectsBeingRedrawn = NSZoneCalloc(NULL, _rectsBeingRedrawnCount,
+                                                   sizeof(NSRect));
+@@ -2269,10 +2371,13 @@ static NSView *viewBeingPrinted = nil;
+             NSView *view = [self superview];
+             if (view) {
+                 NSView *opaqueAncestor = [view opaqueAncestor];
+-                const NSRect *ancestorRects;
+-                NSInteger ancestorRectsCount;
++                // Stay empty when no ancestor is opaque (opaqueAncestor is nil).
++                const NSRect *ancestorRects = NULL;
++                NSInteger ancestorRectsCount = 0;
+                 [opaqueAncestor getRectsBeingDrawn: &ancestorRects
+                                              count: &ancestorRectsCount];
++                if (ancestorRects == NULL)
++                    ancestorRectsCount = 0;
+                 if (ancestorRectsCount || _invalidRectCount) {
+                     _rectsBeingRedrawn = NSZoneCalloc(
+                             NULL, _invalidRectCount + ancestorRectsCount,
+@@ -2687,6 +2792,17 @@ static NSView *viewBeingPrinted = nil;
           slideBack: (BOOL) slideBack
  {
      location = [self convertPoint: location toView: nil];
@@ -2993,7 +3026,7 @@ index 8ac2bbd..a0fb4f3 100644
      [[NSDraggingManager draggingManager] dragImage: image
                                                  at: location
                                              offset: offset
-@@ -2783,7 +2893,8 @@ static NSView *viewBeingPrinted = nil;
+@@ -2783,7 +2899,8 @@ static NSView *viewBeingPrinted = nil;
  }
  
  - (BOOL) prepareForDragOperation: (id<NSDraggingInfo>) sender {

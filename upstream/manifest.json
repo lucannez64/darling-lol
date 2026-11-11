@@ -15,24 +15,25 @@
         "src/CoreAudio/CoreAudioComponent/MatrixMixerAU.cpp",
         "src/frameworks/Carbon/HIToolbox/src/SecureInput.c",
         "src/frameworks/CoreMedia/include/CoreMedia/CMFormatDescription.h",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.c",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.h",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.h",
         "src/frameworks/CryptoTokenKit/src/TKTokenWatcher.m",
         "src/frameworks/OpenDirectory/src/ODLocalDirectory.h",
         "src/frameworks/OpenDirectory/src/ODLocalDirectory.m",
         "src/frameworks/OpenGL/CGLAsyncPresent.inc",
         "src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h",
         "src/startup/mldr/commpage-cpu-caps.h",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.h",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.c",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.h",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c",
+        "src/frameworks/Accelerate/vecLib/vDSP/src/arith.c",
+        "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c",
         "src/shellspawn/shellspawn-fds.h",
         "src/startup/mldr/dc_codesign.c",
         "src/startup/mldr/dc_codesign.h",
-        "src/frameworks/Accelerate/vecLib/vDSP/src/arith.c",
-        "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c",
         "src/startup/mldr/include/dc_entitlements.h",
         "src/startup/mldr/include/dc_mseal.h",
         "src/startup/mldr/include/dc_image_snapshot.h",
+        "src/startup/mldr/include/dc_macho_slice.h",
         "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm"
       ]
     },
@@ -65,10 +66,24 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 115,
+      "modified_files": 134,
       "new_files": [
         "QuartzCore/include/QuartzCore/CATransformLayer.h",
-        "AppKit/NSGeometryTrace.h"
+        "AppKit/NSGeometryTrace.h",
+        "AppKit/NSAccessibilityCustomAction.m",
+        "AppKit/NSColorSampler.m",
+        "AppKit/NSImageSymbolConfiguration.m",
+        "AppKit/NSMenuItemBadge.m",
+        "AppKit/NSNextStepFrame.m",
+        "AppKit/NSPreviewRepresentingActivityItem.m",
+        "AppKit/X11.backend/X11RelativeMouse.h",
+        "AppKit/include/AppKit/NSAccessibilityCustomAction.h",
+        "AppKit/include/AppKit/NSColorSampler.h",
+        "AppKit/include/AppKit/NSImageSymbolConfiguration.h",
+        "AppKit/include/AppKit/NSMenuItemBadge.h",
+        "AppKit/include/AppKit/NSPreviewRepresentingActivityItem.h",
+        "QuartzCore/CAEDRMetadata.m",
+        "QuartzCore/include/QuartzCore/CAEDRMetadata.h"
       ]
     },
     {
@@ -100,8 +115,10 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 6,
-      "new_files": []
+      "modified_files": 10,
+      "new_files": [
+        "NSConstantCollections.m"
+      ]
     },
     {
       "path": "src/external/curl",
@@ -144,8 +161,10 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 5,
-      "new_files": []
+      "modified_files": 10,
+      "new_files": [
+        "src/NSConstantNumber.m"
+      ]
     },
     {
       "path": "src/external/iokitd",
@@ -292,15 +311,17 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 11,
-      "new_files": []
+      "modified_files": 15,
+      "new_files": [
+        "OSX/libsecurity_codesigning/lib/rclol_signing_trace.h"
+      ]
     },
     {
       "path": "src/external/xnu",
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 87,
+      "modified_files": 90,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
@@ -308,6 +329,8 @@
         "darling/src/libsystem_kernel/emulation/include/conversion/xattr/name.h",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h",
+        "darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h",
+        "darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
         "libsyscall/wrappers/__sysctlbyname.S",
@@ -316,6 +339,8 @@
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c",
         "darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h",
         "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h",
+        "darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h",
+        "darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c"
       ]
@@ -325,10 +350,9 @@
       "revision": "8423a7d2f053167030d2bc4a227f96243c740667",
       "repository": "https://github.com/darlinghq/indium.git",
       "patch": "patches/metal--deps--indium.patch",
-      "modified_files": 36,
+      "modified_files": 57,
       "new_files": [
         "private-include/indium/counters.private.hpp",
-        "private-include/indium/deferred-blit-encoder.private.hpp",
         "private-include/indium/deferred-render-encoder.private.hpp",
         "private-include/indium/gpu-timing.private.hpp",
         "private-include/indium/memory-pool.private.hpp",
@@ -339,8 +363,12 @@
         "private-include/indium/submission-batch.private.hpp",
         "private-include/indium/submit-batch.private.hpp",
         "private-include/indium/submit-thread.private.hpp",
+        "private-include/indium/deferred-blit-encoder.private.hpp",
         "private-include/indium/waits.private.hpp",
-        "private-include/indium/completion-spin.private.hpp"
+        "private-include/indium/completion-spin.private.hpp",
+        "private-include/indium/vertex-input.private.hpp",
+        "private-include/indium/black-trace.private.hpp",
+        "private-include/indium/slow-log.private.hpp"
       ]
     },
     {
