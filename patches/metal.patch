@@ -101,7 +101,7 @@ index f22a57d..6b6715d 100644
 +@end
 +#endif
 diff --git a/include/Metal/MTLDevice.h b/include/Metal/MTLDevice.h
-index a3efc96..299c038 100644
+index a3efc96..4205a41 100644
 --- a/include/Metal/MTLDevice.h
 +++ b/include/Metal/MTLDevice.h
 @@ -18,9 +18,18 @@ METAL_DECLARATIONS_BEGIN
@@ -124,7 +124,7 @@ index a3efc96..299c038 100644
  @class MTLRenderPipelineDescriptor;
  
  typedef NS_OPTIONS(NSUInteger, MTLPipelineOption) {
-@@ -42,8 +51,31 @@ MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevices(void);
+@@ -42,8 +51,46 @@ MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevices(void);
  MTL_EXPORT NSArray<id<MTLDevice>>* MTLCopyAllDevicesWithObserver(id<NSObject>* observer, MTLDeviceNotificationHandler handler);
  MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
  
@@ -132,6 +132,13 @@ index a3efc96..299c038 100644
 +	MTLReadWriteTextureTierNone = 0,
 +	MTLReadWriteTextureTier1 = 1,
 +	MTLReadWriteTextureTier2 = 2,
++};
++
++typedef NS_ENUM(NSUInteger, MTLDeviceLocation) {
++	MTLDeviceLocationBuiltIn = 0,
++	MTLDeviceLocationSlot = 1,
++	MTLDeviceLocationExternal = 2,
++	MTLDeviceLocationUnspecified = NSUIntegerMax,
 +};
 +
  @protocol MTLDevice <NSObject>
@@ -151,12 +158,20 @@ index a3efc96..299c038 100644
 +- (BOOL)supportsFamily: (NSUInteger)family;
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet;
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount;
++/* darling-lol: further feature queries of the current Riot Client's ANGLE and Dawn. */
++@property (readonly) BOOL supports32BitFloatFiltering;
++@property (readonly) BOOL supportsBCTextureCompression;
++@property (readonly) BOOL supportsPullModelInterpolation;
++@property (readonly, getter=areProgrammableSamplePositionsSupported) BOOL programmableSamplePositionsSupported;
++@property (readonly, getter=areRasterOrderGroupsSupported) BOOL rasterOrderGroupsSupported;
++@property (readonly) MTLDeviceLocation location;
++@property (readonly) NSArray* counterSets;
 +- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount: (NSUInteger)maxCommandBufferCount;
 +
  - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor: (MTLComputePipelineDescriptor*)descriptor
                                                               options: (MTLPipelineOption)options
                                                            reflection: (MTLAutoreleasedComputePipelineReflection*)reflection
-@@ -57,10 +89,14 @@ MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
+@@ -57,10 +104,14 @@ MTL_EXPORT void MTLRemoveDeviceObserver(id<NSObject> observer);
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error;
  
@@ -1134,10 +1149,10 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..2c45608 100644
+index f58184a..88ec70f 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
-@@ -2,14 +2,32 @@
+@@ -2,14 +2,34 @@
  // SPDX-License-Identifier: MPL-2.0
  
  #import <Metal/MTLDeviceInternal.h>
@@ -1165,12 +1180,14 @@ index f58184a..2c45608 100644
 +#import <Metal/MTLDeviceInfo.h>
 +#if DARLING_METAL_ENABLED
 +#include <indium/device.private.hpp>
++#include <indium/dynamic-vk.hpp>
++#include <initializer_list>
 +#include <cstdlib>
 +#endif
  
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceWasAddedNotification = @"MTLDeviceWasAdded";
  MTL_EXTERN const MTLDeviceNotificationName MTLDeviceRemovalRequestedNotification = @"MTLDeviceRemovalRequested";
-@@ -88,6 +106,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -88,6 +108,37 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[observer release];
  };
  
@@ -1208,7 +1225,7 @@ index f58184a..2c45608 100644
  @implementation MTLDeviceInternal
  
  #if DARLING_METAL_ENABLED
-@@ -96,6 +145,9 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -96,6 +147,9 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	NSThread* _pollingThread;
  	NSCondition* _threadExitCondition;
  	BOOL _threadIsRunning;
@@ -1218,7 +1235,7 @@ index f58184a..2c45608 100644
  }
  
  @synthesize device = _device;
-@@ -116,6 +168,50 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -116,6 +170,50 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1269,7 +1286,7 @@ index f58184a..2c45608 100644
  - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
  {
  	self = [super init];
-@@ -123,6 +219,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -123,6 +221,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		_device = device;
  		_threadExitCondition = [NSCondition new];
  		_threadIsRunning = NO;
@@ -1277,7 +1294,7 @@ index f58184a..2c45608 100644
  		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
  		[_pollingThread start];
  	}
-@@ -133,6 +230,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -133,6 +232,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  {
  	[_pollingThread release];
  	[_threadExitCondition release];
@@ -1285,7 +1302,7 @@ index f58184a..2c45608 100644
  
  	[super dealloc];
  }
-@@ -153,12 +251,60 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +253,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1326,6 +1343,54 @@ index f58184a..2c45608 100644
 +- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
 +- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
++/* darling-lol: further feature queries of the current Riot Client's ANGLE.
++ * Float filtering and BC sampling are what the Vulkan device reports for the
++ * formats Indium maps them to; pull-model interpolation, programmable sample
++ * positions and raster order groups are not exposed by Indium. */
++- (BOOL)supports32BitFloatFiltering
++{
++	return [self formats: { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT }
++	         haveFeatures: VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT];
++}
++- (BOOL)supportsBCTextureCompression
++{
++	return [self formats: { VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK,
++	                        VK_FORMAT_BC4_UNORM_BLOCK, VK_FORMAT_BC5_UNORM_BLOCK, VK_FORMAT_BC6H_UFLOAT_BLOCK,
++	                        VK_FORMAT_BC7_UNORM_BLOCK }
++	         haveFeatures: VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT];
++}
++- (BOOL)formats: (std::initializer_list<VkFormat>)formats haveFeatures: (VkFormatFeatureFlags)required
++{
++	auto priv = dynamic_cast<Indium::PrivateDevice*>(_device.get());
++	if (!priv || priv->physicalDevice() == VK_NULL_HANDLE) {
++		return NO;
++	}
++	for (VkFormat format : formats) {
++		VkFormatProperties properties {};
++		Indium::DynamicVK::vkGetPhysicalDeviceFormatProperties(priv->physicalDevice(), format, &properties);
++		if ((properties.optimalTilingFeatures & required) != required) {
++			return NO;
++		}
++	}
++	return YES;
++}
++// No GPU counters; Dawn enumerates them when it probes the device for WebGPU.
++- (NSArray *)counterSets { return @[]; }
++- (BOOL)supportsPullModelInterpolation { return NO; }
++- (BOOL)areProgrammableSamplePositionsSupported { return NO; }
++- (BOOL)areRasterOrderGroupsSupported { return NO; }
++- (MTLDeviceLocation)location { return MTLDeviceLocationSlot; }
++/* Indium loads compiled libraries only; there is no Metal Shading Language
++ * compiler, so source fails with MTLLibraryErrorCompileFailure. */
++- (id<MTLLibrary>)newLibraryWithSource: (NSString*)source
++                               options: (id)options
++                                 error: (NSError**)error
++{
++	if (error)
++		*error = [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 3
++		                         userInfo: @{ NSLocalizedDescriptionKey: @"Metal Shading Language source is not supported" }];
++	return nil;
++}
 +- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount: (NSUInteger)maxCommandBufferCount
 +{
 +	return [self newCommandQueue];
@@ -1347,7 +1412,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +312,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +362,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1355,7 +1420,7 @@ index f58184a..2c45608 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +330,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +380,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1370,7 +1435,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +344,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +394,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1416,7 +1481,7 @@ index f58184a..2c45608 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +389,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +439,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1536,7 +1601,7 @@ index f58184a..2c45608 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +570,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,8 +620,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -1561,7 +1626,7 @@ index f58184a..2c45608 100644
  		return nil;
  	}
 diff --git a/src/Metal/MTLLibrary.mm b/src/Metal/MTLLibrary.mm
-index 0feb46e..e0c0e93 100644
+index 0feb46e..a88794f 100644
 --- a/src/Metal/MTLLibrary.mm
 +++ b/src/Metal/MTLLibrary.mm
 @@ -1,6 +1,7 @@
@@ -1586,7 +1651,7 @@ index 0feb46e..e0c0e93 100644
  	}
  	return self;
  }
-@@ -121,7 +124,12 @@ MTL_UNSUPPORTED_CLASS
+@@ -121,13 +124,31 @@ MTL_UNSUPPORTED_CLASS
  
  - (id<MTLFunction>)newFunctionWithName: (NSString*)functionName
  {
@@ -1600,6 +1665,25 @@ index 0feb46e..e0c0e93 100644
  	if (!func) {
  		return nil;
  	}
+ 	return [[MTLFunctionInternal alloc] initWithFunction: func device: _device];
+ }
+ 
++// darling-lol: linked by the current Riot Client's ANGLE. Indium cannot
++// specialize function constants, and ignoring them would build a different
++// shader, so specialization fails with MTLLibraryErrorFunctionNotFound.
++- (id<MTLFunction>)newFunctionWithName: (NSString*)functionName
++                        constantValues: (id)constantValues
++                                 error: (NSError**)error
++{
++	if (error)
++		*error = [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 5
++		                         userInfo: @{ NSLocalizedDescriptionKey: @"Function constants are not supported" }];
++	return nil;
++}
++
+ #else
+ 
+ @dynamic installName;
 diff --git a/src/Metal/MTLRenderCommandEncoder.mm b/src/Metal/MTLRenderCommandEncoder.mm
 index e931b90..b2fe0a5 100644
 --- a/src/Metal/MTLRenderCommandEncoder.mm
@@ -3880,3 +3964,72 @@ new file mode 100644
 +MTL_UNSUPPORTED_CLASS
 +#endif
 +@end
+diff --git a/src/Metal/Metal.mm b/src/Metal/Metal.mm
+index dfe5174..d9282ad 100644
+--- a/src/Metal/Metal.mm
++++ b/src/Metal/Metal.mm
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: MPL-2.0
+ 
+ #import <Metal/Metal.h>
++#import <objc/runtime.h>
+ #if DARLING_METAL_ENABLED
+ #include <indium/indium.hpp>
+ #endif
+@@ -40,3 +41,56 @@ static void finitMetal(void) {
+ };
+ 
+ #endif
++
++// darling-lol: counter constants and descriptor classes linked by the current
++// Riot Client's Electron (ANGLE). Darling's Metal has no counters, argument
++// buffers, indirect command buffers or capture descriptors; a message the
++// classes do not implement returns nil or 0 instead of raising.
++#import <Foundation/NSInvocation.h>
++#import <Foundation/NSMethodSignature.h>
++
++extern "C" NSString* const MTLCommonCounterSetTimestamp = @"timestamp";
++extern "C" NSString* const MTLCommonCounterTimestamp = @"GPUTimestamp";
++
++static void rclolReturnZero(NSInvocation* invocation)
++{
++	char zero[64] = {0};
++	NSUInteger length = [[invocation methodSignature] methodReturnLength];
++	if (length > 0 && length <= sizeof(zero))
++		[invocation setReturnValue:zero];
++}
++
++/* One object argument per colon in the selector, so a stub accepts the
++ * arguments of the message it answers (a fixed "@@:" made NSInvocation reject
++ * setters with "invoked with 3 args, but 2 expected"). */
++static NSMethodSignature* rclolStubSignature(SEL sel)
++{
++	char types[64] = "@@:";
++	size_t length = 3;
++	for (const char *c = sel_getName(sel); *c != '\0' && length < sizeof(types) - 1; ++c) {
++		if (*c == ':')
++			types[length++] = '@';
++	}
++	types[length] = '\0';
++	return [NSMethodSignature signatureWithObjCTypes:types];
++}
++
++#define RCLOL_NIL_STUB_CLASS(name) \
++	@interface name : NSObject @end \
++	@implementation name \
++	+ (NSMethodSignature*)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	+ (void)forwardInvocation:(NSInvocation*)invocation { rclolReturnZero(invocation); } \
++	- (NSMethodSignature*)methodSignatureForSelector:(SEL)sel { \
++		return [super methodSignatureForSelector:sel] ?: rclolStubSignature(sel); \
++	} \
++	- (void)forwardInvocation:(NSInvocation*)invocation { rclolReturnZero(invocation); } \
++	@end
++
++RCLOL_NIL_STUB_CLASS(MTLArgumentDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLBlitPassDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLCaptureDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLCounterSampleBufferDescriptor)
++RCLOL_NIL_STUB_CLASS(MTLFunctionConstantValues)
++RCLOL_NIL_STUB_CLASS(MTLIndirectCommandBufferDescriptor)
