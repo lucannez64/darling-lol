@@ -32,12 +32,20 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 @interface MPRemoteCommand : NSObject
 {
 	NSMutableArray *_targets;
+	BOOL _active;
+	NSString *_localizedTitle;
 }
 - (id)addTargetWithHandler:(id)handler;
+- (void)addTarget:(id)target action:(SEL)action;
 - (void)removeTarget:(id)target;
 - (void)removeTarget:(id)target action:(SEL)action;
 - (BOOL)isEnabled;
 - (void)setEnabled:(BOOL)enabled;
+/* MPFeedbackCommand (like/dislike/bookmark): Electron reads and sets these on any command. */
+- (BOOL)isActive;
+- (void)setActive:(BOOL)active;
+- (NSString *)localizedTitle;
+- (void)setLocalizedTitle:(NSString *)title;
 @end
 
 @interface MPRemoteCommandEvent : NSObject
@@ -65,6 +73,10 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 - (MPRemoteCommand *)dislikeCommand;
 - (MPRemoteCommand *)bookmarkCommand;
 - (MPRemoteCommand *)languageOptionCommand;
+- (MPRemoteCommand *)changeRepeatModeCommand;
+- (MPRemoteCommand *)changeShuffleModeCommand;
+- (MPRemoteCommand *)enableLanguageOptionCommand;
+- (MPRemoteCommand *)disableLanguageOptionCommand;
 @end
 
 @interface MPNowPlayingInfoCenter : NSObject
@@ -107,14 +119,38 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 }
 - (void)removeTarget:(id)target
 {
+	if (!target)
+	{
+		[_targets removeAllObjects];
+		return;
+	}
+	// Handler tokens are stored directly; action targets only as their address, which is
+	// compared without ever turning it back into an object (it may be deallocated).
+	[_targets removeObjectIdenticalTo:target];
+	for (NSInteger i = (NSInteger)[_targets count] - 1; i >= 0; i--)
+	{
+		id entry = [_targets objectAtIndex:i];
+		if ([entry isKindOfClass:[NSValue class]] && [entry pointerValue] == (__bridge const void *)target)
+			[_targets removeObjectAtIndex:i];
+	}
+}
+- (void)addTarget:(id)target action:(SEL)action
+{
+	// No command is ever delivered, so the target is only recorded for removeTarget:.
+	// Like other target-action APIs the command does not own it. Keep only its address:
+	// a recipient that is never removed is not kept alive, and a deallocated one is never
+	// handed back to ARC as a dangling object.
+	(void)action;
 	if (target)
-		[_targets removeObjectIdenticalTo:target];
-    else
-        [_targets removeAllObjects];
+		[_targets addObject:[NSValue valueWithPointer:(__bridge const void *)target]];
 }
 - (void)removeTarget:(id)target action:(SEL)action { [self removeTarget:target]; }
 - (BOOL)isEnabled { return YES; }
 - (void)setEnabled:(BOOL)enabled { }
+- (BOOL)isActive { return _active; }
+- (void)setActive:(BOOL)active { _active = active; }
+- (NSString *)localizedTitle { return _localizedTitle; }
+- (void)setLocalizedTitle:(NSString *)title { _localizedTitle = [title copy]; }
 @end
 
 @implementation MPRemoteCommandEvent
@@ -161,6 +197,10 @@ typedef NS_ENUM(NSInteger, MPNowPlayingPlaybackState) {
 - (MPRemoteCommand *)dislikeCommand { return [self commandFor:@"dislike"]; }
 - (MPRemoteCommand *)bookmarkCommand { return [self commandFor:@"bookmark"]; }
 - (MPRemoteCommand *)languageOptionCommand { return [self commandFor:@"languageOption"]; }
+- (MPRemoteCommand *)changeRepeatModeCommand { return [self commandFor:@"changeRepeatMode"]; }
+- (MPRemoteCommand *)changeShuffleModeCommand { return [self commandFor:@"changeShuffleMode"]; }
+- (MPRemoteCommand *)enableLanguageOptionCommand { return [self commandFor:@"enableLanguageOption"]; }
+- (MPRemoteCommand *)disableLanguageOptionCommand { return [self commandFor:@"disableLanguageOption"]; }
 @end
 
 @implementation MPNowPlayingInfoCenter

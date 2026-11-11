@@ -118,6 +118,26 @@ index 194c5d0..6399cf8 100644
  }
  
  - (void) setEventHandler: (id) handler
+diff --git a/src/NSBundle.m b/src/NSBundle.m
+index ce2819c..06b871d 100644
+--- a/src/NSBundle.m
++++ b/src/NSBundle.m
+@@ -722,7 +722,14 @@ static void __NSBundleMainBundleDealloc()
+     // synchronize this entire block to prevent simultaneous loads
+     @synchronized(self)
+     {
+-        if (![self isLoaded])
++        // darling-lol: like Apple's, an already-loaded bundle reports YES.
++        // NSDisplay instances are per thread and load the AppKit backends
++        // again on each new thread.
++        if ([self isLoaded])
++        {
++            loaded = true;
++        }
++        else
+         {
+             loaded = CFBundleLoadExecutableAndReturnError(_cfBundle, (CFErrorRef *)error);
+             if (loaded)
 diff --git a/src/NSConstantNumber.m b/src/NSConstantNumber.m
 new file mode 100644
 index 0000000..26ced08
