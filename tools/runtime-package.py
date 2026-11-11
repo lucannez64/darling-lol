@@ -164,9 +164,10 @@ def check_link(name, target):
     return target
 
 
-def check_links(entries):
+def check_links(entries, destination_root=None, replaced=()):
     """Resolve composed package symlinks, including .. after another symlink."""
     links = {entry['path']: check_link(entry['path'], entry['target']) for entry in entries}
+    replaced = set(replaced)
     for name in links:
         root = safe_relative(name)[0]
         pending = list(PurePosixPath(name).parts)
@@ -183,12 +184,19 @@ def check_links(entries):
                 continue
             resolved.append(part)
             key = '/'.join(resolved)
-            if key in links:
+            target = links.get(key)
+            if target is None and destination_root is not None and key not in replaced:
+                existing = Path(destination_root).joinpath(*resolved)
+                if existing.is_symlink():
+                    target = os.readlink(existing)
+                    if target.startswith('/'):
+                        raise PackageError('package link traverses absolute destination symlink: %s' % name)
+            if target is not None:
                 hops += 1
                 if hops > 40:
                     raise PackageError('symlink cycle: %s' % name)
                 resolved.pop()
-                pending = list(PurePosixPath(links[key]).parts) + pending
+                pending = list(PurePosixPath(target).parts) + pending
         if not resolved or resolved[0] != root:
             raise PackageError('composed symlink escapes %s: %s' % (root, name))
 
@@ -255,8 +263,14 @@ def read_package(package):
         except KeyError:
             raise PackageError('no %s in %s' % (MANIFEST, package))
         manifest = json.loads(archive.extractfile(member).read().decode())
-        members = {item.name: item for item in archive.getmembers()
-                   if item.name != MANIFEST}
+        members = {}
+        seen = set()
+        for item in archive.getmembers():
+            if item.name in seen:
+                raise PackageError('duplicate archive member: %s' % item.name)
+            seen.add(item.name)
+            if item.name != MANIFEST:
+                members[item.name] = item
         return manifest, members, archive
     except Exception:
         archive.close()
@@ -269,11 +283,17 @@ def validate(manifest, members):
     expected = {}
     for entry in manifest.get('files', []):
         parts = safe_relative(entry['path'])
-        expected['/'.join(parts)] = ('file', entry)
+        key = '/'.join(parts)
+        if key in expected:
+            raise PackageError('duplicate manifest path: %s' % key)
+        expected[key] = ('file', entry)
     for entry in manifest.get('symlinks', []):
         parts = safe_relative(entry['path'])
         check_link('/'.join(parts), entry['target'])
-        expected['/'.join(parts)] = ('link', entry)
+        key = '/'.join(parts)
+        if key in expected:
+            raise PackageError('duplicate manifest path: %s' % key)
+        expected[key] = ('link', entry)
     for name in expected:
         if len(safe_relative(name)) < 2:
             raise PackageError('runtime root must be a directory: %s' % name)
@@ -347,6 +367,10 @@ def install(package, root, dry_run=False, out=print):
         for directory in directories:
             if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
                 raise PackageError('refusing to replace directory: %s' % directory)
+        # Package entries replace these existing paths; all other destination
+        # links survive and must be included when checking the resulting tree.
+        check_links(manifest['symlinks'], root,
+                    replaced=[entry['path'] for entry, _ in entries])
         # Prepare every byte, checksum, mode and symlink before the first replace.
         for entry, is_link, target, staged in prepared:
             if is_link:

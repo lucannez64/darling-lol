@@ -186,6 +186,41 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertEqual(good.read_bytes(), b'old')
         self.assertFalse((target / 'RuntimeLibraries/conflict').exists())
 
+    def test_duplicate_manifest_path_is_rejected_before_replacement(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        good = target / 'RuntimeLibraries/good'
+        good.write_bytes(b'old')
+        data = b'new'
+        entry = {'path': 'RuntimeLibraries/good', 'size': len(data), 'mode': 0o644,
+                 'sha256': hashlib.sha256(data).hexdigest()}
+        manifest = {'schema': package_tool.SCHEMA, 'files': [entry, dict(entry)], 'symlinks': []}
+        write_package(self.archive, {entry['path']: data}, {}, manifest)
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertEqual(good.read_bytes(), b'old')
+
+    def test_package_link_cannot_escape_through_preserved_destination_link(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        (target / 'secret').write_bytes(b'private')
+        os.symlink('..', target / 'RuntimeLibraries/existing')
+        write_package(self.archive, {}, {'RuntimeLibraries/new': 'existing/secret'})
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertFalse((target / 'RuntimeLibraries/new').is_symlink())
+        self.assertEqual((target / 'secret').read_bytes(), b'private')
+
+    def test_package_replacement_does_not_follow_an_old_destination_link(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        os.symlink('..', target / 'RuntimeLibraries/existing')
+        write_package(self.archive, {'RuntimeLibraries/existing': b'replacement'},
+                      {'RuntimeLibraries/new': 'existing'})
+        package_tool.install(self.archive, target, out=lambda _: None)
+        self.assertEqual((target / 'RuntimeLibraries/new').read_bytes(), b'replacement')
+        self.assertFalse((target / 'RuntimeLibraries/existing').is_symlink())
+
     def test_traversal_path_is_refused(self):
         manifest = {
             'schema': package_tool.SCHEMA,
