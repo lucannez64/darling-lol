@@ -21,7 +21,7 @@ seconds and no game process is running. It is off by default and never stops
 when the window state cannot be read.
 
 A failed client exit is reported with its status, and, when --guest-log names
-the client's log directory, with the last line of its newest log file. That
+the client's log directory, with the last available line of its newest log file, labelled as possibly historical. That
 turns a bare "runtime and guest processes are gone" into the reason the guest
 died, such as a dyld "Library not loaded" abort.
 
@@ -493,7 +493,7 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
         log('client exited with status %d' % status, out)
         line = last_log_line(newest_guest_log(guest_log))
         if line:
-            log('last guest log line: %s' % line, out)
+            log('last available guest log line (possibly from an earlier session): %s' % line, out)
     if not owns_runtime:
         log('another session owns this runtime; leaving it running', out)
         remaining = []

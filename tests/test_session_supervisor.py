@@ -463,8 +463,6 @@ class ManagedWindowTests(unittest.TestCase):
         self.assertIsNone(supervisor.managed_client_window(run))
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class FailureReportingTests(unittest.TestCase):
@@ -507,14 +505,14 @@ class FailureReportingTests(unittest.TestCase):
             ['sh', '-c', 'exit 3'], guest_log=self.logs)
         self.assertEqual(code, 3)
         self.assertIn('client exited with status 3', output)
-        self.assertIn('last guest log line: abort_with_payload: reason: dyld: '
+        self.assertIn('last available guest log line (possibly from an earlier session): abort_with_payload: reason: dyld: '
                       'No shared cache present', output)
         self.assertEqual(seen['note'], ' (client exited with status 3)')
 
     def test_newest_log_file_is_reported(self):
         old = self.logs / 'old.log'
         old.write_text('old failure\n')
-        new = self.logs / 'nested' 
+        new = self.logs / 'nested'
         new.mkdir()
         newest = new / 'new.log'
         newest.write_text('newest failure\n')
@@ -523,7 +521,7 @@ class FailureReportingTests(unittest.TestCase):
         code, output, _seen = self.run_supervisor(
             ['sh', '-c', 'exit 1'], guest_log=self.logs)
         self.assertEqual(code, 1)
-        self.assertIn('last guest log line: newest failure', output)
+        self.assertIn('last available guest log line (possibly from an earlier session): newest failure', output)
 
     def test_clean_exit_reports_no_failure(self):
         (self.logs / 'run.log').write_text('normal shutdown\n')
@@ -549,3 +547,7 @@ class FailureReportingTests(unittest.TestCase):
         self.assertEqual(remaining, [])
         self.assertIn('runtime and guest processes are gone (client exited with '
                       'status 3)', output.getvalue())
+
+
+if __name__ == '__main__':
+    unittest.main()
