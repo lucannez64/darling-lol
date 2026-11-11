@@ -95,7 +95,7 @@ fi
 
 if [ ! -f "$DCC" ] || [ ! -x "$DCC" ]; then
 	echo "sign-darling-runtime.sh: dc-codesign not built at $DCC" >&2
-	echo "  run: make -C $here" >&2
+	echo "  run: make -C $here/dc-codesign" >&2
 	exit 2
 fi
 if [ -z "$RCODESIGN" ] || [ ! -x "$RCODESIGN" ]; then
