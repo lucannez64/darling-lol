@@ -66,5 +66,20 @@ class SandboxABITests(unittest.TestCase):
                          'integer token counters are not Apple ABI')
 
 
+    def test_libsystem_sandbox_exports_the_same_extension_abi(self):
+        # Client 143 binds these through libSystem instead of libsandbox.
+        import subprocess
+        import tempfile
+        source = added('src/sandbox/sandbox.c')
+        bodies = source[source.index('char *sandbox_extension_issue_file'):]
+        program = '#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n#include <assert.h>\n' + bodies + '\nint main(void) {\n char *file = sandbox_extension_issue_file("test", "/tmp/a", 0);\n char *mach = sandbox_extension_issue_mach("test", "service", 0);\n assert(file && mach);\n assert(sandbox_extension_consume(file) != 0);\n assert(sandbox_extension_consume(NULL) == 0);\n assert(sandbox_extension_release(1) == 0);\n free(file); free(mach);\n}\n'
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'extension.c'
+            binary = Path(folder) / 'extension'
+            path.write_text(program)
+            subprocess.run(['cc', '-std=gnu11', str(path), '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+
 if __name__ == '__main__':
     unittest.main()

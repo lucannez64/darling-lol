@@ -1131,27 +1131,31 @@ running Darling.
 
 **Current state.** With the stubs, the constant classes and the AppKit/CoreText
 additions above, 142 resolves every dyld import, starts the Electron main
-process, starts its static server, reads settings and feature flags, creates its
-window and a CGL context, then stops with `SIGTRAP` on a libdispatch worker
-thread right after the browser process enumerates three font faces. The trap is
-`int3` with no Chromium log line, so it is not a `CHECK` failure that prints; no
-C++ exception is raised near it. 141 (`42E1358C87FB3ABC`) still runs with the
-same runtime, so the remaining fault is specific to what Chromium 150 does in
-the browser process. `tools/riot-client-pin.py --restore
-~/darling-backups/42E1358C87FB3ABC` puts 141 back.
+process and renders its UI. Its local page load used to fail with
+`ERR_NETWORK_CHANGED`; the cause was the BSD syscall return register, described
+below. With that fix the page loads, the client's config RPC answers, and the
+login window appears. Everything after sign-in and League patching is still
+untested. 141 (`42E1358C87FB3ABC`) still runs with the same runtime.
 
-The trap itself is now localized to V8's page allocator. The crashing function
-is the allocator that formats a `slotsize`/`spansize` message, and the fault is
-not a rejected mapping: a full 142 launch logs every protection change and
-mapping, and all of them succeed, including the 512 MB executable reservation
-and the 4.5 MB read-write range. The allocator aborts instead right after a
-`SetPermissions(addr, len, 3)` call whose length is zero, and that call never
-reaches Darling's `mprotect` (no zero-length protection call appears in the
-trace). The allocator frame also holds a poison-looking fourth argument,
-`0xBADBAD0062757480`, so the allocator is being handed a bogus size or
-granularity rather than being refused by the kernel. The remaining work is to
-follow that argument back through the allocator's caller and compare it with the
-Electron 28 (Chromium 117) code that 141 runs, where the same path succeeds.
+**The syscall return register.** Chromium 150's
+`WORK_AROUND_CRBUG_40064248` (`net/socket/socket_apple.h`) treats a nonzero
+secondary syscall return register (`%rdx` on x86-64) after a successful
+`sendto`, `send` or `write` as proof of crbug 40064248 and returns
+`ERR_NETWORK_CHANGED`. XNU clears `%rdx` for every BSD syscall except
+`pipe()`. Darling's `__darling_bsd_syscall` left it holding the `size`
+argument, so every non-empty send looked bogus. The `%rdx` hunk in
+`patches/xnu.patch` clears it before the shared return and keeps it only for
+`SYS_pipe`.
+
+`tools/riot-sendto-rdx-check.c` reports the value and secondary return register
+for `sendto`, `send` and `write`; on a pre-fix library it prints `rdx=0x5`
+after a five-byte send, and `rdx=0x0` with the fix.
+`tests/test_riot_client_syscall_return.py` fails if the clearing is dropped.
+`tools/riot-socket-errno-check.c` and
+`tools/build-riot-network-change-check.py` rule out the other candidates:
+socket errno values and `poll`/`SO_ERROR` behave normally, and
+SystemConfiguration raises no reachability or dynamic-store notification. The
+`libnetwork` path monitor from #162 is not needed for this failure either.
 
 **Diagnostic noise on Omarchy.** Every guest crash is announced by Omarchy's
 crash watcher (`omarchy-crash-watch.service`), which reads systemd-coredump's
