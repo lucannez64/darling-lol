@@ -274,6 +274,12 @@ def validate(manifest, members):
         parts = safe_relative(entry['path'])
         check_link('/'.join(parts), entry['target'])
         expected['/'.join(parts)] = ('link', entry)
+    for name in expected:
+        if len(safe_relative(name)) < 2:
+            raise PackageError('runtime root must be a directory: %s' % name)
+        for parent in PurePosixPath(name).parents:
+            if parent.as_posix() in expected:
+                raise PackageError('package entry has a non-directory ancestor: %s' % name)
     for name, member in members.items():
         parts = safe_relative(name)
         key = '/'.join(parts)

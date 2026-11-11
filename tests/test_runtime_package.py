@@ -155,6 +155,15 @@ class RuntimePackageTests(unittest.TestCase):
         package_tool.install(self.archive, target, dry_run=True, out=lambda _: None)
         self.assertFalse(target.exists())
 
+    def test_package_file_cannot_be_another_entries_parent(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        write_package(self.archive, {'RuntimeLibraries/a': b'file',
+                                     'RuntimeLibraries/a/b': b'child'}, {})
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertFalse((target / 'RuntimeLibraries/a').exists())
+
     def test_traversal_path_is_refused(self):
         manifest = {
             'schema': package_tool.SCHEMA,
