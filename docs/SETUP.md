@@ -29,6 +29,29 @@ First launch builds Darling and guides you through Riot client installation.
 NixOS is not required; other Linux distributions with Nix installed are also
 supported.
 
+## Recommended identity and compatibility profile
+
+Use a synthetic identity generated for your own prefix, rather than keeping
+Darling's base identity or copying another user's serial and UUID. New prefixes
+are provisioned during runtime installation. For an existing prefix, follow
+[platform provisioning](PLATFORM_IDENTITY.md#recommended-configuration) to replace
+shared defaults or create missing identifiers; keep an already custom identity
+stable across updates.
+
+Use `profile=compat` for the recommended application compatibility configuration.
+After runtime installation, edit `<prefix>/private/etc/darling-system.prop` and
+change `profile=host` to `profile=compat`. The installed file takes precedence
+over `tools/system.prop` and is preserved by updates. If it does not exist yet,
+edit `tools/system.prop` before runtime installation. An explicit
+`RCLOL_PLATFORM_PROFILE` environment variable overrides the file.
+
+Provisioning and compat mode are separate steps: provisioning saves your prefix's
+serial and UUID, while compat selects the CPU, GPU and memory presentation.
+Apply these changes with the game and clients closed, then relaunch through
+`scripts/run.sh` (or the packaged launcher). Neither step guarantees full
+application support or acceptance by a third-party service; the runtime remains
+experimental.
+
 ## Native setup notes
 
 The patch manifest pins Darling to `60ba801decee7a00782f74f6be4c8ffb013f79ff` and records every changed submodule's revision. `scripts/prepare.py` checks each revision before applying patches and never resets an existing checkout to make a patch apply. Re-running it accepts an already-applied patch.

@@ -14,6 +14,87 @@ if [ "${RCLOL_CORE_DUMPS:-0}" != 1 ]; then
 fi
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$runner_dir/runtime-paths.sh"
+
+# Hardware presentation is selected in one key=value file. The installed copy
+# in the prefix wins so users can change it without editing the checkout; the
+# repository copy is the fallback before install-runtime.sh has run.
+system_prop=${RCLOL_SYSTEM_PROP:-"$prefix_dir/private/etc/darling-system.prop"}
+[ -r "$system_prop" ] || system_prop="$runner_dir/system.prop"
+profile=host
+host_cpu_brand=host
+host_gpu_name=host
+host_gpu_vram=host
+host_memory_bytes=host
+compat_cpu_brand=
+compat_gpu_name=
+compat_gpu_vram=
+compat_memory_bytes=
+if [ -r "$system_prop" ]; then
+ while IFS='=' read -r key value; do
+  case "$key" in
+   profile) profile=$value;;
+   host.cpu.brand) host_cpu_brand=$value;;
+   host.gpu.name) host_gpu_name=$value;;
+   host.gpu.vram) host_gpu_vram=$value;;
+   host.memory.bytes) host_memory_bytes=$value;;
+   compat.cpu.brand) compat_cpu_brand=$value;;
+   compat.gpu.name) compat_gpu_name=$value;;
+   compat.gpu.vram) compat_gpu_vram=$value;;
+   compat.memory.bytes) compat_memory_bytes=$value;;
+  esac
+ done < "$system_prop"
+fi
+profile=${RCLOL_PLATFORM_PROFILE:-$profile}
+case "$profile" in
+ host|compat) ;;
+ *) echo "system.prop: invalid profile '$profile'; using host" >&2; profile=host;;
+esac
+
+host_cpu_brand_default=$(awk -F: '
+ /^model name[ \t]*:/ { value=$2; sub(/^[ \t]+/, "", value); print value; exit }
+ /^Hardware[ \t]*:/ { value=$2; sub(/^[ \t]+/, "", value); print value; exit }
+' /proc/cpuinfo 2>/dev/null || true)
+host_memory_bytes_default=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024; exit }' /proc/meminfo 2>/dev/null || true)
+case "$host_cpu_brand" in host|'') host_cpu_brand=$host_cpu_brand_default;; esac
+case "$host_memory_bytes" in host|'') host_memory_bytes=$host_memory_bytes_default;; esac
+[ -n "$host_cpu_brand" ] || host_cpu_brand=$(uname -m 2>/dev/null || echo 'Unknown CPU')
+case "$host_memory_bytes" in ''|*[!0-9]*) host_memory_bytes=;; esac
+
+case "$profile" in
+ compat)
+  cpu_brand=$compat_cpu_brand
+  gpu_name=$compat_gpu_name
+  gpu_vram=$compat_gpu_vram
+  memory_bytes=$compat_memory_bytes
+  ;;
+ host)
+  cpu_brand=$host_cpu_brand
+  gpu_name=$host_gpu_name
+  gpu_vram=$host_gpu_vram
+  memory_bytes=$host_memory_bytes
+  ;;
+esac
+export RCLOL_PLATFORM_PROFILE="$profile"
+[ -z "$cpu_brand" ] || export RCLOL_CPU_BRAND="$cpu_brand"
+case "$memory_bytes" in ''|*[!0-9]*) ;; *) export RCLOL_MEMORY_BYTES="$memory_bytes";; esac
+export RCLOL_GPU_NAME="$gpu_name"
+export RCLOL_GPU_VRAM_MB="$gpu_vram"
+if [ "$profile" = compat ]; then
+ # User-supplied DARLING_METAL_* values win over the profile, as in HOST.
+ case "$gpu_name" in
+  mac) export DARLING_METAL_MAC_GPU_NAME="${DARLING_METAL_MAC_GPU_NAME:-1}";;
+  host|'') ;;
+  *) export DARLING_METAL_GPU_NAME="${DARLING_METAL_GPU_NAME:-$gpu_name}";;
+ esac
+ case "$gpu_vram" in ''|*[!0-9]*) ;; *) export DARLING_METAL_VRAM_MB="${DARLING_METAL_VRAM_MB:-$gpu_vram}";; esac
+ # The kernel patch defaults to unified memory; 0 is the compatibility value.
+ export DARLING_METAL_HOST_UNIFIED_MEMORY="${DARLING_METAL_HOST_UNIFIED_MEMORY:-0}"
+else
+ # HOST leaves the Metal name to the real host card and asks it to report the
+ # host's memory model. User-supplied DARLING_METAL_* overrides still win.
+ export DARLING_METAL_HOST_UNIFIED_MEMORY="${DARLING_METAL_HOST_UNIFIED_MEMORY:-1}"
+fi
+
 # Opt-in partial recovery: if Darling is alive but a previous client tree is
 # windowless, stop only that client/CEF tree and reuse the runtime. Never
 # touches the game, darlingserver or the runtime sockets.
@@ -49,12 +130,9 @@ unset RCLOL_APP_ARG3 RCLOL_APP_ARG3_SLOT RCLOL_UX_ARG1 RCLOL_UX_ARG1_SLOT
 unset RCLOL_UX_ARG2 RCLOL_UX_ARG2_SLOT
 # The paired runtime presents completed GPU textures without CPU readback.
 # Explicit 0 or an empty value selects the CPU fallback for diagnostics.
-# DARLING_METAL_MAC_GPU_NAME reports the MacBookPro16,1 GPU of the host vendor (AMD or Intel) as
-# MTLDevice.name, matching the model IOKit reports; memory figures stay the host's.
-# VRAM clamp: honor an explicit DARLING_METAL_VRAM_MB, otherwise pin 4096 MB so the
-# 5500M identity does not leak the host card's heap size.
-export DARLING_METAL_VRAM_MB="${DARLING_METAL_VRAM_MB:-4096}"
-for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_VSYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED RCLOL_MOUSE_CONFINEMENT DARLING_METAL_MAC_GPU_NAME; do
+# Metal values come from tools/system.prop: HOST reports the real host GPU;
+# COMPAT is the opt-in MacBookPro16,1 presentation.
+for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_VSYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED RCLOL_MOUSE_CONFINEMENT; do
  eval 'value=${'"$option"'-1}'
  case "$value" in 0|'') unset "$option";; *) export "$option=$value";; esac
 done
@@ -155,8 +233,15 @@ export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
 # directory; Mesa creates mesa_shader_cache/ and radv_builtin_shaders/ below it.
 cache_root=${XDG_CACHE_HOME:-${HOME:-$prefix_dir}/.cache}/darling-lol
 MESA_SHADER_CACHE_DIR="${MESA_SHADER_CACHE_DIR:=$cache_root}"
+# A directory that cannot be created (root-owned parent, full disk) makes Mesa
+# disable the disk cache silently, so every game recompiles every pipeline and
+# hitch at first use. Fall back to the default rather than run cache-less.
+if ! mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null || [ ! -w "$MESA_SHADER_CACHE_DIR" ]; then
+	echo "run-riot-client: MESA_SHADER_CACHE_DIR=$MESA_SHADER_CACHE_DIR is not writable; using $cache_root" >&2
+	MESA_SHADER_CACHE_DIR=$cache_root
+	mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null || true
+fi
 export MESA_SHADER_CACHE_DIR
-mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null || true
 # NVIDIA proprietary driver: limit pre-rendered frames.
 export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
 # Threaded optimizations stay off: with them, NVIDIA 580 (the last branch for

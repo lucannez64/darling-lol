@@ -27,6 +27,13 @@ darling shell /usr/bin/true
 prefix=$prefix_dir
 mkdir -p "$prefix/private/tmp"
 chmod 1777 "$prefix/private/tmp"
+# The single hardware-presentation profile lives in the prefix so it survives
+# updates and can be edited without touching the checkout. Never replace an
+# existing profile: an update must not turn a user's HOST/COMPAT choice back on.
+if [ ! -e "$prefix/private/etc/darling-system.prop" ]; then
+  mkdir -p "$prefix/private/etc"
+  install -m 0644 build/runtime/tools/system.prop "$prefix/private/etc/darling-system.prop"
+fi
 # Build the system root store now that the prefix exists; Darling is stopped next anyway.
 python3 build/runtime/tools/ensure-darling-root-certificates.py || \
   echo 'Darling system root store not installed; the launcher retries it' >&2
@@ -45,12 +52,19 @@ if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
   python3 build/runtime/tools/install-riot-libs-runtime.py
 fi
 python3 build/runtime/tools/install-darling-system-profiler.py
+# Riot Client 142 (Electron 43) hard-links QuickLookUI, MediaPlayer, CoreML, CoreHaptics and
+# Accessibility; without these stubs in RuntimeFrameworks dyld aborts before the first window.
+python3 tools/build-riot-electron43-frameworks.py --install
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
 python3 build/runtime/tools/validate-riot-runtime.py
 # Sign the installed runtime and populate the local trust store. The base SDK
 # is signed only when this process can actually write it; the per-user
 # RuntimeLibraries/RuntimeFrameworks overlays are always signed.
 if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
+  if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
+    make -s -C "$repo/tools/dc-codesign" dc-codesign || \
+      echo 'dc-codesign did not build (it needs the OpenSSL headers)' >&2
+  fi
   sign_args="--prefix --quiet"
   if [ -w /usr/local/libexec/darling ]; then
     sign_args="--sdk $sign_args"
