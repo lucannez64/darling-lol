@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..a017eca 100644
+index 5b2e765..6650f54 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -52,7 +52,23 @@ index 5b2e765..a017eca 100644
  
  # include src/startup for rtsig.h
  include_directories(
-@@ -134,6 +133,7 @@ set(xnu_syscall_bsd_sources
+@@ -36,6 +35,7 @@ set(common_sources
+ 	src/common/guarded/table.c
+ 	src/common/base.c
+ 	src/common/simple.c
++	src/common/cpu_identity.c
+ )
+ 
+ set(conversion_sources
+@@ -84,6 +84,7 @@ set(linux_premigration_sources
+ 	src/linux_premigration/resources/dserver-rpc-defs.c
+ 	src/linux_premigration/signal/sig_restorer.S
+ 	src/linux_premigration/signal/sigexc.c
++	src/linux_premigration/signal/cpuid_trace.c
+ 	src/linux_premigration/elfcalls_wrapper.c
+ 	src/linux_premigration/linux-syscall.S
+ 	src/linux_premigration/vchroot_userspace.c
+@@ -134,6 +135,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/guarded/guarded_close_np.c
  	src/xnu_syscall/bsd/impl/guarded/guarded_kqueue_np.c
  	src/xnu_syscall/bsd/impl/guarded/guarded_open_np.c
@@ -60,7 +76,7 @@ index 5b2e765..a017eca 100644
  	src/xnu_syscall/bsd/impl/hfs/stub.c
  	src/xnu_syscall/bsd/impl/ioctl/ioctl.c
  	src/xnu_syscall/bsd/impl/kqueue/kevent.c
-@@ -144,6 +144,7 @@ set(xnu_syscall_bsd_sources
+@@ -144,6 +146,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/clonefile.c
  	src/xnu_syscall/bsd/impl/misc/csops.c
  	src/xnu_syscall/bsd/impl/misc/csrctl.c
@@ -68,7 +84,7 @@ index 5b2e765..a017eca 100644
  	src/xnu_syscall/bsd/impl/misc/fileport_makefd.c
  	src/xnu_syscall/bsd/impl/misc/fileport_makeport.c
  	src/xnu_syscall/bsd/impl/misc/fsgetpath.c
-@@ -153,6 +154,7 @@ set(xnu_syscall_bsd_sources
+@@ -153,6 +156,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/getrlimit.c
  	src/xnu_syscall/bsd/impl/misc/getrusage.c
  	src/xnu_syscall/bsd/impl/misc/iopolicysys.c
@@ -76,7 +92,7 @@ index 5b2e765..a017eca 100644
  	src/xnu_syscall/bsd/impl/misc/proc_info.c
  	src/xnu_syscall/bsd/impl/misc/ptrace.c
  	src/xnu_syscall/bsd/impl/misc/reboot.c
-@@ -359,6 +361,11 @@ set(emulation_sources
+@@ -359,6 +363,11 @@ set(emulation_sources
  	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
  )
  
@@ -145,8 +161,8 @@ index 0000000..8ae1665
 + * and 8 physical CPUs). The game and the clients size their worker pools from
 + * hw.ncpu / hw.activecpu, so on this 6-core/12-thread host the game created 7
 + * workers where the same PC runs 12 threads under Windows. Report what the
-+ * host really has instead, while the emulated Mac identity (hw.model, brand
-+ * string) stays unchanged.
++ * host really has instead, while the emulated hw.model identity stays
++ * unchanged.
 + *
 + * Values are cached once per process. avail/active reflect the process's
 + * affinity mask (cgroup or taskset restrictions); max values reflect the
@@ -1584,10 +1600,34 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..1a763fe 100644
+index 206e92e..b31d6e1 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-@@ -151,8 +151,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -14,6 +14,7 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
+ #include <darling/emulation/common/simple.h>
++#include <darling/emulation/linux_premigration/signal/cpuid_trace.h>
+ 
+ #include <darlingserver/rpc.h>
+ 
+@@ -118,6 +119,15 @@ void sigexc_setup(void)
+ 	sigexc_setup1();
+ 	sigexc_setup2();
+ 
++	/* darling-lol: arm the off-by-default cpuid tracer. sigexc_setup() runs
++	 * twice, in dyld and again in libSystem init, and each has its own copy of
++	 * the tracer state. Only the libSystem copy arms, because its sigexc_handler
++	 * is the one left installed; arming in dyld would leave traps nobody claims.
++	 * Still single-threaded here. No-op unless League and the flag file exist. */
++#ifndef VARIANT_DYLD
++	rclol_cpuid_trace_setup();
++#endif
++
+ #ifdef VARIANT_DYLD
+ 	bool started_suspended;
+ 	int code = dserver_rpc_started_suspended(&started_suspended);
+@@ -151,8 +161,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  	int status = dserver_rpc_interrupt_enter();
  
  	if (status != 0) {
@@ -1603,7 +1643,7 @@ index 206e92e..1a763fe 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -267,13 +272,165 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +282,175 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -1696,6 +1736,16 @@ index 206e92e..1a763fe 100644
 +
  void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_ucontext* ctxt)
  {
++#ifdef __x86_64__
++	/* darling-lol cpuid tracer: a perf execute-breakpoint SIGTRAP (si_code ==
++	 * TRAP_PERF) carrying one of our cookies is emulated entirely in userspace
++	 * (run cpuid, write results, skip the instruction) and consumed here,
++	 * before the signal is ever turned into a Mach exception. Returns true only
++	 * for our own traps; everything else falls through to normal handling. */
++	if (linux_signum == LINUX_SIGTRAP && rclol_cpuid_trace_handle(info, ctxt))
++		return;
++#endif
++
  	int status = dserver_rpc_interrupt_enter();
 +	if (forward_native_resize_signal(linux_signum, status))
 +		return;
@@ -1770,7 +1820,7 @@ index 206e92e..1a763fe 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +516,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +536,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -1785,6 +1835,749 @@ index 206e92e..1a763fe 100644
  			}
  		}
  	}
+diff --git a/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h b/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h
+new file mode 100644
+index 0000000..9901d10
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h
+@@ -0,0 +1,64 @@
++#ifndef _RCLOL_CPUID_TRACE_H
++#define _RCLOL_CPUID_TRACE_H
++
++// darling-lol: diagnostic, off-by-default tracer for the cpuid instructions the
++// League of Legends game executable runs. It uses x86 hardware execute
++// breakpoints (perf_event_open + sigtrap) so it never modifies the game's own
++// code bytes (the game checksums itself). The handler emulates the trapped
++// instruction (runs cpuid, writes the result registers into the trapped context
++// and skips the two instruction bytes). With fake mode on (flag token fake=1,
++// or rclol_cpuid_trace_set_fake) the results of the trapped leaves are
++// rewritten to the compatibility CPU identity before they are written back;
++// untrapped and non-identity leaves keep the host's real values.
++//
++// See src/linux_premigration/signal/cpuid_trace.c for the full design notes.
++
++#include <stdbool.h>
++#include <stdint.h>
++
++struct linux_siginfo;
++struct linux_ucontext;
++
++#ifdef __x86_64__
++
++// Called once, early, while the process is still single-threaded and before any
++// game code runs (from sigexc_setup(), which dyld invokes from start() before
++// loading the app's code). The main executable's path and load slide are read
++// from /proc/self/maps. Does nothing (beyond reading the flag file) unless this
++// is the League game process.
++void rclol_cpuid_trace_setup(void);
++
++// Arm one hardware execute breakpoint at a runtime (slid) address. cookie is the
++// value delivered back in siginfo.si_perf_data so the handler can identify the
++// site without consulting any shared table. Returns the perf fd (>= 0) or < 0.
++// Exposed so the host-only test can arm sites in its own binary.
++int rclol_cpuid_trace_arm(unsigned long runtime_addr, unsigned long cookie);
++
++// Signal-handler fast path, called at the very top of sigexc_handler before the
++// Mach-exception machinery. Returns true if this was one of our cpuid traps and
++// it was fully handled (the caller must then return from the signal handler
++// without any further processing). Async-signal-safe: raw syscalls only.
++bool rclol_cpuid_trace_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt);
++
++// Number of times the site with the given cookie has been hit (for the test).
++unsigned long rclol_cpuid_trace_hits(unsigned long cookie);
++
++// Enable identity substitution without the flag file (used by the host test).
++void rclol_cpuid_trace_set_fake(int on);
++
++// Rewrite one trapped cpuid result to the compatibility identity. Only the
++// identity leaves change (vendor, signature, brand string, address sizes,
++// cache sizes); every other leaf passes through. No-op unless fake mode is on.
++// Exposed so the host test can check the transform directly.
++void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
++	uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx);
++
++#else
++
++static inline void rclol_cpuid_trace_setup(void) { }
++static inline bool rclol_cpuid_trace_handle(struct linux_siginfo* i, struct linux_ucontext* c) { (void) i; (void) c; return false; }
++static inline void rclol_cpuid_trace_set_fake(int on) { (void) on; }
++
++#endif
++
++#endif // _RCLOL_CPUID_TRACE_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
+new file mode 100644
+index 0000000..0588004
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
+@@ -0,0 +1,667 @@
++// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
++//
++// Mechanism
++// ---------
++// We arm up to four x86 hardware execute breakpoints (DR0-DR3) with
++// perf_event_open(PERF_TYPE_BREAKPOINT, HW_BREAKPOINT_X). Each event has
++// sigtrap=1, so when the game executes the watched cpuid the kernel delivers a
++// synchronous SIGTRAP to the triggering thread with si_code == TRAP_PERF and
++// siginfo.si_perf_data == attr.sig_data. We set sig_data to the site's *unslid*
++// address, so the handler identifies the site with no shared state.
++//
++// inherit=1 makes threads created later inherit the breakpoints; sigtrap=1 with
++// inherit=1 requires remove_on_exec=1 (Linux >= 5.13). We arm while the process
++// is still single-threaded (from dyld start(), before the app's own code runs).
++//
++// The SIGTRAP lands in Darling's guest signal path: darling_sigexc_self()
++// installs sigexc_handler as the Linux handler for every signal including
++// SIGTRAP. We hook the very top of sigexc_handler (before it turns the signal
++// into a Mach exception) and, for our traps only, emulate the instruction and
++// return. Because an execute breakpoint faults *before* the instruction retires
++// and we advance rip past the 2-byte cpuid, there is no re-trigger/RF concern:
++// the watched byte is never executed again on this pass.
++//
++// In fake mode -- the launcher's profile=compat (RCLOL_PLATFORM_PROFILE) or the
++// diagnostic flag token fake=1 -- the emulated result is passed through
++// rclol_cpuid_trace_spoof() before it is written back, so the trapped leaves
++// report the compatibility CPU identity instead of the host's.
++//
++// The handler never modifies the game's code bytes, so the game's self-checksum
++// is unaffected; the only observable is extra time per traced cpuid.
++
++#include <darling/emulation/linux_premigration/signal/cpuid_trace.h>
++
++#ifdef __x86_64__
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <darling/emulation/common/cpu_identity.h>
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
++#include <darling/emulation/conversion/signal/sigaction.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++// ---------------------------------------------------------------------------
++// Minimal Linux perf_event_open ABI (we cannot include <linux/perf_event.h>
++// from the guest headers). Field order copied faithfully from the kernel.
++
++struct rclol_perf_event_attr {
++	uint32_t type;
++	uint32_t size;
++	uint64_t config;
++	union { uint64_t sample_period; uint64_t sample_freq; };
++	uint64_t sample_type;
++	uint64_t read_format;
++	// flags bitfield (kernel order)
++	uint64_t disabled:1, inherit:1, pinned:1, exclusive:1,
++		 exclude_user:1, exclude_kernel:1, exclude_hv:1, exclude_idle:1,
++		 mmap:1, comm:1, freq:1, inherit_stat:1,
++		 enable_on_exec:1, task:1, watermark:1,
++		 precise_ip:2, mmap_data:1, sample_id_all:1,
++		 exclude_host:1, exclude_guest:1,
++		 exclude_callchain_kernel:1, exclude_callchain_user:1,
++		 mmap2:1, comm_exec:1, use_clockid:1, context_switch:1,
++		 write_backward:1, namespaces:1, ksymbol:1, bpf_event:1,
++		 aux_output:1, cgroup:1, text_poke:1, build_id:1,
++		 inherit_thread:1, remove_on_exec:1, sigtrap:1,
++		 __reserved_1:26;
++	union { uint32_t wakeup_events; uint32_t wakeup_watermark; };
++	uint32_t bp_type;
++	union { uint64_t bp_addr; uint64_t kprobe_func; uint64_t config1; };
++	union { uint64_t bp_len; uint64_t kprobe_addr; uint64_t config2; };
++	uint64_t branch_sample_type;
++	uint64_t sample_regs_user;
++	uint32_t sample_stack_user;
++	int32_t clockid;
++	uint64_t sample_regs_intr;
++	uint32_t aux_watermark;
++	uint16_t sample_max_stack;
++	uint16_t __reserved_2;
++	uint32_t aux_sample_size;
++	uint32_t __reserved_3;
++	uint64_t sig_data;
++	uint64_t config3;
++};
++
++#define RCLOL_PERF_TYPE_BREAKPOINT 5u
++#define RCLOL_HW_BREAKPOINT_X      4u
++#define RCLOL_TRAP_PERF            6     // si_code for perf-generated SIGTRAP
++
++#define RCLOL_O_WRONLY  0x001
++#define RCLOL_O_CREAT   0x040
++#define RCLOL_O_APPEND  0x400
++
++#define RCLOL_CLOCK_MONOTONIC 1
++
++#ifndef RCLOL_CPUID_FLAG_PATH
++#define RCLOL_CPUID_FLAG_PATH "/tmp/rclol-cpuid-trace"
++#endif
++#ifndef RCLOL_CPUID_LOG_PATH
++#define RCLOL_CPUID_LOG_PATH  "/tmp/rclol-cpuid-trace.log"
++#endif
++
++#define RCLOL_IMAGE_TEXT_BASE 0x100000000UL
++#define RCLOL_MAX_SITES       4
++#define RCLOL_LOG_FIRST_N     64
++
++// ---------------------------------------------------------------------------
++// Static tables: the group -> first-cpuid-site-of-each-function map, verified
++// against game build 16.22.8348910 (x86_64). Values are *unslid* absolute
++// addresses (also used as the sig_data cookie).
++
++// Group 1: the CPU identity function at 0x1014c5bb0 (brand-string leaves
++// 0x80000002..4 and the leaf-1 signature). Four sites, so they fill DR0-DR3:
++// this is the group to arm in fake mode.
++static const unsigned long rclol_group1[RCLOL_MAX_SITES] =
++	{ 0x1014c5c04UL, 0x1014c5c38UL, 0x1014c5c64UL, 0x1014c5d06UL };
++// Group 2: generic feature detection at 0x101c67ed0 (vendor leaf 0, leaf 1,
++// max extended 0x80000000, cache leaf 0x80000006).
++static const unsigned long rclol_group2[RCLOL_MAX_SITES] =
++	{ 0x101c67ed8UL, 0x101c67f0fUL, 0x101c67f3fUL, 0x101c67f7dUL };
++// Group 3: topology and address-size detection at 0x101e8e180 (0x80000000,
++// 0x80000001, 0x80000008 and leaf 1).
++static const unsigned long rclol_group3[RCLOL_MAX_SITES] =
++	{ 0x101e8e205UL, 0x101e8e216UL, 0x101e8e230UL, 0x101e8e23eUL };
++
++// Per-armed-site state (cookie is the unslid address).
++struct rclol_site {
++	unsigned long cookie;    // unslid address == sig_data
++	unsigned long runtime;   // slid address
++	unsigned long hits;
++};
++static struct rclol_site g_sites[RCLOL_MAX_SITES];
++static int g_site_count = 0;
++static int g_log_fd = -1;
++
++// ---------------------------------------------------------------------------
++// Tiny async-signal-safe helpers (raw syscalls, no libc).
++
++static long rclol_sys(long nr, long a1, long a2, long a3, long a4, long a5, long a6)
++{
++	return linux_syscall(a1, a2, a3, a4, a5, a6, (int) nr);
++}
++
++static int rclol_open_log(void)
++{
++	if (g_log_fd >= 0)
++		return g_log_fd;
++	long fd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) RCLOL_CPUID_LOG_PATH,
++		RCLOL_O_WRONLY | RCLOL_O_CREAT | RCLOL_O_APPEND, 0644, 0, 0);
++	if (fd >= 0)
++		g_log_fd = (int) fd;
++	return g_log_fd;
++}
++
++static void rclol_write(const char* text, unsigned long len)
++{
++	int fd = rclol_open_log();
++	if (fd >= 0)
++		rclol_sys(__NR_write, fd, (long) text, (long) len, 0, 0, 0);
++}
++
++static void rclol_write_str(const char* text)
++{
++	unsigned long len = 0;
++	while (text[len]) ++len;
++	rclol_write(text, len);
++}
++
++static unsigned long long rclol_monotonic_ns(void)
++{
++	struct { long tv_sec; long tv_nsec; } ts = { 0, 0 };
++	if (rclol_sys(__NR_clock_gettime, RCLOL_CLOCK_MONOTONIC, (long) &ts, 0, 0, 0, 0) != 0)
++		return 0;
++	return (unsigned long long) ts.tv_sec * 1000000000ULL + (unsigned long long) ts.tv_nsec;
++}
++
++static long rclol_gettid(void)
++{
++	return rclol_sys(__NR_gettid, 0, 0, 0, 0, 0, 0);
++}
++
++// ---------------------------------------------------------------------------
++// Arming
++
++int rclol_cpuid_trace_arm(unsigned long runtime_addr, unsigned long cookie)
++{
++	if (g_site_count >= RCLOL_MAX_SITES)
++		return -1;
++
++	// Protect against game updates: only arm an actual `cpuid` (0f a2).
++	const unsigned char* bytes = (const unsigned char*) runtime_addr;
++	if (bytes[0] != 0x0f || bytes[1] != 0xa2) {
++		char line[128];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-trace: SKIP site cookie=0x%lx runtime=0x%lx not-cpuid=%02x %02x\n",
++			cookie, runtime_addr, bytes[0], bytes[1]);
++		rclol_write_str(line);
++		return -1;
++	}
++
++	struct rclol_perf_event_attr attr;
++	__builtin_memset(&attr, 0, sizeof(attr));
++	attr.type = RCLOL_PERF_TYPE_BREAKPOINT;
++	attr.size = sizeof(attr);
++	attr.bp_type = RCLOL_HW_BREAKPOINT_X;
++	attr.bp_addr = runtime_addr;
++	attr.bp_len = sizeof(long);           // 8, per the task spec
++	attr.sample_period = 1;
++	attr.exclude_kernel = 1;
++	attr.exclude_hv = 1;
++	attr.inherit = 1;                     // later threads inherit the breakpoint
++	attr.remove_on_exec = 1;              // required with sigtrap + inherit
++	attr.sigtrap = 1;
++	attr.sig_data = cookie;               // delivered as siginfo.si_perf_data
++
++	// pid=0 (this process), cpu=-1 (any cpu), group_fd=-1, flags=0.
++	long fd = rclol_sys(__NR_perf_event_open, (long) &attr, 0, -1, -1, 0, 0);
++	if (fd < 0) {
++		char line[128];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-trace: ARM FAILED cookie=0x%lx runtime=0x%lx err=%ld\n",
++			cookie, runtime_addr, fd);
++		rclol_write_str(line);
++		return (int) fd;
++	}
++
++	g_sites[g_site_count].cookie = cookie;
++	g_sites[g_site_count].runtime = runtime_addr;
++	g_sites[g_site_count].hits = 0;
++	++g_site_count;
++
++	char line[128];
++	__simple_snprintf(line, sizeof(line),
++		"cpuid-trace: ARMED site=%d cookie=0x%lx runtime=0x%lx fd=%ld\n",
++		g_site_count - 1, cookie, runtime_addr, fd);
++	rclol_write_str(line);
++	// The fd is intentionally kept open for the lifetime of the process.
++	return (int) fd;
++}
++
++
++// ---------------------------------------------------------------------------
++// Identity substitution (fake mode)
++//
++// Group 1's four sites are where the game builds its reported CPU identity. In
++// fake mode the handler rewrites the results of those leaves so the guest sees
++// a coherent Intel mobile part instead of the host's AMD CPU. Leaves the host
++// implements with vendor-specific meanings (0x80000001, 0x80000006..8) are
++// adjusted in place; everything else passes through, so capability detection
++// still sees what this CPU really supports.
++//
++// The identity itself lives in one table shared with the sysctls
++// (common/cpu_identity.h, src/common/cpu_identity.c). The brand string there is
++// the profile's default; when the launcher exported RCLOL_CPU_BRAND (the
++// profile's source of truth, tools/system.prop) that string is used instead so
++// cpuid and machdep.cpu.brand_string cannot disagree. The brand leaves hold 48
++// bytes; a longer string is truncated.
++
++static int g_fake = 0;
++
++static struct darling_cpu_identity g_identity;
++static int g_identity_ready = 0;
++
++static const struct darling_cpu_identity* rclol_identity(void)
++{
++	if (!g_identity_ready) {
++		const char* brand = darling_configured_cpu_brand();
++		g_identity = *darling_compat_cpu_identity();
++		if (brand != 0) {
++			uint32_t n = 0;
++			while (brand[n] && n < 48u)
++				++n;
++			g_identity.brand = brand;
++			g_identity.brand_len = n;
++		}
++		g_identity_ready = 1;
++	}
++	return &g_identity;
++}
++
++void rclol_cpuid_trace_set_fake(int on)
++{
++	g_fake = on ? 1 : 0;
++}
++
++static uint32_t rclol_brand_word(uint32_t offset)
++{
++	const struct darling_cpu_identity* id = rclol_identity();
++	uint32_t value = 0;
++	int i;
++
++	for (i = 3; i >= 0; --i) {
++		uint32_t pos = offset + (uint32_t) i;
++		uint32_t byte = pos < id->brand_len ? (uint32_t) (unsigned char) id->brand[pos] : 0;
++		value = (value << 8) | byte;
++	}
++	return value;
++}
++
++void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
++	uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx)
++{
++	const struct darling_cpu_identity* id = rclol_identity();
++
++	(void) subleaf;
++	switch (leaf) {
++	case 0x00000000u:
++		*eax = id->max_basic;
++		*ebx = 0x756e6547u; /* "Genu" */
++		*edx = 0x49656e69u; /* "ineI" */
++		*ecx = 0x6c65746eu; /* "ntel" */
++		break;
++	case 0x00000001u:
++		*eax = id->signature;
++		/* Brand index 0, CLFLUSH line size 8 (64 bytes), full thread count. */
++		*ebx = (*ebx & 0xff000000u) | ((id->threads - 1) << 16) | (8u << 8);
++		/* The identity part's feature word. It is a superset of the host's
++		 * (the host AMD leaf 1 EDX lacks only DS, SS and TM), so nothing the
++		 * host really has is lost. machdep.cpu.features reports the same
++		 * word, so the sysctl and the game cannot disagree. */
++		*edx = id->leaf1_edx;
++		break;
++	case 0x80000000u:
++		*eax = id->max_ext;
++		*ebx = 0x756e6547u;
++		*edx = 0x49656e69u;
++		*ecx = 0x6c65746eu;
++		break;
++	case 0x80000001u:
++		/* Clear the AMD-only bits; keep NX, 1GB pages, RDTSCP and long mode. */
++		*ecx &= ~0x00003fc4u; /* SVM, SSE4A, misaligned SSE, 3DNow prefetch, OSVW, IBS, XOP, SKINIT, WDT */
++		*edx &= ~0xc0400000u; /* MMX-ext, FXSR-opt, 3DNow, 3DNow-ext */
++		break;
++	case 0x80000002u:
++	case 0x80000003u:
++	case 0x80000004u: {
++		uint32_t off = (leaf - 0x80000002u) * 16u;
++		*eax = rclol_brand_word(off);
++		*ebx = rclol_brand_word(off + 4u);
++		*ecx = rclol_brand_word(off + 8u);
++		*edx = rclol_brand_word(off + 12u);
++		break;
++	}
++	case 0x80000006u:
++		*ecx = ((id->l2_kb & 0xffffu) << 16) | 0x4001u;
++		*edx = (((id->l3_kb / 512u) & 0x3fffu) << 18) | 0x0000f001u;
++		break;
++	case 0x80000007u:
++		*edx &= 0x00000100u; /* invariant TSC only */
++		break;
++	case 0x80000008u:
++		*eax = (id->phys_bits & 0xffu) | ((id->virt_bits & 0xffu) << 8);
++		*ebx = (id->cores - 1) | ((id->threads - 1) << 8);
++		*ecx = 0;
++		break;
++	default:
++		break;
++	}
++}
++
++// ---------------------------------------------------------------------------
++// Signal-handler fast path
++
++bool rclol_cpuid_trace_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt)
++{
++	if (!info || !ctxt)
++		return false;
++	if (info->si_code != RCLOL_TRAP_PERF)
++		return false;
++
++	// si_value overlaps si_perf_data in the kernel siginfo (offset 24).
++	unsigned long cookie = (unsigned long) info->si_value;
++
++	struct rclol_site* site = NULL;
++	for (int i = 0; i < g_site_count; ++i) {
++		if (g_sites[i].cookie == cookie) { site = &g_sites[i]; break; }
++	}
++	if (!site)
++		return false; // a perf SIGTRAP that isn't ours; let normal handling run
++
++	struct linux_gregset* r = &ctxt->uc_mcontext.gregs;
++
++	// Emulate the instruction: run cpuid with the trapped eax/ecx, then let
++	// fake mode substitute the compatibility identity for the trapped leaves.
++	uint32_t in_eax = (uint32_t) r->rax;
++	uint32_t in_ecx = (uint32_t) r->rcx;
++	uint32_t oa, ob, oc, od;
++	__asm__ volatile ("cpuid"
++		: "=a"(oa), "=b"(ob), "=c"(oc), "=d"(od)
++		: "a"(in_eax), "c"(in_ecx));
++
++	if (g_fake)
++		rclol_cpuid_trace_spoof(in_eax, in_ecx, &oa, &ob, &oc, &od);
++
++	r->rax = oa;  // 64-bit mode zero-extends the 32-bit results
++	r->rbx = ob;
++	r->rcx = oc;
++	r->rdx = od;
++	r->rip += 2;  // skip the two-byte `0f a2`
++
++	unsigned long n = site->hits++;
++	if (n < RCLOL_LOG_FIRST_N) {
++		char line[192];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid t=%llu tid=%ld site=0x%lx off=0x%lx in[eax=0x%x ecx=0x%x] "
++			"out[eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x] n=%lu\n",
++			rclol_monotonic_ns(), rclol_gettid(), cookie,
++			cookie - RCLOL_IMAGE_TEXT_BASE, in_eax, in_ecx,
++			oa, ob, oc, od, n);
++		rclol_write_str(line);
++	} else if (n == RCLOL_LOG_FIRST_N) {
++		char line[96];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-trace: site=0x%lx reached %d hits; counting only from here\n",
++			cookie, RCLOL_LOG_FIRST_N);
++		rclol_write_str(line);
++	}
++
++	return true;
++}
++
++unsigned long rclol_cpuid_trace_hits(unsigned long cookie)
++{
++	for (int i = 0; i < g_site_count; ++i)
++		if (g_sites[i].cookie == cookie)
++			return g_sites[i].hits;
++	return 0;
++}
++
++// ---------------------------------------------------------------------------
++// LC_UUID of the loaded image (for the log / game-version correlation).
++
++static void rclol_log_uuid(const void* base)
++{
++	// mach_header_64: magic,cputype,cpusubtype,filetype,ncmds,sizeofcmds,flags,reserved
++	const uint32_t* h = (const uint32_t*) base;
++	uint32_t ncmds = h[4];
++	const unsigned char* p = (const unsigned char*) base + 32; // sizeof(mach_header_64)
++	for (uint32_t i = 0; i < ncmds; ++i) {
++		uint32_t cmd = ((const uint32_t*) p)[0];
++		uint32_t cmdsize = ((const uint32_t*) p)[1];
++		if (cmdsize < 8)
++			break;
++		if (cmd == 0x1b /* LC_UUID */) {
++			const unsigned char* u = p + 8;
++			char line[128];
++			__simple_snprintf(line, sizeof(line),
++				"cpuid-trace: image base=0x%lx uuid="
++				"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
++				(unsigned long) base,
++				u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],
++				u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]);
++			rclol_write_str(line);
++			return;
++		}
++		p += cmdsize;
++	}
++}
++
++// ---------------------------------------------------------------------------
++// Config parsing and high-level setup
++
++static bool rclol_ends_with_league(const char* p, unsigned long len)
++{
++	static const char suffix[] = "LeagueofLegends.app/Contents/MacOS/LeagueofLegends";
++	unsigned long slen = sizeof(suffix) - 1;
++	if (!p || len < slen)
++		return false;
++	const char* tail = p + (len - slen);
++	for (unsigned long i = 0; i < slen; ++i)
++		if (tail[i] != suffix[i])
++			return false;
++	return true;
++}
++
++// Find the League main executable in /proc/self/maps and return its lowest
++// mapped address (the slid __TEXT base). Returns 0 if this is not the game.
++// mldr maps the main Mach-O before dyld (hence before us) runs, so by the time
++// sigexc_setup() calls this the mapping is already present.
++static unsigned long rclol_find_league_base(void)
++{
++	long fd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) "/proc/self/maps", 0 /*O_RDONLY*/, 0, 0, 0);
++	if (fd < 0)
++		return 0;
++
++	unsigned long best = 0;
++	char buf[4096];
++	char line[512];
++	unsigned int ll = 0;
++	long got;
++	while ((got = rclol_sys(__NR_read, fd, (long) buf, (long) sizeof(buf), 0, 0, 0)) > 0) {
++		for (long i = 0; i < got; ++i) {
++			char ch = buf[i];
++			if (ch != '\n') {
++				if (ll < sizeof(line) - 1)
++					line[ll++] = ch;
++				continue;
++			}
++			line[ll] = '\0';
++			// line: "start-end perms offset dev inode   pathname"
++			unsigned long start = 0;
++			for (unsigned int j = 0; j < ll; ++j) {
++				char hc = line[j];
++				unsigned d;
++				if (hc >= '0' && hc <= '9') d = (unsigned) (hc - '0');
++				else if (hc >= 'a' && hc <= 'f') d = (unsigned) (hc - 'a' + 10);
++				else if (hc >= 'A' && hc <= 'F') d = (unsigned) (hc - 'A' + 10);
++				else break; // stop at '-'
++				start = start * 16 + d;
++			}
++			// find the pathname: first field beginning with '/'
++			const char* path = NULL;
++			unsigned long path_len = 0;
++			for (unsigned int j = 0; j < ll; ++j) {
++				if (line[j] == '/') { path = &line[j]; path_len = ll - j; break; }
++			}
++			if (path && rclol_ends_with_league(path, path_len)) {
++				if (best == 0 || start < best)
++					best = start;
++			}
++			ll = 0;
++		}
++	}
++	rclol_sys(__NR_close, fd, 0, 0, 0, 0, 0);
++	return best;
++}
++
++// Read a leading 0x.. / decimal number from *s, advancing *s. Returns value.
++static unsigned long rclol_parse_num(const char** s)
++{
++	const char* p = *s;
++	unsigned long v = 0;
++	int base = 10;
++	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { base = 16; p += 2; }
++	for (;;) {
++		char c = *p;
++		unsigned d;
++		if (c >= '0' && c <= '9') d = (unsigned) (c - '0');
++		else if (base == 16 && c >= 'a' && c <= 'f') d = (unsigned) (c - 'a' + 10);
++		else if (base == 16 && c >= 'A' && c <= 'F') d = (unsigned) (c - 'A' + 10);
++		else break;
++		v = v * (unsigned) base + d;
++		++p;
++	}
++	*s = p;
++	return v;
++}
++
++// Normalise a user-supplied site value to an unslid absolute address: values
++// below the __TEXT base are treated as offsets from it.
++static unsigned long rclol_normalise_site(unsigned long v)
++{
++	return v >= RCLOL_IMAGE_TEXT_BASE ? v : RCLOL_IMAGE_TEXT_BASE + v;
++}
++
++
++// Flag tokens are separated by whitespace or commas; find "key=" at a token
++// boundary and return a pointer to its value, or NULL.
++static const char* rclol_flag_value(const char* text, const char* key)
++{
++	unsigned long klen = 0;
++	const char* p;
++
++	while (key[klen]) ++klen;
++	for (p = text; *p; ++p) {
++		unsigned long i;
++		if (p != text) {
++			char prev = p[-1];
++			if (prev != ' ' && prev != '\t' && prev != '\n' && prev != '\r' && prev != ',')
++				continue;
++		}
++		for (i = 0; i < klen; ++i)
++			if (p[i] != key[i])
++				break;
++		if (i == klen)
++			return p + klen;
++	}
++	return NULL;
++}
++
++void rclol_cpuid_trace_setup(void)
++{
++	// Two switches: the launcher's hardware profile (RCLOL_PLATFORM_PROFILE,
++	// inherited by the game) and the diagnostic flag file. A process under
++	// neither pays one failed open() and is done.
++	char contents[128];
++	__builtin_memset(contents, 0, sizeof(contents));
++	long ffd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) RCLOL_CPUID_FLAG_PATH, 0 /*O_RDONLY*/, 0, 0, 0);
++	int compat = darling_compat_profile_enabled();
++	if (ffd < 0 && !compat)
++		return;
++	if (ffd >= 0) {
++		long got = rclol_sys(__NR_read, ffd, (long) contents, (long) sizeof(contents) - 1, 0, 0, 0);
++		rclol_sys(__NR_close, ffd, 0, 0, 0, 0, 0);
++		if (got < 0)
++			got = 0;
++		contents[got] = '\0';
++	}
++
++	// Only the League game process has sites to arm.
++	unsigned long base = rclol_find_league_base();
++	if (base == 0)
++		return;
++	unsigned long slide = base - RCLOL_IMAGE_TEXT_BASE;
++
++	rclol_log_uuid((const void*) base);
++	{
++		char line[160];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-trace: setup pid=%ld slide=0x%lx flag=\"%s\"\n",
++			rclol_sys(__NR_getpid, 0, 0, 0, 0, 0, 0), slide, contents);
++		rclol_write_str(line);
++	}
++
++	// Choose the sites. Tokens: fake=1, group=1|2|3, sites=0x...,0x...
++	// fake=1 alone arms group 1, the identity function.
++	{
++		const char* fake = rclol_flag_value(contents, "fake=");
++		if (fake && (fake[0] == '1' || fake[0] == 'y' || fake[0] == 'Y'))
++			g_fake = 1;
++	}
++	// The launcher's profile is the normal switch: profile=compat rewrites the
++	// game's identity from the same table the sysctls use. The flag file
++	// remains for one-off diagnostics (fake=1, group=, sites=).
++	if (!g_fake && compat)
++		g_fake = 1;
++
++	const unsigned long* chosen = rclol_group1; // default group=1
++	unsigned long explicit_sites[RCLOL_MAX_SITES];
++	int n_explicit = 0;
++	const char* sites_token = rclol_flag_value(contents, "sites=");
++	const char* group_token = rclol_flag_value(contents, "group=");
++
++	if (sites_token) {
++		const char* p = sites_token;
++		while (*p && n_explicit < RCLOL_MAX_SITES) {
++			if ((*p == '0' && (p[1] == 'x' || p[1] == 'X')) || (*p >= '0' && *p <= '9')) {
++				explicit_sites[n_explicit++] = rclol_normalise_site(rclol_parse_num(&p));
++			} else {
++				++p;
++			}
++		}
++		chosen = NULL;
++	} else if (group_token) {
++		char g = group_token[0];
++		if (g == '2') chosen = rclol_group2;
++		else if (g == '3') chosen = rclol_group3;
++		else chosen = rclol_group1;
++	}
++
++	if (chosen) {
++		for (int i = 0; i < RCLOL_MAX_SITES; ++i)
++			rclol_cpuid_trace_arm(chosen[i] + slide, chosen[i]);
++	} else {
++		for (int i = 0; i < n_explicit; ++i)
++			rclol_cpuid_trace_arm(explicit_sites[i] + slide, explicit_sites[i]);
++	}
++	{
++		char line[96];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-trace: armed %d site(s) fake=%d\n", g_site_count, g_fake);
++		rclol_write_str(line);
++	}
++}
++
++#endif // __x86_64__
 diff --git a/darling/src/libsystem_kernel/emulation/src/other/mach/lkm.c b/darling/src/libsystem_kernel/emulation/src/other/mach/lkm.c
 index 8c6d5d9..6fd1acf 100644
 --- a/darling/src/libsystem_kernel/emulation/src/other/mach/lkm.c
@@ -1874,19 +2667,20 @@ index 7d5ef80..46debb8 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..058b985 100644
+index f273989..938f00d 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-@@ -9,6 +9,8 @@
+@@ -9,6 +9,9 @@
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
  #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
  #include <darling/emulation/common/simple.h>
++#include <darling/emulation/common/cpu_identity.h>
 +#include <darling/emulation/common/cpu_topology.h>
 +#include <darling/emulation/common/cpu_frequency.h>
  #include <darling/emulation/common/string.h>
  
  extern kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name);
-@@ -16,6 +18,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
+@@ -16,6 +19,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
  
  /* Darling specific */
  enum {
@@ -1894,7 +2688,7 @@ index f273989..058b985 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +27,14 @@ enum {
+@@ -24,10 +28,14 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -1910,7 +2704,7 @@ index f273989..058b985 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +46,78 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +47,78 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -1990,7 +2784,7 @@ index f273989..058b985 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +129,12 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,7 +130,12 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -2004,13 +2798,13 @@ index f273989..058b985 100644
  	{ .oid = -1 }
  };
  
-@@ -71,6 +150,32 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -71,6 +151,35 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
 +
-+		// Keep the emulated MacBookPro16,1 identity (hw.model, brand string,
-+		// memory size), but report the host's real CPU counts. The game and the
++		// Keep the emulated MacBookPro16,1 hw.model, but report the host's real
++		// CPU counts and the profile-selected memory size. The game and the
 +		// clients size their worker pools from these values; the old fixed
 +		// 8 logical / 8 physical configuration made the game create 7 workers
 +		// on a 12-thread host. Note it did not even match the emulated machine:
@@ -2033,11 +2827,14 @@ index f273989..058b985 100644
 +			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +		}
-+		hinfo.max_mem = 17179869184ULL; // 16 GB, matching the emulated machine
++		extern char* getenv(const char*);
++		const char* memory = getenv("RCLOL_MEMORY_BYTES");
++		if (memory != NULL && memory[0] != '\0')
++			hinfo.max_mem = __simple_atoi(memory, NULL);
  	}
  
  	return &hinfo;
-@@ -83,6 +188,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +192,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -2051,12 +2848,20 @@ index f273989..058b985 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +281,49 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +285,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
 +static long cpu_frequency(uint64_t* frequency)
 +{
++	// The compat profile reports the compatibility part's base clock, not the
++	// host's boost clock: a MacBookPro16,1 CPU would never say 4268 MHz.
++	if (darling_compat_profile_enabled())
++	{
++		*frequency = (uint64_t) darling_compat_cpu_identity()->base_mhz * 1000000ULL;
++		return 0;
++	}
++
 +	char buffer[32];
 +	const char* paths[] = {
 +		"/Volumes/SystemRoot/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
@@ -2108,7 +2913,7 @@ index f273989..058b985 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +338,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +350,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -2248,18 +3053,23 @@ index bd9cdc2..83ad15c 100644
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..122ad3a 100644
+index 4319355..da10132 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-@@ -4,6 +4,7 @@
+@@ -2,8 +2,12 @@
+ 
+ #include <sys/errno.h>
  #include <alloca.h>
++extern char *getenv(const char *name);
++extern char *strstr(const char *s, const char *find), *strchr(const char *s, int c);
  
  #include <darling/emulation/common/simple.h>
++#include <darling/emulation/common/cpu_identity.h>
 +#include <darling/emulation/common/cpu_topology.h>
  #include <darling/emulation/conversion/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
-@@ -25,6 +26,7 @@ enum {
+@@ -25,6 +29,7 @@ enum {
  	_CPU_BRAND_STRING,
  	_CPU_FEATURES,
  	_CPU_CORE_COUNT,
@@ -2267,7 +3077,7 @@ index 4319355..122ad3a 100644
  };
  
  static sysctl_handler(handle_vendor);
-@@ -32,9 +34,15 @@ static sysctl_handler(handle_max_basic);
+@@ -32,9 +37,39 @@ static sysctl_handler(handle_max_basic);
  static sysctl_handler(handle_family);
  static sysctl_handler(handle_model);
  static sysctl_handler(handle_stepping);
@@ -2275,7 +3085,31 @@ index 4319355..122ad3a 100644
 -static sysctl_handler(handle_features);
 +static sysctl_handler(handle_brand_string)
 +{
-+	copyout_string("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", (char*) old, oldlen);
++	const char* brand = getenv("RCLOL_CPU_BRAND");
++	char cpuinfo[4096];
++
++	if (brand == NULL || brand[0] == '\0')
++	{
++		brand = "Unknown CPU";
++		if (read_string("/Volumes/SystemRoot/proc/cpuinfo", cpuinfo, (int)sizeof(cpuinfo)))
++		{
++			char* line = strstr(cpuinfo, "model name");
++			char* value = line != NULL ? strchr(line, ':') : NULL;
++
++			if (value != NULL)
++			{
++				char* end;
++				++value;
++				while (*value == ' ' || *value == '\t')
++					++value;
++				end = strchr(value, '\n');
++				if (end != NULL)
++					*end = '\0';
++				brand = value;
++			}
++		}
++	}
++	copyout_string(brand, (char*) old, oldlen);
 +	return 0;
 +}
 +
@@ -2285,7 +3119,7 @@ index 4319355..122ad3a 100644
  
  const struct known_sysctl sysctls_machdep_cpu[] = {
      { .oid = _CPU_MAX_BASIC, .type = CTLTYPE_INT, .exttype = "I", .name = "max_basic", .handler = handle_max_basic },
-@@ -42,9 +50,10 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
+@@ -42,9 +77,10 @@ const struct known_sysctl sysctls_machdep_cpu[] = {
      { .oid = _CPU_FAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "family", .handler = handle_family },
  		{ .oid = _CPU_MODEL, .type = CTLTYPE_INT, .exttype = "I", .name = "model", .handler = handle_model },
  		{ .oid = _CPU_STEPPING, .type = CTLTYPE_INT, .exttype = "I", .name = "stepping", .handler = handle_stepping },
@@ -2297,11 +3131,208 @@ index 4319355..122ad3a 100644
  	{ .oid = -1 }
  };
  
-@@ -154,38 +163,37 @@ sysctl_handler(handle_stepping)
-     return 0;
+@@ -70,31 +106,100 @@ const struct known_sysctl sysctls_machdep[] = {
+ #endif
+ 
+ 
+-static inline void copyout_int(int value, char* to_copy, size_t* to_copy_length)
++// cpuid, into named outputs. The old setup() macro passed its own (`level`, 0)
++// as the leaf, so every caller ran leaf 0 regardless of the value it asked for.
++static void cpuid_leaf(unsigned int leaf, unsigned int* eax, unsigned int* ebx,
++		unsigned int* ecx, unsigned int* edx)
+ {
+-        char tmp[64];
+-        __simple_sprintf(tmp, "%d", value);
+-        copyout_string(tmp, to_copy, to_copy_length);
++	unsigned int a, b, c, d;
++
++	__cpuid(leaf, a, b, c, d);
++	*eax = a;
++	*ebx = b;
++	*ecx = c;
++	*edx = d;
  }
  
-+// Original cpuid-based implementation, replaced by the fixed brand string defined above
++// machdep.cpu.family/model/stepping/max_basic are CTLTYPE_INT on macOS: a
++// four-byte integer. They used to be written with copyout_string(), so a
++// caller asking for an int received the first one or two digits ("158") as the
++// value; the string branch of copyout_string also reported a 1-2 byte size.
++static int copyout_int32(unsigned int value, void* out, unsigned long* out_len)
++{
++	if (out == NULL)
++	{
++		if (out_len != NULL)
++			*out_len = sizeof(value);
++		return 0;
++	}
++	if (out_len != NULL && *out_len < sizeof(value))
++	{
++		*out_len = sizeof(value);
++		return -ENOMEM;
++	}
++	*(unsigned int*) out = value;
++	if (out_len != NULL)
++		*out_len = sizeof(value);
++	return 0;
++}
++
++// ---------------------------------------------------------------------------
++// The CPU identity node.
++//
++// In the compat hardware profile (tools/system.prop) the launcher asks for the
++// compatibility identity; every value then comes from the one table in
++// common/cpu_identity.c, which is also what the cpuid trap rewrites the game's
++// identity leaves to. In the host profile the host's own cpuid is reported.
++
++static void compat_vendor(char* name)
++{
++	const char* vendor = "GenuineIntel";
++
++	for (int i = 0; i < 12; ++i)
++		name[i] = vendor[i];
++	name[12] = 0;
++}
++
++// Family/model/stepping from a leaf-1 signature (Intel SDM CPUID.1.EAX).
++static unsigned int signature_family(unsigned int signature)
++{
++	unsigned int base = (signature >> 8) & 0xfu;
++	unsigned int extended = (signature >> 20) & 0xffu;
++
++	return base == 0xfu ? base + extended : base;
++}
++
++static unsigned int signature_model(unsigned int signature)
++{
++	unsigned int base_family = (signature >> 8) & 0xfu;
++	unsigned int base_model = (signature >> 4) & 0xfu;
++	unsigned int extended = (signature >> 16) & 0xfu;
++
++	return (base_family == 0x6u || base_family == 0xfu) ? ((extended << 4) | base_model) : base_model;
++}
+ 
+ sysctl_handler(handle_vendor)
+ {
+-	unsigned int level = 0;
+-    unsigned int eax = 0;
++	unsigned int eax;
+ 	union
+ 	{
+ 		struct
+ 		{
+-	    	unsigned int ebx;
+-		    unsigned int edx;
+-	    	unsigned int ecx;
++			unsigned int ebx;
++			unsigned int edx;
++			unsigned int ecx;
+ 		};
+ 		char name[13];
+ 	} v;
+ 
+-    __cpuid(level, eax, v.ebx, v.ecx, v.edx);
++	if (darling_compat_profile_enabled())
++	{
++		compat_vendor(v.name);
++		copyout_string(v.name, (char*) old, oldlen);
++		return 0;
++	}
+ 
++	cpuid_leaf(0, &eax, &v.ebx, &v.ecx, &v.edx);
+ 	v.name[12] = 0;
+ 	copyout_string(v.name, (char*) old, oldlen);
+ 
+@@ -103,211 +208,181 @@ sysctl_handler(handle_vendor)
+ 
+ sysctl_handler(handle_max_basic)
+ {
+-	setup(0);
+-
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
++	unsigned int eax, ebx, ecx, edx;
+ 
+-	copyout_int(eax, (char*)old,oldlen);
++	if (darling_compat_profile_enabled())
++		return copyout_int32(darling_compat_cpu_identity()->max_basic, old, oldlen);
+ 
+-	return 0;
++	cpuid_leaf(0, &eax, &ebx, &ecx, &edx);
++	return copyout_int32(eax, old, oldlen);
+ }
+ 
+ sysctl_handler(handle_family)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax = eax >> 7;
+-    eax &= 15;
++	unsigned int eax, ebx, ecx, edx;
++	unsigned int signature;
+ 
+-    copyout_int(eax, old, oldlen);
++	if (darling_compat_profile_enabled())
++		signature = darling_compat_cpu_identity()->signature;
++	else
++	{
++		cpuid_leaf(1, &eax, &ebx, &ecx, &edx);
++		signature = eax;
++	}
+ 
+-    return 0;
++	return copyout_int32(signature_family(signature), old, oldlen);
+ }
+ 
+ sysctl_handler(handle_model)
+ {
+-    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
++	unsigned int eax, ebx, ecx, edx;
++	unsigned int signature;
+ 
+-    eax = eax >> 3;
+-    eax &= 15;
+-
+-    copyout_int(eax,(char*)old, oldlen);
++	if (darling_compat_profile_enabled())
++		signature = darling_compat_cpu_identity()->signature;
++	else
++	{
++		cpuid_leaf(1, &eax, &ebx, &ecx, &edx);
++		signature = eax;
++	}
+ 
+-    return 0;
++	return copyout_int32(signature_model(signature), old, oldlen);
+ }
+ 
+ sysctl_handler(handle_stepping)
+ {
+-    setup(1);
++	unsigned int eax, ebx, ecx, edx;
++	unsigned int signature;
+ 
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax &= 15;
+-
+-    copyout_int(eax,(char*)old, oldlen);
++	if (darling_compat_profile_enabled())
++		signature = darling_compat_cpu_identity()->signature;
++	else
++	{
++		cpuid_leaf(1, &eax, &ebx, &ecx, &edx);
++		signature = eax;
++	}
+ 
+-    return 0;
++	return copyout_int32(signature & 0xfu, old, oldlen);
+ }
+ 
++// Original cpuid-based implementation, replaced by the profile-aware brand string above
 +#if 0
  sysctl_handler(handle_brand_string)
  {
@@ -2359,7 +3390,111 @@ index 4319355..122ad3a 100644
  
  sysctl_handler(handle_features)
  {
-@@ -269,45 +277,54 @@ sysctl_handler(handle_features)
++	// The flags are leaf 1 EDX. The old code read leaf 0, whose EDX is the
++	// "ineI" half of the vendor string, so the list was vendor ASCII decoded
++	// as feature bits (no SSE/SSE2, a spurious IA64).
++	static const char features[][7] = {"FPU","VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "","SEP","MTRR","PGE",
++						"MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS",
++						"HTT", "TM","IA64","PBE"};
++	unsigned int eax, ebx, ecx, edx;
++	char buffer[256];
++	int length = 0;
++
++	if (darling_compat_profile_enabled())
++		edx = darling_compat_cpu_identity()->leaf1_edx;
++	else
++		cpuid_leaf(1, &eax, &ebx, &ecx, &edx);
++
++	for (int i = 0; i < 32; i++)
++	{
++		const char* name = features[i];
+ 
+-    setup(1);
+-
+-    static const char features[][7] = {"FPU","VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "","SEP","MTRR","PGE",
+-                        "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS",
+-                        "HTT", "TM","IA64","PBE"};
+-
+-    __cpuid(0,eax,ebx,ecx,edx);
+-    int current_length = 0;
+-
+-    if (old != NULL)
+-    {
+-
+-        char *outsr = (char*)old;
+-
+-        for (int i = 0; i < 32; i++)
+-        {
+-            if (i == 10 || i == 20)
+-                continue;
+-
+-            if ( (edx & (1<<i)) && current_length < *oldlen)
+-            {
+-                if (current_length)
+-                {
+-                    outsr[current_length] = ' ';
+-
+-                    current_length++;
+-                }
+-                if (current_length < *oldlen)
+-                {
+-                    int len = __simple_strlen(features[i]);
+-                    
+-                    strncpy(outsr + current_length, features[i],
+-                    *oldlen - current_length);
+-
+-                    current_length += len;
+-                }
+-            }
+-        }
+-
+-        if (current_length < *oldlen)
+-        {
+-            outsr[current_length] = '\0';
+-        }
+-
+-    }
+-    else
+-    {
+-
+-        for (int i = 0; i < 32; i++)
+-        {
+-
+-            if (i == 10 || i == 20)
+-                continue;
+-
+-            if (edx & (1<<i)) 
+-            {
+-                if (current_length != 0)
+-                    current_length++;
+-                
+-                current_length += __simple_strlen(features[i]);
+-            }
+-
+-        }
+-
+-        if (oldlen)
+-            *oldlen = current_length;
+-
+-    }
+-        
+-
++		if (i == 10 || i == 20 || !(edx & (1u << i)))
++			continue;
+ 
+-    return 0;
++		if (length != 0 && length < (int) sizeof(buffer) - 1)
++			buffer[length++] = ' ';
++		while (*name && length < (int) sizeof(buffer) - 1)
++			buffer[length++] = *name++;
++	}
++	buffer[length] = '\0';
+ 
++	copyout_string(buffer, (char*) old, oldlen);
++	return 0;
+ }
+ 
+-
  // TODO: i doubt core count is ever going to change.
  //       this is something that could be cached if we had some way of doing something only once in libsystem_kernel (i.e. a simple version of dispatch_once).
  sysctl_handler(handle_core_count) {
@@ -2430,20 +3565,20 @@ index 4319355..122ad3a 100644
 +			++line; // skip the colon
 +			if (*line == '\0')
 +				continue;
- 
--		core_count = __simple_atoi(line, NULL);
--		break;
++
 +			++line; // skip the space
 +			if (*line == '\0')
 +				continue;
-+
+ 
+-		core_count = __simple_atoi(line, NULL);
+-		break;
 +			core_count = __simple_atoi(line, NULL);
 +			break;
 +		}
  	}
  
  out:
-@@ -319,3 +336,21 @@ out:
+@@ -319,3 +394,21 @@ out:
  		*oldlen = sizeof(uint32_t);
  	return 0;
  }
@@ -6281,7 +7416,7 @@ diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/mis
 index f1ce3d3..791899c 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/csops.c
-@@ -1,38 +1,405 @@
+@@ -1,38 +1,394 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/misc/csops.h>
  
  #include <stdint.h>
@@ -6349,15 +7484,12 @@ index f1ce3d3..791899c 100644
 +	return ret;
 +}
 +
-+static int state_for(int pid, int self, struct dc_cs_state* state) {
++static int state_for(int pid, struct dc_cs_state* state) {
 +	memset(state, 0, sizeof(*state));
 +	state->version = DC_CS_STATE_VERSION;
-+	if (self) {
-+		const struct dc_cs_local_state* local = local_state();
-+		if (local != NULL)
-+			*state = local->state;
-+		return 0;
-+	}
++	/* The loader snapshot does not track server-side invalidation or flag
++	 * changes made by another process. Self and cross-process queries must
++	 * report the same authoritative signing state. */
 +	return rpc_get_state(pid, state, NULL, 0, NULL, 0, NULL, 0);
 +}
 +
@@ -6408,28 +7540,22 @@ index f1ce3d3..791899c 100644
 +	uint32_t server_flags = 0;
 +	int ret;
 +
-+	if (self) {
-+		const struct dc_cs_local_state* local = local_state();
-+		if (local != NULL) {
-+			struct dc_cs_state* state = (struct dc_cs_state*) &local->state;
-+			state->flags = (state->flags | set_flags) & ~clear_flags;
-+			if (valid == 0) {
-+				state->valid = 0;
-+				state->flags &= ~DC_CS_VALID;
-+			} else if (valid == 1) {
-+				if (state->verified)
-+					state->flags |= DC_CS_VALID;
-+			}
-+			if (!state->valid || !state->verified)
-+				state->flags &= ~DC_CS_VALID;
-+		}
-+	}
-+
 +	ret = dserver_rpc_update_cs_state(pid, set_flags, clear_flags, valid, &server_flags);
 +	if (ret > 0)
 +		return -ret;
 +	if (ret < 0)
 +		return ret;
++	/* Commit only the server-accepted result. A failed RPC must not change
++	 * local flags or make self queries disagree with other observers. */
++	if (self) {
++		const struct dc_cs_local_state* local = local_state();
++		if (local != NULL) {
++			struct dc_cs_state* state = (struct dc_cs_state*) &local->state;
++			state->flags = server_flags;
++			state->valid = (server_flags & DC_CS_VALID) != 0;
++			state->lv_required = (server_flags & (DC_CS_REQUIRE_LV | DC_CS_FORCED_LV)) != 0;
++		}
++	}
 +	if (out_flags != NULL)
 +		*out_flags = server_flags;
 +	return 0;
@@ -6456,7 +7582,7 @@ index f1ce3d3..791899c 100644
 +		pid = sys_getpid();
 +	self = (pid == sys_getpid());
 +
-+	ret = state_for(pid, self, &state);
++	ret = state_for(pid, &state);
 +	if (ret != 0)
 +		return ret;
 +
@@ -6674,7 +7800,7 @@ index f1ce3d3..791899c 100644
 +	self = (pid == sys_getpid());
 +	if (self || sys_geteuid() == 0)
 +		return 1;
-+	if (state_for(pid, 0, &state) != 0)
++	if (state_for(pid, &state) != 0)
 +		return 0;
 +	return (state.flags & CS_GET_TASK_ALLOW) != 0;
 +}
@@ -6688,7 +7814,6 @@ index f1ce3d3..791899c 100644
 -	// just defer to the regular csops
 -	return sys_csops(pid, ops, useraddr, usersize);
 +	struct dc_cs_state state;
-+	int self;
 +	int ret;
 +
 +	if (audit_token == NULL)
@@ -6698,8 +7823,7 @@ index f1ce3d3..791899c 100644
 +	if (audit_token->val[5] != (uint32_t) pid)
 +		return -ESRCH;
 +
-+	self = (pid == sys_getpid());
-+	ret = state_for(pid, self, &state);
++	ret = state_for(pid, &state);
 +	if (ret != 0)
 +		return ret;
 +	/* XNU also validates audit_token.val[7] against the target pidversion.
@@ -7998,3 +9122,203 @@ index a26ae39..0fb6d6a 100644
  .std_ret:
  Lexit_hook:
  	.space 13, 0x90
+diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
+new file mode 100644
+index 0000000..254db21
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
+@@ -0,0 +1,49 @@
++#ifndef DARLING_LOL_CPU_IDENTITY_H
++#define DARLING_LOL_CPU_IDENTITY_H
++
++// darling-lol: the single CPU identity table behind the `compat` hardware
++// presentation profile (tools/system.prop, tools/run-riot-client.sh).
++//
++// The launcher selects the profile once (RCLOL_PLATFORM_PROFILE) and exports
++// the profile's brand string (RCLOL_CPU_BRAND). Everything that reports a CPU
++// identity reads it from here, so cpuid (cpuid_trace.c rewrites the game's
++// identity leaves) and the machdep.cpu.* / hw.cpufrequency sysctls agree.
++//
++// The SKU is a MacBookPro16,1 part: i7-9750H, Coffee Lake-H, 6 cores /
++// 12 threads. Those counts match this host, so the profile does not have to
++// invent a topology the scheduler does not have.
++
++#include <stdint.h>
++
++struct darling_cpu_identity
++{
++	const char* brand;    // NUL-padded into the 48 bytes of leaves 0x80000002..4
++	uint32_t brand_len;
++	uint32_t signature;   // leaf 1 EAX: family/model/stepping
++	uint32_t leaf1_edx;   // leaf 1 EDX: feature flags
++	uint32_t cores;       // physical cores (leaf 0x80000008 EBX low byte + 1)
++	uint32_t threads;     // logical processors (leaf 1 EBX bits 16..23 + 1)
++	uint32_t max_basic;   // leaf 0 EAX
++	uint32_t max_ext;     // leaf 0x80000000 EAX
++	uint32_t phys_bits;   // leaf 0x80000008 EAX low byte
++	uint32_t virt_bits;   // leaf 0x80000008 EAX high byte
++	uint32_t l2_kb;
++	uint32_t l3_kb;
++	uint32_t base_mhz;    // hw.cpufrequency
++};
++
++// The compatibility identity. Never NULL.
++const struct darling_cpu_identity* darling_compat_cpu_identity(void);
++
++// 1 when the launcher selected the compat profile for this process
++// (RCLOL_PLATFORM_PROFILE=compat). Reads /proc/self/environ with raw syscalls
++// and caches the answer once, so it is safe to call at process startup before
++// the C library is usable.
++int darling_compat_profile_enabled(void);
++
++// The brand string from RCLOL_CPU_BRAND (the profile's source of truth), or
++// NULL when it is unset or empty. Points into a static, NUL-terminated buffer
++// owned by this module.
++const char* darling_configured_cpu_brand(void);
++
++#endif // DARLING_LOL_CPU_IDENTITY_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
+new file mode 100644
+index 0000000..bfe2626
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
+@@ -0,0 +1,139 @@
++// darling-lol: the shared compatibility CPU identity. See common/cpu_identity.h.
++
++#include <darling/emulation/common/cpu_identity.h>
++
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++
++extern long linux_syscall(long arg1, long arg2, long arg3, long arg4, long arg5, long arg6, int nr);
++
++// i7-9750H, Coffee Lake-H: the mobile part a MacBookPro16,1 with the Radeon
++// Pro 5500M ships with. 6 cores / 12 threads, 2.60 GHz base clock.
++#define DARLING_COMPAT_BRAND "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"
++
++static const struct darling_cpu_identity g_compat_identity =
++{
++	.brand = DARLING_COMPAT_BRAND,
++	.brand_len = sizeof(DARLING_COMPAT_BRAND) - 1,
++	.signature = 0x000906eau,
++	.leaf1_edx = 0xbfebfbffu,
++	.cores = 6,
++	.threads = 12,
++	.max_basic = 0x16u,
++	.max_ext = 0x80000008u,
++	.phys_bits = 39,
++	.virt_bits = 48,
++	.l2_kb = 256,
++	.l3_kb = 12288,
++	.base_mhz = 2600,
++};
++
++const struct darling_cpu_identity* darling_compat_cpu_identity(void)
++{
++	return &g_compat_identity;
++}
++
++// ---------------------------------------------------------------------------
++// Profile and brand selection
++//
++// The launcher exports the resolved profile and brand to every guest process,
++// so the values are read from this process's own environment. getenv() is not
++// used because this module is also called from the cpuid trap setup, which runs
++// before the C library is usable: /proc/self/environ is read with raw syscalls
++// once and cached.
++
++#define DARLING_ENVIRON_MAX 32768
++
++static char g_environ[DARLING_ENVIRON_MAX + 1];
++static long g_environ_len = -1; // -1: not read yet
++static int g_compat = -1;       // -1: not resolved yet
++
++static void darling_load_environ(void)
++{
++	long offset = 0;
++
++	if (g_environ_len >= 0)
++		return;
++	g_environ_len = 0;
++
++	long fd = linux_syscall(-100 /* AT_FDCWD */, (long) "/proc/self/environ",
++		0 /* O_RDONLY */, 0, 0, 0, __NR_openat);
++	if (fd < 0)
++		return;
++	while (offset < DARLING_ENVIRON_MAX)
++	{
++		long got = linux_syscall((long) fd, (long) (g_environ + offset),
++			(long) (DARLING_ENVIRON_MAX - offset), 0, 0, 0, __NR_read);
++		if (got <= 0)
++			break;
++		offset += got;
++	}
++	linux_syscall((long) fd, 0, 0, 0, 0, 0, __NR_close);
++	g_environ[offset] = '\0';
++	g_environ_len = offset;
++}
++
++// The environment block is a sequence of NUL-terminated "KEY=value" entries.
++// Return the value of the first exact key match, or NULL.
++static const char* darling_environ_value(const char* key)
++{
++	unsigned long key_len = 0;
++	long pos;
++
++	darling_load_environ();
++	while (key[key_len])
++		++key_len;
++
++	for (pos = 0; pos < g_environ_len; )
++	{
++		const char* entry = g_environ + pos;
++		long end = pos;
++		unsigned long i = 0;
++
++		while (end < g_environ_len && g_environ[end])
++			++end;
++		while (i < key_len && pos + (long) i < end && entry[i] == key[i])
++			++i;
++		if (i == key_len && pos + (long) key_len < end && entry[key_len] == '=')
++			return entry + key_len + 1;
++		pos = end + 1;
++	}
++	return 0;
++}
++
++int darling_compat_profile_enabled(void)
++{
++	if (g_compat < 0)
++	{
++		const char* value = darling_environ_value("RCLOL_PLATFORM_PROFILE");
++		g_compat = 1;
++		if (value == 0 || value[0] != 'c' || value[1] != 'o' || value[2] != 'm'
++				|| value[3] != 'p' || value[4] != 'a' || value[5] != 't'
++				|| value[6] != '\0')
++			g_compat = 0;
++	}
++	return g_compat;
++}
++
++const char* darling_configured_cpu_brand(void)
++{
++	static char copy[64];
++	static int state = 0; // 0: not resolved, 1: present, -1: absent
++
++	if (state == 0)
++	{
++		const char* value = darling_environ_value("RCLOL_CPU_BRAND");
++		state = -1;
++		if (value != 0 && value[0] != '\0')
++		{
++			unsigned long n = 0;
++			while (value[n] && n < sizeof(copy) - 1)
++			{
++				copy[n] = value[n];
++				++n;
++			}
++			copy[n] = '\0';
++			state = 1;
++		}
++	}
++	return state == 1 ? copy : 0;
++}
