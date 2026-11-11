@@ -8,31 +8,32 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 102,
+      "modified_files": 126,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
         "src/CoreAudio/CoreAudioComponent/MatrixMixerAU.cpp",
         "src/frameworks/Carbon/HIToolbox/src/SecureInput.c",
         "src/frameworks/CoreMedia/include/CoreMedia/CMFormatDescription.h",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.c",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.h",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c",
-        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.h",
         "src/frameworks/CryptoTokenKit/src/TKTokenWatcher.m",
         "src/frameworks/OpenDirectory/src/ODLocalDirectory.h",
         "src/frameworks/OpenDirectory/src/ODLocalDirectory.m",
         "src/frameworks/OpenGL/CGLAsyncPresent.inc",
         "src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h",
         "src/startup/mldr/commpage-cpu-caps.h",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.h",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpen.c",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.h",
+        "src/frameworks/CoreServices/src/LaunchServices/LSHostOpenBus.c",
+        "src/frameworks/Accelerate/vecLib/vDSP/src/arith.c",
+        "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c",
         "src/shellspawn/shellspawn-fds.h",
         "src/startup/mldr/dc_codesign.c",
         "src/startup/mldr/dc_codesign.h",
-        "src/frameworks/Accelerate/vecLib/vDSP/src/arith.c",
-        "src/frameworks/Accelerate/vecLib/vDSP/src/fft.c",
         "src/startup/mldr/include/dc_entitlements.h",
         "src/startup/mldr/include/dc_mseal.h",
-        "src/startup/mldr/include/dc_image_snapshot.h"
+        "src/startup/mldr/include/dc_image_snapshot.h",
+        "src/startup/mldr/include/dc_macho_slice.h"
       ]
     },
     {
@@ -291,15 +292,17 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 9,
-      "new_files": []
+      "modified_files": 14,
+      "new_files": [
+        "OSX/libsecurity_codesigning/lib/rclol_signing_trace.h"
+      ]
     },
     {
       "path": "src/external/xnu",
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 87,
+      "modified_files": 95,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
@@ -307,6 +310,8 @@
         "darling/src/libsystem_kernel/emulation/include/conversion/xattr/name.h",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/guarded/change_fdguard_np.h",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/mac_syscall.h",
+        "darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h",
+        "darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/guarded/change_fdguard_np.c",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/mac_syscall.c",
         "libsyscall/wrappers/__sysctlbyname.S",
@@ -314,7 +319,9 @@
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/sip.h",
         "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c",
         "darling/src/libsystem_kernel/emulation/include/common/dc_mseal.h",
-        "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h"
+        "darling/src/libsystem_kernel/emulation/include/common/dc_image_snapshot.h",
+        "darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h",
+        "darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c"
       ]
     },
     {
@@ -322,10 +329,9 @@
       "revision": "8423a7d2f053167030d2bc4a227f96243c740667",
       "repository": "https://github.com/darlinghq/indium.git",
       "patch": "patches/metal--deps--indium.patch",
-      "modified_files": 36,
+      "modified_files": 57,
       "new_files": [
         "private-include/indium/counters.private.hpp",
-        "private-include/indium/deferred-blit-encoder.private.hpp",
         "private-include/indium/deferred-render-encoder.private.hpp",
         "private-include/indium/gpu-timing.private.hpp",
         "private-include/indium/memory-pool.private.hpp",
@@ -336,8 +342,12 @@
         "private-include/indium/submission-batch.private.hpp",
         "private-include/indium/submit-batch.private.hpp",
         "private-include/indium/submit-thread.private.hpp",
+        "private-include/indium/deferred-blit-encoder.private.hpp",
         "private-include/indium/waits.private.hpp",
-        "private-include/indium/completion-spin.private.hpp"
+        "private-include/indium/completion-spin.private.hpp",
+        "private-include/indium/vertex-input.private.hpp",
+        "private-include/indium/black-trace.private.hpp",
+        "private-include/indium/slow-log.private.hpp"
       ]
     },
     {

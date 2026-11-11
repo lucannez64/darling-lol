@@ -98,6 +98,8 @@ sources = [
     project / "tools/riot-host-sysctl-cpu-check.c",
     emulation / "src/xnu_syscall/bsd/helper/misc/sysctl_hw.c",
     emulation / "src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c",
+    emulation / "src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c",
+    emulation / "src/common/cpu_identity.c",
 ]
 subprocess.run(["cc", "-std=gnu11", "-O2", "-Wall", "-Wno-unused-function",
                 "-I", str(folder / "include"),
@@ -115,3 +117,13 @@ try:
     subprocess.run([str(binary), "optout"], check=True)
 finally:
     Path(flag).unlink(missing_ok=True)
+
+# machdep.cpu.*: the host's own view, then the compat profile. The profile is
+# read from /proc/self/environ, so it has to be in the environment at exec.
+import os
+compat_env = {key: value for key, value in os.environ.items()
+              if key not in ("RCLOL_PLATFORM_PROFILE", "RCLOL_CPU_BRAND")}
+subprocess.run([str(binary), "machdep"], check=True, env=compat_env)
+compat_env["RCLOL_PLATFORM_PROFILE"] = "compat"
+compat_env["RCLOL_CPU_BRAND"] = "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"
+subprocess.run([str(binary), "machdep-compat"], check=True, env=compat_env)
