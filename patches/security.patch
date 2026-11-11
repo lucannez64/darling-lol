@@ -191,6 +191,47 @@ index e3657a19..26b8838a 100644
  }
  
  
+diff --git a/OSX/sec/Security/SecExports.exp-in b/OSX/sec/Security/SecExports.exp-in
+index 116367d..c022218 100644
+--- a/OSX/sec/Security/SecExports.exp-in
++++ b/OSX/sec/Security/SecExports.exp-in
+@@ -245,6 +245,7 @@ _SecTrustEvaluateWithError
+ _SecTrustFlushResponseCache
+ _SecTrustGetAssetVersionNumber
+ _SecTrustGetCertificateAtIndex
++_SecTrustCopyCertificateChain
+ _SecTrustGetCertificateCount
+ _SecTrustGetDetails
+ _SecTrustGetKeychainsAllowed
+diff --git a/OSX/sec/Security/SecTrust.c b/OSX/sec/Security/SecTrust.c
+index ee5aea2..d8495bc 100644
+--- a/OSX/sec/Security/SecTrust.c
++++ b/OSX/sec/Security/SecTrust.c
+@@ -1918,6 +1918,24 @@ SecCertificateRef SecTrustGetCertificateAtIndex(SecTrustRef trust,
+     return cert;
+ }
+ 
++/* darling-lol: macOS 12 API linked by the current Riot Client. Returns the
++ * evaluated chain, leaf first, or NULL when evaluation produced none, as Apple's
++ * does (unlike SecTrustGetCertificateAtIndex, it does not fall back to the
++ * leaf). */
++CFArrayRef SecTrustCopyCertificateChain(SecTrustRef trust) {
++    if (!trust) {
++        return NULL;
++    }
++    SecTrustEvaluateIfNecessary(trust);
++    __block CFArrayRef chain = NULL;
++    dispatch_sync(trust->_trustQueue, ^{
++        if (trust->_chain) {
++            chain = CFArrayCreateCopy(NULL, trust->_chain);
++        }
++    });
++    return chain;
++}
++
+ CFDictionaryRef SecTrustCopyInfo(SecTrustRef trust) {
+     if (!trust) {
+         return NULL;
 diff --git a/securityd/CMakeLists.txt b/securityd/CMakeLists.txt
 index 32d90f4d..cec9f05d 100644
 --- a/securityd/CMakeLists.txt
@@ -375,3 +416,74 @@ index f6d166e2..fb7ae819 100644
  #include <utilities/SecCFWrappers.h>
  #include <utilities/SecFileLocations.h>
  
+diff --git a/OSX/CMakeLists.txt b/OSX/CMakeLists.txt
+index 6d257de..cea33e3 100644
+--- a/OSX/CMakeLists.txt
++++ b/OSX/CMakeLists.txt
+@@ -55,6 +55,22 @@ endforeach()
+ 
+ set(EXP_IN_FLAGS "${EXP_IN_FLAGS} ${CMAKE_C_FLAGS}")
+ 
++# darling-lol: every file Security.exp-in pulls in, directly or through SecExports.exp-in
++# and SOSViews.exp-in. Listing only the top file left the generated .exp stale on
++# incremental builds, so newly exported symbols (for example
++# _SecTrustCopyCertificateChain from SecExports.exp-in) were dropped at link time.
++set(SECURITY_EXP_IN_DEPENDS
++	${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in
++	${CMAKE_CURRENT_SOURCE_DIR}/../CSSMOID.exp-in
++	${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecExports.exp-in
++	${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecPolicy.list
++	${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecPolicyChecks.list
++	${CMAKE_CURRENT_SOURCE_DIR}/sec/Security/SecAccessControlExports.exp-in
++	${CMAKE_CURRENT_SOURCE_DIR}/../keychain/SecureObjectSync/SOSExports.exp-in
++	${CMAKE_CURRENT_SOURCE_DIR}/../keychain/SecureObjectSync/SOSViews.exp-in
++	${CMAKE_CURRENT_SOURCE_DIR}/../keychain/SecureObjectSync/ViewList.list
++)
++
+ separate_arguments(EXP_IN_FLAGS)
+ 
+ set(EXP_IN_FLAGS ${EXP_IN_FLAGS} ${DirOpts})
+@@ -67,8 +83,7 @@ if (BUILD_TARGET_64BIT)
+ 		OUTPUT
+ 			${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
+ 		DEPENDS
+-			${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in
+-			${CMAKE_CURRENT_SOURCE_DIR}/../CSSMOID.exp-in
++			${SECURITY_EXP_IN_DEPENDS}
+ 		COMMAND
+ 			${CMAKE_C_COMPILER} -E -Xpreprocessor -P -x objective-c -target ${APPLE_TARGET_TRIPLET_64BIT} ${EXP_IN_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in -o ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
+ 	)
+@@ -108,8 +123,7 @@ if (BUILD_TARGET_32BIT)
+ 		OUTPUT
+ 			${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
+ 		DEPENDS
+-			${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in
+-			${CMAKE_CURRENT_SOURCE_DIR}/../CSSMOID.exp-in
++			${SECURITY_EXP_IN_DEPENDS}
+ 		COMMAND
+ 			${CMAKE_C_COMPILER} -E -Xpreprocessor -P -x objective-c -target ${APPLE_TARGET_TRIPLET_32BIT} ${EXP_IN_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in -o ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
+ 	)
+@@ -312,6 +326,11 @@ if (BUILD_TARGET_64BIT)
+ 		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
+ 	)
+ 
++	# darling-lol: add_dependencies only orders the build; relink when the list changes.
++	set_property(TARGET Security_${APPLE_ARCH_64BIT}_firstpass Security_${APPLE_ARCH_64BIT}
++		APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
++	)
++
+ 	target_link_options(Security_${APPLE_ARCH_64BIT} PRIVATE
+ 		-Wl,-dead_strip
+ 		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
+@@ -332,6 +351,11 @@ if (BUILD_TARGET_32BIT)
+ 		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
+ 	)
+ 
++	# darling-lol: add_dependencies only orders the build; relink when the list changes.
++	set_property(TARGET Security_${APPLE_ARCH_32BIT}_firstpass Security_${APPLE_ARCH_32BIT}
++		APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
++	)
++
+ 	target_link_options(Security_${APPLE_ARCH_32BIT} PRIVATE
+ 		-Wl,-dead_strip
+ 		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
