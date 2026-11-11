@@ -133,7 +133,7 @@ def build_manifest(home, files, links, label):
 
 def safe_relative(name):
     """A package path that stays inside a runtime root."""
-    if not isinstance(name, str) or not name or name.startswith('/') or '\\' in name:
+    if not isinstance(name, str) or not name or name.startswith('/') or '\\' in name or '\0' in name:
         raise PackageError('unsafe package path: %r' % name)
     parts = PurePosixPath(name).parts
     if any(part in ('..', '.') for part in parts):
@@ -147,7 +147,7 @@ def safe_relative(name):
 
 def check_link(name, target):
     """A relative symlink that cannot resolve outside its runtime root."""
-    if not target or target.startswith('/'):
+    if not isinstance(target, str) or not target or target.startswith('/') or '\0' in target:
         raise PackageError('absolute symlink in %s: %r' % (name, target))
     root = safe_relative(name)[0]
     resolved = PurePosixPath(*safe_relative(name)[:-1], target)
@@ -323,6 +323,24 @@ def validate(manifest, members):
         raise PackageError('missing archive members: %s' % ', '.join(missing[:5]))
 
 
+def check_destination_limits(root, names):
+    """Reject predictable native path errors before replacing any entry."""
+    anchor = Path(root)
+    while not anchor.is_dir():
+        anchor = anchor.parent
+    name_max = os.pathconf(anchor, 'PC_NAME_MAX')
+    path_max = os.pathconf(anchor, 'PC_PATH_MAX')
+    for name in names:
+        parts = safe_relative(name)
+        try:
+            if name_max >= 0 and any(len(os.fsencode(part)) > name_max for part in parts):
+                raise PackageError('destination name is too long: %s' % name)
+            if path_max >= 0 and len(os.fsencode(Path(root).joinpath(*parts))) >= path_max:
+                raise PackageError('destination path is too long: %s' % name)
+        except UnicodeError as error:
+            raise PackageError('destination path cannot be encoded: %r' % name) from error
+
+
 def destination(root, name):
     parts = safe_relative(name)
     target = Path(root).joinpath(*parts)
@@ -347,6 +365,7 @@ def install(package, root, dry_run=False, out=print):
             root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix='.runtime-package-',
                                        dir=None if dry_run else root))
+        check_destination_limits(root, members)
         prepared = []
         directories = [destination(root, name) for name, member in members.items()
                        if member.isdir()]

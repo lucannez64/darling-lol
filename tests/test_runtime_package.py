@@ -221,6 +221,42 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertEqual((target / 'RuntimeLibraries/new').read_bytes(), b'replacement')
         self.assertFalse((target / 'RuntimeLibraries/existing').is_symlink())
 
+    def test_pax_nul_path_is_rejected_before_replacement(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        good = target / 'RuntimeLibraries/good'
+        good.write_bytes(b'old')
+        files = {'RuntimeLibraries/good': b'new', 'RuntimeLibraries/b\0c': b'bad'}
+        manifest = {'schema': package_tool.SCHEMA, 'files': [
+            {'path': name, 'size': len(data), 'mode': 0o644,
+             'sha256': hashlib.sha256(data).hexdigest()} for name, data in files.items()],
+            'symlinks': []}
+        with tarfile.open(self.archive, 'w:gz', format=tarfile.PAX_FORMAT) as archive:
+            package_tool.add_bytes(archive, package_tool.MANIFEST, json.dumps(manifest).encode())
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.pax_headers = {'path': name}  # PAX preserves embedded NULs.
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertEqual(good.read_bytes(), b'old')
+
+    def test_overlong_name_below_missing_directory_is_rejected_before_replacement(self):
+        target = self.root / 'target'
+        (target / 'RuntimeLibraries').mkdir(parents=True)
+        good = target / 'RuntimeLibraries/good'
+        good.write_bytes(b'old')
+        length = os.pathconf(target, 'PC_NAME_MAX')
+        if length < 0:
+            self.skipTest('filesystem has no fixed name limit')
+        invalid = 'RuntimeLibraries/newdir/' + 'b' * (length + 1)
+        write_package(self.archive, {'RuntimeLibraries/good': b'new', invalid: b'bad'}, {})
+        with self.assertRaises(package_tool.PackageError):
+            package_tool.install(self.archive, target)
+        self.assertEqual(good.read_bytes(), b'old')
+        self.assertFalse((target / 'RuntimeLibraries/newdir').exists())
+
     def test_traversal_path_is_refused(self):
         manifest = {
             'schema': package_tool.SCHEMA,
