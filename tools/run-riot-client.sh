@@ -24,12 +24,10 @@ profile=host
 host_cpu_brand=host
 host_gpu_name=host
 host_gpu_vram=host
-host_gpu_unified=host
 host_memory_bytes=host
 compat_cpu_brand=
 compat_gpu_name=
 compat_gpu_vram=
-compat_gpu_unified=
 compat_memory_bytes=
 if [ -r "$system_prop" ]; then
  while IFS='=' read -r key value; do
@@ -38,12 +36,10 @@ if [ -r "$system_prop" ]; then
    host.cpu.brand) host_cpu_brand=$value;;
    host.gpu.name) host_gpu_name=$value;;
    host.gpu.vram) host_gpu_vram=$value;;
-   host.gpu.unified) host_gpu_unified=$value;;
    host.memory.bytes) host_memory_bytes=$value;;
    compat.cpu.brand) compat_cpu_brand=$value;;
    compat.gpu.name) compat_gpu_name=$value;;
    compat.gpu.vram) compat_gpu_vram=$value;;
-   compat.gpu.unified) compat_gpu_unified=$value;;
    compat.memory.bytes) compat_memory_bytes=$value;;
   esac
  done < "$system_prop"
@@ -69,14 +65,12 @@ case "$profile" in
   cpu_brand=$compat_cpu_brand
   gpu_name=$compat_gpu_name
   gpu_vram=$compat_gpu_vram
-  gpu_unified=$compat_gpu_unified
   memory_bytes=$compat_memory_bytes
   ;;
  host)
   cpu_brand=$host_cpu_brand
   gpu_name=$host_gpu_name
   gpu_vram=$host_gpu_vram
-  gpu_unified=$host_gpu_unified
   memory_bytes=$host_memory_bytes
   ;;
 esac
@@ -85,7 +79,6 @@ export RCLOL_PLATFORM_PROFILE="$profile"
 case "$memory_bytes" in ''|*[!0-9]*) ;; *) export RCLOL_MEMORY_BYTES="$memory_bytes";; esac
 export RCLOL_GPU_NAME="$gpu_name"
 export RCLOL_GPU_VRAM_MB="$gpu_vram"
-export RCLOL_GPU_UNIFIED="$gpu_unified"
 if [ "$profile" = compat ]; then
  # User-supplied DARLING_METAL_* values win over the profile, as in HOST.
  case "$gpu_name" in
@@ -240,8 +233,15 @@ export MESA_NO_ERROR="${MESA_NO_ERROR:-1}"
 # directory; Mesa creates mesa_shader_cache/ and radv_builtin_shaders/ below it.
 cache_root=${XDG_CACHE_HOME:-${HOME:-$prefix_dir}/.cache}/darling-lol
 MESA_SHADER_CACHE_DIR="${MESA_SHADER_CACHE_DIR:=$cache_root}"
+# A directory that cannot be created (root-owned parent, full disk) makes Mesa
+# disable the disk cache silently, so every game recompiles every pipeline and
+# hitch at first use. Fall back to the default rather than run cache-less.
+if ! mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null || [ ! -w "$MESA_SHADER_CACHE_DIR" ]; then
+	echo "run-riot-client: MESA_SHADER_CACHE_DIR=$MESA_SHADER_CACHE_DIR is not writable; using $cache_root" >&2
+	MESA_SHADER_CACHE_DIR=$cache_root
+	mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null || true
+fi
 export MESA_SHADER_CACHE_DIR
-mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null || true
 # NVIDIA proprietary driver: limit pre-rendered frames.
 export __GL_MaxFramesAllowed="${__GL_MaxFramesAllowed:-1}"
 # Threaded optimizations stay off: with them, NVIDIA 580 (the last branch for
@@ -256,6 +256,32 @@ fi
 # On affected setups Chromium's default temp directory is unusable. Electron
 # can copy app.asar entries to temporary files for async reads and report a
 # failed copy as "not found". Use a writable guest directory by default.
+# Discord Rich Presence: the client's Discord SDK looks for discord-ipc-N in the guest's
+# $XDG_RUNTIME_DIR (else TMPDIR, which Darling sets to /private/tmp). Those paths resolve
+# inside the prefix, so link them to the host sockets; vchroot follows /Volumes/SystemRoot
+# out to the host root. Discord itself picks XDG_RUNTIME_DIR, TMPDIR, TMP, TEMP, then /tmp;
+# Flatpak/Snap Discord and Vesktop keep the socket in a subdirectory.
+# RCLOL_DISCORD_RPC=0 removes links left by an earlier launch instead.
+guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
+if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
+ host_ipc=${XDG_RUNTIME_DIR:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}}
+ for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do
+  for n in 0 1 2 3 4 5 6 7 8 9; do
+   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; break 2; fi
+  done
+ done
+ (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
+  ln -sfn "/Volumes/SystemRoot$host_ipc/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
+ done) || echo 'discord-rpc: could not link the Discord IPC sockets; continuing without them' >&2
+else
+ # Only links this launcher made: they point through /Volumes/SystemRoot. The guest searches
+ # its XDG_RUNTIME_DIR and TMPDIR, so links elsewhere (an old runtime dir) are unreachable.
+ for link in "$guest_ipc"/discord-ipc-[0-9] "$prefix"/private/tmp/discord-ipc-[0-9]; do
+  case $(readlink "$link" 2>/dev/null) in
+   /Volumes/SystemRoot/*) rm -f "$link" ;;
+  esac
+ done
+fi
 # exec-guest.py closes host file descriptors above stderr before starting the guest. A shell
 # loop cannot: dash only accepts single-digit descriptors in redirections.
 # Keep the launcher as a supervisor: on Ctrl+C/terminal close it stops the

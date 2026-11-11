@@ -29,10 +29,9 @@ class SystemProfileTests(unittest.TestCase):
         values = profile_values()
         self.assertEqual(values['profile'], 'host')
         self.assertEqual(values['compat.cpu.brand'],
-                         'Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz')
+                         'Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz')
         self.assertEqual(values['compat.gpu.name'], 'mac')
         self.assertEqual(values['compat.gpu.vram'], '4096')
-        self.assertEqual(values['compat.gpu.unified'], '1')
         self.assertEqual(values['compat.memory.bytes'], '17179869184')
 
     def test_profile_does_not_contain_real_apple_or_account_identifiers(self):
@@ -93,7 +92,7 @@ class SystemProfileTests(unittest.TestCase):
 
         compat = self.launcher_handoff('compat')
         self.assertEqual(compat['profile'], 'compat')
-        self.assertEqual(compat['cpu'], 'Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz')
+        self.assertEqual(compat['cpu'], 'Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz')
         self.assertEqual(compat['gpu'], 'mac')
         self.assertEqual(compat['vram'], '4096')
         self.assertEqual(compat['metal_mac'], '1')

@@ -15,14 +15,18 @@ profile=host
 host.cpu.brand=host
 host.gpu.name=host
 host.gpu.vram=host
-host.gpu.unified=host
 host.memory.bytes=host
 
 # COMPAT: guest-visible compatibility profile. These are compatibility strings,
 # not identifiers from a real Mac; they do not enable or disable any Riot or
 # Apple security check.
-compat.cpu.brand=Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz
+#
+# The CPU brand is the one part identity every surface reports: the machdep.cpu.*
+# sysctls, hw.cpufrequency and the game's own cpuid (see
+# emulation/include/common/cpu_identity.h in patches/xnu.patch). It is a
+# 6-core/12-thread part, matching the host's topology, so the profile does not
+# have to invent a topology the scheduler does not have.
+compat.cpu.brand=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
 compat.gpu.name=mac
 compat.gpu.vram=4096
-compat.gpu.unified=1
 compat.memory.bytes=17179869184

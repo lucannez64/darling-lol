@@ -85,6 +85,23 @@ an older `.conf` never edits that source. Symlinks escaping the prefix are
 rejected. To restore the original defaults, remove the override file while the
 prefix is stopped, then restart it.
 
+## Recommended configuration
+
+Provision your own prefix instead of keeping Darling's base identity. Do not
+copy another user's identifiers. First-time runtime installation does this for
+new prefixes; existing prefixes without saved overrides need an explicit
+provisioning run. With the game and clients closed, stop the selected prefix,
+then follow the commands below. `--provision --write` fills missing identifiers
+and replaces the known shared defaults, while preserving an already custom
+identity. It does not rotate custom identifiers on every run.
+
+Also select `profile=compat` in
+`<prefix>/private/etc/darling-system.prop` for the recommended application
+compatibility configuration. See [setup](SETUP.md#recommended-identity-and-compatibility-profile)
+for file precedence and activation. This profile is independent of the saved
+serial and UUID; provisioning alone does not enable it. Full application support
+has not been established across machines.
+
 ## Opt-in provisioning
 
 Preview a fresh or repaired identity without writing anything:
@@ -137,9 +154,10 @@ order. It writes:
 - `private/etc/darling-platform.plist`: canonical runtime overrides.
 - `private/etc/darling-smbios.conf`: matching shell-quoted `SMBIOS_*` values,
   including `SMBIOS_PROVISIONING_UDID`; unrelated legacy settings are not exported.
-- `System/Library/CoreServices/SystemVersion.plist`: an exact copy of the selected
-  runtime's metadata, not a fabricated macOS release. The runtime root defaults
-  to the saved SDK path or `/usr/local/libexec/darling`; override with
+- `System/Library/CoreServices/SystemVersion.plist`: metadata normalized to the
+  emulated macOS version and build reported by the patched kernel (14.7 /
+  23H124). This does not install macOS. The source runtime root defaults to the
+  saved SDK path or `/usr/local/libexec/darling`; override with
   `--runtime-root /path/to/runtime`.
 
 A valid runtime version file is required. The command checks all destinations
@@ -163,7 +181,7 @@ copy first and falls back to the checkout copy.
 
 `profile=host` is the default. It reports the real host CPU, GPU, VRAM and memory.
 `profile=compat` is opt-in and reports the MacBookPro16,1 compatibility values
-(`i9-9980HK`, `Radeon Pro 5500M` on AMD, `UHD Graphics 630` on Intel, 4096 MB VRAM
+(`i7-9750H`, `Radeon Pro 5500M` on AMD, `UHD Graphics 630` on Intel, 4096 MB VRAM
 and 16 GiB). NVIDIA cards keep their own name in both profiles so the game does
 not take another vendor's driver path. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
@@ -171,9 +189,13 @@ file for diagnostics.
 
 The profile does not contain serial numbers, UUIDs, MLB/ROM values, tokens or
 account data. Those remain local platform-identity metadata managed by
-`tools/configure-darling-platform.py`; see the sections above. COMPAT changes
-reported presentation only. It does not alter the host, the driver, the GPU that
-presents frames, a license, an attestation, or an anti-cheat result.
+`tools/configure-darling-platform.py`; see the sections above. The profile does
+not replace the host hardware, driver or GPU that presents frames. It does not
+establish licensing, authentication, or acceptance by a third-party service.
+
+The current compat profile also enables a Security fallback: when the
+notarization lookup returns false, it treats the code as notarized without
+validating an offline ticket. This is not equivalent to macOS notarization.
 
 ## system_profiler
 
