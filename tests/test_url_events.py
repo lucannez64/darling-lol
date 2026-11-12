@@ -50,6 +50,14 @@ class AppleEventFoundationTests(unittest.TestCase):
                 self.assertIn(method, descriptor)
         self.assertIn("kDarlingTypeUTF8Text    = 'utf8'", descriptor)
 
+    def test_strings_are_unicode_text_in_host_byte_order(self):
+        # Apple documents +descriptorWithString: as creating typeUnicodeText ('utxt').
+        descriptor = added('patches/foundation.patch', 'src/NSAppleEventDescriptor.m')
+        make = descriptor.split('+ (NSAppleEventDescriptor *)descriptorWithString:', 1)[1].split('\n}', 1)[0]
+        self.assertIn('dataUsingEncoding:HostUTF16()', make)
+        self.assertIn('kDarlingTypeUnicodeText', make)
+        self.assertIn('case kDarlingTypeUnicodeText: encoding = HostUTF16(); break;', descriptor)
+
     def test_manifest_counts_the_descriptor(self):
         import json
         manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
@@ -101,7 +109,7 @@ class LaunchServicesDeliveryTests(unittest.TestCase):
     def test_both_open_paths_try_the_running_app(self):
         lsopen = new_side('patches/darling.patch', 'src/frameworks/CoreServices/src/LaunchServices/LSOpen.m')
         self.assertIn('LS_URL_EVENT_PORT_PREFIX "org.darlinghq.url-event."', lsopen)
-        self.assertRegex(lsopen, r'status = _LSOpenURLInRunningApp\(url\);\s*if \(status != kLSApplicationNotFoundErr\)')
+        self.assertRegex(lsopen, r'status = _LSOpenURLInRunningApp\(url\);[^}]*if \(status != kLSApplicationNotFoundErr\b')
         spec = new_side('patches/darling.patch', 'src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c')
         self.assertRegex(spec, r'temp = _LSOpenURLInRunningApp\(url\);\s*if \(temp == kLSApplicationNotFoundErr\)')
 
@@ -110,6 +118,14 @@ class LaunchServicesDeliveryTests(unittest.TestCase):
         appkit = added('patches/cocotron.patch', 'AppKit/NSApplication.m')
         prefix = re.search(r'LS_URL_EVENT_PORT_PREFIX "([^"]+)"', lsopen).group(1)
         self.assertIn(f'DARLING_URL_EVENT_PORT_PREFIX @"{prefix}"', appkit)
+
+    def test_unserved_custom_scheme_is_never_a_path(self):
+        # riotclient:///Applications/Other.app must not launch Other.app when no app serves it.
+        lsopen = new_side('patches/darling.patch', 'src/frameworks/CoreServices/src/LaunchServices/LSOpen.m')
+        self.assertRegex(lsopen, r'if \(status != kLSApplicationNotFoundErr \|\| _LSURLHasNonFileScheme\(url\)\)\s*return status;')
+        guard = lsopen.split('_LSURLHasNonFileScheme(CFURLRef url)', 1)[1].split('\n}', 1)[0]
+        self.assertIn('CFSTR("file"), kCFCompareCaseInsensitive', guard)
+        self.assertIn('return FALSE;', guard)  # scheme-less URLs from open(1) keep the path handling
 
     def test_keeps_file_urls_and_the_size_limit(self):
         lsopen = added('patches/darling.patch', 'src/frameworks/CoreServices/src/LaunchServices/LSOpen.m')

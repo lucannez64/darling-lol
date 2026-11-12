@@ -712,10 +712,10 @@ index 09c0a73..53649d2 100644
 +
 +NSString *const NSUserActivityTypeBrowsingWeb = @"com.apple.coreservices.useractivity.browser";
 diff --git a/src/NSAppleEventDescriptor.m b/src/NSAppleEventDescriptor.m
-index 390be6c..96da1f1 100644
+index 390be6c..eabf919 100644
 --- a/src/NSAppleEventDescriptor.m
 +++ b/src/NSAppleEventDescriptor.m
-@@ -1,21 +1,354 @@
+@@ -1,21 +1,366 @@
 -#import <Foundation/NSObject.h>
 +#import <Foundation/NSAppleEventDescriptor.h>
 +#import <Foundation/NSArray.h>
@@ -723,6 +723,7 @@ index 390be6c..96da1f1 100644
 +#import <Foundation/NSDictionary.h>
 +#import <Foundation/NSString.h>
 +#import <Foundation/NSValue.h>
++#include <CoreFoundation/CFByteOrder.h>
  
 -#import <Foundation/NSInvocation.h>
 +/* darling-lol: a working descriptor for the Apple events Darling delivers itself
@@ -782,8 +783,9 @@ index 390be6c..96da1f1 100644
  {
 -	NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
 +	return [self descriptorWithDescriptorType:kDarlingTypeBoolean bytes:&boolean length:sizeof boolean];
-+}
-+
+ }
+-@end
+ 
 ++ (NSAppleEventDescriptor *)descriptorWithDescriptorType:(DescType)descriptorType
 +                                                   bytes:(const void *)bytes
 +                                                  length:(NSUInteger)byteCount
@@ -806,10 +808,18 @@ index 390be6c..96da1f1 100644
 +	return [self descriptorWithDescriptorType:kDarlingTypeSInt32 bytes:&signedInt length:sizeof signedInt];
 +}
 +
++/* typeUnicodeText is UTF-16 in host byte order, without a byte-order mark. */
++static NSStringEncoding HostUTF16(void)
++{
++	return CFByteOrderGetCurrent() == CFByteOrderBigEndian ? NSUTF16BigEndianStringEncoding
++	                                                       : NSUTF16LittleEndianStringEncoding;
++}
++
 ++ (NSAppleEventDescriptor *)descriptorWithString:(NSString *)string
 +{
-+	NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
-+	return data ? [self descriptorWithDescriptorType:kDarlingTypeUTF8Text data:data] : nil;
++	/* As on macOS, a string becomes typeUnicodeText. */
++	NSData *data = [string dataUsingEncoding:HostUTF16()];
++	return data ? [self descriptorWithDescriptorType:kDarlingTypeUnicodeText data:data] : nil;
 +}
 +
 ++ (NSAppleEventDescriptor *)descriptorWithTypeCode:(OSType)typeCode
@@ -830,9 +840,8 @@ index 390be6c..96da1f1 100644
 ++ (NSAppleEventDescriptor *)recordDescriptor
 +{
 +	return [[[self alloc] initRecordDescriptor] autorelease];
- }
--@end
- 
++}
++
 +- (id)init
 +{
 +	return [self initWithDescriptorType:kDarlingTypeNull bytes:NULL length:0];
@@ -946,8 +955,8 @@ index 390be6c..96da1f1 100644
 +	switch (_type) {
 +	case kDarlingTypeUTF8Text: encoding = NSUTF8StringEncoding; break;
 +	case kDarlingTypeChar: encoding = NSMacOSRomanStringEncoding; break;
-+	case kDarlingTypeUnicodeText:
-+	case kDarlingTypeUTF16: encoding = NSUTF16StringEncoding; break;
++	case kDarlingTypeUnicodeText: encoding = HostUTF16(); break;
++	case kDarlingTypeUTF16: encoding = NSUTF16StringEncoding; break; /* may carry a BOM */
 +	default: return nil;
 +	}
 +	return [[[NSString alloc] initWithData:_data encoding:encoding] autorelease];
@@ -958,8 +967,11 @@ index 390be6c..96da1f1 100644
 +	if (descriptorType == _type)
 +		return self;
 +	NSString *string = [self stringValue];
-+	if (string && descriptorType == kDarlingTypeUTF8Text)
++	if (string && descriptorType == kDarlingTypeUnicodeText)
 +		return [NSAppleEventDescriptor descriptorWithString:string];
++	if (string && descriptorType == kDarlingTypeUTF8Text)
++		return [NSAppleEventDescriptor descriptorWithDescriptorType:kDarlingTypeUTF8Text
++		                                                       data:[string dataUsingEncoding:NSUTF8StringEncoding]];
 +	return nil;
 +}
 +

@@ -3793,10 +3793,10 @@ index cf9933a84..6651d50dc 100644
  				forKey: [NSNumber numberWithInt: wd]];
  	}
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m b/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
-index dd78f6df4..925fb3cb0 100644
+index dd78f6df4..6b98c7506 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
 +++ b/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
-@@ -19,8 +19,171 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -19,8 +19,186 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  
  
  #include <LaunchServices/LaunchServices.h>
@@ -3816,6 +3816,19 @@ index dd78f6df4..925fb3cb0 100644
 +// when no running app serves the scheme; launching an app for it is not done yet.
 +#define LS_URL_EVENT_PORT_PREFIX "org.darlinghq.url-event."
 +#define LS_URL_EVENT_MAX_LENGTH 4096
++
++// True for a URL with a scheme other than file. open(1) may pass scheme-less URLs
++// built from raw paths; those keep the path handling below.
++static Boolean
++_LSURLHasNonFileScheme(CFURLRef url)
++{
++	CFStringRef scheme = CFURLCopyScheme(url);
++	if (scheme == NULL)
++		return FALSE;
++	Boolean other = CFStringCompare(scheme, CFSTR("file"), kCFCompareCaseInsensitive) != kCFCompareEqualTo;
++	CFRelease(scheme);
++	return other;
++}
 +
 +OSStatus
 +_LSOpenURLInRunningApp(CFURLRef url)
@@ -3900,7 +3913,9 @@ index dd78f6df4..925fb3cb0 100644
 +	if (params == NULL || params->application == NULL)
 +	{
 +		status = _LSOpenURLInRunningApp(url);
-+		if (status != kLSApplicationNotFoundErr)
++		// A URL with its own scheme is never a file path, even when no app serves it:
++		// riotclient:///Applications/Other.app must not launch Other.app.
++		if (status != kLSApplicationNotFoundErr || _LSURLHasNonFileScheme(url))
 +			return status;
 +	}
 +
@@ -3968,7 +3983,7 @@ index dd78f6df4..925fb3cb0 100644
  
  OSStatus
  LSOpenURLsWithRole(
-@@ -31,8 +194,27 @@ LSOpenURLsWithRole(
+@@ -31,8 +209,27 @@ LSOpenURLsWithRole(
    ProcessSerialNumber * outPSNs,
    CFIndex inMaxPSNCount)
  {

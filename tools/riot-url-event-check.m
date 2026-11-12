@@ -10,9 +10,12 @@
  * tools/build-riot-url-event-check.py builds RiotURLEventCheck.app. Its Info.plist
  * declares the schemes darling-lol-ae and darling-lol-delegate. Run the bundle
  * executable with no arguments inside the guest (DISPLAY must reach an X server):
- *   ae        an app registered with NSAppleEventManager gets darling-lol-ae://...
+ *   ae        an app registered with NSAppleEventManager gets darling-lol-ae://... as
+ *             typeUnicodeText ('utxt'), as +descriptorWithString: creates on macOS
  *   delegate  an app without a handler gets darling-lol-delegate://... in application:openURLs:
  *   undeclared  a scheme no running app declares returns kLSApplicationNotFoundErr
+ *   nopath      with no serving app, open(1)'s path (LSOpenURLsWithRole) must not take
+ *               darling-lol-nobody:///path/Fake.app for a bundle path and launch it
  *   control     raw data sent straight to the app's port is still checked: a control
  *               character, or a URL of another scheme, is refused and never delivered
  * Prints one line per case and exits 0 when all pass.
@@ -61,8 +64,10 @@ static void record(NSString *how, NSString *url)
 - (void)handleGetURLEvent:(NSAppleEventDescriptor *)event withReplyEvent:(NSAppleEventDescriptor *)reply
 {
 	NSAppleEventDescriptor *current = [[NSAppleEventManager sharedAppleEventManager] currentAppleEvent];
-	record(current == event ? @"appleevent" : @"appleevent-without-current",
-	       [[event paramDescriptorForKeyword:kDirectObject] stringValue]);
+	NSAppleEventDescriptor *direct = [event paramDescriptorForKeyword:kDirectObject];
+	NSString *how = current != event ? @"appleevent-without-current"
+	              : [direct descriptorType] != 'utxt' ? @"appleevent-not-utxt" : @"appleevent";
+	record(how, [direct stringValue]);
 }
 - (void)application:(NSApplication *)application openURLs:(NSArray *)urls
 {
@@ -167,6 +172,20 @@ static int runCase(const char *self, const char *mode, NSString *scheme, NSStrin
 		OSStatus none = openURL(@"darling-lol-nobody://x");
 		failed += report("undeclared", none == kLSApplicationNotFoundErr,
 		                 none == kLSApplicationNotFoundErr ? nil : [NSString stringWithFormat:@"(LSOpen %d)", (int) none]);
+		/* No app serves darling-lol-nobody: open(1)'s path must not treat the URL's path
+		 * as a bundle to launch (a fake bundle with no executable makes a launch fail). */
+		NSString *fake = [NSTemporaryDirectory() stringByAppendingPathComponent:
+		                  [NSString stringWithFormat:@"riot-url-event-check-%d/Fake.app", getpid()]];
+		[[NSFileManager defaultManager] createDirectoryAtPath:[fake stringByAppendingPathComponent:@"Contents"]
+		                          withIntermediateDirectories:YES attributes:nil error:NULL];
+		[@{ @"CFBundleExecutable": @"Missing" } writeToFile:[fake stringByAppendingPathComponent:@"Contents/Info.plist"]
+		                                         atomically:YES];
+		NSURL *pathURL = [NSURL URLWithString:[@"darling-lol-nobody://" stringByAppendingString:fake]];
+		OSStatus viaPath = LSOpenURLsWithRole((CFArrayRef) @[ pathURL ], kLSRolesAll, NULL, NULL, NULL, 0);
+		[[NSFileManager defaultManager] removeItemAtPath:[fake stringByDeletingLastPathComponent] error:NULL];
+		failed += report("nopath", viaPath == kLSApplicationNotFoundErr,
+		                 viaPath == kLSApplicationNotFoundErr ? nil : [NSString stringWithFormat:@"(LSOpen %d)", (int) viaPath]);
+
 		/* Any guest process can write to the port, so the app checks again. */
 		NSString *before = readResults();
 		BOOL refused = sendRaw(@"darling-lol-ae", "darling-lol-ae://x\x01y") == 0 &&
