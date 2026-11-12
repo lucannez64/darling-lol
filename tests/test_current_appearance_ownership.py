@@ -26,7 +26,7 @@ def method(text, signature):
     return text[start:end]
 
 
-@unittest.skipUnless(shutil.which('clang') and shutil.which('cc'),
+@unittest.skipUnless(shutil.which('clang'),
                      'host Objective-C compiler and runtime required')
 class CurrentAppearanceOwnershipTests(unittest.TestCase):
     def test_replacement_scope_and_thread_exit_own_the_current_appearance(self):
@@ -113,7 +113,9 @@ int main(void) {
     assert(deallocated == 4);
 }
 '''
-        library = subprocess.check_output(['cc', '-print-file-name=libobjc.so'], text=True).strip()
+        # Ask the compiler that links the probe: cc and clang can pick
+        # different GCC installations, and only clang's matters here.
+        library = subprocess.check_output(['clang', '-print-file-name=libobjc.so'], text=True).strip()
         if not Path(library).is_file():
             self.skipTest('GNU Objective-C runtime required for host ownership probe')
         with tempfile.TemporaryDirectory() as folder:
