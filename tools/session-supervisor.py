@@ -434,6 +434,7 @@ def idle_decision(seen_client, idle_since, now, windows, game, seconds):
 
 LEAGUE_LOL = 'Applications/League of Legends.app/Contents/LoL'
 LEAGUE_APP_PATH = '/League of Legends.app/'
+LEAGUE_UX_PATH = '/LoL/League of Legends.app/'
 QUIT_MARKER = b'Failed to send quit message because there was no connection'
 LEAGUE_QUIT_GRACE = 8.0
 
@@ -534,6 +535,15 @@ def finish_league_exit(prefix, namespace, proc_root=Path('/proc'), kill=os.kill,
                 if identities[pid] is not None and process_identity(proc) == identities[pid]
                 and (process_info(proc) or ('Z',))[0] != 'Z']
 
+    if asked:
+        # LeagueClient now waits for a UX that cannot hear it; left alone, the
+        # UX shows "You've lost connection" until the grace period ends. Stop
+        # the UX tree so LeagueClient can finish its own shutdown.
+        ux = [(pid, proc) for pid, proc in alive()
+              if any(LEAGUE_UX_PATH in part for part in command_line(proc))]
+        if ux:
+            stop_processes(ux, kill=kill, sleep=sleep, proc_root=proc_root, out=out,
+                           clock=clock, identities=identities)
     deadline = clock() + (grace if asked else 0)
     while alive() and clock() < deadline:
         sleep(POLL_SECONDS)

@@ -675,3 +675,27 @@ class LeagueExitTests(unittest.TestCase):
 
     def test_missing_lockfile_falls_back_to_stopping(self):
         self.assertFalse(supervisor.request_league_quit(self.prefix, urlopen=mock.Mock()))
+
+    def test_ux_is_stopped_before_league_client(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        self.process(21, app + 'League of Legends.app/Contents/MacOS/LeagueClientUx', ppid=20)
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:https')
+        signals = []
+
+        def kill(pid, signum):
+            signals.append((pid, signum))
+            if pid == 21:
+                shutil.rmtree(self.proc_root / '21')
+
+        def sleep(_seconds):
+            # LeagueClient finishes on its own once the UX is gone.
+            if not (self.proc_root / '21').exists() and (self.proc_root / '20').exists():
+                shutil.rmtree(self.proc_root / '20')
+
+        with mock.patch.object(supervisor, 'game_running', return_value=False):
+            remaining = supervisor.finish_league_exit(
+                self.prefix, self.ns, self.proc_root, kill=kill, sleep=sleep,
+                out=io.StringIO(), urlopen=lambda *a, **k: mock.Mock())
+        self.assertEqual(remaining, [])
+        self.assertEqual(signals, [(21, signal.SIGTERM)])
