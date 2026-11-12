@@ -171,6 +171,29 @@ StartupNotify=false
             subprocess.run([gio, "set", str(desktop_shortcut), "metadata::trusted", "true"], check=False)
         print(f"Created desktop shortcut: {desktop_shortcut}")
 
+    # Link handler for sign-in: Google and other social sign-in finish in the host
+    # browser at a riotclient:// URL, which open-guest-url.sh hands to the client
+    # running in Darling. Hidden from menus and never placed on the desktop.
+    # Declaring the MimeType makes it the handler only while no other app claims
+    # the scheme; the user's explicit choices in mimeapps.list are left alone.
+    handler_exec = quote_exec_argument(str(PROJECT_ROOT / "scripts/open-guest-url.sh"))
+    handler_file = apps_base / "darling-url-handler.desktop"
+    handler_file.write_text(f"""[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Darling Link Handler
+Comment=Opens sign-in links in the running Darling session
+Exec={handler_exec} %u
+Path={project_path}
+Icon=darling-launcher
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/riotclient;
+StartupNotify=false
+""")
+    os.chmod(handler_file, 0o755)
+    print(f"Created link handler: {handler_file}")
+
     # Refresh icon and desktop databases
     update_desktop = shutil.which("update-desktop-database")
     if update_desktop:
