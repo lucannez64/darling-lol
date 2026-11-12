@@ -78,9 +78,30 @@ See [Nix setup and operational limits](docs/SETUP.md#nixos-package).
 
 ## Auto installer
 
-```
+An automated installer is provided to install the required dependencies, configure the build environment, and compile Darling-LoL.
+
+Clone the repository and enter the checkout directory before running the installer:
+
+```bash
+git clone https://github.com/lucannez64/darling-lol
+cd darling-lol
 bash scripts/install-native.sh
 ```
+
+**Options:**
+
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies isolated from the host system.
+- `--verbose`, `-v`: Display full command output during installation.
+
+You can combine both options:
+
+```bash
+bash scripts/install-native.sh --toolbox --verbose
+```
+
+Supported host distributions: Fedora 43+, Arch Linux, Debian 14+, and Ubuntu 26.04+.
+
+The installer requires at least 50 GiB of free disk space.
 
 ## Build on the other PC (non-Nix)
 

@@ -161,12 +161,36 @@ detect_distribution() {
   . /etc/os-release
 
   local ids=" ${ID:-} ${ID_LIKE:-} "
+  local ver_id=${VERSION_ID:-}
+  local ver_major=${ver_id%%.*}
 
   case "$ids" in
-    *' fedora '*) FAMILY=fedora ;;
-    *' arch '*) FAMILY=arch ;;
-    *' debian '*) FAMILY=debian ;;
-    *) fail 'Supported distributions: Fedora, Arch Linux, Debian and Ubuntu.' ;;
+    *' fedora '*)
+      [[ $ver_major =~ ^[0-9]+$ ]] && (( ver_major >= 43 )) ||
+        fail 'Fedora 43 or newer is required (FFmpeg 8 / libavcodec ABI 62).'
+      FAMILY=fedora
+      ;;
+    *' arch '*)
+      FAMILY=arch
+      ;;
+    *' debian '*)
+      if [[ ${ID:-} == ubuntu || $ids == *' ubuntu '* ]]; then
+        [[ $ver_major =~ ^[0-9]+$ ]] && (( ver_major >= 26 )) ||
+          fail 'Ubuntu 26.04 or newer is required (FFmpeg 8 / libavcodec ABI 62).'
+      elif [[ $ver_major =~ ^[0-9]+$ ]]; then
+        (( ver_major >= 14 )) ||
+          fail 'Debian 14 (forky) or newer is required (FFmpeg 8 / libavcodec ABI 62).'
+      else
+        case "${VERSION_CODENAME:-}" in
+          forky|sid) ;;
+          *) fail 'Debian 14 (forky) or newer is required (FFmpeg 8 / libavcodec ABI 62).' ;;
+        esac
+      fi
+      FAMILY=debian
+      ;;
+    *)
+      fail 'Supported distributions: Fedora 43+, Arch Linux, Debian 14+ and Ubuntu 26.04+.'
+      ;;
   esac
 
   case "$FAMILY" in
@@ -231,7 +255,6 @@ preflight() {
   [[ $(uname -m) == x86_64 ]] || fail 'Only x86_64 is supported.'
   command -v sudo >/dev/null 2>&1 || fail 'sudo is required.'
   command -v git >/dev/null 2>&1 || fail 'Git is required.'
-  command -v python3 >/dev/null 2>&1 || fail 'Python 3 is required.'
 
   local kernel_major kernel_minor free_kib
   IFS=. read -r kernel_major kernel_minor _ < <(uname -r)
@@ -239,7 +262,7 @@ preflight() {
   (( kernel_major > 5 || (kernel_major == 5 && ${kernel_minor:-0} >= 14) )) ||
     fail 'Linux kernel 5.14 or newer is required.'
 
-  free_kib=$(df -Pk "$HOME" | awk 'NR == 2 {print $4}')
+  free_kib=$(df -Pk "$TARGET_DIR" | awk 'NR == 2 {print $4}')
   [[ $free_kib =~ ^[0-9]+$ ]] || fail 'Could not determine available disk space.'
   (( free_kib >= MIN_FREE_GIB * 1024 * 1024 )) ||
     fail "At least ${MIN_FREE_GIB} GiB of free disk space is required."
@@ -298,21 +321,31 @@ choose_region() {
   done
 }
 
+confirm_arch_upgrade() {
+  [[ $FAMILY == arch ]] || return 0
+  printf '\n'
+  warning 'Arch Linux dependency installation runs a full system upgrade (pacman -Syu).'
+  printf 'This may upgrade all installed Arch packages and require manual intervention.\n'
+  local reply
+  read -r -p 'Proceed with full system upgrade? [y/N]: ' reply
+  [[ ${reply^^} == Y || ${reply^^} == YES ]] || fail 'Installation cancelled.'
+}
+
 install_packages() {
   case "$FAMILY" in
     fedora)
-      sudo dnf install -y "${PACKAGES[@]}"
+      sudo dnf install -y "${PACKAGES[@]}" || return $?
       ;;
     arch)
-      sudo pacman -Syu --needed --noconfirm -- "${PACKAGES[@]}"
+      sudo pacman -Syu --needed -- "${PACKAGES[@]}" || return $?
       ;;
     debian)
-      sudo apt-get update
-      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PACKAGES[@]}"
+      sudo apt-get update || return $?
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PACKAGES[@]}" || return $?
       ;;
   esac
 
-  git lfs install --skip-repo
+  git lfs install --skip-repo || return $?
 }
 
 verify_ffmpeg() {
@@ -377,12 +410,18 @@ if [[ ${DARLING_LOL_TOOLBOX:-0} != 1 ]]; then
 fi
 
 choose_region
+confirm_arch_upgrade
 
 mkdir -p -- "$(dirname "$LOG")"
 printf '\n=== %s | region=%s ===\n' "$(date -Is)" "$REGION" >>"$LOG"
 
 keep_sudo_alive
-run 'Installing build dependencies' install_packages
+if [[ $FAMILY == arch ]]; then
+  VERBOSE=1 run 'Installing build dependencies' install_packages
+else
+  run 'Installing build dependencies' install_packages
+fi
+command -v python3 >/dev/null 2>&1 || fail 'Python 3 is required.'
 run 'Checking FFmpeg compatibility' verify_ffmpeg
 run 'Running project preflight checks' python3 scripts/preflight.py
 run 'Preparing Python environment' bash -c '
