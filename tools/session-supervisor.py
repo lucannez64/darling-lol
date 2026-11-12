@@ -591,15 +591,17 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                     else not runtime_alive(prefix, proc_root))
     namespace = None
     child = subprocess.Popen(command, start_new_session=True)
+    def signal_child(signum):
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
     stop = []
     previous = {}
 
     def forward(signum, _frame):
         stop.append(signum)
-        try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except OSError:
-            pass
+        signal_child(signal.SIGTERM)
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         previous[signum] = signal.signal(signum, forward)
@@ -625,20 +627,34 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                 if stop_now:
                     log('client window has been gone for %ds; stopping the session'
                         % stop_after, out)
-                    try:
-                        os.killpg(child.pid, signal.SIGTERM)
-                    except OSError:
-                        pass
+
+                    shutdown_requested = False
+
+                    if owns_runtime and darling:
+                        try:
+                            result = run(
+                                [darling, 'shutdown'],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=25
+                            )
+                            shutdown_requested = getattr(result, 'returncode', 0) == 0
+                        except (OSError, subprocess.SubprocessError):
+                            pass
+
+                    if shutdown_requested:
+                        log('Darling shutdown requested successfully', out)
+                    else:
+                        log('Darling shutdown failed; signalling launcher', out)
+                        signal_child(signal.SIGTERM)
+
                     break
             sleep(poll)
         deadline = time.monotonic() + TERM_GRACE
         while child.poll() is None and time.monotonic() < deadline:
             sleep(poll)
         if child.poll() is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            signal_child(signal.SIGKILL)
         code = child.wait()
     finally:
         for signum, handler in previous.items():
