@@ -75,7 +75,7 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container (Fedora hosts only), keeping build dependencies off the host. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout and run `sh scripts/run.sh` and the update commands from inside the container.
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container (Fedora hosts only), keeping build dependencies off the host. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout then follow the Riot Client installation and launch steps below and run update commands inside the container.
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, the installer runs a full `pacman -Syu` and asks first unless this is given.
 - `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
@@ -127,7 +127,7 @@ Default layout: `/usr/local/libexec/darling`, `~/.darling` and `/Users/$USER` in
 
 ## Launch & Usage
 
-Install the Riot Client (change `euw` to your region), then sign in and install League through Riot's own UI:
+For native and manual builds, install the Riot Client (change `euw` to your region), then sign in and install League through Riot's own UI. For Nix, use the [Nix launch instructions](docs/NIX.md):
 
 ```bash
 ./scripts/installer.sh euw
@@ -156,7 +156,7 @@ These window-management helpers are opt-in, off by default, and do not patch cli
 
 Exit the game and both clients first.
 
-**Nix users:** update through the launcher with `nix run github:lucannez64/darling-lol#default -- --update` (see [Nix setup](docs/SETUP.md#nixos-package)); the commands below are for native and manual builds.
+**Nix users:** use `nix run --refresh github:lucannez64/darling-lol#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`. The commands below are for native and manual builds.
 
 **Native / manual builds** (for a `--toolbox` install, run these inside the container):
 
