@@ -1,6 +1,7 @@
 # darling-lol
 
 > [!IMPORTANT]
+>
 > ## Announcement
 >
 > This project has gained a lot of attention, so a few things need to be said clearly.
@@ -8,6 +9,7 @@
 > **1. Maintenance.** I built this mainly as a technical challenge, because everyone kept telling me it was impossible. I don't have the time to maintain it fully. Apart from open issues that block you completely, I will only review and merge pull requests.
 >
 > **2. Bans.** This project can get you permanently banned, as I have said many times. I am not responsible for your actions. You alone are responsible for launching the game in a modified environment (Darling). If you use it:
+>
 > - don't cheat;
 > - don't play ranked;
 > - don't use your main account.
@@ -73,6 +75,35 @@ supported at a time. Readiness is per canonical prefix, configured guest and
 compatible package/runtime/source identity. Store closure roots are retained
 for mutable binaries; do not delete `build/nix-gcroots/` while using them.
 See [Nix setup and operational limits](docs/SETUP.md#nixos-package).
+
+## Auto installer
+
+An automated installer is provided to install the required dependencies, configure the build environment, and compile Darling-LoL.
+
+Clone the repository and enter the checkout directory before running the installer:
+
+```bash
+git clone https://github.com/lucannez64/darling-lol
+cd darling-lol
+bash scripts/install-native.sh
+```
+
+**Options:**
+
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies isolated from the host system.
+- `--verbose`, `-v`: Display full command output during installation.
+- `--yes`, `-y`: Skip confirmations (needed when not run from a terminal).
+- `--region CODE`: Riot server region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
+
+You can combine both options:
+
+```bash
+bash scripts/install-native.sh --toolbox --verbose
+```
+
+Supported host distributions: Fedora 44+, Arch Linux, Debian 14+, and Ubuntu 26.04+.
+
+The installer requires at least 50 GiB of free disk space. On Arch Linux it runs a full system upgrade (`pacman -Syu`) and asks first unless `--yes` is given.
 
 ## Build on the other PC (non-Nix)
 
