@@ -9,8 +9,9 @@
  *
  * The parent registers a rendezvous port with launchd, posix_spawns itself as the
  * child, receives a send right to the child's own receive port and requests a
- * dead-name notification for it. Each case expects NOTE_EXIT for the pid and the
- * dead-name notification within 3 s:
+ * dead-name notification for it. Once both notifications are registered the
+ * parent tells the child to exit. Each case expects NOTE_EXIT for the pid and
+ * the dead-name notification within 3 s:
  *   exit   the child just exits
  *   early  the child runs and joins one worker thread first, then exits
  * Prints one line per case and exits 0 when both pass. macOS 26.7.1 passes both.
@@ -19,6 +20,7 @@
 #include <mach/notify.h>
 #include <servers/bootstrap.h>
 #include <pthread.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <string.h>
@@ -52,9 +54,22 @@ static int child(const char *name, const char *mode)
 		.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND),
 		.msgh_size = sizeof hello, .msgh_remote_port = parent, .msgh_local_port = inbox,
 	};
-	mach_msg(&hello, MACH_SEND_MSG, sizeof hello, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
-	usleep(300000);
+	if (mach_msg(&hello, MACH_SEND_MSG, sizeof hello, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		return 3;
+	/* Exit only once the parent has registered for our exit and our port's death:
+	 * neither a dead-name request nor EVFILT_PROC reports a death that came first. */
+	struct { mach_msg_header_t header; char body[64]; } go;
+	mach_msg(&go.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof go, inbox, 5000, MACH_PORT_NULL);
 	return 0;
+}
+
+/* Reap the child without waiting forever on one that is stuck: the result of
+ * the case is already decided. */
+static void reap(pid_t pid, int exited)
+{
+	if (!exited)
+		kill(pid, SIGKILL);
+	waitpid(pid, NULL, 0);
 }
 
 static int run_case(const char *self, const char *mode)
@@ -78,14 +93,14 @@ static int run_case(const char *self, const char *mode)
 	if (mach_msg(&in.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof in, rendezvous, 3000,
 	             MACH_PORT_NULL) != MACH_MSG_SUCCESS) {
 		printf("%-6s FAIL (child never reported its port)\n", mode);
-		waitpid(pid, NULL, 0);
+		reap(pid, 0);
 		return 1;
 	}
 	mach_port_t child_port = in.header.msgh_remote_port;
 	if (mach_port_request_notification(mach_task_self(), child_port, MACH_NOTIFY_DEAD_NAME, 0,
 	                                   notify, MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous) != KERN_SUCCESS) {
 		printf("%-6s FAIL (dead-name request)\n", mode);
-		waitpid(pid, NULL, 0);
+		reap(pid, 0);
 		return 1;
 	}
 
@@ -93,7 +108,18 @@ static int run_case(const char *self, const char *mode)
 	struct kevent64_s events[2];
 	EV_SET64(&events[0], pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, 0, 0, 0);
 	EV_SET64(&events[1], notify, EVFILT_MACHPORT, EV_ADD | EV_ONESHOT, 0, 0, 0, 0, 0);
-	kevent64(kq, events, 2, NULL, 0, 0, NULL);
+	if (kevent64(kq, events, 2, NULL, 0, 0, NULL) != 0) {
+		printf("%-6s FAIL (kevent registration)\n", mode);
+		close(kq);
+		reap(pid, 0);
+		return 1;
+	}
+	/* Both notifications are registered: let the child exit. */
+	mach_msg_header_t go = {
+		.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+		.msgh_size = sizeof go, .msgh_remote_port = child_port,
+	};
+	mach_msg(&go, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof go, 0, MACH_PORT_NULL, 1000, MACH_PORT_NULL);
 
 	int exited = 0, dead_name = 0;
 	struct timespec timeout = { 3, 0 };
@@ -109,7 +135,7 @@ static int run_case(const char *self, const char *mode)
 		}
 	}
 	close(kq);
-	waitpid(pid, NULL, 0);
+	reap(pid, exited);
 	int ok = exited && dead_name;
 	printf("%-6s %s (NOTE_EXIT %s, dead-name %s)\n", mode, ok ? "PASS" : "FAIL",
 	       exited ? "yes" : "no", dead_name ? "yes" : "no");
