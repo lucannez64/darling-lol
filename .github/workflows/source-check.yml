@@ -18,6 +18,16 @@ jobs:
           python-version: '3.12'
       - name: Security host dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-dev pkg-config
+      # tests/test_current_appearance_ownership.py links Objective-C with clang's
+      # GNU runtime. clang looks for libobjc in the GCC version it selected, so
+      # install the matching libobjc rather than a fixed one.
+      - name: Objective-C runtime for clang
+        run: |
+          gcc_dir=$(clang -v 2>&1 | sed -n 's/^Selected GCC installation: //p')
+          echo "clang uses GCC in $gcc_dir"
+          sudo apt-get install -y -qq "libobjc-$(basename "$gcc_dir")-dev"
+          printf '__attribute__((objc_root_class)) @interface A @end\n@implementation A @end\nint main(void) { return 0; }\n' > /tmp/objc-check.m
+          clang -fobjc-runtime=gcc /tmp/objc-check.m -lobjc -o /tmp/objc-check
       - name: Require C++ regression compiler
         run: |
           command -v c++

@@ -549,5 +549,176 @@ class FailureReportingTests(unittest.TestCase):
                       'status 3)', output.getvalue())
 
 
+
+class LeagueExitTests(unittest.TestCase):
+    QUIT = (b'009690.335|  ERROR| LCE-B0D04C69 Failed to send quit message because '
+            b'there was no connection. Terminating.\n')
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.proc_root = self.root / 'proc'
+        self.prefix = self.root / '.darling'
+        self.lol = self.prefix / supervisor.LEAGUE_LOL
+        self.logs = self.lol / 'Logs/LeagueClient Logs'
+        self.logs.mkdir(parents=True)
+        self.ns = 'pid:[4026532000]'
+
+    def ux_log(self, name='2026-11-12T14-41-18_717_825_LeagueClientUx.log'):
+        return self.logs / name
+
+    def process(self, pid, path, ppid=1):
+        proc = fake_process(self.proc_root, pid, ppid=ppid, comm=os.path.basename(path),
+                            ns=self.ns)
+        (proc / 'cmdline').write_bytes(path.encode() + b'\0--flag\0')
+        return proc
+
+    def test_history_does_not_count(self):
+        self.ux_log().write_bytes(self.QUIT)
+        watch = supervisor.LeagueExitWatch(self.prefix)
+        self.assertFalse(watch.poll())
+
+    def test_new_quit_line_counts_once(self):
+        log = self.ux_log()
+        log.write_bytes(b'000001.000|   OKAY| start\n')
+        watch = supervisor.LeagueExitWatch(self.prefix)
+        self.assertFalse(watch.poll())
+        with open(log, 'ab') as handle:
+            handle.write(self.QUIT)
+        self.assertTrue(watch.poll())
+        self.assertFalse(watch.poll())
+
+    def test_partial_line_waits_for_newline(self):
+        watch = supervisor.LeagueExitWatch(self.prefix)
+        log = self.ux_log()
+        log.write_bytes(self.QUIT[:40])
+        self.assertFalse(watch.poll())
+        with open(log, 'ab') as handle:
+            handle.write(self.QUIT[40:])
+        self.assertTrue(watch.poll())
+
+    def test_log_created_after_start_counts(self):
+        watch = supervisor.LeagueExitWatch(self.prefix)
+        self.ux_log('2026-11-12T15-00-00_1_2_LeagueClientUx.log').write_bytes(self.QUIT)
+        self.assertTrue(watch.poll())
+
+    def test_only_league_client_processes_are_selected(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(10, '/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices')
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        self.process(21, app + 'League of Legends.app/Contents/MacOS/LeagueClientUx', ppid=20)
+        self.process(30, app + 'Game/LeagueofLegends.app/Contents/MacOS/LeagueofLegends')
+        found = supervisor.league_client_processes(self.prefix, self.ns, self.proc_root)
+        self.assertEqual(sorted(pid for pid, _ in found), [20, 21])
+
+    def test_running_game_is_left_alone(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        # No loader socket in its environment: the session namespace alone must
+        # be enough to keep the game safe.
+        self.process(30, app + 'Game/LeagueofLegends.app/Contents/MacOS/LeagueofLegends')
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:https')
+        kill, urlopen = mock.Mock(), mock.Mock()
+        remaining = supervisor.finish_league_exit(
+            self.prefix, self.ns, self.proc_root, kill=kill, sleep=lambda _s: None,
+            out=io.StringIO(), urlopen=urlopen, own_namespace='pid:[1]')
+        self.assertEqual(remaining, [])
+        kill.assert_not_called()
+        urlopen.assert_not_called()
+
+    def test_unknown_game_state_is_left_alone(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        kill = mock.Mock()
+        with mock.patch.object(supervisor, 'game_running', return_value=None):
+            supervisor.finish_league_exit(
+                self.prefix, self.ns, self.proc_root, kill=kill, sleep=lambda _s: None,
+                out=io.StringIO(), urlopen=mock.Mock(), own_namespace='pid:[1]')
+        kill.assert_not_called()
+
+    def test_own_namespace_is_never_scanned(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        self.assertEqual(supervisor.league_client_processes(
+            self.prefix, self.ns, self.proc_root, own_namespace=self.ns), [])
+
+    def test_malformed_lockfile_scheme_is_a_failed_request(self):
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:')
+        self.assertFalse(supervisor.request_league_quit(self.prefix, urlopen=mock.Mock()))
+
+    def test_api_quit_then_stop_leftovers(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:https')
+        requests = []
+
+        def urlopen(request, timeout, context):
+            requests.append(request)
+            return mock.Mock()
+
+        signals = []
+
+        def kill(pid, signum):
+            signals.append((pid, signum))
+            if signum == signal.SIGKILL:
+                shutil.rmtree(self.proc_root / str(pid))
+
+        out = io.StringIO()
+        clock = iter(range(0, 1000)).__next__
+        with mock.patch.object(supervisor, 'game_running', return_value=False):
+            remaining = supervisor.finish_league_exit(
+                self.prefix, self.ns, self.proc_root, kill=kill, sleep=lambda _s: None,
+                out=out, urlopen=urlopen, clock=clock)
+        self.assertEqual(remaining, [])
+        self.assertEqual(requests[0].full_url,
+                         'https://127.0.0.1:44247/process-control/v1/process/quit')
+        self.assertEqual(requests[0].get_method(), 'POST')
+        self.assertIn((20, signal.SIGKILL), signals)
+        self.assertIn('asked it to quit', out.getvalue())
+
+    def test_api_quit_alone_is_enough(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:https')
+
+        def urlopen(request, timeout, context):
+            shutil.rmtree(self.proc_root / '20')
+            return mock.Mock()
+
+        kill = mock.Mock()
+        with mock.patch.object(supervisor, 'game_running', return_value=False):
+            remaining = supervisor.finish_league_exit(
+                self.prefix, self.ns, self.proc_root, kill=kill, sleep=lambda _s: None,
+                out=io.StringIO(), urlopen=urlopen)
+        self.assertEqual(remaining, [])
+        kill.assert_not_called()
+
+    def test_missing_lockfile_falls_back_to_stopping(self):
+        self.assertFalse(supervisor.request_league_quit(self.prefix, urlopen=mock.Mock()))
+
+    def test_ux_is_stopped_before_league_client(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        self.process(21, app + 'League of Legends.app/Contents/MacOS/LeagueClientUx', ppid=20)
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:https')
+        signals = []
+
+        def kill(pid, signum):
+            signals.append((pid, signum))
+            if pid == 21:
+                shutil.rmtree(self.proc_root / '21')
+
+        def sleep(_seconds):
+            # LeagueClient finishes on its own once the UX is gone.
+            if not (self.proc_root / '21').exists() and (self.proc_root / '20').exists():
+                shutil.rmtree(self.proc_root / '20')
+
+        with mock.patch.object(supervisor, 'game_running', return_value=False):
+            remaining = supervisor.finish_league_exit(
+                self.prefix, self.ns, self.proc_root, kill=kill, sleep=sleep,
+                out=io.StringIO(), urlopen=lambda *a, **k: mock.Mock())
+        self.assertEqual(remaining, [])
+        self.assertEqual(signals, [(21, signal.SIGTERM)])
 if __name__ == '__main__':
     unittest.main()
