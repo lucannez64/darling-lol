@@ -57,9 +57,12 @@ static int child(const char *name, const char *mode)
 	if (mach_msg(&hello, MACH_SEND_MSG, sizeof hello, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
 		return 3;
 	/* Exit only once the parent has registered for our exit and our port's death:
-	 * neither a dead-name request nor EVFILT_PROC reports a death that came first. */
+	 * neither a dead-name request nor EVFILT_PROC reports a death that came first.
+	 * Wait without a timeout; the parent kills us (reap) on every path where it
+	 * does not send the message, so this cannot outlive the check. */
 	struct { mach_msg_header_t header; char body[64]; } go;
-	mach_msg(&go.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof go, inbox, 5000, MACH_PORT_NULL);
+	if (mach_msg(&go.header, MACH_RCV_MSG, 0, sizeof go, inbox, 0, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		return 4;
 	return 0;
 }
 
