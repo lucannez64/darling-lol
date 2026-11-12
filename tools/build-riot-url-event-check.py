@@ -28,7 +28,7 @@ with open(bundle / "Info.plist", "wb") as info:
         "CFBundleName": "RiotURLEventCheck",
         "CFBundlePackageType": "APPL",
         "CFBundleURLTypes": [
-            {"CFBundleURLName": "Apple event handler", "CFBundleURLSchemes": ["darling-lol-ae"]},
+            {"CFBundleURLName": "Apple event handler", "CFBundleURLSchemes": ["darling-lol-ae", "DARLING-LOL-AE"]},
             {"CFBundleURLName": "Delegate fallback", "CFBundleURLSchemes": ["darling-lol-delegate"]},
         ],
     }, info)

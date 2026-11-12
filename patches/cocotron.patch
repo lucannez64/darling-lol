@@ -463,7 +463,7 @@ index acb19858..ed2a77c6 100644
 +
 +@end
 diff --git a/AppKit/NSApplication.m b/AppKit/NSApplication.m
-index 8e7508e..8508053 100644
+index 8e7508e..5275db4 100644
 --- a/AppKit/NSApplication.m
 +++ b/AppKit/NSApplication.m
 @@ -17,6 +17,10 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -604,7 +604,7 @@ index 8e7508e..8508053 100644
          [self registerDelegate];
      }
  }
-@@ -549,7 +644,53 @@ NSApplication *NSApp = nil;
+@@ -549,7 +644,56 @@ NSApplication *NSApp = nil;
      return opened;
  }
  
@@ -614,6 +614,8 @@ index 8e7508e..8508053 100644
 +        return;
 +    NSCharacterSet *schemeChars = [NSCharacterSet characterSetWithCharactersInString:
 +            @"abcdefghijklmnopqrstuvwxyz0123456789+-."];
++    // Schemes compare case-insensitively; one port per scheme even if declared twice.
++    NSMutableSet *served = [NSMutableSet set];
 +    for (NSDictionary *type in types) {
 +        if (![type isKindOfClass: [NSDictionary class]])
 +            continue;
@@ -628,8 +630,9 @@ index 8e7508e..8508053 100644
 +                continue;
 +            // http(s) and file belong to the host browser and the file system.
 +            if ([scheme isEqualToString: @"http"] || [scheme isEqualToString: @"https"] ||
-+                [scheme isEqualToString: @"file"])
++                [scheme isEqualToString: @"file"] || [served containsObject: scheme])
 +                continue;
++            [served addObject: scheme];
 +            CFMessagePortContext context = { 0, [scheme retain], NULL, NULL, NULL };
 +            CFStringRef name = (CFStringRef) [DARLING_URL_EVENT_PORT_PREFIX stringByAppendingString: scheme];
 +            CFMessagePortRef port = CFMessagePortCreateLocal(NULL, name, _darlingURLEventReceived, &context, NULL);
@@ -658,7 +661,7 @@ index 8e7508e..8508053 100644
      NSAutoreleasePool *pool = [NSAutoreleasePool new];
      BOOL needsUntitled = YES;
  
-@@ -558,7 +699,8 @@ NSApplication *NSApp = nil;
+@@ -558,7 +702,8 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
      NS_ENDHANDLER
@@ -668,7 +671,7 @@ index 8e7508e..8508053 100644
      // Load the application icon if we have one
      NSString *iconName = [[[NSBundle mainBundle] infoDictionary]
              objectForKey: @"CFBundleIconFile"];
-@@ -614,7 +756,6 @@ NSApplication *NSApp = nil;
+@@ -614,7 +759,6 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
      NS_ENDHANDLER
@@ -676,7 +679,7 @@ index 8e7508e..8508053 100644
              [pool release];
  }
  
-@@ -652,7 +793,15 @@ NSApplication *NSApp = nil;
+@@ -652,7 +796,15 @@ NSApplication *NSApp = nil;
          }
      }
  
@@ -693,7 +696,7 @@ index 8e7508e..8508053 100644
  }
  
  - (void) _checkForAppActivation {
-@@ -666,17 +815,13 @@ NSApplication *NSApp = nil;
+@@ -666,17 +818,13 @@ NSApplication *NSApp = nil;
  }
  
  - (void) run {
@@ -714,7 +717,7 @@ index 8e7508e..8508053 100644
  
      do {
          pool = [NSAutoreleasePool new];
-@@ -716,6 +861,16 @@ NSApplication *NSApp = nil;
+@@ -716,6 +864,16 @@ NSApplication *NSApp = nil;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -731,7 +734,7 @@ index 8e7508e..8508053 100644
      if ([event type] == NSKeyDown) {
          unsigned modifierFlags = [event modifierFlags];
  
-@@ -742,6 +897,61 @@ NSApplication *NSApp = nil;
+@@ -742,6 +900,61 @@ NSApplication *NSApp = nil;
      do {
          NSAutoreleasePool *pool = [NSAutoreleasePool new];
  
@@ -793,7 +796,7 @@ index 8e7508e..8508053 100644
          NS_DURING [NSClassFromString(@"Win32RunningCopyPipe")
                  performSelector: @selector(createRunningCopyPipe)];
  
-@@ -926,13 +1136,26 @@ NSApplication *NSApp = nil;
+@@ -926,13 +1139,26 @@ NSApplication *NSApp = nil;
  }
  
  - (void) activateIgnoringOtherApps: (BOOL) flag {
@@ -821,7 +824,7 @@ index 8e7508e..8508053 100644
  - (NSWindow *) modalWindow {
      return [[_modalStack lastObject] modalWindow];
  }
-@@ -1682,3 +1905,26 @@ BOOL NSPerformService(NSString *itemName, NSPasteboard *pasteboard) {
+@@ -1682,3 +1908,26 @@ BOOL NSPerformService(NSString *itemName, NSPasteboard *pasteboard) {
      NSUnimplementedFunction();
      return NO;
  }

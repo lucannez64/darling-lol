@@ -73,6 +73,10 @@ class AppKitInboxTests(unittest.TestCase):
                          r'\(applicationWillFinishLaunching:\)\.\n\s*\[self _darlingStartURLEventInboxes\];\n'
                          r'\s*// Load the application icon')
 
+    def test_serves_a_scheme_declared_twice_once(self):
+        self.assertIn('[served containsObject: scheme]', self.appkit)
+        self.assertIn('[served addObject: scheme];', self.appkit)
+
     def test_leaves_web_and_file_schemes_to_the_host(self):
         for scheme in ('http', 'https', 'file'):
             self.assertIn(f'[scheme isEqualToString: @"{scheme}"]', self.appkit)

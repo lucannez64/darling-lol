@@ -21,7 +21,8 @@ if [ "$(printf '%s' "$url" | wc -c)" -gt 4096 ]; then
  echo 'open-guest-url: URL longer than 4096 bytes' >&2
  exit 2
 fi
-if [ -n "$(printf '%s' "$url" | LC_ALL=C tr -d '[:print:]')" ]; then
+# Count what is left instead of testing $(...): it would strip trailing newlines.
+if [ "$(printf '%s' "$url" | LC_ALL=C tr -d '[:print:]' | wc -c)" -ne 0 ]; then
  echo 'open-guest-url: URL contains control or non-ASCII characters' >&2
  exit 2
 fi

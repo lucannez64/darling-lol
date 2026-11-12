@@ -65,7 +65,8 @@ class OpenGuestURLTests(unittest.TestCase):
 
     def test_rejects_other_schemes_control_characters_and_long_urls(self):
         for url in ('https://example.com/', 'file:///etc/passwd', 'riotclientx://a',
-                    'riotclient://auth/\x01x', 'riotclient://auth/' + 'a' * 4096, ''):
+                    'riotclient://auth/\x01x', 'riotclient://auth/a\nb', 'riotclient://auth/\n',
+                    'riotclient://auth/' + 'a' * 4096, ''):
             with self.subTest(url=url[:40]):
                 result = self.run_handler(url)
                 self.assertEqual(result.returncode, 2)
