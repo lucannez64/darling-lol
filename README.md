@@ -92,6 +92,8 @@ bash scripts/install-native.sh
 
 - `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies isolated from the host system.
 - `--verbose`, `-v`: Display full command output during installation.
+- `--yes`, `-y`: Skip confirmations (needed when not run from a terminal).
+- `--region CODE`: Riot server region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
 
 You can combine both options:
 
@@ -99,9 +101,9 @@ You can combine both options:
 bash scripts/install-native.sh --toolbox --verbose
 ```
 
-Supported host distributions: Fedora 43+, Arch Linux, Debian 14+, and Ubuntu 26.04+.
+Supported host distributions: Fedora 44+, Arch Linux, Debian 14+, and Ubuntu 26.04+.
 
-The installer requires at least 50 GiB of free disk space.
+The installer requires at least 50 GiB of free disk space. On Arch Linux it runs a full system upgrade (`pacman -Syu`) and asks first unless `--yes` is given.
 
 ## Build on the other PC (non-Nix)
 
