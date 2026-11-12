@@ -58,12 +58,18 @@ static int child(const char *name, const char *mode)
 		return 3;
 	/* Exit only once the parent has registered for our exit and our port's death:
 	 * neither a dead-name request nor EVFILT_PROC reports a death that came first.
-	 * Wait without a timeout; the parent kills us (reap) on every path where it
-	 * does not send the message, so this cannot outlive the check. */
+	 * A live parent either sends the message or kills us (reap), so wait for it
+	 * however long it takes, but give up if the parent itself died meanwhile. */
+	pid_t parent_pid = getppid();
 	struct { mach_msg_header_t header; char body[64]; } go;
-	if (mach_msg(&go.header, MACH_RCV_MSG, 0, sizeof go, inbox, 0, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
-		return 4;
-	return 0;
+	for (;;) {
+		mach_msg_return_t r = mach_msg(&go.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof go,
+		                               inbox, 500, MACH_PORT_NULL);
+		if (r == MACH_MSG_SUCCESS)
+			return 0;
+		if (r != MACH_RCV_TIMED_OUT || getppid() != parent_pid)
+			return 4;
+	}
 }
 
 /* Reap the child without waiting forever on one that is stuck: the result of
