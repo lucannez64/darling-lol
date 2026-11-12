@@ -247,8 +247,8 @@ detect_distribution() {
 
   case "$ids" in
     *' fedora '*)
-      [[ $ver_major =~ ^[0-9]+$ ]] && (( ver_major >= 43 )) ||
-        fail 'Fedora 43 or newer is required (FFmpeg 8 or 9).'
+      [[ $ver_major =~ ^[0-9]+$ ]] && (( ver_major >= 44 )) ||
+        fail 'Fedora 44 or newer is required (FFmpeg 8 or 9).'
       FAMILY=fedora
       ;;
     *' arch '*)
@@ -274,7 +274,7 @@ detect_distribution() {
       FAMILY=debian
       ;;
     *)
-      fail 'Supported distributions: Fedora 43+, Arch Linux, Debian 14+ and Ubuntu 26.04+.'
+      fail 'Supported distributions: Fedora 44+, Arch Linux, Debian 14+ and Ubuntu 26.04+.'
       ;;
   esac
 
@@ -381,12 +381,6 @@ check_repo_ffmpeg() {
       candidate=$(dnf repoquery --latest-limit=1 --qf '%{version}' libavcodec-free-devel 2>/dev/null | head -n 1 || true)
       if [[ -z $candidate ]]; then
         candidate=$(rpm -q --qf '%{VERSION}' libavcodec-free-devel 2>/dev/null || true)
-      fi
-      ;;
-    arch)
-      candidate=$(pacman -Si ffmpeg 2>/dev/null | awk -F': ' '/^Version/ {print $2; exit}' || true)
-      if [[ -z $candidate ]]; then
-        candidate=$(pacman -Q ffmpeg 2>/dev/null | awk '{print $2}' || true)
       fi
       ;;
     debian)
@@ -584,6 +578,27 @@ compile_project() {
     sh scripts/build.sh
 }
 
+ensure_no_active_session() {
+  local rc=0
+  python3 - <<'PY' || rc=$?
+from pathlib import Path
+for entry in Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        command_line = (entry / 'cmdline').read_bytes()
+    except OSError:
+        continue
+    if b'/Riot Client.app/' in command_line or b'/League of Legends.app/' in command_line:
+        raise SystemExit(3)
+PY
+  case $rc in
+    0) ;;
+    3) fail 'A Riot Client or League process is running; exit the game and both clients, then run this again.' ;;
+    *) fail "Could not check for running Riot/League processes (exit code $rc)." ;;
+  esac
+}
+
 install_system_components() {
   cd "$TARGET_DIR" &&
     sudo cmake --install build/darling-src/build
@@ -664,6 +679,7 @@ run 'Running project preflight checks' python3 "$TARGET_DIR/scripts/preflight.py
 run 'Preparing Python environment' prepare_python_env
 run 'Configuring Darling-LoL' configure_project
 run 'Building Darling-LoL (this may take a while)' compile_project
+ensure_no_active_session
 run 'Installing Darling system components' install_system_components
 run 'Installing the user runtime' install_user_runtime
 
