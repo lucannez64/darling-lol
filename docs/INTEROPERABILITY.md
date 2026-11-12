@@ -108,9 +108,10 @@ authentication, payment or integrity controls:
   game servers;
 - we do not patch Riot's client or game binaries, CEF or anti-cheat;
 - we do not automate gameplay input or provide cheats;
-- the opt-in hide helper manages local client windows while a match runs; the
-  opt-in close helper terminates eligible League client UI processes. Both are
-  off by default and do not change client binaries, CEF or anti-cheat.
+- the opt-in hide helpers manage local client windows: the in-game League
+  client UI and the League splash overlay; the opt-in close helper terminates
+  eligible League client UI processes. All are off by default and do not change
+  client binaries, CEF or anti-cheat.
 
 The synthetic platform identity in §3 is local metadata; it is not a credential.
 This repository does not pass it as Riot authentication data.

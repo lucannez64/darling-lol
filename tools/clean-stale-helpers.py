@@ -23,7 +23,8 @@ import time
 from pathlib import Path
 
 HELPER_NAMES = ('close-league-client-in-game.py',
-                'hide-league-client-in-game.py')
+                'hide-league-client-in-game.py',
+                'hide-league-splash-window.py')
 REAPER_NAMES = ('init', 'systemd')
 TERM_GRACE = 3.0
 
