@@ -1096,7 +1096,7 @@ new file mode 100644
 index 0000000..71b9f4d
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.mm
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,148 @@
 +#include "IOPlatformExpertDevice.h"
 +#include "PlatformIdentity.h"
 +#import <Foundation/NSString.h>
@@ -1106,6 +1106,7 @@ index 0000000..71b9f4d
 +#import <Foundation/NSDictionary.h>
 +#include <CommonCrypto/CommonDigest.h>
 +#include <uuid/uuid.h>
++#include <fcntl.h>
 +#include <unistd.h>
 +#include <cstring>
 +
@@ -1129,9 +1130,48 @@ index 0000000..71b9f4d
 +	};
 +}
 +
-+// Per-host identifiers, stable like a real Mac's: a SHA-256 of the host machine-id and a fixed
-+// string, so the raw machine-id (which machine-id(5) says not to expose) never reaches apps.
++// Per-host identifiers, stable like a real Mac's: a SHA-256 of the host machine-id, a fixed
++// string and a random salt kept in a root-only file, so the UUID and serial cannot be derived
++// from the binary alone. The raw machine-id (which machine-id(5) says not to expose) never reaches apps.
 +// The serial's "DARLING-" form is longer than any Apple serial and cannot match a real Mac.
++static const char identitySaltPath[] = "/private/etc/darling-identity-salt";
++
++// Returns the stored 32-byte salt, creating it on first use. False if it cannot be read or written.
++static bool identitySalt(unsigned char salt[32])
++{
++	for (int attempt = 0; attempt < 2; attempt++)
++	{
++		int fd = open(identitySaltPath, O_RDONLY | O_CLOEXEC);
++		if (fd >= 0)
++		{
++			ssize_t n = read(fd, salt, 32);
++			close(fd);
++			if (n == 32)
++				return true;
++		}
++
++		unsigned char fresh[32];
++		int rnd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
++		if (rnd < 0)
++			return false;
++		bool gotRandom = read(rnd, fresh, sizeof(fresh)) == (ssize_t)sizeof(fresh);
++		close(rnd);
++		if (!gotRandom)
++			return false;
++
++		fd = open(identitySaltPath, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
++		if (fd < 0)
++			continue; // another process created it first: read it on the next attempt
++		bool written = write(fd, fresh, sizeof(fresh)) == (ssize_t)sizeof(fresh);
++		close(fd);
++		if (!written)
++			return false;
++		std::memcpy(salt, fresh, sizeof(fresh));
++		return true;
++	}
++	return false;
++}
++
 +static bool hostIdentifiers(NSString** uuid, NSString** serial)
 +{
 +	static const char app[] = "darling-lol IOPlatformExpertDevice";
@@ -1140,11 +1180,21 @@ index 0000000..71b9f4d
 +	if (gethostuuid(machineID, &wait) != 0)
 +		return false;
 +
-+	unsigned char input[sizeof(machineID) + sizeof(app)];
++	// machine-id || app || salt. If no salt can be stored, drop it: that keeps the value
++	// this host already had instead of failing to report an identity at all.
++	unsigned char salt[32];
++	bool salted = identitySalt(salt);
++	unsigned char input[sizeof(machineID) + sizeof(app) + sizeof(salt)];
++	size_t length = sizeof(machineID) + sizeof(app);
 +	std::memcpy(input, machineID, sizeof(machineID));
 +	std::memcpy(input + sizeof(machineID), app, sizeof(app));
++	if (salted)
++	{
++		std::memcpy(input + length, salt, sizeof(salt));
++		length += sizeof(salt);
++	}
 +	unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-+	CC_SHA256(input, sizeof(input), hash);
++	CC_SHA256(input, (CC_LONG)length, hash);
 +
 +	hash[6] = (hash[6] & 0x0f) | 0x40; // version 4
 +	hash[8] = (hash[8] & 0x3f) | 0x80; // RFC 4122 variant
