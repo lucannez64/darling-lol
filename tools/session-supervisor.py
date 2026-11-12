@@ -593,7 +593,11 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     child = subprocess.Popen(command, start_new_session=True)
     def signal_child(signum):
         try:
-            child.send_signal(signum)
+            if os.getpgid(child.pid) != child.pid:
+                return
+            if os.getsid(child.pid) != child.pid:
+                return
+            os.killpg(child.pid, signum)
         except OSError:
             pass
     stop = []
@@ -623,7 +627,8 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                 now = time.monotonic()
                 seen_client, idle_since, stop_now = idle_decision(
                     seen_client, idle_since, now, managed_client_window(run),
-                    game_running(prefix, proc_root), stop_after)
+                    league_game_present(prefix, namespace, proc_root, own_namespace),
+                    stop_after)
                 if stop_now:
                     log('client window has been gone for %ds; stopping the session'
                         % stop_after, out)
