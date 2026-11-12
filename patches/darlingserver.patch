@@ -1826,7 +1826,7 @@ index e35221c..cb399e1 100755
  
  ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..68a72aa 100644
+index cc10f1d..0ff928a 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
 @@ -18,27 +18,102 @@
@@ -1979,7 +1979,46 @@ index cc10f1d..68a72aa 100644
  
  	if (header->number == dserver_callnum_s2c) {
  		// this is an S2C reply
-@@ -521,6 +630,8 @@ void DarlingServer::Call::Uidgid::processCall() {
+@@ -311,6 +420,7 @@ void DarlingServer::Call::Checkin::processCall() {
+ 
+ void DarlingServer::Call::Checkout::processCall() {
+ 	int code = 0;
++	std::shared_ptr<Thread> exitingThread;
+ 
+ 	if (auto thread = _thread.lock()) {
+ 		if (auto process = thread->process()) {
+@@ -370,6 +480,7 @@ void DarlingServer::Call::Checkout::processCall() {
+ 				}
+ 			} else {
+ 				thread->notifyDead();
++				exitingThread = thread;
+ 
+ 				// if this was the last thread in the process, it'll be automatically unregistered
+ 			}
+@@ -385,6 +496,22 @@ void DarlingServer::Call::Checkout::processCall() {
+ 	_thread.reset();
+ 
+ 	_sendReply(code);
++
++	// darling-lol: the direct reply skipped Thread::pushCallReply, the only place that
++	// deactivates the thread's call. A dead thread is released only once it has no active
++	// call, and until then it keeps its process alive: the process's Mach ports are never
++	// destroyed and its peers never get dead-name/no-senders notifications (a League UX
++	// waited forever for a GPU helper that had any short-lived thread).
++	if (exitingThread && exitingThread->activeCall().get() == this) {
++		// `self` may be the last reference to this call; it keeps it alive until we return
++		auto self = exitingThread->activeCall();
++		try {
++			exitingThread->deactivateCall(self);
++		} catch (const std::exception& e) {
++			// _deactivateCallLocked throws if another call is active; keep the old behavior then
++			callLog.warning() << "Checkout: could not release exiting thread: " << e.what() << callLog.endLog;
++		}
++	}
+ };
+ 
+ void DarlingServer::Call::VchrootPath::processCall() {
+@@ -521,6 +648,8 @@ void DarlingServer::Call::Uidgid::processCall() {
  			// HACK
  			// we shouldn't need to access _dtapeTask; Process should provide a method for this (but it doesn't yet because i'm not sure how to make that API feel at-home in C++)
  			dtape_task_uidgid(process->_dtapeTask, _body.new_uid, _body.new_gid, &uid, &gid);
@@ -1988,7 +2027,7 @@ index cc10f1d..68a72aa 100644
  		} else {
  			code = -ESRCH;
  		}
-@@ -694,6 +805,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
+@@ -694,6 +823,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
  	_sendReply(code, socket);
  };
  
@@ -2049,7 +2088,7 @@ index cc10f1d..68a72aa 100644
  void DarlingServer::Call::ForkWaitForChild::processCall() {
  	int code = 0;
  
-@@ -714,6 +879,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
+@@ -714,6 +897,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
  	int code = 0;
  	int newBSDSignal = 0;
  
@@ -2074,7 +2113,7 @@ index cc10f1d..68a72aa 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
-@@ -1040,6 +1223,236 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+@@ -1040,6 +1241,236 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
  	_sendReply(code, fullLength);
  }
  
