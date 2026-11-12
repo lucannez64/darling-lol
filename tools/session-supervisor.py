@@ -483,11 +483,29 @@ class LeagueExitWatch:
 
 def league_client_processes(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
     """League client processes of this session, never the game itself."""
-    members = (namespace_members(namespace, proc_root, own_namespace) if namespace
-               else prefix_only(prefix, proc_root))
-    return [(pid, proc) for pid, proc in members
+    return [(pid, proc) for pid, proc in session_members(prefix, namespace, proc_root, own_namespace)
             if any(LEAGUE_APP_PATH in part for part in command_line(proc))
             and GAME_NAME not in command_names(proc)]
+
+
+def session_members(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
+    """Guest processes of this session; never the supervisor's own namespace."""
+    if own_namespace is None:
+        try:
+            own_namespace = os.readlink('/proc/self/ns/pid')
+        except OSError:
+            return []
+    if namespace:
+        return namespace_members(namespace, proc_root, own_namespace)
+    return prefix_only(prefix, proc_root)
+
+
+def league_game_present(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
+    """True unless /proc proves no game runs; unknown counts as running."""
+    if any(GAME_NAME in command_names(proc)
+           for _pid, proc in session_members(prefix, namespace, proc_root, own_namespace)):
+        return True
+    return game_running(prefix, proc_root) is not False
 
 
 def request_league_quit(prefix, urlopen=None):
@@ -501,14 +519,14 @@ def request_league_quit(prefix, urlopen=None):
     except (OSError, ValueError, IndexError):
         return False
     token = base64.b64encode(('riot:%s' % password).encode()).decode()
-    request = urllib.request.Request(
-        '%s://127.0.0.1:%d/process-control/v1/process/quit' % (scheme, port),
-        data=b'', method='POST', headers={'Authorization': 'Basic ' + token})
     # The client serves its own self-signed certificate on loopback.
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     try:
+        request = urllib.request.Request(
+            '%s://127.0.0.1:%d/process-control/v1/process/quit' % (scheme, port),
+            data=b'', method='POST', headers={'Authorization': 'Basic ' + token})
         (urlopen or urllib.request.urlopen)(request, timeout=3, context=context).close()
         return True
     except Exception:  # noqa: BLE001 - any failure falls through to stopping
@@ -519,7 +537,7 @@ def finish_league_exit(prefix, namespace, proc_root=Path('/proc'), kill=os.kill,
                        sleep=time.sleep, out=sys.stdout, own_namespace=None,
                        urlopen=None, clock=time.monotonic, grace=LEAGUE_QUIT_GRACE):
     """Complete a League Exit: API quit first, then stop what is left."""
-    if game_running(prefix, proc_root):
+    if league_game_present(prefix, namespace, proc_root, own_namespace):
         log('League Exit failed inside the client, but a game is running; leaving it', out)
         return []
     members = league_client_processes(prefix, namespace, proc_root, own_namespace)

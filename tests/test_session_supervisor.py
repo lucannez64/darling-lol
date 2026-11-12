@@ -549,9 +549,6 @@ class FailureReportingTests(unittest.TestCase):
                       'status 3)', output.getvalue())
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class LeagueExitTests(unittest.TestCase):
     QUIT = (b'009690.335|  ERROR| LCE-B0D04C69 Failed to send quit message because '
@@ -616,15 +613,39 @@ class LeagueExitTests(unittest.TestCase):
         self.assertEqual(sorted(pid for pid, _ in found), [20, 21])
 
     def test_running_game_is_left_alone(self):
-        self.process(30, '/Applications/League of Legends.app/Contents/LoL/Game/'
-                         'LeagueofLegends.app/Contents/MacOS/LeagueofLegends')
-        kill = mock.Mock()
-        with mock.patch.object(supervisor, 'game_running', return_value=True):
-            remaining = supervisor.finish_league_exit(
-                self.prefix, self.ns, self.proc_root, kill=kill, sleep=lambda _s: None,
-                out=io.StringIO())
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        # No loader socket in its environment: the session namespace alone must
+        # be enough to keep the game safe.
+        self.process(30, app + 'Game/LeagueofLegends.app/Contents/MacOS/LeagueofLegends')
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:https')
+        kill, urlopen = mock.Mock(), mock.Mock()
+        remaining = supervisor.finish_league_exit(
+            self.prefix, self.ns, self.proc_root, kill=kill, sleep=lambda _s: None,
+            out=io.StringIO(), urlopen=urlopen, own_namespace='pid:[1]')
         self.assertEqual(remaining, [])
         kill.assert_not_called()
+        urlopen.assert_not_called()
+
+    def test_unknown_game_state_is_left_alone(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        kill = mock.Mock()
+        with mock.patch.object(supervisor, 'game_running', return_value=None):
+            supervisor.finish_league_exit(
+                self.prefix, self.ns, self.proc_root, kill=kill, sleep=lambda _s: None,
+                out=io.StringIO(), urlopen=mock.Mock(), own_namespace='pid:[1]')
+        kill.assert_not_called()
+
+    def test_own_namespace_is_never_scanned(self):
+        app = '/Applications/League of Legends.app/Contents/LoL/'
+        self.process(20, app + 'LeagueClient.app/Contents/MacOS/LeagueClient')
+        self.assertEqual(supervisor.league_client_processes(
+            self.prefix, self.ns, self.proc_root, own_namespace=self.ns), [])
+
+    def test_malformed_lockfile_scheme_is_a_failed_request(self):
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:')
+        self.assertFalse(supervisor.request_league_quit(self.prefix, urlopen=mock.Mock()))
 
     def test_api_quit_then_stop_leftovers(self):
         app = '/Applications/League of Legends.app/Contents/LoL/'
@@ -699,3 +720,5 @@ class LeagueExitTests(unittest.TestCase):
                 out=io.StringIO(), urlopen=lambda *a, **k: mock.Mock())
         self.assertEqual(remaining, [])
         self.assertEqual(signals, [(21, signal.SIGTERM)])
+if __name__ == '__main__':
+    unittest.main()
