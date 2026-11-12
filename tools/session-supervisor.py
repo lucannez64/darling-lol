@@ -25,6 +25,14 @@ the client's log directory, with the last available line of its newest log file,
 turns a bare "runtime and guest processes are gone" into the reason the guest
 died, such as a dyld "Library not loaded" abort.
 
+League Exit: LeagueClientUx 16.22 loses its link to LeagueClient early in a
+session, so its Exit button and window close only log "Failed to send quit
+message because there was no connection" and the client stays open. When a
+new line like that appears, the supervisor asks LeagueClient to quit over its
+local API and then stops the League client processes that are left. It never
+touches a running game or the Riot Client. RCLOL_FINISH_LEAGUE_EXIT=0 turns
+this off.
+
 Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
 alone when the launcher exits.
 
@@ -424,10 +432,125 @@ def idle_decision(seen_client, idle_since, now, windows, game, seconds):
     return True, idle_since, now - idle_since >= seconds
 
 
+LEAGUE_LOL = 'Applications/League of Legends.app/Contents/LoL'
+LEAGUE_APP_PATH = '/League of Legends.app/'
+QUIT_MARKER = b'Failed to send quit message because there was no connection'
+LEAGUE_QUIT_GRACE = 8.0
+
+
+class LeagueExitWatch:
+    """Spot a League client Exit that the client itself cannot deliver.
+
+    LeagueClientUx 16.22 drops its link to LeagueClient (close code 1003,
+    "Unsupported Data Type") early in the session. From then on Exit and the
+    window close button only log QUIT_MARKER and the client stays open. Lines
+    already in a log when the supervisor starts are history and never count.
+    """
+
+    def __init__(self, prefix):
+        self.directory = prefix / LEAGUE_LOL / 'Logs/LeagueClient Logs'
+        self.offsets = {path: size for path, size in self._logs()}
+
+    def _logs(self):
+        try:
+            for path in self.directory.glob('*_LeagueClientUx.log'):
+                yield path, path.stat().st_size
+        except OSError:
+            return
+
+    def poll(self):
+        """True when a complete new log line carries QUIT_MARKER."""
+        found = False
+        for path, size in list(self._logs()):
+            offset = self.offsets.get(path, 0)
+            if size < offset:
+                offset = 0
+            if size == offset:
+                continue
+            try:
+                with open(path, 'rb') as handle:
+                    handle.seek(offset)
+                    data = handle.read(size - offset)
+            except OSError:
+                continue
+            complete = data.rfind(b'\n') + 1
+            self.offsets[path] = offset + complete
+            if QUIT_MARKER in data[:complete]:
+                found = True
+        return found
+
+
+def league_client_processes(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
+    """League client processes of this session, never the game itself."""
+    members = (namespace_members(namespace, proc_root, own_namespace) if namespace
+               else prefix_only(prefix, proc_root))
+    return [(pid, proc) for pid, proc in members
+            if any(LEAGUE_APP_PATH in part for part in command_line(proc))
+            and GAME_NAME not in command_names(proc)]
+
+
+def request_league_quit(prefix, urlopen=None):
+    """Ask LeagueClient to quit over its local API; False when that fails."""
+    import base64
+    import ssl
+    import urllib.request
+    try:
+        fields = (prefix / LEAGUE_LOL / 'lockfile').read_text().strip().split(':')
+        port, password, scheme = int(fields[2]), fields[3], fields[4]
+    except (OSError, ValueError, IndexError):
+        return False
+    token = base64.b64encode(('riot:%s' % password).encode()).decode()
+    request = urllib.request.Request(
+        '%s://127.0.0.1:%d/process-control/v1/process/quit' % (scheme, port),
+        data=b'', method='POST', headers={'Authorization': 'Basic ' + token})
+    # The client serves its own self-signed certificate on loopback.
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        (urlopen or urllib.request.urlopen)(request, timeout=3, context=context).close()
+        return True
+    except Exception:  # noqa: BLE001 - any failure falls through to stopping
+        return False
+
+
+def finish_league_exit(prefix, namespace, proc_root=Path('/proc'), kill=os.kill,
+                       sleep=time.sleep, out=sys.stdout, own_namespace=None,
+                       urlopen=None, clock=time.monotonic, grace=LEAGUE_QUIT_GRACE):
+    """Complete a League Exit: API quit first, then stop what is left."""
+    if game_running(prefix, proc_root):
+        log('League Exit failed inside the client, but a game is running; leaving it', out)
+        return []
+    members = league_client_processes(prefix, namespace, proc_root, own_namespace)
+    if not members:
+        return []
+    identities = {pid: process_identity(proc) for pid, proc in members}
+    asked = request_league_quit(prefix, urlopen)
+    log('League Exit could not reach LeagueClient; %s' % (
+        'asked it to quit over its local API' if asked else 'stopping the League client'), out)
+
+    def alive():
+        return [(pid, proc) for pid, proc in members
+                if identities[pid] is not None and process_identity(proc) == identities[pid]
+                and (process_info(proc) or ('Z',))[0] != 'Z']
+
+    deadline = clock() + (grace if asked else 0)
+    while alive() and clock() < deadline:
+        sleep(POLL_SECONDS)
+    remaining = alive()
+    if remaining:
+        remaining = stop_processes(remaining, kill=kill, sleep=sleep, proc_root=proc_root,
+                                   out=out, clock=clock, identities=identities)
+    log('League client closed' if not remaining else
+        'League client processes still present: %s' % ' '.join(str(pid) for pid, _ in remaining), out)
+    return remaining
+
+
 def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
-                   own_namespace=None, runtime_at_start=None, guest_log=None):
+                   own_namespace=None, runtime_at_start=None, guest_log=None,
+                   league_exit=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
@@ -454,12 +577,18 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
         previous[signum] = signal.signal(signum, forward)
     seen_client = False
     idle_since = None
+    if league_exit is None:
+        league_exit = os.environ.get('RCLOL_FINISH_LEAGUE_EXIT', '1') != '0'
+    exit_watch = LeagueExitWatch(prefix) if league_exit else None
     try:
         while child.poll() is None and not stop:
             # Learn the guest namespace while the session runs: after a crash
             # the processes that still carry the socket may be the only proof.
             if namespace is None:
                 namespace = prefix_namespace(prefix, proc_root)
+            if exit_watch is not None and exit_watch.poll():
+                finish_league_exit(prefix, namespace, proc_root=proc_root, kill=kill,
+                                   sleep=sleep, out=out, own_namespace=own_namespace)
             if stop_after > 0:
                 now = time.monotonic()
                 seen_client, idle_since, stop_now = idle_decision(
