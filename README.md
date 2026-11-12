@@ -8,22 +8,24 @@
 </div>
 
 > [!IMPORTANT]
+>
 > ## Critical Announcement
 >
 > **1. Maintenance:** Built mainly as a technical challenge, because everyone kept telling me it was impossible. I do not have the time to maintain it fully. Apart from issues that block you completely, I will only review and merge pull requests.
 >
 > **2. Bans:** **You will probably get permabanned.** You alone are responsible for launching the game in a modified environment (Darling).
+>
 > - **DO NOT cheat.**
 > - **DO NOT play ranked.**
 > - **DO NOT use your main account.**
 >
-> *Note: Currently triggering 3-Day Suspensions ("UNSUPPORTED_THIRD_PARTY_TOOLS"). DON'T USE IT RN.*
+> _Note: Currently triggering 3-Day Suspensions ("UNSUPPORTED_THIRD_PARTY_TOOLS"). DON'T USE IT RN._
 >
 > **3. Continuity:** If discontinued, patches remain available under their upstream licenses, and the original integration tooling under GPL-3.0.
 >
 > **4. To Riot:** A lot of players want to play your game on Linux. If you want to fix this, make LoL Next compatible natively or via a layer like Proton (Epic did it with Easy Anti-Cheat, kernel anticheat included). Contact: `darling-lolriot@proton.me` (especially for an official or supported version of League on Linux).
 >
-> *Open to work: part-time remote as an employee, or full-time remote as a freelancer for a mission.*
+> _Open to work: part-time remote as an employee, or full-time remote as a freelancer for a mission._
 
 ---
 
@@ -34,7 +36,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 - **Performance:** On a Ryzen 5 5500 / RX 6600, ARAM averages about **118–135 FPS** (slowest 10-second stretches around 106–119; higher figures with Hyprland's direct scanout off). Fights were 70–80 FPS before the 2026-10-13/14 work, versus 170–190 on Windows.
 - **Not yet measured:** the effect of the memory changes on client RAM.
 - **Not validated:** a fresh checkout on another machine, end to end.
-- Details: [docs/STATUS.md](docs/STATUS.md) (manual ARAM run and current status) and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) (real machines and measured frame times). `darling-lol --doctor` and `darling-lol --perf` produce the data for a new row.
+- Details: [docs/STATUS.md](docs/STATUS.md) (manual ARAM run and current status) and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) (real machines and measured frame times). `darling-lol --doctor` and `darling-lol --perf` (available through the Nix launcher) produce the data for a new row. On native and manual installs, run the equivalent commands `python3 tools/doctor.py` and `python3 tools/perf-baseline.py`.
 
 ### What's included
 
@@ -72,7 +74,8 @@ bash scripts/install-native.sh
 ```
 
 **Options:**
-- `--toolbox`, `-t`: Isolate build dependencies in a Fedora Toolbox container.
+
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container (Fedora hosts only), keeping build dependencies off the host. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout and run `sh scripts/run.sh` and the update commands from inside the container.
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, the installer runs a full `pacman -Syu` and asks first unless this is given.
 - `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
@@ -95,6 +98,7 @@ nix run github:lucannez64/darling-lol#shell
 ```
 
 From a local checkout:
+
 ```bash
 nix run .#installer
 nix run .#default
@@ -138,6 +142,7 @@ Launch:
 First installs and future Riot updates can still hit compatibility gaps (e.g. an accepted Install action failing native LaunchAgent registration and leaving the download idle). The archived inspector-based workaround is excluded from the manual workflow. The client window-visibility correction is part of the installed runtime (Darling's AppKit overlay), not a patch to Riot's binaries. See [troubleshooting](docs/TROUBLESHOOTING.md) for the known limitation and the fixes already in the runtime.
 
 **Advanced launch options:**
+
 - **Region/locale:** `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh` (display follows `$DISPLAY`; legacy fallback is `:1`).
 - **Recover stale client** (client closed but `darlingserver` still running): `RCLOL_RECOVER_STALE_CLIENT=1 ./scripts/run.sh`. Stops only a windowless Riot/League/CEF tree at least 60 s old; preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`. [Details](docs/TROUBLESHOOTING.md#client-remains-running-without-a-window).
 - **Clean orphaned helpers** (several `close-league-client-in-game.py` watchers): `RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh`. Only removes orphaned helpers of this prefix. [Details](docs/TROUBLESHOOTING.md#multiple-client-in-game-helpers).
@@ -150,6 +155,10 @@ These window-management helpers are opt-in, off by default, and do not patch cli
 ## Updating
 
 Exit the game and both clients first.
+
+**Nix users:** update through the launcher with `nix run github:lucannez64/darling-lol#default -- --update` (see [Nix setup](docs/SETUP.md#nixos-package)); the commands below are for native and manual builds.
+
+**Native / manual builds** (for a `--toolbox` install, run these inside the container):
 
 ```bash
 git pull
@@ -167,7 +176,7 @@ A built runtime can also be shipped without the toolchain via `tools/runtime-pac
 
 Start with the standalone regression checks, then play a match manually: [docs/TESTING.md](docs/TESTING.md). Do **not** attach a debugger, query client APIs, inject diagnostic hooks or automate client/game input. The project includes standalone compatibility probes and the opt-in host-side window-management helpers described above, but no client injection hooks, client API automation or input automation; the normal launcher enables none of them.
 
-FPS counters, presentation requests and display refresh are different measurements. Record average and p99 frame times, scene, graphics settings, power state and focus. Game-process speed switches are in [setup](docs/SETUP.md#game-process-switches); passive match capture is in [testing](docs/TESTING.md#passive-match-capture).
+FPS counters, presentation requests and display refresh are different measurements. Record average and p99 frame times, scene, graphics settings, power state and focus. Game-process speed switches are in [setup](docs/SETUP.md#game-process-switches); the passive match sampler is mentioned in [status](docs/STATUS.md#game-fps-2026-10-1314).
 
 ---
 
@@ -193,6 +202,6 @@ This is an unofficial interoperability effort. It distributes source patches for
 
 Darling/upstream components keep their licenses ([NOTICE.md](NOTICE.md)). Original integration tooling is GPL-3.0; patches retain the licensing of their target files.
 
-*League of Legends and Riot Games are trademarks or registered trademarks of Riot Games, Inc. This project is not affiliated with, endorsed by, or sponsored by Riot Games.*
+_League of Legends and Riot Games are trademarks or registered trademarks of Riot Games, Inc. This project is not affiliated with, endorsed by, or sponsored by Riot Games._
 
 **Donations:** [Support on Ko-Fi](https://ko-fi.com/lucannez64)
