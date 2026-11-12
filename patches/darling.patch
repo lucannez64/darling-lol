@@ -3793,10 +3793,10 @@ index cf9933a84..6651d50dc 100644
  				forKey: [NSNumber numberWithInt: wd]];
  	}
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m b/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
-index dd78f6df4..8fa95a174 100644
+index dd78f6df4..925fb3cb0 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
 +++ b/src/frameworks/CoreServices/src/LaunchServices/LSOpen.m
-@@ -19,8 +19,104 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -19,8 +19,171 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  
  
  #include <LaunchServices/LaunchServices.h>
@@ -3807,6 +3807,66 @@ index dd78f6df4..8fa95a174 100644
 +#include <string.h>
 +#include <strings.h>
 +#include <sys/stat.h>
++#include <CoreFoundation/CFMessagePort.h>
++
++// darling-lol: hand a URL to the running app that serves its scheme. AppKit makes
++// every app that declares CFBundleURLTypes schemes serve one CFMessagePort per
++// scheme (NSApplication.m, "URL events for running apps") and delivers the URL as
++// the kAEGetURL Apple event macOS would send. Returns kLSApplicationNotFoundErr
++// when no running app serves the scheme; launching an app for it is not done yet.
++#define LS_URL_EVENT_PORT_PREFIX "org.darlinghq.url-event."
++#define LS_URL_EVENT_MAX_LENGTH 4096
++
++OSStatus
++_LSOpenURLInRunningApp(CFURLRef url)
++{
++	CFStringRef scheme = CFURLCopyScheme(url);
++	char schemeBuf[64], portName[128], urlBuf[LS_URL_EVENT_MAX_LENGTH + 1];
++	OSStatus status = kLSApplicationNotFoundErr;
++
++	if (scheme == NULL)
++		return kLSApplicationNotFoundErr;
++	Boolean ok = CFStringGetCString(scheme, schemeBuf, sizeof(schemeBuf), kCFStringEncodingASCII);
++	CFRelease(scheme);
++	if (!ok || schemeBuf[0] == 0)
++		return kLSApplicationNotFoundErr;
++	for (char *c = schemeBuf; *c; c++)
++	{
++		if (*c >= 'A' && *c <= 'Z')
++			*c += 'a' - 'A';
++		if (!((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '+' || *c == '-' || *c == '.'))
++			return kLSApplicationNotFoundErr;
++	}
++	if (strcmp(schemeBuf, "file") == 0)
++		return kLSApplicationNotFoundErr;
++
++	if (!CFStringGetCString(CFURLGetString(url), urlBuf, sizeof(urlBuf), kCFStringEncodingUTF8))
++		return paramErr; // over LS_URL_EVENT_MAX_LENGTH bytes, or not representable
++
++	snprintf(portName, sizeof(portName), LS_URL_EVENT_PORT_PREFIX "%s", schemeBuf);
++	CFStringRef name = CFStringCreateWithCString(NULL, portName, kCFStringEncodingASCII);
++	CFMessagePortRef remote = CFMessagePortCreateRemote(NULL, name);
++	CFRelease(name);
++	if (remote == NULL)
++		return kLSApplicationNotFoundErr;
++
++	CFDataRef data = CFDataCreate(NULL, (const UInt8 *) urlBuf, strlen(urlBuf));
++	CFDataRef reply = NULL;
++	SInt32 sent = CFMessagePortSendRequest(remote, 0, data, 2.0, 5.0, kCFRunLoopDefaultMode, &reply);
++	CFRelease(data);
++	CFMessagePortInvalidate(remote);
++	CFRelease(remote);
++
++	if (sent != kCFMessagePortSuccess)
++		fprintf(stderr, "LaunchServices: could not deliver a %s URL to its app (%d)\n", schemeBuf, (int) sent);
++	else if (reply != NULL && CFDataGetLength(reply) == 1 && CFDataGetBytePtr(reply)[0] == 1)
++		status = noErr;
++	else
++		fprintf(stderr, "LaunchServices: the app serving %s URLs did not handle it\n", schemeBuf);
++	if (reply != NULL)
++		CFRelease(reply);
++	return status;
++}
 +
 +// darling-lol M2a: minimal bundle launching.
 +// Supports: file URLs (or bare POSIX paths) pointing at .app bundles,
@@ -3836,6 +3896,13 @@ index dd78f6df4..8fa95a174 100644
 +
 +	if ((params == NULL || params->application == NULL) && _LSIsHostOpenURL(url))
 +		return _LSOpenURLOnHost(url);
++
++	if (params == NULL || params->application == NULL)
++	{
++		status = _LSOpenURLInRunningApp(url);
++		if (status != kLSApplicationNotFoundErr)
++			return status;
++	}
 +
 +	// open(1) builds URLs via +URLWithString from a raw path, which may yield
 +	// a scheme-less URL object. CFURLCopyFileSystemPath works either way.
@@ -3901,7 +3968,7 @@ index dd78f6df4..8fa95a174 100644
  
  OSStatus
  LSOpenURLsWithRole(
-@@ -31,8 +127,27 @@ LSOpenURLsWithRole(
+@@ -31,8 +194,27 @@ LSOpenURLsWithRole(
    ProcessSerialNumber * outPSNs,
    CFIndex inMaxPSNCount)
  {
@@ -3932,7 +3999,7 @@ index dd78f6df4..8fa95a174 100644
  
  OSStatus
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c b/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
-index 854fa1e7f..8a76923c4 100644
+index 854fa1e7f..7f1fbfbf1 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
 +++ b/src/frameworks/CoreServices/src/LaunchServices/LaunchServices.c
 @@ -19,9 +19,14 @@
@@ -3951,7 +4018,17 @@ index 854fa1e7f..8a76923c4 100644
  
  static void get_main_executable_info(CFURLRef appURL, CFStringRef *exec, CFStringRef *bundleName);
  
-@@ -77,6 +82,12 @@ OSStatus LSOpenFromURLSpec(const LSLaunchURLSpec *inLaunchSpec, CFURLRef *outLau
+@@ -38,6 +43,9 @@ OSStatus LSRegisterURL(CFURLRef inURL, Boolean inUpdate)
+ 	return 0;
+ }
+ 
++// LSOpen.m: hands the URL to the running app serving its scheme.
++OSStatus _LSOpenURLInRunningApp(CFURLRef url);
++
+ OSStatus LSOpenFromURLSpec(const LSLaunchURLSpec *inLaunchSpec, CFURLRef *outLaunchedURL)
+ {
+ 	CFStringRef scheme, extension;
+@@ -77,10 +85,20 @@ OSStatus LSOpenFromURLSpec(const LSLaunchURLSpec *inLaunchSpec, CFURLRef *outLau
  			if (extension != NULL)
  				CFRelease(extension);
  		}
@@ -3963,8 +4040,18 @@ index 854fa1e7f..8a76923c4 100644
 +		}
  		else
  		{
- 			printf("We can't handle this scheme yet\n");
-@@ -108,8 +119,14 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
+-			printf("We can't handle this scheme yet\n");
+-			ret = kLSApplicationNotFoundErr;
++			// darling-lol: a running app that declares the scheme gets it (LSOpen.m).
++			temp = _LSOpenURLInRunningApp(url);
++			if (temp == kLSApplicationNotFoundErr)
++				printf("We can't handle this scheme yet\n");
++			if (temp)
++				ret = temp;
+ 		}
+ 		CFRelease(scheme);
+ 	}
+@@ -108,8 +126,14 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
  		CFRelease(url_plus_exec);
  		url_plus_exec = CFURLCreateCopyAppendingPathComponent(kCFAllocatorDefault, pre, executable, FALSE);
  		CFRelease(pre);
@@ -3981,7 +4068,7 @@ index 854fa1e7f..8a76923c4 100644
  
  		/* Try to use CFBundleName first */
  		if (bundleName == NULL)
-@@ -122,15 +139,19 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
+@@ -122,15 +146,19 @@ OSStatus _LSLaunchApplication(CFURLRef appPath)
  		CFStringGetFileSystemRepresentation(executable, exec, execSize);
  		argv[0] = exec;
  		argv[1] = NULL;
@@ -4005,7 +4092,7 @@ index 854fa1e7f..8a76923c4 100644
  		CFRelease(executable);
  
  	}
-@@ -184,3 +205,25 @@ err_pre_info:
+@@ -184,3 +212,25 @@ err_pre_info:
  	CFRelease(rs);
  	CFRelease(info_plist_url);
  }

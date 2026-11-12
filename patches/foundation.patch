@@ -58,18 +58,38 @@ index 80c92bc..2a80df6 100644
 +
 +FOUNDATION_EXPORT NSString *const NSUserActivityTypeBrowsingWeb;
 diff --git a/src/NSAppleEventManager.m b/src/NSAppleEventManager.m
-index 194c5d0..6399cf8 100644
+index 194c5d0..de0045d 100644
 --- a/src/NSAppleEventManager.m
 +++ b/src/NSAppleEventManager.m
-@@ -1,6 +1,7 @@
+@@ -1,10 +1,26 @@
  #import <Foundation/NSAppleEventManager.h>
  #import <Foundation/NSMethodSignature.h>
  #import <Foundation/NSInvocation.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
 +#include <stdlib.h>
  
  static NSAppleEventManager* instance = nil;
  
-@@ -17,11 +18,47 @@ static NSAppleEventManager* instance = nil;
+-@implementation NSAppleEventManager
++/* darling-lol: handlers are recorded so Darling can dispatch the Apple events it
++ * synthesizes itself (an "open URL" delivered to a running app, see AppKit).
++ * As on macOS the handler object is not retained. */
++@implementation NSAppleEventManager {
++    NSMutableDictionary *_handlers;   /* (class << 32 | id) -> @[ nonretained handler, selector name ] */
++    NSAppleEventDescriptor *_currentEvent;
++    NSAppleEventDescriptor *_currentReply;
++}
++
++static NSNumber *HandlerKey(AEEventClass eventClass, AEEventID eventID)
++{
++    return [NSNumber numberWithUnsignedLongLong:((unsigned long long)eventClass << 32) | eventID];
++}
+ 
+ + (NSAppleEventManager *)sharedAppleEventManager
+ {
+@@ -17,11 +33,47 @@ static NSAppleEventManager* instance = nil;
  }
  
  - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
@@ -95,21 +115,21 @@ index 194c5d0..6399cf8 100644
 +}
 +
 +- (NSAppleEventDescriptor *)currentAppleEvent {
-+    /* There is no Apple event being dispatched: Darling does not receive
-+     * Carbon Apple events from the host. Apple returns nil outside of event
-+     * handling, and callers test for that. */
-+    return nil;
++    /* Only set while -_darlingDispatchAppleEvent: runs a handler; Apple returns nil
++     * outside of event handling, and callers test for that. */
++    return _currentEvent;
 +}
 +
 +- (NSAppleEventDescriptor *)currentReplyAppleEvent {
-+    return nil;
++    return _currentReply;
 +}
 +
 +- (void)removeEventHandlerForEventClass:(AEEventClass)eventClass
 +                             andEventID:(AEEventID)eventID
 +{
-+    /* Handlers registered by setEventHandler: are not dispatched yet, so
-+     * there is nothing to remove. */
++    @synchronized(self) {
++        [_handlers removeObjectForKey:HandlerKey(eventClass, eventID)];
++    }
 +}
 +
 +- (NSAppleEventManagerSuspensionID)suspendCurrentAppleEvent {
@@ -118,6 +138,53 @@ index 194c5d0..6399cf8 100644
  }
  
  - (void) setEventHandler: (id) handler
+@@ -29,7 +81,45 @@ static NSAppleEventManager* instance = nil;
+            forEventClass: (AEEventClass) eventClass
+               andEventID: (AEEventID) eventID
+ {
+-    printf("STUB %s\n", __PRETTY_FUNCTION__);
++    if (!handler || !selector)
++        return;
++    @synchronized(self) {
++        if (!_handlers)
++            _handlers = [NSMutableDictionary new];
++        [_handlers setObject:[NSArray arrayWithObjects:[NSValue valueWithNonretainedObject:handler],
++                                                       NSStringFromSelector(selector), nil]
++                      forKey:HandlerKey(eventClass, eventID)];
++    }
++}
++
++/* Darling-private: run the handler registered for the event's class and ID with
++ * `- (void)handler:(NSAppleEventDescriptor *)event withReplyEvent:(NSAppleEventDescriptor *)reply`.
++ * Returns NO when no handler is registered. Call it on the main thread. */
++- (BOOL)_darlingDispatchAppleEvent:(NSAppleEventDescriptor *)event
++{
++    NSArray *entry;
++    @synchronized(self) {
++        entry = [[[_handlers objectForKey:HandlerKey([event eventClass], [event eventID])] retain] autorelease];
++    }
++    if (!entry)
++        return NO;
++    id handler = [[entry objectAtIndex:0] nonretainedObjectValue];
++    SEL selector = NSSelectorFromString([entry objectAtIndex:1]);
++    if (![handler respondsToSelector:selector])
++        return NO;
++
++    NSAppleEventDescriptor *reply = [NSAppleEventDescriptor appleEventWithEventClass:'aevt' eventID:'ansr'
++                                                                    targetDescriptor:nil returnID:0 transactionID:0];
++    NSAppleEventDescriptor *savedEvent = _currentEvent, *savedReply = _currentReply;
++    _currentEvent = event;
++    _currentReply = reply;
++    @try {
++        [handler performSelector:selector withObject:event withObject:reply];
++    } @finally {
++        _currentEvent = savedEvent;
++        _currentReply = savedReply;
++    }
++    return YES;
+ }
+ 
+ @end
 diff --git a/src/NSBundle.m b/src/NSBundle.m
 index ce2819c..06b871d 100644
 --- a/src/NSBundle.m
@@ -644,3 +711,373 @@ index 09c0a73..53649d2 100644
  @end
 +
 +NSString *const NSUserActivityTypeBrowsingWeb = @"com.apple.coreservices.useractivity.browser";
+diff --git a/src/NSAppleEventDescriptor.m b/src/NSAppleEventDescriptor.m
+index 390be6c..96da1f1 100644
+--- a/src/NSAppleEventDescriptor.m
++++ b/src/NSAppleEventDescriptor.m
+@@ -1,21 +1,354 @@
+-#import <Foundation/NSObject.h>
++#import <Foundation/NSAppleEventDescriptor.h>
++#import <Foundation/NSArray.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
+ 
+-#import <Foundation/NSInvocation.h>
++/* darling-lol: a working descriptor for the Apple events Darling delivers itself
++ * (an "open URL" event handed to a running app). Darling receives no Apple events
++ * from outside, so there is no AEDesc behind a descriptor: -aeDesc returns NULL.
++ * Scalars and text are stored as bytes with their DescType, records and Apple
++ * events keep their parameters by keyword, lists keep their items in order. */
+ 
+-// DUMMY
++enum {
++	kDarlingTypeNull        = 'null',
++	kDarlingTypeBoolean     = 'bool',
++	kDarlingTypeTrue        = 'true',
++	kDarlingTypeFalse       = 'fals',
++	kDarlingTypeSInt32      = 'long',
++	kDarlingTypeEnumerated  = 'enum',
++	kDarlingTypeType        = 'type',
++	kDarlingTypeChar        = 'TEXT',
++	kDarlingTypeUTF8Text    = 'utf8',
++	kDarlingTypeUnicodeText = 'utxt',
++	kDarlingTypeUTF16       = 'ut16',
++	kDarlingTypeAEList      = 'list',
++	kDarlingTypeAERecord    = 'reco',
++	kDarlingTypeAppleEvent  = 'aevt',
++};
+ 
+-@interface NSAppleEventDescriptor : NSObject
+-@end
++@implementation NSAppleEventDescriptor {
++	DescType _type;
++	NSData *_data;
++	NSMutableArray *_items;               /* lists */
++	NSMutableArray *_keys;                /* records and events: keywords, in insertion order */
++	NSMutableDictionary *_values;         /* keyword -> descriptor */
++	NSMutableDictionary *_attributes;     /* events: keyword -> descriptor */
++	AEEventClass _eventClass;
++	AEEventID _eventID;
++	AEReturnID _returnID;
++	AETransactionID _transactionID;
++}
+ 
+-@implementation NSAppleEventDescriptor
+-- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
+++ (NSAppleEventDescriptor *)appleEventWithEventClass:(AEEventClass)eventClass
++                                             eventID:(AEEventID)eventID
++                                    targetDescriptor:(NSAppleEventDescriptor *)addressDescriptor
++                                            returnID:(AEReturnID)returnID
++                                       transactionID:(AETransactionID)transactionID
+ {
+-	return [NSMethodSignature signatureWithObjCTypes: "v@:"];
++	return [[[self alloc] initWithEventClass:eventClass eventID:eventID targetDescriptor:addressDescriptor
++	                                returnID:returnID transactionID:transactionID] autorelease];
+ }
+ 
+-- (void)forwardInvocation:(NSInvocation *)anInvocation
+++ (NSAppleEventDescriptor *)descriptorWithBoolean:(Boolean)boolean
+ {
+-	NSLog(@"Stub called: %@ in %@", NSStringFromSelector([anInvocation selector]), [self class]);
++	return [self descriptorWithDescriptorType:kDarlingTypeBoolean bytes:&boolean length:sizeof boolean];
++}
++
+++ (NSAppleEventDescriptor *)descriptorWithDescriptorType:(DescType)descriptorType
++                                                   bytes:(const void *)bytes
++                                                  length:(NSUInteger)byteCount
++{
++	return [[[self alloc] initWithDescriptorType:descriptorType bytes:bytes length:byteCount] autorelease];
++}
++
+++ (NSAppleEventDescriptor *)descriptorWithDescriptorType:(DescType)descriptorType data:(NSData *)data
++{
++	return [[[self alloc] initWithDescriptorType:descriptorType data:data] autorelease];
++}
++
+++ (NSAppleEventDescriptor *)descriptorWithEnumCode:(OSType)enumerator
++{
++	return [self descriptorWithDescriptorType:kDarlingTypeEnumerated bytes:&enumerator length:sizeof enumerator];
++}
++
+++ (NSAppleEventDescriptor *)descriptorWithInt32:(SInt32)signedInt
++{
++	return [self descriptorWithDescriptorType:kDarlingTypeSInt32 bytes:&signedInt length:sizeof signedInt];
++}
++
+++ (NSAppleEventDescriptor *)descriptorWithString:(NSString *)string
++{
++	NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
++	return data ? [self descriptorWithDescriptorType:kDarlingTypeUTF8Text data:data] : nil;
++}
++
+++ (NSAppleEventDescriptor *)descriptorWithTypeCode:(OSType)typeCode
++{
++	return [self descriptorWithDescriptorType:kDarlingTypeType bytes:&typeCode length:sizeof typeCode];
++}
++
+++ (NSAppleEventDescriptor *)listDescriptor
++{
++	return [[[self alloc] initListDescriptor] autorelease];
++}
++
+++ (NSAppleEventDescriptor *)nullDescriptor
++{
++	return [self descriptorWithDescriptorType:kDarlingTypeNull bytes:NULL length:0];
++}
++
+++ (NSAppleEventDescriptor *)recordDescriptor
++{
++	return [[[self alloc] initRecordDescriptor] autorelease];
+ }
+-@end
+ 
++- (id)init
++{
++	return [self initWithDescriptorType:kDarlingTypeNull bytes:NULL length:0];
++}
++
++- (id)initListDescriptor
++{
++	if ((self = [super init])) {
++		_type = kDarlingTypeAEList;
++		_items = [NSMutableArray new];
++	}
++	return self;
++}
++
++- (id)initRecordDescriptor
++{
++	if ((self = [super init])) {
++		_type = kDarlingTypeAERecord;
++		_keys = [NSMutableArray new];
++		_values = [NSMutableDictionary new];
++	}
++	return self;
++}
++
++- (id)initWithAEDescNoCopy:(const struct AEDesc *)aeDesc
++{
++	/* There are no AEDescs in Darling (see above). */
++	[self release];
++	return nil;
++}
++
++- (id)initWithDescriptorType:(DescType)descriptorType bytes:(const void *)bytes length:(NSUInteger)byteCount
++{
++	if ((self = [super init])) {
++		_type = descriptorType;
++		_data = (bytes && byteCount) ? [[NSData alloc] initWithBytes:bytes length:byteCount] : [NSData new];
++	}
++	return self;
++}
++
++- (id)initWithDescriptorType:(DescType)descriptorType data:(NSData *)data
++{
++	return [self initWithDescriptorType:descriptorType bytes:[data bytes] length:[data length]];
++}
++
++- (id)initWithEventClass:(AEEventClass)eventClass
++                 eventID:(AEEventID)eventID
++        targetDescriptor:(NSAppleEventDescriptor *)addressDescriptor
++                returnID:(AEReturnID)returnID
++           transactionID:(AETransactionID)transactionID
++{
++	if ((self = [self initRecordDescriptor])) {
++		_type = kDarlingTypeAppleEvent;
++		_eventClass = eventClass;
++		_eventID = eventID;
++		_returnID = returnID;
++		_transactionID = transactionID;
++		_attributes = [NSMutableDictionary new];
++		if (addressDescriptor)
++			[_attributes setObject:addressDescriptor forKey:[NSNumber numberWithUnsignedInt:'addr']];
++	}
++	return self;
++}
++
++- (void)dealloc
++{
++	[_data release];
++	[_items release];
++	[_keys release];
++	[_values release];
++	[_attributes release];
++	[super dealloc];
++}
++
++- (const struct AEDesc *)aeDesc
++{
++	return NULL;
++}
++
++- (DescType)descriptorType { return _type; }
++- (NSData *)data { return _data ? [[_data retain] autorelease] : [NSData data]; }
++- (AEEventClass)eventClass { return _eventClass; }
++- (AEEventID)eventID { return _eventID; }
++- (AEReturnID)returnID { return _returnID; }
++- (AETransactionID)transactionID { return _transactionID; }
++
++- (Boolean)booleanValue
++{
++	if (_type == kDarlingTypeTrue)
++		return true;
++	if (_type == kDarlingTypeFalse)
++		return false;
++	return [_data length] ? ((const unsigned char *)[_data bytes])[0] != 0 : false;
++}
++
++- (OSType)fourCharValue
++{
++	OSType value = 0;
++	if ([_data length] >= sizeof value)
++		[_data getBytes:&value length:sizeof value];
++	return value;
++}
++
++- (SInt32)int32Value { return (SInt32)[self fourCharValue]; }
++- (OSType)enumCodeValue { return [self fourCharValue]; }
++- (OSType)typeCodeValue { return [self fourCharValue]; }
++
++- (NSString *)stringValue
++{
++	NSStringEncoding encoding;
++	switch (_type) {
++	case kDarlingTypeUTF8Text: encoding = NSUTF8StringEncoding; break;
++	case kDarlingTypeChar: encoding = NSMacOSRomanStringEncoding; break;
++	case kDarlingTypeUnicodeText:
++	case kDarlingTypeUTF16: encoding = NSUTF16StringEncoding; break;
++	default: return nil;
++	}
++	return [[[NSString alloc] initWithData:_data encoding:encoding] autorelease];
++}
++
++- (NSAppleEventDescriptor *)coerceToDescriptorType:(DescType)descriptorType
++{
++	if (descriptorType == _type)
++		return self;
++	NSString *string = [self stringValue];
++	if (string && descriptorType == kDarlingTypeUTF8Text)
++		return [NSAppleEventDescriptor descriptorWithString:string];
++	return nil;
++}
++
++/* Lists (1-based, as in AppKit). Records answer numberOfItems/descriptorAtIndex too. */
++
++- (NSInteger)numberOfItems
++{
++	if (_items)
++		return [_items count];
++	return _keys ? [_keys count] : 0;
++}
++
++- (NSAppleEventDescriptor *)descriptorAtIndex:(NSInteger)anIndex
++{
++	if (anIndex < 1 || anIndex > [self numberOfItems])
++		return nil;
++	if (_items)
++		return [_items objectAtIndex:anIndex - 1];
++	return [_values objectForKey:[_keys objectAtIndex:anIndex - 1]];
++}
++
++- (void)insertDescriptor:(NSAppleEventDescriptor *)descriptor atIndex:(NSInteger)anIndex
++{
++	if (!_items || !descriptor)
++		return;
++	/* As in AppKit, 0 (or anything past the end) appends. */
++	NSUInteger index = (anIndex < 1 || (NSUInteger)anIndex > [_items count]) ? [_items count] : anIndex - 1;
++	[_items insertObject:descriptor atIndex:index];
++}
++
++- (void)removeDescriptorAtIndex:(NSInteger)anIndex
++{
++	if (_items && anIndex >= 1 && anIndex <= (NSInteger)[_items count])
++		[_items removeObjectAtIndex:anIndex - 1];
++}
++
++- (AEKeyword)keywordForDescriptorAtIndex:(NSInteger)anIndex
++{
++	if (!_keys || anIndex < 1 || anIndex > (NSInteger)[_keys count])
++		return 0;
++	return [[_keys objectAtIndex:anIndex - 1] unsignedIntValue];
++}
++
++/* Records and Apple events. */
++
++- (NSAppleEventDescriptor *)descriptorForKeyword:(AEKeyword)keyword
++{
++	return [_values objectForKey:[NSNumber numberWithUnsignedInt:keyword]];
++}
++
++- (void)setDescriptor:(NSAppleEventDescriptor *)descriptor forKeyword:(AEKeyword)keyword
++{
++	if (!_values)
++		return;
++	NSNumber *key = [NSNumber numberWithUnsignedInt:keyword];
++	if (!descriptor) {
++		[self removeDescriptorWithKeyword:keyword];
++		return;
++	}
++	if (![_values objectForKey:key])
++		[_keys addObject:key];
++	[_values setObject:descriptor forKey:key];
++}
++
++- (void)removeDescriptorWithKeyword:(AEKeyword)keyword
++{
++	NSNumber *key = [NSNumber numberWithUnsignedInt:keyword];
++	[_values removeObjectForKey:key];
++	[_keys removeObject:key];
++}
++
++- (NSAppleEventDescriptor *)paramDescriptorForKeyword:(AEKeyword)keyword
++{
++	return [self descriptorForKeyword:keyword];
++}
++
++- (void)setParamDescriptor:(NSAppleEventDescriptor *)descriptor forKeyword:(AEKeyword)keyword
++{
++	[self setDescriptor:descriptor forKeyword:keyword];
++}
++
++- (void)removeParamDescriptorWithKeyword:(AEKeyword)keyword
++{
++	[self removeDescriptorWithKeyword:keyword];
++}
++
++- (NSAppleEventDescriptor *)attributeDescriptorForKeyword:(AEKeyword)keyword
++{
++	return [_attributes objectForKey:[NSNumber numberWithUnsignedInt:keyword]];
++}
++
++- (void)setAttributeDescriptor:(NSAppleEventDescriptor *)descriptor forKeyword:(AEKeyword)keyword
++{
++	if (!_attributes)
++		return;
++	NSNumber *key = [NSNumber numberWithUnsignedInt:keyword];
++	if (descriptor)
++		[_attributes setObject:descriptor forKey:key];
++	else
++		[_attributes removeObjectForKey:key];
++}
++
++static NSString *FourCharString(OSType code)
++{
++	char text[5] = { (char)(code >> 24), (char)(code >> 16), (char)(code >> 8), (char)code, 0 };
++	return [NSString stringWithCString:text encoding:NSMacOSRomanStringEncoding];
++}
++
++- (NSString *)description
++{
++	if (_type == kDarlingTypeAppleEvent)
++		return [NSString stringWithFormat:@"<NSAppleEventDescriptor: %@/%@, %lu params>",
++		        FourCharString(_eventClass), FourCharString(_eventID), (unsigned long)[_keys count]];
++	NSString *string = [self stringValue];
++	if (string)
++		return [NSString stringWithFormat:@"<NSAppleEventDescriptor: %@>", string];
++	return [NSString stringWithFormat:@"<NSAppleEventDescriptor: %@, %lu bytes>",
++	        FourCharString(_type), (unsigned long)[_data length]];
++}
++
++@end
