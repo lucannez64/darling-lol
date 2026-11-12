@@ -161,7 +161,7 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 10,
+      "modified_files": 11,
       "new_files": [
         "src/NSConstantNumber.m"
       ]

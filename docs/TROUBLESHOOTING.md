@@ -605,6 +605,25 @@ LaunchServices dereferenced a nullable error-output pointer in six paths. The pa
 
 LaunchServices now opens `http`, `https` and `mailto` links on the Linux desktop itself. It loads the host's `libsystemd.so.0` and asks `xdg-desktop-portal` (`org.freedesktop.portal.OpenURI`) on the user session bus to open the link, so your default browser starts outside Darling and survives `darling shutdown`. Without a portal, it starts `xdg-open` in a transient systemd user unit instead. It also reports a handler for these schemes, since Electron checks for one before opening a link. Other schemes, control characters and URLs over 4096 bytes are rejected. If a link still does nothing, check the client's stderr for a `LaunchServices:` line and that `busctl --user status org.freedesktop.portal.Desktop` works on the host. Both LaunchServices and AppKit must be rebuilt. The hand-off passed the host-side D-Bus regression and opened the host browser from a guest through both `open(1)` and `NSWorkspace`; a link clicked in the Riot client is not yet confirmed. The null-pointer fix does not explain every unrelated button crash.
 
+## Google or another social sign-in never comes back from the browser
+
+Social sign-in opens in the host browser and finishes at a `riotclient://auth/...` link. On macOS, LaunchServices hands that link to the running Riot Client as a `kAEGetURL` Apple event. Under Darling it was lost twice:
+
+- The host had no handler for `riotclient://`.
+- Darling had no Apple event delivery: `NSAppleEventManager` only printed `STUB`, and LaunchServices rejected every scheme except `http`, `https`, `mailto` and `file`.
+
+The link now reaches the client:
+
+- `scripts/create-desktop-entry.sh` installs `darling-url-handler.desktop`, which declares `x-scheme-handler/riotclient`. It is hidden from menus and is not added as a desktop shortcut. It is used only while no other application claims the scheme; your own choices in `mimeapps.list` take precedence.
+- When the browser opens such a link, `scripts/open-guest-url.sh` forwards it with `darling shell /usr/bin/open`. It only forwards into a Darling session that is already running and never starts one. It accepts only `riotclient://` links of at most 4096 bytes without control characters. The outcome goes to `build/open-url.log`; the link itself is never logged, because it carries a sign-in token.
+- In the guest, every app that declares URL schemes in `CFBundleURLTypes` serves one `CFMessagePort` per scheme, named `org.darlinghq.url-event.<scheme>`. LaunchServices (`open`, `LSOpenCFURLRef`, `NSWorkspace`) sends the URL there.
+- The app checks the URL again: the scheme must be one it declares, and the URL must be at most 4096 bytes with no control characters. It then delivers the URL to its registered `kAEGetURL` handler, or else to `-application:openURLs:`.
+- If no running app serves a scheme, LaunchServices still returns `kLSApplicationNotFoundErr`; an app is not launched for it.
+
+If sign-in still does not complete, check `build/open-url.log` and that `xdg-mime query default x-scheme-handler/riotclient` names `darling-url-handler.desktop`. The guest side is covered by `tools/riot-url-event-check.m`: build it with `tools/build-riot-url-event-check.py`, then run `build/RiotURLEventCheck.app/Contents/MacOS/RiotURLEventCheck` inside the guest with `DISPLAY` set.
+
+The packaged (Nix) desktop entry does not install the link handler yet.
+
 ## Riot client shows "Not Found" instead of its UI
 
 On affected setups, including the reported NixOS installation, the client window opens but only shows `Not Found`, and its log has `ENOENT, dist/renderer/index.html not found in …/app.asar` although the archive contains that file. Electron's asynchronous file opening can copy an archive entry to a temporary file first (`copyFileOut`), and a failed copy can be reported as "not found". Chromium checks `MAC_CHROMIUM_TMPDIR` before falling back to `NSTemporaryDirectory()`; an unusable default temporary directory can therefore produce this symptom even while synchronous archive reads work.

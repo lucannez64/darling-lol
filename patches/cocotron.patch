@@ -463,20 +463,21 @@ index acb19858..ed2a77c6 100644
 +
 +@end
 diff --git a/AppKit/NSApplication.m b/AppKit/NSApplication.m
-index 8e7508e..d249f71 100644
+index 8e7508e..5275db4 100644
 --- a/AppKit/NSApplication.m
 +++ b/AppKit/NSApplication.m
-@@ -17,6 +17,9 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+@@ -17,6 +17,10 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
  IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  
 +#if defined(DARLING)
 +#include <mach/mach_time.h>
++#include <CoreFoundation/CFMessagePort.h>
 +#endif
  #import <AppKit/NSAlert.h>
  #import <AppKit/NSApplication.h>
  #import <AppKit/NSColorPanel.h>
-@@ -37,12 +40,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -37,12 +41,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSSheetContext.h>
  #import <AppKit/NSSpellChecker.h>
  #import <AppKit/NSSystemInfoPanel.h>
@@ -493,7 +494,85 @@ index 8e7508e..d249f71 100644
  const NSRunLoopMode NSModalPanelRunLoopMode = @"NSModalPanelRunLoopMode";
  const NSRunLoopMode NSEventTrackingRunLoopMode = @"NSEventTrackingRunLoopMode";
  
-@@ -271,6 +278,11 @@ NSApplication *NSApp = nil;
+@@ -101,6 +109,77 @@ NSApplication *NSApp = nil;
+ - initWithOwner: owner;
+ @end
+ 
++// darling-lol: URL events for running apps.
++//
++// On macOS, LaunchServices hands a URL whose scheme an app declares in
++// CFBundleURLTypes to that app as a kInternetEventClass/kAEGetURL Apple event (or
++// to -application:openURLs:). Darling has no Apple event transport, so each app
++// that declares URL schemes serves one CFMessagePort per scheme, named
++// DARLING_URL_EVENT_PORT_PREFIX + scheme; LaunchServices (LSOpen.m) sends the URL
++// there. The URL is checked again here, since any guest process can send.
++#define DARLING_URL_EVENT_PORT_PREFIX @"org.darlinghq.url-event."
++#define DARLING_URL_EVENT_MAX_LENGTH 4096
++enum { kDarlingInternetEventClass = 'GURL', kDarlingAEGetURL = 'GURL', kDarlingKeyDirectObject = '----' };
++
++@interface NSAppleEventManager (DarlingURLEvents)
++- (BOOL) _darlingDispatchAppleEvent: (NSAppleEventDescriptor *) event;
++@end
++
++// NSApplicationDelegate method (macOS 10.13) that Cocotron's headers do not declare.
++@protocol _DarlingOpenURLsDelegate
++- (void) application: (NSApplication *) application openURLs: (NSArray *) urls;
++@end
++
++static BOOL _darlingURLIsDeliverable(NSString *url, NSString *scheme) {
++    NSUInteger length = [url length];
++    if (length == 0 || [url lengthOfBytesUsingEncoding: NSUTF8StringEncoding] > DARLING_URL_EVENT_MAX_LENGTH)
++        return NO;
++    for (NSUInteger i = 0; i < length; i++) {
++        unichar c = [url characterAtIndex: i];
++        if (c < 0x20 || c == 0x7f)
++            return NO;
++    }
++    NSRange colon = [url rangeOfString: @":"];
++    return colon.location != NSNotFound &&
++           [[[url substringToIndex: colon.location] lowercaseString] isEqualToString: scheme];
++}
++
++static CFDataRef _darlingURLEventReceived(CFMessagePortRef port, SInt32 msgid, CFDataRef data, void *info) {
++    NSString *scheme = (NSString *) info;
++    NSString *url = data ? [[[NSString alloc] initWithData: (NSData *) data encoding: NSUTF8StringEncoding] autorelease] : nil;
++    BOOL delivered = NO;
++
++    if (url && _darlingURLIsDeliverable(url, scheme)) {
++        NSAppleEventDescriptor *event =
++            [NSAppleEventDescriptor appleEventWithEventClass: kDarlingInternetEventClass
++                                                     eventID: kDarlingAEGetURL
++                                            targetDescriptor: nil
++                                                    returnID: -1
++                                               transactionID: 0];
++        [event setParamDescriptor: [NSAppleEventDescriptor descriptorWithString: url]
++                       forKeyword: kDarlingKeyDirectObject];
++        NS_DURING
++            delivered = [[NSAppleEventManager sharedAppleEventManager] _darlingDispatchAppleEvent: event];
++            id delegate = [NSApp delegate];
++            NSURL *nsurl = [NSURL URLWithString: url];
++            if (!delivered && nsurl && [delegate respondsToSelector: @selector(application:openURLs:)]) {
++                [(id<_DarlingOpenURLsDelegate>) delegate application: NSApp
++                                                             openURLs: [NSArray arrayWithObject: nsurl]];
++                delivered = YES;
++            }
++        NS_HANDLER
++            [NSApp reportException: localException];
++        NS_ENDHANDLER
++    } else {
++        NSLog(@"Rejected a URL event for scheme %@ (malformed, oversized or another scheme)", scheme);
++    }
++    if (!delivered && url)
++        NSLog(@"No handler for a %@ URL event", scheme);
++
++    UInt8 status = delivered ? 1 : 0;
++    return CFDataCreate(NULL, &status, 1);
++}
++
+ @implementation NSApplication
+ 
+ + (NSApplication *) sharedApplication {
+@@ -271,6 +350,11 @@ NSApplication *NSApp = nil;
      return _isRunning;
  }
  
@@ -505,7 +584,7 @@ index 8e7508e..d249f71 100644
  - (NSWindow *) makeWindowsPerform: (SEL) selector inOrder: (BOOL) inOrder {
      NSUnimplementedMethod();
      return nil;
-@@ -382,7 +394,18 @@ NSApplication *NSApp = nil;
+@@ -382,7 +466,18 @@ NSApplication *NSApp = nil;
  - (void) setDelegate: delegate {
      if (delegate != _delegate) {
          [self unregisterDelegate];
@@ -525,9 +604,52 @@ index 8e7508e..d249f71 100644
          [self registerDelegate];
      }
  }
-@@ -550,6 +573,13 @@ NSApplication *NSApp = nil;
+@@ -549,7 +644,56 @@ NSApplication *NSApp = nil;
+     return opened;
  }
  
++- (void) _darlingStartURLEventInboxes {
++    NSArray *types = [[NSBundle mainBundle] objectForInfoDictionaryKey: @"CFBundleURLTypes"];
++    if (![types isKindOfClass: [NSArray class]])
++        return;
++    NSCharacterSet *schemeChars = [NSCharacterSet characterSetWithCharactersInString:
++            @"abcdefghijklmnopqrstuvwxyz0123456789+-."];
++    // Schemes compare case-insensitively; one port per scheme even if declared twice.
++    NSMutableSet *served = [NSMutableSet set];
++    for (NSDictionary *type in types) {
++        if (![type isKindOfClass: [NSDictionary class]])
++            continue;
++        NSArray *schemes = [type objectForKey: @"CFBundleURLSchemes"];
++        if (![schemes isKindOfClass: [NSArray class]])
++            continue;
++        for (NSString *declared in schemes) {
++            if (![declared isKindOfClass: [NSString class]] || [declared length] == 0)
++                continue;
++            NSString *scheme = [declared lowercaseString];
++            if ([[scheme stringByTrimmingCharactersInSet: schemeChars] length] != 0)
++                continue;
++            // http(s) and file belong to the host browser and the file system.
++            if ([scheme isEqualToString: @"http"] || [scheme isEqualToString: @"https"] ||
++                [scheme isEqualToString: @"file"] || [served containsObject: scheme])
++                continue;
++            [served addObject: scheme];
++            CFMessagePortContext context = { 0, [scheme retain], NULL, NULL, NULL };
++            CFStringRef name = (CFStringRef) [DARLING_URL_EVENT_PORT_PREFIX stringByAppendingString: scheme];
++            CFMessagePortRef port = CFMessagePortCreateLocal(NULL, name, _darlingURLEventReceived, &context, NULL);
++            if (!port) {
++                // Another running app already serves this scheme; the first one keeps it.
++                NSLog(@"Not serving %@ URL events: another app already does", scheme);
++                [scheme release];
++                continue;
++            }
++            CFRunLoopSourceRef source = CFMessagePortCreateRunLoopSource(NULL, port, 0);
++            CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
++            CFRelease(source);
++            // The port lives as long as the app.
++        }
++    }
++}
++
  - (void) finishLaunching {
 +    // AppKit guarantees that launch notifications are delivered once. Some
 +    // clients call finishLaunching from their delegate path and NSApplication
@@ -539,15 +661,17 @@ index 8e7508e..d249f71 100644
      NSAutoreleasePool *pool = [NSAutoreleasePool new];
      BOOL needsUntitled = YES;
  
-@@ -558,7 +588,6 @@ NSApplication *NSApp = nil;
+@@ -558,7 +702,8 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
      NS_ENDHANDLER
 -
++    // Handlers for URL events are registered by now (applicationWillFinishLaunching:).
++    [self _darlingStartURLEventInboxes];
      // Load the application icon if we have one
      NSString *iconName = [[[NSBundle mainBundle] infoDictionary]
              objectForKey: @"CFBundleIconFile"];
-@@ -614,7 +643,6 @@ NSApplication *NSApp = nil;
+@@ -614,7 +759,6 @@ NSApplication *NSApp = nil;
                            object: self];
      NS_HANDLER [self reportException: localException];
      NS_ENDHANDLER
@@ -555,7 +679,7 @@ index 8e7508e..d249f71 100644
              [pool release];
  }
  
-@@ -652,7 +680,15 @@ NSApplication *NSApp = nil;
+@@ -652,7 +796,15 @@ NSApplication *NSApp = nil;
          }
      }
  
@@ -572,7 +696,7 @@ index 8e7508e..d249f71 100644
  }
  
  - (void) _checkForAppActivation {
-@@ -666,17 +702,13 @@ NSApplication *NSApp = nil;
+@@ -666,17 +818,13 @@ NSApplication *NSApp = nil;
  }
  
  - (void) run {
@@ -593,7 +717,7 @@ index 8e7508e..d249f71 100644
  
      do {
          pool = [NSAutoreleasePool new];
-@@ -716,6 +748,16 @@ NSApplication *NSApp = nil;
+@@ -716,6 +864,16 @@ NSApplication *NSApp = nil;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -610,7 +734,7 @@ index 8e7508e..d249f71 100644
      if ([event type] == NSKeyDown) {
          unsigned modifierFlags = [event modifierFlags];
  
-@@ -742,6 +784,61 @@ NSApplication *NSApp = nil;
+@@ -742,6 +900,61 @@ NSApplication *NSApp = nil;
      do {
          NSAutoreleasePool *pool = [NSAutoreleasePool new];
  
@@ -672,7 +796,7 @@ index 8e7508e..d249f71 100644
          NS_DURING [NSClassFromString(@"Win32RunningCopyPipe")
                  performSelector: @selector(createRunningCopyPipe)];
  
-@@ -926,13 +1023,26 @@ NSApplication *NSApp = nil;
+@@ -926,13 +1139,26 @@ NSApplication *NSApp = nil;
  }
  
  - (void) activateIgnoringOtherApps: (BOOL) flag {
@@ -700,7 +824,7 @@ index 8e7508e..d249f71 100644
  - (NSWindow *) modalWindow {
      return [[_modalStack lastObject] modalWindow];
  }
-@@ -1682,3 +1792,26 @@ BOOL NSPerformService(NSString *itemName, NSPasteboard *pasteboard) {
+@@ -1682,3 +1908,26 @@ BOOL NSPerformService(NSString *itemName, NSPasteboard *pasteboard) {
      NSUnimplementedFunction();
      return NO;
  }
