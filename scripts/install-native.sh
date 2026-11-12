@@ -25,11 +25,6 @@ REGIONS=(
   'LAS|Latin America South'
   'TR|Turkey'
   'RU|Russia'
-  'SEA|Southeast Asia'
-  'TW|Taiwan'
-  'VN|Vietnam'
-  'ME|Middle East'
-  'PBE|Public Beta Environment'
 )
 BG_PID=''
 SUDO_PID=''
