@@ -50,6 +50,7 @@ class CFNetworkHTTPS(unittest.TestCase):
         lines = added('src/URL/CFURLConnection.c')
         self.assertIn('z_stream *zStream = connection->zStream;', lines)
         self.assertIn('status = inflate(zStream, Z_BLOCK);', lines)
+        self.assertIn('CFDataIncreaseLength(outputData, halfLength > 0 ? halfLength : 1);', lines)
 
     def test_manifest_counts_the_patched_files(self):
         manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())

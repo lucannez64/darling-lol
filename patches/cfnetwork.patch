@@ -85,10 +85,10 @@ index 05e8e4c..8d334e5 100644
  
          else if (value) {
 diff --git a/src/URL/CFURLConnection.c b/src/URL/CFURLConnection.c
-index fdc7bc7..cc752d1 100644
+index fdc7bc7..932eb03 100644
 --- a/src/URL/CFURLConnection.c
 +++ b/src/URL/CFURLConnection.c
-@@ -432,21 +432,23 @@ static void connectionDecodeData(struct _CFURLConnection *connection, CFDataRef
+@@ -432,21 +432,24 @@ static void connectionDecodeData(struct _CFURLConnection *connection, CFDataRef
      CFMutableDataRef outputData = CFDataCreateMutable(kCFAllocatorDefault, 0);
      CFDataIncreaseLength(outputData, length + halfLength);
  
@@ -100,6 +100,7 @@ index fdc7bc7..cc752d1 100644
 -    while (zStream.avail_in != 0) {
 -
 -        if (zStream.total_out >= CFDataGetLength(outputData)) {
+-            CFDataIncreaseLength(outputData, halfLength);
 +    /* Inflate with the connection's own stream: zlib rejects a copied z_stream (its state points back at
 +     * the original), and a copy would also drop the state needed by the next chunk of the body. */
 +    z_stream *zStream = connection->zStream;
@@ -110,7 +111,8 @@ index fdc7bc7..cc752d1 100644
 +    while (zStream->avail_in != 0) {
 +
 +        if (zStream->total_out >= CFDataGetLength(outputData)) {
-             CFDataIncreaseLength(outputData, halfLength);
++            /* At least one byte: a one-byte read has halfLength 0, and inflate() with no output space fails. */
++            CFDataIncreaseLength(outputData, halfLength > 0 ? halfLength : 1);
          }
  
 -        zStream.next_out = (Bytef *)CFDataGetMutableBytePtr(outputData) + zStream.total_out;
@@ -123,7 +125,7 @@ index fdc7bc7..cc752d1 100644
          if (status == Z_STREAM_END) {
              break;
          } else if (status < 0) {
-@@ -455,7 +457,7 @@ static void connectionDecodeData(struct _CFURLConnection *connection, CFDataRef
+@@ -455,7 +458,7 @@ static void connectionDecodeData(struct _CFURLConnection *connection, CFDataRef
      }
  
      if (status == Z_OK || status == Z_STREAM_END) {
@@ -132,7 +134,7 @@ index fdc7bc7..cc752d1 100644
          connectionGotData(connection, outputData);
      } else {
          CFErrorRef error = CFErrorCreate(kCFAllocatorDefault, ErrorDomain, kCFURLErrorCannotDecodeRawData, nil);
-@@ -660,10 +662,14 @@ static void readStreamEvent(CFReadStreamRef stream, CFStreamEventType type, void
+@@ -660,10 +663,14 @@ static void readStreamEvent(CFReadStreamRef stream, CFStreamEventType type, void
              }
  
              if (length) {
