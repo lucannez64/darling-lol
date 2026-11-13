@@ -363,7 +363,7 @@ index 0000000..1741d59
 +	free(fp);
 +}
 diff --git a/duct-tape/src/host.c b/duct-tape/src/host.c
-index a841dfd..9fe8bb4 100644
+index a841dfd..1612038 100644
 --- a/duct-tape/src/host.c
 +++ b/duct-tape/src/host.c
 @@ -28,6 +28,64 @@ long sysconf(int name);
@@ -451,6 +451,121 @@ index a841dfd..9fe8bb4 100644
  				basic_info->logical_cpu = basic_info->avail_cpus;
  				basic_info->logical_cpu_max = basic_info->max_cpus;
  
+@@ -229,17 +292,110 @@ kern_return_t host_statistics(host_t host, host_flavor_t flavor, host_info_t inf
+ 	}
+ };
+ 
++// darling-lol: host_statistics64(HOST_VM_INFO64) used to return an all-zero
++// vm_statistics64, so guests computed 0 bytes of free memory next to a correct
++// hw.memsize. Report the host's real numbers from /proc/meminfo instead.
++//
++// Linux -> Mach mapping (pages of the guest page size):
++//   free_count     MemFree
++//   active_count   Active
++//   inactive_count Inactive
++//   wire_count     MemTotal - MemFree - Active - Inactive (kernel, slab, ...)
++//   external/internal_page_count  file-backed / anonymous LRU pages
++// so free + active + inactive + wire is exactly MemTotal, the same total that
++// host_info(HOST_BASIC_INFO) reports from sysinfo. Returns 0 when /proc/meminfo
++// cannot be read or has no MemTotal; the caller then keeps the zeroed struct.
++struct dtape_meminfo {
++	uint64_t total, free, active, inactive, active_anon, inactive_anon, active_file, inactive_file;
++};
++
++static int dtape_meminfo_field(const char* line, const char* name, uint64_t* out_bytes) {
++	uint64_t kb = 0;
++
++	while (*name != '\0') {
++		if (*line++ != *name++) {
++			return 0;
++		}
++	}
++	if (*line++ != ':') {
++		return 0;
++	}
++	while (*line == ' ' || *line == '\t') {
++		++line;
++	}
++	if (*line < '0' || *line > '9') {
++		return 0;
++	}
++	while (*line >= '0' && *line <= '9') {
++		kb = kb * 10 + (uint64_t)(*line++ - '0');
++	}
++	*out_bytes = kb * 1024;
++	return 1;
++}
++
++static int dtape_read_meminfo(struct dtape_meminfo* mi) {
++	char buf[4096];
++	long len = 0;
++	long n;
++
++	int fd = open("/proc/meminfo", 0 /* O_RDONLY */);
++	if (fd < 0) {
++		return 0;
++	}
++	while (len < (long)sizeof(buf) - 1 && (n = read(fd, buf + len, sizeof(buf) - 1 - len)) > 0) {
++		len += n;
++	}
++	close(fd);
++	buf[len] = '\0';
++
++	memset(mi, 0, sizeof(*mi));
++	for (const char* line = buf; *line != '\0';) {
++		(void)(dtape_meminfo_field(line, "MemTotal", &mi->total)
++			|| dtape_meminfo_field(line, "MemFree", &mi->free)
++			|| dtape_meminfo_field(line, "Active", &mi->active)
++			|| dtape_meminfo_field(line, "Inactive", &mi->inactive)
++			|| dtape_meminfo_field(line, "Active(anon)", &mi->active_anon)
++			|| dtape_meminfo_field(line, "Inactive(anon)", &mi->inactive_anon)
++			|| dtape_meminfo_field(line, "Active(file)", &mi->active_file)
++			|| dtape_meminfo_field(line, "Inactive(file)", &mi->inactive_file));
++		while (*line != '\0' && *line != '\n') {
++			++line;
++		}
++		if (*line == '\n') {
++			++line;
++		}
++	}
++	return mi->total != 0;
++}
++
+ kern_return_t vm_stats(void* info, unsigned int* count) {
+ 	vm_statistics64_t stat = (vm_statistics64_t)info;
++	mach_msg_type_number_t original_count = *count;
++	struct dtape_meminfo mi;
+ 
+-	if (*count < HOST_VM_INFO64_COUNT)
++	// as in XNU: callers built against the rev0 structure are still served
++	if (original_count < HOST_VM_INFO64_REV0_COUNT)
+ 		return (KERN_FAILURE);
+ 
+-	memset(stat, 0, sizeof(*stat));
++	memset(stat, 0, (original_count < HOST_VM_INFO64_COUNT ? original_count : HOST_VM_INFO64_COUNT) * sizeof(integer_t));
++
++	if (dtape_read_meminfo(&mi)) {
++		uint64_t used = mi.free + mi.active + mi.inactive;
++
++		stat->free_count = (natural_t)(mi.free / PAGE_SIZE);
++		stat->active_count = (natural_t)(mi.active / PAGE_SIZE);
++		stat->inactive_count = (natural_t)(mi.inactive / PAGE_SIZE);
++		stat->wire_count = (natural_t)((mi.total > used ? mi.total - used : 0) / PAGE_SIZE);
++
++		if (original_count >= HOST_VM_INFO64_REV1_COUNT) {
++			stat->external_page_count = (natural_t)((mi.active_file + mi.inactive_file) / PAGE_SIZE);
++			stat->internal_page_count = (natural_t)((mi.active_anon + mi.inactive_anon) / PAGE_SIZE);
++		}
++	}
+ 
+-	dtape_stub("TODO: actually fill in the values with something useful");
++	// event counters (faults, pageins, ...), compressor and swap statistics stay zero
+ 
+-	*count = HOST_VM_INFO64_COUNT;
++	*count = (original_count >= HOST_VM_INFO64_REV1_COUNT) ? HOST_VM_INFO64_REV1_COUNT : HOST_VM_INFO64_REV0_COUNT;
+ 
+ 	return KERN_SUCCESS;
+ };
 diff --git a/duct-tape/src/kqchan.c b/duct-tape/src/kqchan.c
 index 458e659..2e33f20 100644
 --- a/duct-tape/src/kqchan.c

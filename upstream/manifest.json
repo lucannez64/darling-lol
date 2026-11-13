@@ -224,7 +224,7 @@
       "revision": "56c5fad43f24a40d8ca7f8a1d0badedfeaf7e64e",
       "repository": "https://github.com/darlinghq/darling-libnetwork.git",
       "patch": "patches/libnetwork.patch",
-      "modified_files": 2,
+      "modified_files": 4,
       "new_files": []
     },
     {
@@ -321,7 +321,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 95,
+      "modified_files": 97,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
