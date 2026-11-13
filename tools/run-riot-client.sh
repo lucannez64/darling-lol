@@ -191,6 +191,9 @@ if [ -z "${RIOT_LAUNCHER_HOST:-}" ]; then
  elif [ "${RCLOL_HIDE_CLIENT_IN_GAME:-0}" = 1 ]; then
   python3 "$runner_dir/hide-league-client-in-game.py" --detach &
  fi
+ if [ "${RCLOL_HIDE_LEAGUE_SPLASH:-0}" = 1 ]; then
+  python3 "$runner_dir/hide-league-splash-window.py" --detach &
+ fi
 fi
 A=${RIOT_LAUNCHER_HOST:-"$client/Contents/MacOS/RiotClientServices"}
 # External XIM (for example Fcitx) consumes keys before Darling forwards them.

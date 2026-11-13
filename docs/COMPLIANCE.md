@@ -49,9 +49,10 @@ compatibility.
   authentication, attestations, or acceptance by third-party services. See
   [platform identity](PLATFORM_IDENTITY.md#hardware-presentation-profile) for the
   additional Security notarization fallback enabled by this profile.
-- The opt-in hide helper manages local client windows while a match runs. The opt-in close helper
-  terminates eligible League client UI processes. Neither helper patches client binaries, CEF,
-  anti-cheat or DRM, and both helpers are off by default.
+- The opt-in hide helpers manage local client windows: the in-game League client UI and the
+  League splash overlay. The opt-in close helper terminates eligible League client UI processes.
+  None of these helpers patch client binaries, CEF, anti-cheat or DRM, and all are off by
+  default.
 
 ## Assets and third-party material
 
