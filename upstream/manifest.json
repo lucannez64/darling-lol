@@ -376,7 +376,7 @@
       "revision": "e7e3db881008d883f82914765a72ce842bcba735",
       "repository": "https://github.com/darlinghq/darling-cfnetwork.git",
       "patch": "patches/cfnetwork.patch",
-      "modified_files": 4,
+      "modified_files": 7,
       "new_files": []
     },
     {
