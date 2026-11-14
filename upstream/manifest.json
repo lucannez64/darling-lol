@@ -209,8 +209,7 @@
       "repository": "https://github.com/darlinghq/darling-libkqueue.git",
       "patch": "patches/libkqueue.patch",
       "modified_files": 13,
-      "new_files": [],
-      "patch_sha256": "329a21bfb8df03cf8b5467073642959e99dd602d540aabc09c2bca478505eb35"
+      "new_files": []
     },
     {
       "path": "src/external/libmalloc",
