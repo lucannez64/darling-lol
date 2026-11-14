@@ -1456,11 +1456,13 @@ diff --git a/AppKit/NSEvent.subproj/NSEvent_mouse.m b/AppKit/NSEvent.subproj/NSE
 index 31c65aa..d73e12a 100644
 --- a/AppKit/NSEvent.subproj/NSEvent_mouse.m
 +++ b/AppKit/NSEvent.subproj/NSEvent_mouse.m
-@@ -18,6 +18,11 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+@@ -18,6 +18,13 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
  IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSEvent_mouse.h>
 +#import <CoreGraphics/CGEvent.h>
++#import <AppKit/NSWindow.h>
++#import <AppKit/NSScreen.h>
 +
 +@interface NSObject (MouseCGEventFlags)
 +- (void)setFlags:(CGEventFlags)flags;
@@ -1468,7 +1470,7 @@ index 31c65aa..d73e12a 100644
  
  @implementation NSEvent_mouse
  
-@@ -34,6 +39,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -34,6 +41,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
              modifierFlags: modifierFlags
                     window: window];
  
@@ -1477,7 +1479,7 @@ index 31c65aa..d73e12a 100644
      _clickCount = clickCount;
      _deltaX = deltaX;
      _deltaY = deltaY;
-@@ -45,6 +52,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -45,6 +54,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      return _clickCount;
  }
  
@@ -1491,7 +1493,7 @@ index 31c65aa..d73e12a 100644
  - (instancetype) initWithType: (NSEventType) type
                       location: (NSPoint) location
                  modifierFlags: (NSEventModifierFlags) modifierFlags
-@@ -74,8 +88,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -74,8 +90,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      self = [super initWithType: type
                        location: location
                   modifierFlags: modifierFlags
@@ -1505,7 +1507,7 @@ index 31c65aa..d73e12a 100644
          _trackingNumber = tracking;
          _userData = userData;
      }
-@@ -95,7 +113,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -95,7 +115,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      [super initWithType: type
                   location: location
              modifierFlags: modifierFlags
@@ -1520,7 +1522,7 @@ index 31c65aa..d73e12a 100644
      _clickCount = clickCount;
      return self;
  }
-@@ -112,6 +136,39 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -112,6 +138,52 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      return 0.0;
  }
  
@@ -1533,6 +1535,19 @@ index 31c65aa..d73e12a 100644
 +- (CGFloat) scrollingDeltaX { return _deltaX; }
 +- (CGFloat) scrollingDeltaY { return _deltaY; }
 +
++// CGEvent locations are global display coordinates with a top-left origin,
++// while an NSEvent location is window-local with a bottom-left origin.
++- (CGPoint) cgGlobalLocation {
++    NSPoint point = [self locationInWindow];
++    NSWindow *window = [self window];
++    if (window != nil) {
++        point = [window convertBaseToScreen: point];
++        NSArray *screens = [NSScreen screens];
++        if ([screens count] > 0)
++            point.y = NSMaxY([[screens objectAtIndex: 0] frame]) - point.y;
++    }
++    return NSPointToCGPoint(point);
++}
 +- (CGEventRef) CGEvent {
 +    if (_type != NSScrollWheel) {
 +        switch (_type) {
@@ -1540,7 +1555,7 @@ index 31c65aa..d73e12a 100644
 +        case NSMouseMoved: case NSLeftMouseDragged: case NSRightMouseDragged:
 +        case NSOtherMouseDown: case NSOtherMouseUp: case NSOtherMouseDragged: {
 +            CGEventRef event = CGEventCreateMouseEvent(NULL, (CGEventType)_type,
-+                NSPointToCGPoint([self locationInWindow]), (CGMouseButton)_buttonNumber);
++                [self cgGlobalLocation], (CGMouseButton)_buttonNumber);
 +            CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, _buttonNumber);
 +            CGEventSetIntegerValueField(event, kCGMouseEventClickState, _clickCount);
 +            [(id)event setFlags:(CGEventFlags)[self modifierFlags]];
@@ -1551,7 +1566,7 @@ index 31c65aa..d73e12a 100644
 +    }
 +    CGEventRef event = CGEventCreateScrollWheelEvent(NULL,
 +        kCGScrollEventUnitLine, 2, (int32_t)_deltaY, (int32_t)_deltaX);
-+    CGEventSetLocation(event, NSPointToCGPoint([self locationInWindow]));
++    CGEventSetLocation(event, [self cgGlobalLocation]);
 +    CGEventSetIntegerValueField(event, kCGScrollWheelEventIsContinuous, 0);
 +    [(id)event setFlags:(CGEventFlags)[self modifierFlags]];
 +    return (CGEventRef)[(id)event autorelease];
