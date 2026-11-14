@@ -166,7 +166,11 @@ if [ -n "${DISPLAY:-}" ] && { [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-
    export XAUTHORITY
    # Never replace an existing ~/.Xauthority, even one this user cannot read.
    if [ -n "${HOME:-}" ] && [ ! -e "$HOME/.Xauthority" ] && [ ! -L "$HOME/.Xauthority" ]; then
-    cp -n "$candidate" "$HOME/.Xauthority" 2>/dev/null && chmod 600 "$HOME/.Xauthority" 2>/dev/null || true
+    # mktemp creates the copy with mode 0600; ln fails if the name appeared meanwhile.
+    xauth_tmp=$(mktemp "$HOME/.Xauthority.XXXXXX" 2>/dev/null) && {
+     cat "$candidate" > "$xauth_tmp" && ln "$xauth_tmp" "$HOME/.Xauthority" 2>/dev/null
+     rm -f "$xauth_tmp"
+    } || true
    fi
    break
   done
