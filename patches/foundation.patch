@@ -207,10 +207,10 @@ index ce2819c..06b871d 100644
              if (loaded)
 diff --git a/src/NSConstantNumber.m b/src/NSConstantNumber.m
 new file mode 100644
-index 0000000..26ced08
+index 0000000..e4b61f1
 --- /dev/null
 +++ b/src/NSConstantNumber.m
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,317 @@
 +//
 +//  NSConstantNumber.m
 +//  Foundation
@@ -305,6 +305,36 @@ index 0000000..26ced08
 +- (NSNumber *)boxedValue { return encodingIsUnsigned(_encoding) ? [NSNumber numberWithUnsignedLongLong:(unsigned long long)_value] : [NSNumber numberWithLongLong:_value]; }
 +- (NSComparisonResult)compare:(NSNumber *)other
 +{
++    if (other == nil)
++    {
++        [NSException raise:NSInvalidArgumentException format:@"Cannot compare NSNumber with nil"];
++    }
++    if (other == self)
++    {
++        return NSOrderedSame;
++    }
++    if (encodingIsUnsigned(_encoding))
++    {
++        const char *otherEncoding = [other objCType];
++        char otherCode = otherEncoding ? otherEncoding[0] : '\0';
++        if (otherCode == 'f' || otherCode == 'd')
++        {
++            double lhs = (double)(unsigned long long)_value;
++            double rhs = [other doubleValue];
++            if (lhs < rhs) return NSOrderedAscending;
++            if (lhs > rhs) return NSOrderedDescending;
++            return NSOrderedSame;
++        }
++        if (!encodingIsUnsigned(otherEncoding) && [other longLongValue] < 0)
++        {
++            return NSOrderedDescending;
++        }
++        unsigned long long lhs = (unsigned long long)_value;
++        unsigned long long rhs = [other unsignedLongLongValue];
++        if (lhs < rhs) return NSOrderedAscending;
++        if (lhs > rhs) return NSOrderedDescending;
++        return NSOrderedSame;
++    }
 +    return [[self boxedValue] compare:other];
 +}
 +- (NSUInteger)hash { return [[self boxedValue] hash]; }

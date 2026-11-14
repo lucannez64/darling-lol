@@ -164,7 +164,8 @@
       "modified_files": 11,
       "new_files": [
         "src/NSConstantNumber.m"
-      ]
+      ],
+      "patch_sha256": "e44315c36b24239e7ae9b1afe04ac43f8ceb7a7c04beab600d6f54ae3d6fd4b4"
     },
     {
       "path": "src/external/iokitd",
