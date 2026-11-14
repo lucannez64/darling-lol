@@ -39,12 +39,12 @@ class DesktopEntryTests(unittest.TestCase):
         shutil.copy2(ROOT / 'darling-lol.png', project / 'darling-lol.png')
         return project
 
-    def install(self, project):
+    def install(self, project, *args):
         script = project / 'desktop-entry.py'
         script.write_text(HELPER.read_text()
                           .replace('@PROJECT_ROOT@', str(project))
                           .replace('@HOST_HOME@', str(self.home)))
-        return subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+        return subprocess.run([sys.executable, str(script), *args], capture_output=True, text=True,
                               env=dict(os.environ, HOME=str(self.home)), check=False)
 
     def entry(self):
@@ -126,6 +126,19 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertTrue(exec_line.startswith('Exec="'), exec_line)
         self.assertTrue(exec_line.endswith('"'), exec_line)
         self.assertIn('\\$dollar', exec_line)
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(self.entry())],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_toolbox_entry_launches_through_the_container(self):
+        project = self.project()
+        result = self.install(project, '--toolbox', 'darling-lol')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.entry().read_text()
+        exec_line = next(line for line in text.splitlines() if line.startswith('Exec='))
+        self.assertTrue(exec_line.startswith('Exec=toolbox run -c darling-lol '), exec_line)
+        self.assertIn(str(project / 'scripts/desktop-run.sh'), exec_line)
         if shutil.which('desktop-file-validate'):
             check = subprocess.run(['desktop-file-validate', str(self.entry())],
                                    capture_output=True, text=True, check=False)

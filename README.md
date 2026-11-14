@@ -80,6 +80,8 @@ bash scripts/install-native.sh
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, the installer runs a full `pacman -Syu` and asks first unless this is given.
 - `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
 
+At the end of an interactive install, the script offers to create a menu/desktop launcher. It is written for the current install mode: a plain entry for a native install, or a `toolbox run -c <container>` entry when installed with `--toolbox`. Set `DARLING_LOL_DESKTOP_ENTRY=1` to create it without asking, or `0` to skip the prompt.
+
 Options can be combined: `bash scripts/install-native.sh --toolbox --verbose`
 
 ---

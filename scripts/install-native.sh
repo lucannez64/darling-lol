@@ -26,6 +26,7 @@ VERBOSE=0
 USE_TOOLBOX=0
 INSIDE_TOOLBOX=0
 YES=0
+NO_CONFIRM=0
 FAMILY=''
 PACKAGE_MANAGER=''
 PACKAGES=()
@@ -133,6 +134,8 @@ Options:
 
 Environment:
   DARLING_LOL_TOOLBOX_NAME   Toolbox container name (default: darling-lol)
+  DARLING_LOL_DESKTOP_ENTRY  Create the desktop entry without asking (1/0);
+                             when unset, ask at the end of an interactive install
   NO_COLOR                   Disable colored output
   XDG_CACHE_HOME             Where the install log is written
 EOF
@@ -144,6 +147,7 @@ parse_args() {
       -v|--verbose) VERBOSE=1 ;;
       -t|--toolbox) USE_TOOLBOX=1 ;;
       -y|--yes) YES=1 ;;
+      --no-confirm) NO_CONFIRM=1 ;;
       --region)
         (( $# >= 2 )) || fail '--region requires a value.'
         REGION=${2^^}
@@ -449,7 +453,8 @@ install_toolbox() {
   info "Entering Toolbox '$TOOLBOX_NAME'..."
   printf '\n'
 
-  local args=(--yes --region "$REGION")
+  local args=(--no-confirm --region "$REGION")
+  if (( YES )); then args+=(--yes); fi
   if (( VERBOSE )); then args+=(--verbose); fi
 
   exec toolbox run --container "$TOOLBOX_NAME" \
@@ -478,7 +483,7 @@ confirm_install() {
     show_banner
   fi
 
-  if (( YES )); then
+  if (( YES || NO_CONFIRM )); then
     return 0
   fi
 
@@ -609,6 +614,48 @@ install_user_runtime() {
     sh scripts/install-runtime.sh
 }
 
+create_desktop_entry() {
+  local helper="$TARGET_DIR/build/runtime/tools/desktop-entry.py"
+  local args=()
+
+  if [[ ! -f $helper ]]; then
+    warning "Desktop entry helper not found at $helper; skipping."
+    return 0
+  fi
+
+  if (( INSIDE_TOOLBOX )); then
+    args+=(--toolbox "$TOOLBOX_NAME")
+  fi
+
+  if ! python3 "$helper" "${args[@]}"; then
+    warning 'Could not create the desktop entry. Run scripts/create-desktop-entry.sh afterwards.'
+  fi
+}
+
+offer_desktop_entry() {
+  local choice=${DARLING_LOL_DESKTOP_ENTRY:-}
+
+  case "${choice,,}" in
+    1|yes|true)
+      create_desktop_entry
+      return 0
+      ;;
+    0|no|false)
+      return 0
+      ;;
+  esac
+
+  if (( YES )) || [[ ! -t 0 ]]; then
+    return 0
+  fi
+
+  printf '\n'
+  local reply
+  read -r -p 'Create a desktop entry automatically? [y/N]: ' reply || return 0
+  [[ ${reply^^} == Y || ${reply^^} == YES ]] || return 0
+  create_desktop_entry
+}
+
 finish() {
   local branch commit
   branch=$(git -C "$TARGET_DIR" branch --show-current 2>/dev/null || true)
@@ -620,6 +667,7 @@ finish() {
   printf 'Branch: %s\n' "${branch:-detached HEAD}"
   printf 'Commit: %s\n' "${commit:-unknown}"
   printf 'Log: %s\n\n' "$LOG"
+  offer_desktop_entry
   printf 'To start the runtime:\n'
   if (( INSIDE_TOOLBOX )); then
     printf '  toolbox enter %s\n' "$TOOLBOX_NAME"
@@ -635,52 +683,58 @@ finish() {
   fi
 }
 
-parse_args "$@"
+main() {
+  parse_args "$@"
 
-if (( INSIDE_TOOLBOX )); then
-  info "Running inside Toolbox '$TOOLBOX_NAME'."
+  if (( INSIDE_TOOLBOX )); then
+    info "Running inside Toolbox '$TOOLBOX_NAME'."
+  fi
+
+  detect_distribution
+  preflight
+
+  if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
+    check_toolbox_support
+  fi
+
+  confirm_install
+  resolve_region
+  confirm_arch_upgrade
+  init_log
+
+  if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
+    install_toolbox
+  fi
+
+  keep_sudo_alive
+
+  if [[ $FAMILY == debian ]]; then
+    run 'Updating package index' sudo apt-get update
+  fi
+  check_repo_ffmpeg
+
+  if [[ $FAMILY == arch ]] && (( ! YES )); then
+    prev_verbose=$VERBOSE
+    VERBOSE=1
+    run 'Installing build dependencies' install_packages
+    VERBOSE=$prev_verbose
+  else
+    run 'Installing build dependencies' install_packages
+  fi
+
+  command -v python3 >/dev/null 2>&1 || fail 'Python 3 is required.'
+  run 'Checking FFmpeg compatibility' verify_ffmpeg
+  run 'Running project preflight checks' python3 "$TARGET_DIR/scripts/preflight.py"
+  run 'Preparing Python environment' prepare_python_env
+  run 'Configuring Darling-LoL' configure_project
+  run 'Building Darling-LoL (this may take a while)' compile_project
+  ensure_no_active_session
+  run 'Installing Darling system components' install_system_components
+  run 'Installing the user runtime' install_user_runtime
+
+  finish
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
 fi
-
-detect_distribution
-preflight
-
-if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
-  check_toolbox_support
-fi
-
-confirm_install
-resolve_region
-confirm_arch_upgrade
-init_log
-
-if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
-  install_toolbox
-fi
-
-keep_sudo_alive
-
-if [[ $FAMILY == debian ]]; then
-  run 'Updating package index' sudo apt-get update
-fi
-check_repo_ffmpeg
-
-if [[ $FAMILY == arch ]] && (( ! YES )); then
-  prev_verbose=$VERBOSE
-  VERBOSE=1
-  run 'Installing build dependencies' install_packages
-  VERBOSE=$prev_verbose
-else
-  run 'Installing build dependencies' install_packages
-fi
-
-command -v python3 >/dev/null 2>&1 || fail 'Python 3 is required.'
-run 'Checking FFmpeg compatibility' verify_ffmpeg
-run 'Running project preflight checks' python3 "$TARGET_DIR/scripts/preflight.py"
-run 'Preparing Python environment' prepare_python_env
-run 'Configuring Darling-LoL' configure_project
-run 'Building Darling-LoL (this may take a while)' compile_project
-ensure_no_active_session
-run 'Installing Darling system components' install_system_components
-run 'Installing the user runtime' install_user_runtime
-
-finish

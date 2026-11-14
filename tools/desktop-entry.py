@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Create and install the GNOME / FreeDesktop desktop entry and launcher icon."""
+import argparse
 import os
 import shutil
 import subprocess
@@ -33,6 +34,22 @@ def quote_exec_argument(value: str) -> str:
         return escaped
     escaped = "".join("\\" + char if char in '"`$\\' else char for char in escaped)
     return f'"{escaped}"'
+
+
+def exec_command(toolbox: str | None = None) -> str:
+    """Return the Exec value, optionally launching through a Toolbox container.
+
+    The native installer runs inside Toolbox when it is invoked with
+    ``--toolbox``; the launcher must then re-enter the same container instead
+    of running on the host, where Darling's dependencies are not installed.
+    """
+    launcher = str(PROJECT_ROOT / LEGACY_RUN_SCRIPT)
+    if toolbox is None:
+        return quote_exec_argument(launcher)
+    return " ".join(
+        quote_exec_argument(part)
+        for part in ("toolbox", "run", "-c", toolbox, launcher)
+    )
 
 
 def legacy_entry_owned(path: Path) -> bool:
@@ -88,7 +105,7 @@ def shortcut_directories() -> list[Path]:
     return directories
 
 
-def main():
+def main(toolbox: str | None = None):
     icons_base = HOST_HOME / ".local/share/icons"
     apps_base = HOST_HOME / ".local/share/applications"
 
@@ -139,7 +156,7 @@ def main():
     # Terminal stays false here because this entry runs desktop-run.sh, which
     # saves session output in build/desktop-launch.log; the packaged entry runs
     # the session directly and therefore needs a terminal.
-    exec_cmd = quote_exec_argument(str(PROJECT_ROOT / LEGACY_RUN_SCRIPT))
+    exec_cmd = exec_command(toolbox)
     project_path = escape_string(str(PROJECT_ROOT))
     desktop_content = f"""[Desktop Entry]
 Version=1.0
@@ -207,4 +224,9 @@ StartupNotify=false
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--toolbox", metavar="CONTAINER",
+        help="launch the entry through 'toolbox run -c CONTAINER'",
+    )
+    main(parser.parse_args().toolbox)
