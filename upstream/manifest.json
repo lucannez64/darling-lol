@@ -210,7 +210,7 @@
       "patch": "patches/libkqueue.patch",
       "modified_files": 13,
       "new_files": [],
-      "patch_sha256": "1d69245c868b18250a21999693e730ac43348356b00752afc6d128fc129f336f"
+      "patch_sha256": "329a21bfb8df03cf8b5467073642959e99dd602d540aabc09c2bca478505eb35"
     },
     {
       "path": "src/external/libmalloc",
