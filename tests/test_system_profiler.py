@@ -164,6 +164,16 @@ class SystemProfilerTests(unittest.TestCase):
         self.assertEqual(item['spdisplays_bus'], 'spdisplays_pcie')
         self.assertEqual(item['spdisplays_vram'], '8192 MB')
 
+    def test_host_vram_fallback_is_not_applied_to_non_nvidia_cards(self):
+        root = Path(self.folder.name) / 'intel-root'
+        device_dir = root / 'sys/class/drm/card0/device'
+        device_dir.mkdir(parents=True)
+        (device_dir / 'vendor').write_text('0x8086\n')
+        (device_dir / 'device').write_text('0x9bc4\n')
+        item = self.display(root, RCLOL_PLATFORM_PROFILE='host', RCLOL_GPU_NAME='host',
+                            RCLOL_GPU_VRAM_MB='host', RCLOL_HOST_GPU_VRAM_MB='8192')
+        self.assertNotIn('8192', item.get('spdisplays_vram', ''))
+
 
 if __name__ == '__main__':
     unittest.main()

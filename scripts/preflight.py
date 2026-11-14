@@ -209,7 +209,11 @@ def vulkan_devices():
     if summary is None and (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
         # vulkaninfo creates a test XCB/Wayland surface when DISPLAY/WAYLAND_DISPLAY is set
         # and exits 1 if the build shell lacks display auth. Retry headless so builds pass.
+        # Unsetting WAYLAND_DISPLAY is not enough: libwayland then falls back to
+        # $XDG_RUNTIME_DIR/wayland-0 and probes the compositor again. An absolute
+        # name that is not a socket makes the Wayland connection fail at once.
         vulkan_env = {k: v for k, v in os.environ.items() if k not in ('DISPLAY', 'WAYLAND_DISPLAY')}
+        vulkan_env['WAYLAND_DISPLAY'] = '/nonexistent/rclol-no-wayland'
         summary = output(['vulkaninfo', '--summary'], env=vulkan_env)
     if summary is None:
         return None

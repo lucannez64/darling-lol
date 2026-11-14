@@ -64,7 +64,7 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
         path.chmod(0o755)
         return path
 
-    def preflight(self, *arguments, kernel=KERNEL, display=':0'):
+    def preflight(self, *arguments, kernel=KERNEL, display=':0', wayland=None):
         env = dict(os.environ, PATH=str(self.bin),
                    RCLOL_PREFLIGHT_KERNEL_RELEASE=kernel,
                    RCLOL_PREFLIGHT_SOURCE=str(Path(self.tmp.name) / 'not fetched'))
@@ -72,6 +72,8 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
             env.pop('DISPLAY', None)
         else:
             env['DISPLAY'] = display
+        if wayland is not None:
+            env['WAYLAND_DISPLAY'] = wayland
         return subprocess.run([sys.executable, str(PREFLIGHT), *arguments], env=env,
                               text=True, capture_output=True, timeout=120)
 
@@ -241,11 +243,13 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
 
     def test_vulkaninfo_retries_headless_when_display_rejects_surface(self):
         self.stub('vulkaninfo', '''if [ -n "${DISPLAY:-}" ]; then exit 1; fi
+case "${WAYLAND_DISPLAY:-}" in ''|/*) ;; *) exit 1;; esac
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -e "$WAYLAND_DISPLAY" ]; then exit 1; fi
 case "$*" in
  --summary) printf '%s\\n' 'Devices:' '========' 'GPU0:' '\tapiVersion = 1.4.309' '\tdeviceName = Headless GPU';;
  *) printf '%s\\n' 'Device Properties and Extensions:' '=================================' 'GPU0:' 'VkPhysicalDeviceProperties:' '\tapiVersion = 1.4.309' '\tdeviceName = Headless GPU' 'VkPhysicalDeviceVulkan12Features:' '\ttimelineSemaphore = true';;
 esac''')
-        result = self.preflight(display=':99')
+        result = self.preflight(display=':99', wayland='wayland-0')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('ok   vulkan', result.stdout)
         self.assertIn('Headless GPU 1.4', result.stdout)

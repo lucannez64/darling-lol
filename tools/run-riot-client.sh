@@ -79,8 +79,9 @@ export RCLOL_PLATFORM_PROFILE="$profile"
 case "$memory_bytes" in ''|*[!0-9]*) ;; *) export RCLOL_MEMORY_BYTES="$memory_bytes";; esac
 export RCLOL_GPU_NAME="$gpu_name"
 export RCLOL_GPU_VRAM_MB="$gpu_vram"
+# The profiler applies this one scalar to NVIDIA cards, so export it only for exactly one NVIDIA GPU.
 if [ -z "${RCLOL_HOST_GPU_VRAM_MB:-}" ] && command -v nvidia-smi >/dev/null 2>&1; then
- nv_vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk 'NR==1 && $1 ~ /^[0-9]+$/ { print $1; exit }' || true)
+ nv_vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{ n++; v = $1 } END { if (n == 1 && v ~ /^[0-9]+$/) print v }' || true)
  [ -z "$nv_vram" ] || export RCLOL_HOST_GPU_VRAM_MB="$nv_vram"
 fi
 if [ "$profile" = compat ]; then
@@ -118,6 +119,34 @@ fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
 export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
+# --- NVIDIA Vulkan ICD pin, before any helper can start Darling ---
+# Guest services started by ensure-darling-root-certificates.py inherit this environment.
+# When NVIDIA is the only active DRM GPU and Mesa's software ICD (lvp_icd) is
+# installed alongside nvidia_icd.json, pin the NVIDIA Vulkan ICD so the loader
+# cannot enumerate llvmpipe ahead of the presenting GPU (issue #127).
+if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
+ drm_vendors=
+ for vfile in /sys/class/drm/card[0-9]/device/vendor /sys/class/drm/card[0-9][0-9]/device/vendor; do
+  [ -r "$vfile" ] || continue
+  v=$(sed 's/^0x//' "$vfile" 2>/dev/null || true)
+  case " $drm_vendors " in *" $v "*) ;; *) drm_vendors="${drm_vendors:+$drm_vendors }$v";; esac
+ done
+ if [ "$drm_vendors" = "10de" ]; then
+  has_sw_icd=0
+  for sw in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
+   [ -r "$sw" ] && { has_sw_icd=1; break; }
+  done
+  if [ "$has_sw_icd" = 1 ]; then
+   for nvicd in /usr/share/vulkan/icd.d/nvidia_icd*.json /etc/vulkan/icd.d/nvidia_icd*.json; do
+    if [ -r "$nvicd" ]; then
+     export VK_DRIVER_FILES="$nvicd"
+     export VK_ICD_FILENAMES="$nvicd"
+     break
+    fi
+   done
+  fi
+ fi
+fi
 # On GNOME/Mutter Wayland, Xwayland writes its auth cookie under XDG_RUNTIME_DIR
 # (.mutter-Xwaylandauth.*). Auto-discover it before any helper can start Darling
 # so launchd and iokitd inherit XAUTHORITY (and ~/.Xauthority fallback).
@@ -125,14 +154,21 @@ if [ -n "${DISPLAY:-}" ] && { [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-
  xauth_dir=${XDG_RUNTIME_DIR:-}
  if [ -n "$xauth_dir" ] && [ -d "$xauth_dir" ]; then
   for candidate in "$xauth_dir"/.mutter-Xwaylandauth.* "$xauth_dir"/xauth_*; do
-   if [ -f "$candidate" ] && [ -r "$candidate" ]; then
-    XAUTHORITY=$candidate
-    export XAUTHORITY
-    if [ -n "${HOME:-}" ] && [ ! -r "$HOME/.Xauthority" ]; then
-     cp -f "$candidate" "$HOME/.Xauthority" 2>/dev/null && chmod 600 "$HOME/.Xauthority" 2>/dev/null || true
-    fi
-    break
+   [ -f "$candidate" ] && [ -r "$candidate" ] || continue
+   # Without xauth the entries cannot be checked, so the first readable file is used.
+   # Mutter writes entries with an empty display number, which match any display.
+   if command -v xauth >/dev/null 2>&1; then
+    display_num=${DISPLAY##*:}; display_num=${display_num%%.*}
+    xauth -f "$candidate" list 2>/dev/null | awk -v n="$display_num" '
+     { k = $1; sub(/.*:/, "", k); if (k == n || k == "") found = 1 } END { exit !found }' || continue
    fi
+   XAUTHORITY=$candidate
+   export XAUTHORITY
+   # Never replace an existing ~/.Xauthority, even one this user cannot read.
+   if [ -n "${HOME:-}" ] && [ ! -e "$HOME/.Xauthority" ] && [ ! -L "$HOME/.Xauthority" ]; then
+    cp -n "$candidate" "$HOME/.Xauthority" 2>/dev/null && chmod 600 "$HOME/.Xauthority" 2>/dev/null || true
+   fi
+   break
   done
  fi
 fi
@@ -238,32 +274,6 @@ else
  fi
 fi
 # --- darling-lol perf: scheduling & driver latency hints ---
-# When NVIDIA is the only active DRM GPU and Mesa's software ICD (lvp_icd) is
-# installed alongside nvidia_icd.json, pin the NVIDIA Vulkan ICD so the loader
-# cannot enumerate llvmpipe ahead of the presenting GPU (issue #127).
-if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
- drm_vendors=
- for vfile in /sys/class/drm/card[0-9]/device/vendor /sys/class/drm/card[0-9][0-9]/device/vendor; do
-  [ -r "$vfile" ] || continue
-  v=$(sed 's/^0x//' "$vfile" 2>/dev/null || true)
-  case " $drm_vendors " in *" $v "*) ;; *) drm_vendors="${drm_vendors:+$drm_vendors }$v";; esac
- done
- if [ "$drm_vendors" = "10de" ]; then
-  has_sw_icd=0
-  for sw in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
-   [ -r "$sw" ] && { has_sw_icd=1; break; }
-  done
-  if [ "$has_sw_icd" = 1 ]; then
-   for nvicd in /usr/share/vulkan/icd.d/nvidia_icd*.json /etc/vulkan/icd.d/nvidia_icd*.json; do
-    if [ -r "$nvicd" ]; then
-     export VK_DRIVER_FILES="$nvicd"
-     export VK_ICD_FILENAMES="$nvicd"
-     break
-    fi
-   done
-  fi
- fi
-fi
 # Refresh rate for display link, async presenter, and frame pacing: the primary monitor's
 # current mode (the first monitor without a primary); unset falls back to 60 Hz.
 if [ -z "${RCLOL_REFRESH_HZ-}" ] && command -v xrandr >/dev/null 2>&1; then

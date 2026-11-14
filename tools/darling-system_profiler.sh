@@ -80,7 +80,8 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
   if [ -r "$card/device/mem_info_vram_total" ]; then
    vram=$(awk '{ printf "%d", $1 / 1048576 }' "$card/device/mem_info_vram_total")
   fi
-  [ -n "$vram" ] || vram=$host_vram
+  # The host value comes from nvidia-smi for a single NVIDIA GPU; other cards must not inherit it.
+  if [ -z "$vram" ] && [ "$vendor" = 10de ]; then vram=$host_vram; fi
   [ -n "$profile_vram" ] && vram=$profile_vram
   name=; bus=builtin
   if [ "$vendor" = 10de ] && [ -r "$card/device/uevent" ]; then
