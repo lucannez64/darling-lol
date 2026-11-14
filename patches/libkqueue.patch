@@ -140,7 +140,7 @@ index a328f80..b9d186c 100644
      pthread_rwlock_wrlock(&filt->kf_knote_mtx);
      tmp = RB_FIND(knt, &filt->kf_knote, &query);
      if (tmp == kn) {
-@@ -111,13 +121,47 @@ knote_delete(struct filter *filt, struct knote *kn)
+@@ -111,13 +121,51 @@ knote_delete(struct filter *filt, struct knote *kn)
      return (0);
  }
  
@@ -167,7 +167,11 @@ index a328f80..b9d186c 100644
 +                   filt->kf_id == EVFILT_USER ||
 +                   filt->kf_id == EVFILT_SIGNAL ||
 +                   filt->kf_id == EVFILT_VNODE) {
-+            if (kn->kdata.kn_dupfd > 0) {
++            /* kdata is one union shared by every filter above (eventfd,
++             * dupfd, signalfd, inotifyfd). Only created knotes are in the
++             * tree, and every create/delete path leaves a valid fd or -1,
++             * so descriptor 0 is a real descriptor to close. */
++            if (kn->kdata.kn_dupfd >= 0) {
 +                (void) __close_for_kqueue(kn->kdata.kn_dupfd);
 +                kn->kdata.kn_dupfd = -1;
 +            }
