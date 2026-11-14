@@ -84,8 +84,7 @@
         "AppKit/include/AppKit/NSPreviewRepresentingActivityItem.h",
         "QuartzCore/CAEDRMetadata.m",
         "QuartzCore/include/QuartzCore/CAEDRMetadata.h"
-      ],
-      "patch_sha256": "b239a3033eb497c2f997f2a79d59c005975a158df2ca0490230b81e9bc5f2d08"
+      ]
     },
     {
       "path": "src/external/compiler-rt",
