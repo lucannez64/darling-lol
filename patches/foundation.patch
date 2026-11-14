@@ -210,7 +210,7 @@ new file mode 100644
 index 0000000..e4b61f1
 --- /dev/null
 +++ b/src/NSConstantNumber.m
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,318 @@
 +//
 +//  NSConstantNumber.m
 +//  Foundation
@@ -321,6 +321,7 @@ index 0000000..e4b61f1
 +        {
 +            double lhs = (double)(unsigned long long)_value;
 +            double rhs = [other doubleValue];
++            if (rhs != rhs) return NSOrderedDescending; /* CFNumberCompare orders NaN below every non-negative number */
 +            if (lhs < rhs) return NSOrderedAscending;
 +            if (lhs > rhs) return NSOrderedDescending;
 +            return NSOrderedSame;
