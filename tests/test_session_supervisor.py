@@ -757,6 +757,35 @@ class LeagueExitTests(unittest.TestCase):
         self.assertEqual(unmapped, [0x20])
         self.assertIn('hid 1 closing game window(s)', out.getvalue())
 
+    def test_hide_finished_game_window_keeps_other_prefix_window(self):
+        other = self.root / 'other' / '.darling'
+        mine = fake_process(self.root, 30, comm='LeagueofLegends',
+                            environ=b'__mldr_sockpath=%s\0' % os.fsencode(self.prefix / '.darlingserver.sock'))
+        theirs = fake_process(self.root, 31, comm='LeagueofLegends',
+                                  environ=b'__mldr_sockpath=%s\0' % os.fsencode(other / '.darlingserver.sock'))
+        self.prefix.mkdir(parents=True, exist_ok=True)
+        other.mkdir(parents=True)
+        pids = {'0x20': '30', '0x30': '31'}
+
+        def fake_run(command, **_kwargs):
+            class Result:
+                stdout = ''
+            res = Result()
+            if '_NET_CLIENT_LIST' in command:
+                res.stdout = '_NET_CLIENT_LIST(WINDOW): window id # 0x20, 0x30'
+            elif 'WM_CLASS' in command:
+                res.stdout = 'WM_CLASS(STRING) = "LeagueofLegends", "LeagueofLegends"'
+            elif '_NET_WM_PID' in command:
+                res.stdout = '_NET_WM_PID(CARDINAL) = %s' % pids[command[2]]
+            return res
+
+        unmapped = []
+        found = supervisor.hide_finished_game_window(
+            run=fake_run, unmap=lambda wins: (unmapped.extend(wins) or True),
+            out=io.StringIO(), prefix=self.prefix.resolve(), proc_root=self.root)
+        self.assertEqual(found, [0x20])
+        self.assertEqual(unmapped, [0x20])
+
 
 if __name__ == '__main__':
     unittest.main()

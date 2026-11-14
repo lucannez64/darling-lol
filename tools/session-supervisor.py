@@ -514,8 +514,34 @@ def _unmap_x11_windows(windows):
         return False
 
 
-def hide_finished_game_window(run=subprocess.run, unmap=_unmap_x11_windows, out=sys.stdout):
-    """Unmap managed LeagueofLegends X11 windows after the main loop has ended."""
+def window_of_other_prefix(run, raw, prefix, proc_root):
+    """True when the window's _NET_WM_PID is a game process of a different prefix.
+
+    A window whose PID is missing or unknown stays a candidate, so a host that
+    cannot map the PID never loses the hide; only a proven foreign game is kept.
+    """
+    try:
+        text = run(['xprop', '-id', raw, '_NET_WM_PID'], text=True,
+                   capture_output=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    found = re.search(r'=\s*(\d+)', text)
+    if not found:
+        return False
+    proc = proc_root / found.group(1)
+    if GAME_NAME not in command_names(proc):
+        return False
+    owner = socket_prefix(proc)
+    return owner is not None and owner != prefix
+
+
+def hide_finished_game_window(run=subprocess.run, unmap=_unmap_x11_windows, out=sys.stdout,
+                              prefix=None, proc_root=Path('/proc')):
+    """Unmap managed LeagueofLegends X11 windows after the main loop has ended.
+
+    With a prefix, windows owned by a game of another prefix on the same display
+    are left alone.
+    """
     try:
         listing = run(['xprop', '-root', '_NET_CLIENT_LIST'], text=True,
                       capture_output=True, timeout=5).stdout
@@ -532,7 +558,8 @@ def hide_finished_game_window(run=subprocess.run, unmap=_unmap_x11_windows, out=
             window_id = int(raw, 16)
         except (OSError, subprocess.SubprocessError, ValueError):
             continue
-        if GAME_WINDOW_CLASS in classes:
+        if GAME_WINDOW_CLASS in classes and not (
+                prefix is not None and window_of_other_prefix(run, raw, prefix, proc_root)):
             windows.append(window_id)
     if windows and unmap(windows):
         log('game main loop finished; hid %d closing game window(s)' % len(windows), out)
@@ -723,7 +750,7 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
             if namespace is None:
                 namespace = prefix_namespace(prefix, proc_root)
             if game_exit_watch is not None and game_exit_watch.poll():
-                hide_finished_game_window(run=run, out=out)
+                hide_finished_game_window(run=run, out=out, prefix=prefix, proc_root=proc_root)
             if exit_watch is not None and exit_watch.poll():
                 finish_league_exit(prefix, namespace, proc_root=proc_root, kill=kill,
                                    sleep=sleep, out=out, own_namespace=own_namespace)
