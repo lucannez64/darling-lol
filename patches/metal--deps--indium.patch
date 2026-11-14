@@ -797,18 +797,20 @@ index edfc54e..6d58cf6 100644
  	};
  };
 diff --git a/private-include/indium/compute-command-encoder.private.hpp b/private-include/indium/compute-command-encoder.private.hpp
-index 8546daa..7e4993c 100644
+index 8546daa..5d2e98d 100644
 --- a/private-include/indium/compute-command-encoder.private.hpp
 +++ b/private-include/indium/compute-command-encoder.private.hpp
-@@ -15,12 +15,14 @@ namespace Indium {
+@@ -15,12 +15,13 @@ namespace Indium {
  		FunctionResources _functionResources;
  		std::shared_ptr<PrivateComputePipelineState> _pso;
  		VkDescriptorPool _pool = VK_NULL_HANDLE;
 +        std::vector<VkDescriptorPool> _retiredPools;
  
- 		// XXX: not sure if we actually need to store pipelines until the command buffer finishes executing,
- 		//      but let's do it just in case.
- 		std::vector<VkPipeline> _savedPipelines;
+-		// XXX: not sure if we actually need to store pipelines until the command buffer finishes executing,
+-		//      but let's do it just in case.
+-		std::vector<VkPipeline> _savedPipelines;
++		// Retain compute pipeline states until the command buffer finishes executing.
++		std::vector<std::shared_ptr<PrivateComputePipelineState>> _savedPSOs;
  		std::vector<FunctionResources> _savedFunctionResources;
  		std::vector<std::shared_ptr<Buffer>> _keepAliveBuffers;
 +		AddressPool _addressPool;
@@ -816,7 +818,7 @@ index 8546daa..7e4993c 100644
  		void updateBindings();
  
 diff --git a/private-include/indium/device.private.hpp b/private-include/indium/device.private.hpp
-index 58f1794..167369b 100644
+index 58f1794..a552dfb 100644
 --- a/private-include/indium/device.private.hpp
 +++ b/private-include/indium/device.private.hpp
 @@ -13,6 +13,8 @@
@@ -875,7 +877,7 @@ index 58f1794..167369b 100644
  		std::shared_ptr<TimelineSemaphore> getWrappedTimelineSemaphore();
  
  		BinarySemaphore getBinarySemaphore(bool exportable = false);
-@@ -111,5 +130,37 @@ namespace Indium {
+@@ -111,5 +130,44 @@ namespace Indium {
  
  		INDIUM_PROPERTY(VkPhysicalDeviceMemoryProperties, m, M,emoryProperties);
  		INDIUM_PROPERTY_READONLY(Feature, f, F,eatures);
@@ -911,10 +913,17 @@ index 58f1794..167369b 100644
 +		// Sequentially consistent handshake: either re-snapshot or signal.
 +		std::atomic<uint64_t> _eventLoopRegistrations {0};
 +		std::atomic<unsigned> _eventLoopBlockedPollers {0};
++	public:
++		VkPipelineCache pipelineCache() const { return _pipelineCache; }
++		void notePipelineCreated();
++		void savePipelineCache();
++	private:
++		void initPipelineCache();
++		VkPipelineCache _pipelineCache = VK_NULL_HANDLE;
  	};
  };
 diff --git a/private-include/indium/dynamic-vk.hpp b/private-include/indium/dynamic-vk.hpp
-index 4957eca..fb2a315 100644
+index 4957eca..5ac0a2c 100644
 --- a/private-include/indium/dynamic-vk.hpp
 +++ b/private-include/indium/dynamic-vk.hpp
 @@ -6,6 +6,9 @@
@@ -995,8 +1004,27 @@ index 4957eca..fb2a315 100644
  			_macro(vkCmdFillBuffer) \
  			_macro(vkCmdPipelineBarrier) \
  			_macro(vkCmdSetBlendConstants) \
-@@ -157,6 +171,7 @@ namespace Indium {
+@@ -120,6 +134,7 @@ namespace Indium {
+ 			_macro(vkCreateGraphicsPipelines) \
+ 			_macro(vkCreateImage) \
+ 			_macro(vkCreateImageView) \
++			_macro(vkCreatePipelineCache) \
+ 			_macro(vkCreatePipelineLayout) \
+ 			_macro(vkCreateRenderPass) \
+ 			_macro(vkCreateSampler) \
+@@ -138,6 +153,7 @@ namespace Indium {
+ 			_macro(vkDestroyImageView) \
+ 			_macro(vkDestroyInstance) \
+ 			_macro(vkDestroyPipeline) \
++			_macro(vkDestroyPipelineCache) \
+ 			_macro(vkDestroyPipelineLayout) \
+ 			_macro(vkDestroyRenderPass) \
+ 			_macro(vkDestroySampler) \
+@@ -155,8 +171,10 @@ namespace Indium {
+ 			_macro(vkGetBufferMemoryRequirements) \
+ 			_macro(vkGetDeviceQueue) \
  			_macro(vkGetImageMemoryRequirements) \
++			_macro(vkGetPipelineCacheData) \
  			_macro(vkGetPhysicalDeviceFeatures2) \
  			_macro(vkGetPhysicalDeviceMemoryProperties) \
 +			_macro(vkGetPhysicalDeviceFormatProperties) \
@@ -2891,10 +2919,10 @@ index 5704602..d2cd020 100644
  	return std::make_shared<PrivateCommandBuffer>(shared_from_this());
  };
 diff --git a/src/indium/compute-command-encoder.cpp b/src/indium/compute-command-encoder.cpp
-index 5f62ad0..5957bec 100644
+index 5f62ad0..a2906f3 100644
 --- a/src/indium/compute-command-encoder.cpp
 +++ b/src/indium/compute-command-encoder.cpp
-@@ -9,27 +9,19 @@ Indium::PrivateComputeCommandEncoder::PrivateComputeCommandEncoder(std::shared_p
+@@ -9,27 +9,16 @@ Indium::PrivateComputeCommandEncoder::PrivateComputeCommandEncoder(std::shared_p
  	_privateDevice(std::dynamic_pointer_cast<PrivateDevice>(commandBuffer->device())),
  	_descriptor(descriptor)
  {
@@ -2912,9 +2940,9 @@ index 5f62ad0..5957bec 100644
  };
  
  Indium::PrivateComputeCommandEncoder::~PrivateComputeCommandEncoder() {
- 	for (auto& pipeline: _savedPipelines) {
- 		DynamicVK::vkDestroyPipeline(_privateDevice->device(), pipeline, nullptr);
- 	}
+-	for (auto& pipeline: _savedPipelines) {
+-		DynamicVK::vkDestroyPipeline(_privateDevice->device(), pipeline, nullptr);
+-	}
 -	DynamicVK::vkDestroyDescriptorPool(_privateDevice->device(), _pool, 0);
 +	_privateDevice->releaseDescriptorPool(_pool);
 +    for (auto pool : _retiredPools) _privateDevice->releaseDescriptorPool(pool);
@@ -2926,7 +2954,16 @@ index 5f62ad0..5957bec 100644
  };
  
  void Indium::PrivateComputeCommandEncoder::setComputePipelineState(std::shared_ptr<ComputePipelineState> state) {
-@@ -138,7 +130,7 @@ Indium::DispatchType Indium::PrivateComputeCommandEncoder::dispatchType() {
+@@ -92,7 +81,7 @@ void Indium::PrivateComputeCommandEncoder::dispatchThreadgroups(Size threadgroup
+ 	auto buf = _privateCommandBuffer.lock();
+ 
+ 	auto pipeline = _pso->createPipeline(threadsPerThreadgroup);
+-	_savedPipelines.push_back(pipeline);
++	_savedPSOs.push_back(_pso);
+ 
+ 	DynamicVK::vkCmdBindPipeline(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+ 
+@@ -138,7 +127,7 @@ Indium::DispatchType Indium::PrivateComputeCommandEncoder::dispatchType() {
  void Indium::PrivateComputeCommandEncoder::updateBindings() {
  	auto buf = _privateCommandBuffer.lock();
  
@@ -2936,7 +2973,7 @@ index 5f62ad0..5957bec 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..dce48c5 100644
+index 322e186..4db08bf 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,10 @@
@@ -2950,7 +2987,7 @@ index 322e186..dce48c5 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,39 +18,210 @@
+@@ -12,39 +18,211 @@
  
  #include <iridium/iridium.hpp>
  
@@ -2966,6 +3003,7 @@ index 322e186..dce48c5 100644
 +#include <cstdlib>
  #include <cstring>
 +#include <string>
++#include <sys/stat.h>
 +#include <unistd.h>
  #include <vector>
  
@@ -3167,7 +3205,7 @@ index 322e186..dce48c5 100644
  			continue;
  		}
  
-@@ -67,12 +244,105 @@ void Indium::initGlobalDeviceList() {
+@@ -67,12 +245,105 @@ void Indium::initGlobalDeviceList() {
  		DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
  
  		if (!features12.timelineSemaphore) {
@@ -3184,7 +3222,7 @@ index 322e186..dce48c5 100644
 +		memcpy(candidate.deviceUUID, idProperties.deviceUUID, 16);
 +		memcpy(candidate.driverUUID, idProperties.driverUUID, 16);
 +		candidates.push_back(candidate);
- 	}
++	}
 +
 +	// Resolve the explicit selection against the supported list. An explicit choice
 +	// is honoured even when it names a software (CPU) device, because the user asked
@@ -3267,7 +3305,7 @@ index 322e186..dce48c5 100644
 +
 +	for (size_t index: creationOrder) {
 +		globalDeviceList.push_back(std::make_shared<PrivateDevice>(candidates[index].device));
-+	}
+ 	}
 +
 +	appendDeviceLog("created VkDevice for " + std::to_string(globalDeviceList.size()) + " of "
 +		+ std::to_string(candidates.size()) + " supported device(s)"
@@ -3275,7 +3313,7 @@ index 322e186..dce48c5 100644
  };
  
  void Indium::finitGlobalDeviceList() {
-@@ -83,8 +353,16 @@ Indium::Device::~Device() {};
+@@ -83,8 +354,16 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -3293,7 +3331,7 @@ index 322e186..dce48c5 100644
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
  	uint32_t count = 0;
-@@ -233,6 +511,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +512,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -3330,7 +3368,7 @@ index 322e186..dce48c5 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +554,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +555,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -3338,17 +3376,388 @@ index 322e186..dce48c5 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -297,6 +606,9 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -294,9 +604,380 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+ 			abort();
+ 		}
+ 	}
++
++	initPipelineCache();
  };
  
++namespace {
++	std::string indiumCacheDir() {
++		if (access("/tmp/metal-no-pipeline-cache", F_OK) == 0) {
++			return {};
++		}
++		if (const char* envDir = getenv("INDIUM_CACHE_DIR"); envDir && *envDir) {
++			mkdir(envDir, 0755);
++			return envDir;
++		}
++		if (const char* home = getenv("HOME"); home && *home) {
++			std::string libDir = std::string(home) + "/Library";
++			mkdir(libDir.c_str(), 0755);
++			std::string cachesDir = libDir + "/Caches";
++			mkdir(cachesDir.c_str(), 0755);
++			std::string indiumDir = cachesDir + "/Indium";
++			if (mkdir(indiumDir.c_str(), 0755) == 0 || access(indiumDir.c_str(), W_OK) == 0) {
++				return indiumDir;
++			}
++		}
++		std::string tmpDir = "/tmp/indium-cache";
++		mkdir(tmpDir.c_str(), 0777);
++		return tmpDir;
++	}
++
++	struct PipelineCacheState {
++		std::mutex mutex;
++		std::string path;
++		std::atomic<uint32_t> unsaved {0};
++		std::atomic<uint64_t> lastSaveNs {0};
++	};
++
++	PipelineCacheState& pipelineCacheState() {
++		static auto* state = new PipelineCacheState();
++		return *state;
++	}
++
++	uint64_t monotonicNs() {
++		return static_cast<uint64_t>(
++			std::chrono::duration_cast<std::chrono::nanoseconds>(
++				std::chrono::steady_clock::now().time_since_epoch()).count());
++	}
++
++	struct LibraryCacheKey {
++		uint64_t h1 = 0;
++		uint64_t h2 = 0;
++		size_t length = 0;
++
++		bool operator==(const LibraryCacheKey& other) const {
++			return h1 == other.h1 && h2 == other.h2 && length == other.length;
++		}
++	};
++
++	struct LibraryCacheKeyHash {
++		size_t operator()(const LibraryCacheKey& key) const {
++			return static_cast<size_t>(key.h1 ^ (key.h2 * 0x9e3779b97f4a7c15ULL) ^ key.length);
++		}
++	};
++
++	LibraryCacheKey computeLibraryCacheKey(const void* data, size_t length) {
++		const auto* bytes = static_cast<const uint8_t*>(data);
++		uint64_t h1 = 14695981039346656037ULL;
++		uint64_t h2 = 0x84222325cbf29ce4ULL ^ static_cast<uint64_t>(length);
++		for (size_t i = 0; i < length; ++i) {
++			h1 ^= bytes[i];
++			h1 *= 1099511628211ULL;
++			h2 ^= static_cast<uint64_t>(bytes[i]) + 0x9e3779b97f4a7c15ULL + (h2 << 6) + (h2 >> 2);
++		}
++		return {h1, h2, length};
++	}
++
++	struct CachedTranslatedLibrary {
++		std::vector<char> spirv;
++		Iridium::OutputInfo outputInfo;
++		const Indium::PrivateDevice* liveDevice = nullptr;
++		std::weak_ptr<Indium::PrivateLibrary> liveLibrary;
++	};
++
++	std::mutex& libraryCacheMutex() {
++		static auto* mutex = new std::mutex();
++		return *mutex;
++	}
++
++	std::unordered_map<LibraryCacheKey, std::shared_ptr<CachedTranslatedLibrary>, LibraryCacheKeyHash>& libraryCacheMap() {
++		static auto* map = new std::unordered_map<LibraryCacheKey, std::shared_ptr<CachedTranslatedLibrary>, LibraryCacheKeyHash>();
++		return *map;
++	}
++
++	constexpr char kIridiumCacheMagic[8] = {'I', 'R', 'D', 'C', 3, 0, 0, 0};
++
++	std::string iridiumCacheFilePath(const std::string& dir, const LibraryCacheKey& key) {
++		char name[128];
++		snprintf(name, sizeof(name), "/iridium-v3-%016llx-%016llx-%zx.bin",
++			static_cast<unsigned long long>(key.h1),
++			static_cast<unsigned long long>(key.h2),
++			key.length);
++		return dir + name;
++	}
++
++	void writeU32(std::vector<uint8_t>& out, uint32_t v) {
++		const auto* p = reinterpret_cast<const uint8_t*>(&v);
++		out.insert(out.end(), p, p + sizeof(v));
++	}
++
++	void writeU64(std::vector<uint8_t>& out, uint64_t v) {
++		const auto* p = reinterpret_cast<const uint8_t*>(&v);
++		out.insert(out.end(), p, p + sizeof(v));
++	}
++
++	void writeBytes(std::vector<uint8_t>& out, const void* data, size_t len) {
++		const auto* p = static_cast<const uint8_t*>(data);
++		out.insert(out.end(), p, p + len);
++	}
++
++	void writeString(std::vector<uint8_t>& out, const std::string& s) {
++		writeU32(out, static_cast<uint32_t>(s.size()));
++		writeBytes(out, s.data(), s.size());
++	}
++
++	struct ByteReader {
++		const uint8_t* data = nullptr;
++		size_t size = 0;
++		size_t offset = 0;
++
++		bool readBytes(void* dst, size_t len) {
++			if (len > size - offset) return false;
++			if (len) memcpy(dst, data + offset, len);
++			offset += len;
++			return true;
++		}
++
++		bool readU32(uint32_t& out) { return readBytes(&out, sizeof(out)); }
++		bool readU64(uint64_t& out) { return readBytes(&out, sizeof(out)); }
++
++		bool readString(std::string& out) {
++			uint32_t len = 0;
++			if (!readU32(len) || len > size - offset) return false;
++			out.assign(reinterpret_cast<const char*>(data + offset), len);
++			offset += len;
++			return true;
++		}
++	};
++
++	bool loadTranslatedLibraryFromDisk(const std::string& path, size_t expectedInputLength, CachedTranslatedLibrary& out) {
++		FILE* f = fopen(path.c_str(), "rb");
++		if (!f) return false;
++		if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
++		long fileSize = ftell(f);
++		if (fileSize < 28 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
++		std::vector<uint8_t> buf(static_cast<size_t>(fileSize));
++		if (fread(buf.data(), 1, buf.size(), f) != buf.size()) {
++			fclose(f);
++			return false;
++		}
++		fclose(f);
++
++		ByteReader r {buf.data(), buf.size(), 0};
++		char magic[8];
++		uint64_t inputLength = 0;
++		uint64_t spirvSize = 0;
++		uint32_t numFunctions = 0;
++		if (!r.readBytes(magic, sizeof(magic)) || memcmp(magic, kIridiumCacheMagic, sizeof(magic)) != 0) return false;
++		if (!r.readU64(inputLength) || inputLength != expectedInputLength) return false;
++		if (!r.readU64(spirvSize) || spirvSize == 0 || (spirvSize & 3) != 0 || spirvSize > r.size - r.offset) return false;
++		out.spirv.resize(static_cast<size_t>(spirvSize));
++		if (!r.readBytes(out.spirv.data(), out.spirv.size())) return false;
++		if (!r.readU32(numFunctions) || numFunctions > 4096) return false;
++
++		out.outputInfo.functionInfos.clear();
++		for (uint32_t i = 0; i < numFunctions; ++i) {
++			std::string fnName;
++			uint32_t fnType = 0;
++			uint32_t numBindings = 0;
++			uint32_t numSamplers = 0;
++			uint32_t numArgs = 0;
++			if (!r.readString(fnName) || !r.readU32(fnType)) return false;
++			auto& fnInfo = out.outputInfo.functionInfos[fnName];
++			fnInfo.type = static_cast<Iridium::FunctionType>(fnType);
++
++			if (!r.readU32(numBindings) || numBindings > 4096) return false;
++			fnInfo.bindings.resize(numBindings);
++			if (numBindings && !r.readBytes(fnInfo.bindings.data(), numBindings * sizeof(Iridium::BindingInfo))) return false;
++
++			if (!r.readU32(numSamplers) || numSamplers > 4096) return false;
++			fnInfo.embeddedSamplers.resize(numSamplers);
++			if (numSamplers && !r.readBytes(fnInfo.embeddedSamplers.data(), numSamplers * sizeof(Iridium::EmbeddedSampler))) return false;
++
++			if (!r.readU32(numArgs) || numArgs > 4096) return false;
++			fnInfo.arguments.resize(numArgs);
++			for (uint32_t a = 0; a < numArgs; ++a) {
++				auto& arg = fnInfo.arguments[a];
++				uint32_t argType = 0;
++				uint64_t idx = 0, sz = 0, align = 0;
++				uint32_t numMembers = 0;
++				if (!r.readU32(argType) || !r.readU64(idx) || !r.readString(arg.name) ||
++				    !r.readString(arg.typeName) || !r.readU64(sz) || !r.readU64(align) ||
++				    !r.readU32(numMembers) || numMembers > 4096) {
++					return false;
++				}
++				arg.type = static_cast<Iridium::BindingType>(argType);
++				arg.index = static_cast<size_t>(idx);
++				arg.size = static_cast<size_t>(sz);
++				arg.alignment = static_cast<size_t>(align);
++				arg.members.resize(numMembers);
++				for (uint32_t m = 0; m < numMembers; ++m) {
++					uint64_t mOff = 0;
++					if (!r.readU64(mOff) || !r.readString(arg.members[m].typeName) || !r.readString(arg.members[m].name)) {
++						return false;
++					}
++					arg.members[m].offset = static_cast<size_t>(mOff);
++				}
++			}
++		}
++		return r.offset == r.size;
++	}
++
++	void saveTranslatedLibraryToDisk(const std::string& path, size_t inputLength, const CachedTranslatedLibrary& entry) {
++		std::vector<uint8_t> buf;
++		buf.reserve(64 + entry.spirv.size());
++		writeBytes(buf, kIridiumCacheMagic, sizeof(kIridiumCacheMagic));
++		writeU64(buf, static_cast<uint64_t>(inputLength));
++		writeU64(buf, static_cast<uint64_t>(entry.spirv.size()));
++		writeBytes(buf, entry.spirv.data(), entry.spirv.size());
++		writeU32(buf, static_cast<uint32_t>(entry.outputInfo.functionInfos.size()));
++		for (const auto& [fnName, fnInfo] : entry.outputInfo.functionInfos) {
++			writeString(buf, fnName);
++			writeU32(buf, static_cast<uint32_t>(fnInfo.type));
++			writeU32(buf, static_cast<uint32_t>(fnInfo.bindings.size()));
++			if (!fnInfo.bindings.empty()) {
++				writeBytes(buf, fnInfo.bindings.data(), fnInfo.bindings.size() * sizeof(Iridium::BindingInfo));
++			}
++			writeU32(buf, static_cast<uint32_t>(fnInfo.embeddedSamplers.size()));
++			if (!fnInfo.embeddedSamplers.empty()) {
++				writeBytes(buf, fnInfo.embeddedSamplers.data(), fnInfo.embeddedSamplers.size() * sizeof(Iridium::EmbeddedSampler));
++			}
++			writeU32(buf, static_cast<uint32_t>(fnInfo.arguments.size()));
++			for (const auto& arg : fnInfo.arguments) {
++				writeU32(buf, static_cast<uint32_t>(arg.type));
++				writeU64(buf, static_cast<uint64_t>(arg.index));
++				writeString(buf, arg.name);
++				writeString(buf, arg.typeName);
++				writeU64(buf, static_cast<uint64_t>(arg.size));
++				writeU64(buf, static_cast<uint64_t>(arg.alignment));
++				writeU32(buf, static_cast<uint32_t>(arg.members.size()));
++				for (const auto& m : arg.members) {
++					writeU64(buf, static_cast<uint64_t>(m.offset));
++					writeString(buf, m.typeName);
++					writeString(buf, m.name);
++				}
++			}
++		}
++
++		std::string tmpPath = path + ".tmp." + std::to_string(getpid());
++		if (FILE* f = fopen(tmpPath.c_str(), "wb")) {
++			bool ok = fwrite(buf.data(), 1, buf.size(), f) == buf.size();
++			fclose(f);
++			if (ok) {
++				rename(tmpPath.c_str(), path.c_str());
++				return;
++			}
++		}
++		unlink(tmpPath.c_str());
++	}
++}
++
++void Indium::PrivateDevice::initPipelineCache() {
++	if (!DynamicVK::vkCreatePipelineCache.isAvailable()) {
++		return;
++	}
++	std::string cacheDir = indiumCacheDir();
++	std::vector<uint8_t> initialData;
++	std::string cachePath;
++	if (!cacheDir.empty()) {
++		char filename[96];
++		snprintf(filename, sizeof(filename), "/vkPipelineCache-%04x-%04x.bin",
++			_properties.vendorID, _properties.deviceID);
++		cachePath = cacheDir + filename;
++		if (FILE* f = fopen(cachePath.c_str(), "rb")) {
++			if (fseek(f, 0, SEEK_END) == 0) {
++				long sz = ftell(f);
++				if (sz >= static_cast<long>(sizeof(VkPipelineCacheHeaderVersionOne)) &&
++				    fseek(f, 0, SEEK_SET) == 0) {
++					initialData.resize(static_cast<size_t>(sz));
++					if (fread(initialData.data(), 1, initialData.size(), f) == initialData.size()) {
++						VkPipelineCacheHeaderVersionOne hdr {};
++						memcpy(&hdr, initialData.data(), sizeof(hdr));
++						if (hdr.headerSize < sizeof(VkPipelineCacheHeaderVersionOne) ||
++						    hdr.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
++						    hdr.vendorID != _properties.vendorID ||
++						    hdr.deviceID != _properties.deviceID ||
++						    memcmp(hdr.pipelineCacheUUID, _properties.pipelineCacheUUID, VK_UUID_SIZE) != 0) {
++							initialData.clear();
++						}
++					} else {
++						initialData.clear();
++					}
++				}
++			}
++			fclose(f);
++		}
++	}
++
++	auto& state = pipelineCacheState();
++	{
++		std::lock_guard<std::mutex> lock(state.mutex);
++		state.path = cachePath;
++		state.lastSaveNs.store(0, std::memory_order_relaxed);
++	}
++
++	VkPipelineCacheCreateInfo createInfo {};
++	createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
++	createInfo.initialDataSize = initialData.size();
++	createInfo.pInitialData = initialData.empty() ? nullptr : initialData.data();
++
++	if (DynamicVK::vkCreatePipelineCache(_device, &createInfo, nullptr, &_pipelineCache) != VK_SUCCESS && !initialData.empty()) {
++		createInfo.initialDataSize = 0;
++		createInfo.pInitialData = nullptr;
++		DynamicVK::vkCreatePipelineCache(_device, &createInfo, nullptr, &_pipelineCache);
++	}
++}
++
++void Indium::PrivateDevice::notePipelineCreated() {
++	if (!_pipelineCache) return;
++	auto& state = pipelineCacheState();
++	uint32_t pending = state.unsaved.fetch_add(1, std::memory_order_relaxed) + 1;
++	uint64_t now = monotonicNs();
++	uint64_t last = state.lastSaveNs.load(std::memory_order_relaxed);
++	if (pending >= 8 || last == 0 || (now > last && (now - last) >= 250000000ULL)) {
++		savePipelineCache();
++	}
++}
++
++void Indium::PrivateDevice::savePipelineCache() {
++	if (!_pipelineCache || !DynamicVK::vkGetPipelineCacheData.isAvailable()) return;
++	auto& state = pipelineCacheState();
++	std::lock_guard<std::mutex> lock(state.mutex);
++	if (state.path.empty() || state.unsaved.load(std::memory_order_relaxed) == 0) return;
++
++	size_t dataSize = 0;
++	if (DynamicVK::vkGetPipelineCacheData(_device, _pipelineCache, &dataSize, nullptr) != VK_SUCCESS ||
++	    dataSize < sizeof(VkPipelineCacheHeaderVersionOne)) {
++		return;
++	}
++	std::vector<uint8_t> data(dataSize);
++	if (DynamicVK::vkGetPipelineCacheData(_device, _pipelineCache, &dataSize, data.data()) != VK_SUCCESS) {
++		return;
++	}
++	std::string tmpPath = state.path + ".tmp." + std::to_string(getpid());
++	if (FILE* f = fopen(tmpPath.c_str(), "wb")) {
++		bool ok = fwrite(data.data(), 1, dataSize, f) == dataSize;
++		fclose(f);
++		if (ok && rename(tmpPath.c_str(), state.path.c_str()) == 0) {
++			state.unsaved.store(0, std::memory_order_relaxed);
++			state.lastSaveNs.store(monotonicNs(), std::memory_order_relaxed);
++			return;
++		}
++	}
++	unlink(tmpPath.c_str());
++}
++
  Indium::PrivateDevice::~PrivateDevice() {
++	if (_pipelineCache) {
++		savePipelineCache();
++		if (DynamicVK::vkDestroyPipelineCache.isAvailable()) {
++			DynamicVK::vkDestroyPipelineCache(_device, _pipelineCache, nullptr);
++		}
++		_pipelineCache = VK_NULL_HANDLE;
++	}
 +    for (const auto& entry : _renderPasses) DynamicVK::vkDestroyRenderPass(_device, entry.second, nullptr);
 +    for (const auto& entry : _availableTimelineSemaphores) DynamicVK::vkDestroySemaphore(_device, entry.first, nullptr);
 +	for (auto pool : _availableDescriptorPools) DynamicVK::vkDestroyDescriptorPool(_device, pool, nullptr);
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +620,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +989,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3372,7 +3781,7 @@ index 322e186..dce48c5 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +646,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +1015,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3385,19 +3794,66 @@ index 322e186..dce48c5 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -339,7 +668,11 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
- 	// TODO: cache translated libraries
- 	size_t translatedSize = 0;
- 	Iridium::OutputInfo outputInfo;
-+	uint64_t translateStart = SlowLog::enabled() ? SlowLog::now() : 0;
- 	auto translatedData = Iridium::translate(data, length, translatedSize, outputInfo);
-+	if (translateStart) {
-+		SlowLog::write("translate", static_cast<double>(SlowLog::now() - translateStart) / 1e6, nullptr, nullptr, translatedSize);
+@@ -336,10 +1034,54 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
+ };
+ 
+ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* data, size_t length) {
+-	// TODO: cache translated libraries
+-	size_t translatedSize = 0;
+-	Iridium::OutputInfo outputInfo;
+-	auto translatedData = Iridium::translate(data, length, translatedSize, outputInfo);
++	const auto key = computeLibraryCacheKey(data, length);
++	std::shared_ptr<CachedTranslatedLibrary> cached;
++	{
++		std::lock_guard<std::mutex> lock(libraryCacheMutex());
++		auto& map = libraryCacheMap();
++		auto it = map.find(key);
++		if (it != map.end()) {
++			cached = it->second;
++			if (cached->liveDevice == this) {
++				if (auto existing = cached->liveLibrary.lock()) {
++					return existing;
++				}
++			}
++		}
 +	}
++
++	if (!cached) {
++		auto entry = std::make_shared<CachedTranslatedLibrary>();
++		std::string cacheDir = indiumCacheDir();
++		std::string diskPath = cacheDir.empty() ? std::string() : iridiumCacheFilePath(cacheDir, key);
++		if (diskPath.empty() || !loadTranslatedLibraryFromDisk(diskPath, length, *entry)) {
++			size_t translatedSize = 0;
++			uint64_t translateStart = SlowLog::enabled() ? SlowLog::now() : 0;
++			auto translatedData = Iridium::translate(data, length, translatedSize, entry->outputInfo);
++			if (translateStart) {
++				SlowLog::write("translate", static_cast<double>(SlowLog::now() - translateStart) / 1e6, nullptr, nullptr, translatedSize);
++			}
++			if (!translatedData || translatedSize == 0) {
++				if (translatedData) free(translatedData);
++				return nullptr;
++			}
++			entry->spirv.assign(static_cast<const char*>(translatedData), static_cast<const char*>(translatedData) + translatedSize);
++			free(translatedData);
++			if (!diskPath.empty()) {
++				saveTranslatedLibraryToDisk(diskPath, length, *entry);
++			}
++		}
++		std::lock_guard<std::mutex> lock(libraryCacheMutex());
++		auto [it, inserted] = libraryCacheMap().emplace(key, entry);
++		cached = it->second;
++		if (!inserted && cached->liveDevice == this) {
++			if (auto existing = cached->liveLibrary.lock()) {
++				return existing;
++			}
++		}
++	}
++
++	const auto& outputInfo = cached->outputInfo;
  	PrivateLibrary::FunctionInfoMap funcInfoMap;
  
  	for (const auto& [name, info]: outputInfo.functionInfos) {
-@@ -357,6 +690,33 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,12 +1099,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -3431,7 +3887,19 @@ index 322e186..dce48c5 100644
  		funcInfo.bindings.insert(funcInfo.bindings.end(), info.bindings.begin(), info.bindings.end());
  		funcInfo.embeddedSamplers.insert(funcInfo.embeddedSamplers.end(), info.embeddedSamplers.begin(), info.embeddedSamplers.end());
  	}
-@@ -382,6 +742,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
+ 
+-	auto lib = std::make_shared<PrivateLibrary>(shared_from_this(), static_cast<const char*>(translatedData), translatedSize, funcInfoMap);
+-	free(translatedData);
++	auto lib = std::make_shared<PrivateLibrary>(shared_from_this(), cached->spirv.data(), cached->spirv.size(), funcInfoMap);
++	{
++		std::lock_guard<std::mutex> lock(libraryCacheMutex());
++		cached->liveDevice = this;
++		cached->liveLibrary = lib;
++	}
+ 	return lib;
+ };
+ 
+@@ -382,6 +1155,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
  	return globalDeviceList.empty() ? nullptr : globalDeviceList.front();
  };
  
@@ -3451,7 +3919,7 @@ index 322e186..dce48c5 100644
  void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	// this is held for the entire duration of the poll so we can
  	// ensure we're the only one polling, which allows us to avoid
-@@ -393,9 +766,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -393,9 +1179,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	const std::vector<VkSemaphore> semaphores = _eventLoopSemaphores;
  	const std::vector<uint64_t> values = _eventLoopWaitValues;
  	const std::vector<std::function<void()>> callbacks = _eventLoopCallbacks;
@@ -3487,7 +3955,7 @@ index 322e186..dce48c5 100644
  	VkSemaphoreWaitInfo info {};
  	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
  	info.semaphoreCount = semaphores.size();
-@@ -403,7 +802,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -403,7 +1215,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	info.pValues = values.data();
  	info.flags = VK_SEMAPHORE_WAIT_ANY_BIT;
  
@@ -3508,7 +3976,7 @@ index 322e186..dce48c5 100644
  
  	if (result == VK_TIMEOUT) {
  		// timed out with no semaphores ready
-@@ -474,15 +885,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -474,15 +1298,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  		_eventLoopSemaphores.push_back(semaphore);
  		_eventLoopWaitValues.push_back(targetValue);
  		_eventLoopCallbacks.push_back(callback);
@@ -3542,7 +4010,7 @@ index 322e186..dce48c5 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +931,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +1344,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -3558,7 +4026,7 @@ index 322e186..dce48c5 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +984,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +1397,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -3724,7 +4192,7 @@ index 322e186..dce48c5 100644
 +	return chosen;
 +};
 diff --git a/src/indium/dynamic-vk.cpp b/src/indium/dynamic-vk.cpp
-index a4677c3..69ef23f 100644
+index a4677c3..eaed0d6 100644
 --- a/src/indium/dynamic-vk.cpp
 +++ b/src/indium/dynamic-vk.cpp
 @@ -1,4 +1,5 @@
@@ -3744,7 +4212,16 @@ index a4677c3..69ef23f 100644
  PFN_vkGetInstanceProcAddr Indium::DynamicVK::vkGetInstanceProcAddr = NULL;
  PFN_vkCreateInstance Indium::DynamicVK::vkCreateInstance = NULL;
  PFN_vkEnumerateInstanceLayerProperties Indium::DynamicVK::vkEnumerateInstanceLayerProperties = NULL;
-@@ -32,6 +37,16 @@ static Indium::DynamicVK::DynamicFunctionBase* const eagerlyResolvedFunctions[]
+@@ -20,6 +25,8 @@ INDIUM_DYNAMICVK_FUNCTION_FOREACH(DYNAMICVK_FUNCTION_DEF)
+ static Indium::DynamicVK::DynamicFunctionBase* const eagerlyResolvedFunctions[] = {
+ 	&Indium::DynamicVK::vkDestroyCommandPool,
+ 	&Indium::DynamicVK::vkDestroySemaphore,
++	&Indium::DynamicVK::vkDestroyPipelineCache,
++	&Indium::DynamicVK::vkGetPipelineCacheData,
+ 	&Indium::DynamicVK::vkDestroyDevice,
+ };
+ 
+@@ -32,6 +39,16 @@ static Indium::DynamicVK::DynamicFunctionBase* const eagerlyResolvedFunctions[]
  #endif
  
  bool Indium::DynamicVK::init() {
@@ -3839,7 +4316,7 @@ index e7c06fe..6e1f4b1 100644
 +	if (validationLog) { fclose(validationLog); validationLog = nullptr; }
  };
 diff --git a/src/indium/library.cpp b/src/indium/library.cpp
-index d56a213..971db33 100644
+index d56a213..d416ace 100644
 --- a/src/indium/library.cpp
 +++ b/src/indium/library.cpp
 @@ -1,7 +1,15 @@
@@ -3890,14 +4367,21 @@ index d56a213..971db33 100644
  	// create sampler states for embedded samplers
  	for (auto& [name, funcInfo]: _functionInfos) {
  		for (const auto& embeddedSampler: funcInfo.embeddedSamplers) {
-@@ -146,3 +172,5 @@ Indium::PrivateLibrary::~PrivateLibrary() {
+@@ -144,5 +170,11 @@ Indium::PrivateLibrary::~PrivateLibrary() {
+ };
+ 
  std::shared_ptr<Indium::Function> Indium::PrivateLibrary::newFunction(const std::string& name) {
- 	return std::make_shared<PrivateFunction>(shared_from_this(), name, _functionInfos[name]);
+-	return std::make_shared<PrivateFunction>(shared_from_this(), name, _functionInfos[name]);
++	auto it = _functionInfos.find(name);
++	if (it == _functionInfos.end()) {
++		return nullptr;
++	}
++	return std::make_shared<PrivateFunction>(shared_from_this(), name, it->second);
  };
 +
 +const std::vector<Iridium::ArgumentInfo>& Indium::PrivateFunction::argumentInfo() const { return _functionInfo.arguments; }
 diff --git a/src/indium/render-command-encoder.cpp b/src/indium/render-command-encoder.cpp
-index b27ffe5..1be0e17 100644
+index b27ffe5..c9f5289 100644
 --- a/src/indium/render-command-encoder.cpp
 +++ b/src/indium/render-command-encoder.cpp
 @@ -1,3 +1,9 @@
@@ -4289,7 +4773,7 @@ index b27ffe5..1be0e17 100644
  	DynamicVK::vkCmdSetScissorWithCount(buf->commandBuffer(), tmp.size(), tmp.data());
  };
  
-@@ -287,43 +461,319 @@ void Indium::PrivateRenderCommandEncoder::setBlendColor(float red, float green,
+@@ -287,76 +461,359 @@ void Indium::PrivateRenderCommandEncoder::setBlendColor(float red, float green,
  	DynamicVK::vkCmdSetBlendConstants(buf->commandBuffer(), tmp);
  };
  
@@ -4628,7 +5112,22 @@ index b27ffe5..1be0e17 100644
  	auto buf = _privateCommandBuffer.lock();
  
  	// bind the pipeline with the right topology class for this primitive
-@@ -343,20 +793,27 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
+ 	VkPipeline pipeline = VK_NULL_HANDLE;
+ 	switch (primitiveType) {
+ 		case PrimitiveType::Point:
+-			pipeline = _privatePSO->pipelines()[0];
++			pipeline = _privatePSO->pipelineForTopologyIndex(0);
+ 			break;
+ 		case PrimitiveType::Line:
+ 		case PrimitiveType::LineStrip:
+-			pipeline = _privatePSO->pipelines()[1];
++			pipeline = _privatePSO->pipelineForTopologyIndex(1);
+ 			break;
+ 		case PrimitiveType::Triangle:
+ 		case PrimitiveType::TriangleStrip:
+-			pipeline = _privatePSO->pipelines()[2];
++			pipeline = _privatePSO->pipelineForTopologyIndex(2);
+ 			break;
  		default:
  			throw BadEnumValue();
  	}
@@ -4784,7 +5283,7 @@ index b27ffe5..1be0e17 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) {
-@@ -460,17 +950,26 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
+@@ -460,69 +950,102 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
  	}
  };
  
@@ -4814,7 +5313,22 @@ index b27ffe5..1be0e17 100644
  	auto buf = _privateCommandBuffer.lock();
  
  	// bind the pipeline with the right topology class for this primitive
-@@ -490,39 +989,63 @@ void Indium::PrivateRenderCommandEncoder::drawIndexedPrimitives(PrimitiveType pr
+ 	VkPipeline pipeline = VK_NULL_HANDLE;
+ 	switch (primitiveType) {
+ 		case PrimitiveType::Point:
+-			pipeline = _privatePSO->pipelines()[0];
++			pipeline = _privatePSO->pipelineForTopologyIndex(0);
+ 			break;
+ 		case PrimitiveType::Line:
+ 		case PrimitiveType::LineStrip:
+-			pipeline = _privatePSO->pipelines()[1];
++			pipeline = _privatePSO->pipelineForTopologyIndex(1);
+ 			break;
+ 		case PrimitiveType::Triangle:
+ 		case PrimitiveType::TriangleStrip:
+-			pipeline = _privatePSO->pipelines()[2];
++			pipeline = _privatePSO->pipelineForTopologyIndex(2);
+ 			break;
  		default:
  			throw BadEnumValue();
  	}
@@ -4916,7 +5430,7 @@ index b27ffe5..1be0e17 100644
 +    DynamicVK::vkCmdPipelineBarrier(buf->commandBuffer(), stages, stages, VK_DEPENDENCY_BY_REGION_BIT, 1, &barrier, 0, nullptr, 0, nullptr);
 +}
 diff --git a/src/indium/render-pipeline.cpp b/src/indium/render-pipeline.cpp
-index 1b6bb3b..8af661f 100644
+index 1b6bb3b..4674d2e 100644
 --- a/src/indium/render-pipeline.cpp
 +++ b/src/indium/render-pipeline.cpp
 @@ -1,10 +1,19 @@
@@ -4939,7 +5453,7 @@ index 1b6bb3b..8af661f 100644
  
  Indium::RenderPipelineState::~RenderPipelineState() {};
  
-@@ -22,9 +31,116 @@ Indium::PrivateRenderPipelineState::PrivateRenderPipelineState(std::shared_ptr<P
+@@ -22,14 +31,121 @@ Indium::PrivateRenderPipelineState::PrivateRenderPipelineState(std::shared_ptr<P
  
  	_vertexFunction = std::dynamic_pointer_cast<PrivateFunction>(descriptor.vertexFunction);
  	_fragmentFunction = std::dynamic_pointer_cast<PrivateFunction>(descriptor.fragmentFunction);
@@ -5058,11 +5572,78 @@ index 1b6bb3b..8af661f 100644
  };
  
  Indium::PrivateRenderPipelineState::~PrivateRenderPipelineState() {
-@@ -61,12 +177,21 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+-	if (_pipelines[0]) {
+-		for (auto& pipeline: _pipelines) {
++	for (auto& pipeline: _pipelines) {
++		if (pipeline) {
+ 			DynamicVK::vkDestroyPipeline(_privateDevice->device(), pipeline, nullptr);
+ 			pipeline = VK_NULL_HANDLE;
+ 		}
+@@ -42,13 +158,13 @@ Indium::PrivateRenderPipelineState::~PrivateRenderPipelineState() {
+ };
  
+ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibleRenderPass, bool force) {
+-	if (!force && _pipelines[0]) {
++	if (!force && ready()) {
+ 		// assumes that the current pipeline is compatible with the given render pass
+ 		return;
+ 	}
+ 
+-	if (_pipelines[0]) {
+-		for (auto& pipeline: _pipelines) {
++	for (auto& pipeline: _pipelines) {
++		if (pipeline) {
+ 			DynamicVK::vkDestroyPipeline(_privateDevice->device(), pipeline, nullptr);
+ 			pipeline = VK_NULL_HANDLE;
+ 		}
+@@ -59,14 +175,64 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 		_pipelineLayout = VK_NULL_HANDLE;
+ 	}
+ 
++	_compatibleRenderPass = compatibleRenderPass;
++
++	std::vector<size_t> inputLocations;
++	for (const auto& binding : _vertexFunction->functionInfo().bindings)
++		if (binding.type == Iridium::BindingType::VertexInput) inputLocations.push_back(binding.index);
++	if (!inputLocations.empty() && !_vertexDescriptor)
++		throw std::invalid_argument("Missing vertex descriptor for shader inputs");
++	const auto plan = vertexInputPlan(_vertexDescriptor.value_or(VertexDescriptor{}), inputLocations);
++	_vertexInputBindings = plan.metalBindings;
++
++	std::vector<VkPushConstantRange> pushConstantRanges;
++
++	VkPipelineLayoutCreateInfo layoutCreateInfo {};
++	layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
++	layoutCreateInfo.setLayoutCount = _descriptorSetLayouts.layouts.size();
++	layoutCreateInfo.pSetLayouts = _descriptorSetLayouts.layouts.data();
++	layoutCreateInfo.pushConstantRangeCount = pushConstantRanges.size();
++	layoutCreateInfo.pPushConstantRanges = pushConstantRanges.data();
++
++	if (DynamicVK::vkCreatePipelineLayout(_privateDevice->device(), &layoutCreateInfo, nullptr, &_pipelineLayout) != VK_SUCCESS) {
++		// TODO
++		abort();
++	}
++
++	size_t primaryIndex = 2;
++	if (_primitiveTopology == PrimitiveTopologyClass::Point) {
++		primaryIndex = 0;
++	} else if (_primitiveTopology == PrimitiveTopologyClass::Line) {
++		primaryIndex = 1;
++	}
++	pipelineForTopologyIndex(primaryIndex);
++};
++
++VkPipeline Indium::PrivateRenderPipelineState::pipelineForTopologyIndex(size_t index) {
++	if (index >= _pipelines.size()) {
++		abort();
++	}
++	if (_pipelines[index]) {
++		return _pipelines[index];
++	}
++
  	auto vertexFunctionName = _vertexFunction->name();
  	auto fragmentFunctionName = _fragmentFunction->name();
-+	SlowLog::Scope slowCreate("createGraphicsPipelines", _vertexFunction->library().get(), _fragmentFunction->library().get(), 0);
++	SlowLog::Scope slowCreate("createGraphicsPipelines", _vertexFunction->library().get(), _fragmentFunction->library().get(), index);
  	std::vector<VkPipelineShaderStageCreateInfo> stages;
  
  	VkPipelineShaderStageCreateInfo shaderStage {};
@@ -5080,7 +5661,7 @@ index 1b6bb3b..8af661f 100644
  	shaderStage.module = _vertexFunction->library()->shaderModule();
  	shaderStage.pName = vertexFunctionName.c_str();
  	stages.push_back(shaderStage);
-@@ -82,51 +207,15 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -82,51 +248,15 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  	std::vector<VkVertexInputBindingDescription> vertexBindingDescs;
  	std::vector<VkVertexInputAttributeDescription> vertexAttrDescs;
  
@@ -5141,7 +5722,25 @@ index 1b6bb3b..8af661f 100644
  
  	vertexInputState.vertexBindingDescriptionCount = vertexBindingDescs.size();
  	vertexInputState.pVertexBindingDescriptions = vertexBindingDescs.data();
-@@ -168,6 +257,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -135,6 +265,8 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 
+ 	VkPipelineInputAssemblyStateCreateInfo inputAssemblyState {};
+ 	inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
++	inputAssemblyState.topology = index == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST :
++		(index == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+ 
+ 	VkPipelineTessellationStateCreateInfo tesselationState {};
+ 	tesselationState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+@@ -144,8 +276,6 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 
+ 	VkPipelineRasterizationStateCreateInfo rasterizationState {};
+ 	rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+-	// TODO: figure out how to set `depthClampEnable` and `polgygonMode` dynamically;
+-	//       might have to just create multiple pipelines
+ 	rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
+ 	rasterizationState.lineWidth = 1.0f;
+ 
+@@ -168,6 +298,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		tmp.dstAlphaBlendFactor = blendFactorToVkBlendFactor(colorInfo.destinationAlphaBlendFactor);
  		tmp.alphaBlendOp = blendOperationToVkBlendOp(colorInfo.alphaBlendOperation);
  		tmp.colorWriteMask = colorWriteMaskToVkColorComponentFlags(colorInfo.writeMask);
@@ -5149,6 +5748,64 @@ index 1b6bb3b..8af661f 100644
  		colorBlendStates.push_back(tmp);
  	}
  	VkPipelineColorBlendStateCreateInfo colorBlendState {};
+@@ -204,20 +335,6 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 	dynamicState.dynamicStateCount = dynamicStates.size();
+ 	dynamicState.pDynamicStates = dynamicStates.data();
+ 
+-	std::vector<VkPushConstantRange> pushConstantRanges;
+-
+-	VkPipelineLayoutCreateInfo layoutCreateInfo {};
+-	layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+-	layoutCreateInfo.setLayoutCount = _descriptorSetLayouts.layouts.size();
+-	layoutCreateInfo.pSetLayouts = _descriptorSetLayouts.layouts.data();
+-	layoutCreateInfo.pushConstantRangeCount = pushConstantRanges.size();
+-	layoutCreateInfo.pPushConstantRanges = pushConstantRanges.data();
+-
+-	if (DynamicVK::vkCreatePipelineLayout(_privateDevice->device(), &layoutCreateInfo, nullptr, &_pipelineLayout) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
+-
+ 	VkGraphicsPipelineCreateInfo pipelineCreateInfo {};
+ 	pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+ 	pipelineCreateInfo.stageCount = stages.size();
+@@ -232,32 +349,14 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 	pipelineCreateInfo.pColorBlendState = &colorBlendState;
+ 	pipelineCreateInfo.pDynamicState = &dynamicState;
+ 	pipelineCreateInfo.layout = _pipelineLayout;
+-	pipelineCreateInfo.renderPass = compatibleRenderPass;
+-
+-	// we can set the primitive topology dynamically, but unfortunately, we can only set it for a different topology
+-	// in the same topology class that the pipeline was created for. this means we need to create 3 pipelines
+-	// (one for each topology class) rather than 5 (one for each primitive topology).
+-
+-	// first, one for points
+-	inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+-	if (DynamicVK::vkCreateGraphicsPipelines(_privateDevice->device(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &_pipelines[0]) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
+-
+-	// now, one for lines
+-	inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+-	if (DynamicVK::vkCreateGraphicsPipelines(_privateDevice->device(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &_pipelines[1]) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
++	pipelineCreateInfo.renderPass = _compatibleRenderPass;
+ 
+-	// finally, one for triangles
+-	inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+-	if (DynamicVK::vkCreateGraphicsPipelines(_privateDevice->device(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &_pipelines[2]) != VK_SUCCESS) {
++	if (DynamicVK::vkCreateGraphicsPipelines(_privateDevice->device(), _privateDevice->pipelineCache(), 1, &pipelineCreateInfo, nullptr, &_pipelines[index]) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+ 	}
++	_privateDevice->notePipelineCreated();
++	return _pipelines[index];
+ };
+ 
+ const Indium::FunctionInfo& Indium::PrivateRenderPipelineState::vertexFunctionInfo() {
 diff --git a/src/indium/sampler.cpp b/src/indium/sampler.cpp
 index 71392df..d82e5f0 100644
 --- a/src/indium/sampler.cpp
@@ -5172,7 +5829,7 @@ index 71392df..d82e5f0 100644
  	info.unnormalizedCoordinates = descriptor.normalizedCoordinates ? VK_FALSE : VK_TRUE;
  
 diff --git a/src/indium/texture.cpp b/src/indium/texture.cpp
-index 1e3e971..cbdd7ff 100644
+index 1e3e971..4c18554 100644
 --- a/src/indium/texture.cpp
 +++ b/src/indium/texture.cpp
 @@ -1,8 +1,90 @@
@@ -5379,7 +6036,7 @@ index 1e3e971..cbdd7ff 100644
  	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // TODO: check if this should be "concurrent" instead. i think we're good, though.
  	info.queueFamilyIndexCount = 0;
  	info.pQueueFamilyIndices = nullptr;
-@@ -347,45 +469,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -347,45 +469,32 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  
  	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _image, &reqs);
  
@@ -5399,12 +6056,18 @@ index 1e3e971..cbdd7ff 100644
 -		if (_storageMode == StorageMode::Shared && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
 -			continue;
 -		}
--
++	size_t targetIndex = _device->findMemoryType(reqs.memoryTypeBits, _storageMode, true);
+ 
 -		// okay, this is good enough
 -		targetIndex = i;
 -		break;
--	}
-+	size_t targetIndex = _device->findMemoryType(reqs.memoryTypeBits, _storageMode, true);
++	if (targetIndex == SIZE_MAX && _storageMode != StorageMode::Private) {
++		// Optimal-tiling images on discrete drivers (e.g. NVIDIA) only expose
++		// non-host-visible memoryTypeBits; ConcreteTexture never maps image
++		// memory directly and services replaceRegion through a Shared staging
++		// buffer, so fall back to Private (DEVICE_LOCAL) placement.
++		targetIndex = _device->findMemoryType(reqs.memoryTypeBits, StorageMode::Private, true);
+ 	}
  
  	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for image with requested storage mode");
@@ -5435,7 +6098,7 @@ index 1e3e971..cbdd7ff 100644
  	VkCommandBufferAllocateInfo cmdBufAllocInfo {};
  	cmdBufAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
  	cmdBufAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-@@ -409,7 +510,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -409,7 +518,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  	barrier.srcAccessMask = VK_ACCESS_NONE;
  	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
  	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -5444,7 +6107,7 @@ index 1e3e971..cbdd7ff 100644
  	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
  	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
  	barrier.image = _image;
-@@ -438,15 +539,13 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -438,15 +547,13 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  	submitInfo.commandBufferCount = 1;
  	submitInfo.pCommandBuffers = &cmdBuf;
  
@@ -5466,7 +6129,7 @@ index 1e3e971..cbdd7ff 100644
  
  	VkImageViewCreateInfo info2 {};
  	info2.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-@@ -463,12 +562,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -463,12 +570,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  		// TODO
  		abort();
  	}
@@ -5492,7 +6155,7 @@ index 1e3e971..cbdd7ff 100644
  };
  
  Indium::TextureType Indium::ConcreteTexture::textureType() const {
-@@ -537,7 +648,20 @@ VkImage Indium::ConcreteTexture::image() {
+@@ -537,7 +656,20 @@ VkImage Indium::ConcreteTexture::image() {
  	return _image;
  };
  
@@ -5513,7 +6176,7 @@ index 1e3e971..cbdd7ff 100644
  	return VK_IMAGE_LAYOUT_GENERAL;
  };
  
-@@ -546,6 +670,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -546,6 +678,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  };
  
  void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmapLevel, size_t slice, const void* bytes, size_t bytesPerRow, size_t bytesPerImage) {
@@ -5530,7 +6193,7 @@ index 1e3e971..cbdd7ff 100644
  	if (_storageMode != StorageMode::Managed && _storageMode != StorageMode::Shared) {
  		throw std::runtime_error("Invalid usage of replaceRegion on non-managed and non-shared texture");
  	}
-@@ -556,99 +690,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -556,99 +698,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  
  	auto aspect = pixelFormatToVkImageAspectFlags(_descriptor.pixelFormat);
  
@@ -9332,7 +9995,7 @@ index 0000000..962fdad
 +}
 +}
 diff --git a/private-include/indium/render-pipeline.private.hpp b/private-include/indium/render-pipeline.private.hpp
-index 7e5f242..5f68503 100644
+index 7e5f242..7a4ad51 100644
 --- a/private-include/indium/render-pipeline.private.hpp
 +++ b/private-include/indium/render-pipeline.private.hpp
 @@ -22,6 +22,9 @@ namespace Indium {
@@ -9345,14 +10008,16 @@ index 7e5f242..5f68503 100644
  			PrivateRenderPipelineState(std::shared_ptr<PrivateDevice> device, const RenderPipelineDescriptor& descriptor);
  			~PrivateRenderPipelineState();
  
-@@ -38,8 +41,15 @@ namespace Indium {
+@@ -37,9 +40,17 @@ namespace Indium {
+ 			//       if so, we would always be able to create the pipeline immediately
  			//       in the constructor.
  			void recreatePipeline(VkRenderPass compatibleRenderPass, bool force);
- 
-+            bool ready() const {
-+                return _pipelineLayout && _pipelines[0] && _pipelines[1] && _pipelines[2];
-+            }
++			VkPipeline pipelineForTopologyIndex(size_t index);
 +
++            bool ready() const {
++                return _pipelineLayout && (_pipelines[0] || _pipelines[1] || _pipelines[2]);
++            }
+ 
  			const FunctionInfo& vertexFunctionInfo();
  			const FunctionInfo& fragmentFunctionInfo();
 +			// Reject unbound fetches that cannot fit in the finite zero buffer.
@@ -9361,6 +10026,14 @@ index 7e5f242..5f68503 100644
  
  			INDIUM_PROPERTY_READONLY_OBJECT(PrivateDevice, p, P,rivateDevice);
  
+@@ -51,5 +62,7 @@ namespace Indium {
+ 			INDIUM_PROPERTY_REF(DescriptorSetLayouts<2>, d, D,escriptorSetLayouts);
+ 
+ 			INDIUM_PROPERTY_READONLY_REF(std::vector<size_t>, v,V,ertexInputBindings);
++		private:
++			VkRenderPass _compatibleRenderPass = VK_NULL_HANDLE;
+ 	};
+ };
 diff --git a/private-include/indium/vertex-input.private.hpp b/private-include/indium/vertex-input.private.hpp
 new file mode 100644
 --- /dev/null
@@ -9531,7 +10204,7 @@ index 0000000..523fffe
 +	}
 +}
 diff --git a/src/indium/compute-pipeline.cpp b/src/indium/compute-pipeline.cpp
-index e89f5d5..d52282b 100644
+index e89f5d5..3a49a38 100644
 --- a/src/indium/compute-pipeline.cpp
 +++ b/src/indium/compute-pipeline.cpp
 @@ -1,4 +1,5 @@
@@ -9540,7 +10213,36 @@ index e89f5d5..d52282b 100644
  #include <indium/device.private.hpp>
  #include <stdexcept>
  #include <indium/dynamic-vk.hpp>
-@@ -59,6 +60,7 @@ VkPipeline Indium::PrivateComputePipelineState::createPipeline(Size threadsPerTh
+@@ -45,20 +46,33 @@ Indium::PrivateComputePipelineState::PrivateComputePipelineState(std::shared_ptr
+ };
+ 
+ Indium::PrivateComputePipelineState::~PrivateComputePipelineState() {
++	for (const auto& entry : _cachedPipelines) {
++		if (entry.second) {
++			DynamicVK::vkDestroyPipeline(_privateDevice->device(), entry.second, nullptr);
++		}
++	}
+ 	if (_layout) {
+ 		DynamicVK::vkDestroyPipelineLayout(_privateDevice->device(), _layout, nullptr);
+ 	}
+ };
+ 
+ VkPipeline Indium::PrivateComputePipelineState::createPipeline(Size threadsPerThreadgroup) {
+-	// TODO: optimize this by using pipeline caches.
+-	//       also, we can store the most recent pipeline and, if the number of threads per threadgroup stays the same,
+-	//       we can just return that instead (wrapped in a reference counting object).
++	{
++		std::lock_guard<std::mutex> lock(_pipelineMutex);
++		for (const auto& entry : _cachedPipelines) {
++			if (entry.first.width == threadsPerThreadgroup.width &&
++			    entry.first.height == threadsPerThreadgroup.height &&
++			    entry.first.depth == threadsPerThreadgroup.depth) {
++				return entry.second;
++			}
++		}
++	}
+ 
+ 	VkPipeline pipeline = VK_NULL_HANDLE;
  
  	auto func = std::dynamic_pointer_cast<PrivateFunction>(_descriptor.computeFunction);
  	auto funcName = func->name();
@@ -9548,3 +10250,41 @@ index e89f5d5..d52282b 100644
  
  	std::array<uint32_t, 3> threadsPerThreadgroupData = { static_cast<uint32_t>(threadsPerThreadgroup.width), static_cast<uint32_t>(threadsPerThreadgroup.height), static_cast<uint32_t>(threadsPerThreadgroup.depth) };
  
+@@ -85,11 +99,22 @@ VkPipeline Indium::PrivateComputePipelineState::createPipeline(Size threadsPerTh
+ 	info.stage.pSpecializationInfo = &specInfo;
+ 	info.layout = _layout;
+ 
+-	if (DynamicVK::vkCreateComputePipelines(_privateDevice->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
++	if (DynamicVK::vkCreateComputePipelines(_privateDevice->device(), _privateDevice->pipelineCache(), 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+ 	}
+-
++	_privateDevice->notePipelineCreated();
++
++	std::lock_guard<std::mutex> lock(_pipelineMutex);
++	for (const auto& entry : _cachedPipelines) {
++		if (entry.first.width == threadsPerThreadgroup.width &&
++		    entry.first.height == threadsPerThreadgroup.height &&
++		    entry.first.depth == threadsPerThreadgroup.depth) {
++			DynamicVK::vkDestroyPipeline(_privateDevice->device(), pipeline, nullptr);
++			return entry.second;
++		}
++	}
++	_cachedPipelines.emplace_back(threadsPerThreadgroup, pipeline);
+ 	return pipeline;
+ };
+ 
+diff --git a/private-include/indium/compute-pipeline.private.hpp b/private-include/indium/compute-pipeline.private.hpp
+index 759a4df..3ee4321 100644
+--- a/private-include/indium/compute-pipeline.private.hpp
++++ b/private-include/indium/compute-pipeline.private.hpp
+@@ -33,5 +33,8 @@ namespace Indium {
+ 
+ 		INDIUM_PROPERTY_REF(DescriptorSetLayouts<1>, d,D,escriptorSetLayouts);
+ 		INDIUM_PROPERTY_READONLY(VkPipelineLayout, l,L,ayout) = VK_NULL_HANDLE;
++	private:
++		std::mutex _pipelineMutex;
++		std::vector<std::pair<Size, VkPipeline>> _cachedPipelines;
+ 	};
+ };

@@ -369,7 +369,8 @@
         "private-include/indium/vertex-input.private.hpp",
         "private-include/indium/black-trace.private.hpp",
         "private-include/indium/slow-log.private.hpp"
-      ]
+      ],
+      "patch_sha256": "6b75949634fc0a602520f9ee8414fc7f1703ab1425f41ee21456da03f9c61ad6"
     },
     {
       "path": "src/external/cfnetwork",
