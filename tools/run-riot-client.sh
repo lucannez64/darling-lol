@@ -147,6 +147,22 @@ case "$guest_home" in
  "$prefix"/*) guest_path=/${guest_home#"$prefix"/} ;;
  *) echo "RIOT_GUEST_HOME must be inside DPREFIX" >&2; exit 1 ;;
 esac
+# The client saves its locale in RiotClientSettings.yaml and prefers it over --locale, so
+# an explicit RCLOL_LOCALE is ignored once a session has run in another language. The
+# in-client language switch needs a self-restart, which closes the client under Darling,
+# so sync an explicit RCLOL_LOCALE into the saved settings before the client starts.
+if [ -n "${RCLOL_LOCALE:-}" ]; then
+ case "$RCLOL_LOCALE" in
+  [a-z][a-z]_[A-Z][A-Z])
+   settings="$guest_home/Library/Application Support/Riot Games/Riot Client/Config/RiotClientSettings.yaml"
+   if [ -w "$settings" ]; then
+    # The file uses CRLF line endings; keep whatever follows the closing quote.
+    sed -i "s/^\( *locale: \)\"[A-Za-z_]*\"/\1\"$RCLOL_LOCALE\"/" "$settings"
+   fi
+   ;;
+  *) echo "RCLOL_LOCALE must look like pt_BR; ignoring '$RCLOL_LOCALE'" >&2; unset RCLOL_LOCALE ;;
+ esac
+fi
 # The first-time installer puts the client in /Users/Shared/Riot Games and then
 # hands off through LaunchServices, which does not start it under Darling. Link
 # the installed client where the normal launch expects it.
