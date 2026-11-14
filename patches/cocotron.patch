@@ -1340,14 +1340,24 @@ index cacd899..9422d86 100644
      NSInvalidAbstractInvocation();
      return nil;
 diff --git a/AppKit/NSEvent.subproj/NSEvent.m b/AppKit/NSEvent.subproj/NSEvent.m
-index d0bad98..fecfa9f 100644
+index d0bad98..e2f4073 100644
 --- a/AppKit/NSEvent.subproj/NSEvent.m
 +++ b/AppKit/NSEvent.subproj/NSEvent.m
-@@ -29,6 +29,38 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -29,6 +29,48 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <Foundation/NSDate.h>
  #import <Foundation/NSException.h>
  #import <Foundation/NSRaise.h>
 +#import <Foundation/NSArray.h>
++#include <mach/mach_time.h>
++
++static NSTimeInterval darlingSystemUptime(void) {
++    static mach_timebase_info_data_t timebase;
++    if (timebase.denom == 0) {
++        mach_timebase_info(&timebase);
++    }
++    uint64_t now = mach_absolute_time();
++    return ((double)now * (double)timebase.numer / (double)timebase.denom) / 1.0e9;
++}
 +
 +@interface _NSLocalEventMonitor : NSObject {
 +@public
@@ -1382,7 +1392,7 @@ index d0bad98..fecfa9f 100644
  
  @implementation NSEvent
  
-@@ -40,6 +72,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -40,13 +82,17 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      return [[NSDisplay currentDisplay] currentModifierFlags];
  }
  
@@ -1393,7 +1403,28 @@ index d0bad98..fecfa9f 100644
  - (instancetype) initWithType: (NSEventType) type
                       location: (NSPoint) location
                  modifierFlags: (NSEventModifierFlags) modifierFlags
-@@ -350,14 +386,23 @@ static NSTimer *_periodicTimer = nil;
+                        window: (NSWindow *) window
+ {
+     _type = type;
+-    _timestamp = [NSDate timeIntervalSinceReferenceDate];
++    _timestamp = darlingSystemUptime();
+     _locationInWindow = location;
+     _modifierFlags = modifierFlags;
+     _windowNumber = [window windowNumber];
+@@ -177,10 +223,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+                               data1: (NSInteger) data1
+                               data2: (NSInteger) data2
+ {
++    NSTimeInterval resolvedTimestamp = timestamp > 0.0 ? timestamp : darlingSystemUptime();
+     return [[[NSEvent_other alloc] initWithType: type
+                                        location: location
+                                   modifierFlags: flags
+-                                      timestamp: timestamp
++                                      timestamp: resolvedTimestamp
+                                    windowNumber: windowNum
+                                         context: context
+                                         subtype: subtype
+@@ -350,14 +397,23 @@ static NSTimer *_periodicTimer = nil;
  }
  
  + (id) addLocalMonitorForEventsMatchingMask: (NSEventMask) mask
@@ -1422,7 +1453,7 @@ index d0bad98..fecfa9f 100644
  
  @end
 diff --git a/AppKit/NSEvent.subproj/NSEvent_mouse.m b/AppKit/NSEvent.subproj/NSEvent_mouse.m
-index 31c65aa..f7d55ec 100644
+index 31c65aa..d73e12a 100644
 --- a/AppKit/NSEvent.subproj/NSEvent_mouse.m
 +++ b/AppKit/NSEvent.subproj/NSEvent_mouse.m
 @@ -18,6 +18,11 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
@@ -1460,16 +1491,36 @@ index 31c65aa..f7d55ec 100644
  - (instancetype) initWithType: (NSEventType) type
                       location: (NSPoint) location
                  modifierFlags: (NSEventModifierFlags) modifierFlags
-@@ -96,6 +110,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -74,8 +88,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     self = [super initWithType: type
+                       location: location
+                  modifierFlags: modifierFlags
+-                        window: (id) windowNumber];
++                        window: nil];
+     if (self != nil) {
++        if (timestamp > 0.0) {
++            _timestamp = timestamp;
++        }
++        _windowNumber = windowNumber;
+         _trackingNumber = tracking;
+         _userData = userData;
+     }
+@@ -95,7 +113,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+     [super initWithType: type
                   location: location
              modifierFlags: modifierFlags
-                    window: (id) windowNumber];
+-                   window: (id) windowNumber];
++                   window: nil];
++    if (timestamp > 0.0) {
++        _timestamp = timestamp;
++    }
++    _windowNumber = windowNumber;
 +    _buttonNumber = (type == NSRightMouseDown || type == NSRightMouseUp || type == NSRightMouseDragged) ? 1 :
 +        (type == NSOtherMouseDown || type == NSOtherMouseUp || type == NSOtherMouseDragged) ? 2 : 0;
      _clickCount = clickCount;
      return self;
  }
-@@ -112,6 +128,37 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -112,6 +136,39 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      return 0.0;
  }
  
@@ -1500,7 +1551,9 @@ index 31c65aa..f7d55ec 100644
 +    }
 +    CGEventRef event = CGEventCreateScrollWheelEvent(NULL,
 +        kCGScrollEventUnitLine, 2, (int32_t)_deltaY, (int32_t)_deltaX);
++    CGEventSetLocation(event, NSPointToCGPoint([self locationInWindow]));
 +    CGEventSetIntegerValueField(event, kCGScrollWheelEventIsContinuous, 0);
++    [(id)event setFlags:(CGEventFlags)[self modifierFlags]];
 +    return (CGEventRef)[(id)event autorelease];
 +}
 +
@@ -2726,7 +2779,7 @@ index 359607f..2d365b8 100644
  {
      return [NSMethodSignature signatureWithObjCTypes: "v@:"];
 diff --git a/AppKit/NSSpellChecker.m b/AppKit/NSSpellChecker.m
-index 8fecc9d..a9c8324 100644
+index 8fecc9d..9f92c3f 100644
 --- a/AppKit/NSSpellChecker.m
 +++ b/AppKit/NSSpellChecker.m
 @@ -28,6 +28,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
@@ -2774,7 +2827,26 @@ index 8fecc9d..a9c8324 100644
  }
  #endif
  
-@@ -547,7 +565,6 @@ static NSSpellChecker *shared = nil;
+@@ -397,7 +415,7 @@ static NSSpellChecker *shared = nil;
+ }
+ 
+ - (void) closeSpellDocumentWithTag: (NSInteger) tag {
+-    NSUnimplementedMethod();
++    [_tagToData removeObjectForKey: [NSNumber numberWithInteger: tag]];
+ }
+ 
+ - (void) ignoreWord: (NSString *) word inSpellDocumentWithTag: (NSInteger) tag {
+@@ -511,8 +529,7 @@ static NSSpellChecker *shared = nil;
+ #pragma mark Automatic Spelling Correction
+ 
+ + (BOOL) isAutomaticSpellingCorrectionEnabled {
+-    NSUnimplementedMethod();
+-    return 0;
++    return NO;
+ }
+ 
+ #ifdef NS_BLOCKS
+@@ -547,15 +564,13 @@ static NSSpellChecker *shared = nil;
  }
  
  - (void) dismissCorrectionIndicatorForView: (NSView *) view {
@@ -2782,6 +2854,15 @@ index 8fecc9d..a9c8324 100644
  }
  
  #pragma mark -
+ #pragma mark Automatic Text Replacement
+ 
+ + (BOOL) isAutomaticTextReplacementEnabled {
+-    NSUnimplementedMethod();
+-    return 0;
++    return NO;
+ }
+ 
+ @end
 diff --git a/AppKit/NSTextInput.m b/AppKit/NSTextInput.m
 index 9177a98..9c3c5ca 100644
 --- a/AppKit/NSTextInput.m
@@ -4588,7 +4669,7 @@ index 1818940..12cde42 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf..1377c90 100644
+index 5ae29bf..c42adf2 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -5035,10 +5116,7 @@ index 5ae29bf..1377c90 100644
 +    XRRScreenResources *screen = NULL;
 +    if (XRRQueryExtension(_display, &eventBase, &errorBase))
          screen = XRRGetScreenResources(_display, DefaultRootWindow(_display));
--        NSMutableArray<NSScreen *> *retval =
--                [NSMutableArray arrayWithCapacity: screen->noutput];
- 
--        Atom edidAtom = XInternAtom(_display, "EDID", FALSE);
++
 +    if (screen) {
 +        RROutput primaryOutput =
 +                XRRGetOutputPrimary(_display, DefaultRootWindow(_display));
@@ -5049,18 +5127,13 @@ index 5ae29bf..1377c90 100644
 +            return [self _rootScreenFallback];
 +        }
 +        int primary = -1;
- 
-         for (int i = 0; i < screen->noutput; i++) {
-             XRROutputInfo *oinfo =
-                     XRRGetOutputInfo(_display, screen, screen->outputs[i]);
--            NSScreen *nsscreen;
--
--            if (oinfo->crtc) {
++
++        for (int i = 0; i < screen->noutput; i++) {
++            XRROutputInfo *oinfo =
++                    XRRGetOutputInfo(_display, screen, screen->outputs[i]);
 +            if (oinfo && oinfo->crtc) {
-                 XRRCrtcInfo *crtc =
-                         XRRGetCrtcInfo(_display, screen, oinfo->crtc);
--                NSRect frame =
--                        NSMakeRect(crtc->x, crtc->y, crtc->width, crtc->height);
++                XRRCrtcInfo *crtc =
++                        XRRGetCrtcInfo(_display, screen, oinfo->crtc);
 +                if (crtc) {
 +                    rootFrames[i] =
 +                            NSMakeRect(crtc->x, crtc->y, crtc->width, crtc->height);
@@ -5083,15 +5156,22 @@ index 5ae29bf..1377c90 100644
 +
 +        // [NSScreen screens] starts with the primary screen, as on macOS.
 +        // Display IDs stay tied to the XRandR output index.
-+        NSMutableArray<NSScreen *> *retval =
-+                [NSMutableArray arrayWithCapacity: screen->noutput];
+         NSMutableArray<NSScreen *> *retval =
+                 [NSMutableArray arrayWithCapacity: screen->noutput];
 +        NSMutableArray<NSScreen *> *inactive = [NSMutableArray array];
-+
-+        Atom edidAtom = XInternAtom(_display, "EDID", FALSE);
-+
-+        for (int i = 0; i < screen->noutput; i++) {
-+            NSScreen *nsscreen;
-+
+ 
+         Atom edidAtom = XInternAtom(_display, "EDID", FALSE);
+ 
+         for (int i = 0; i < screen->noutput; i++) {
+-            XRROutputInfo *oinfo =
+-                    XRRGetOutputInfo(_display, screen, screen->outputs[i]);
+             NSScreen *nsscreen;
+ 
+-            if (oinfo->crtc) {
+-                XRRCrtcInfo *crtc =
+-                        XRRGetCrtcInfo(_display, screen, oinfo->crtc);
+-                NSRect frame =
+-                        NSMakeRect(crtc->x, crtc->y, crtc->width, crtc->height);
 +            if (!NSIsEmptyRect(rootFrames[i])) {
 +                NSRect frame = [self frameForRootRect: rootFrames[i]];
  
@@ -5170,10 +5250,6 @@ index 5ae29bf..1377c90 100644
      return &layout->layout;
  }
  
--- (NSUInteger) currentModifierFlags {
--    XkbStateRec r;
--    if (XkbGetState(_display, XkbUseCoreKbd, &r) != Success)
--        return 0;
 +/* darling-lol: the game asks for the pointer position, the pressed buttons and the modifier state about a thousand
 + * times per second. Each answer was a synchronous X round trip (XQueryPointer / XkbGetState) that puts the main thread
 + * to sleep until XWayland replies; while the mouse moves they dominated the slow frames. Reuse a reply for 1 ms, keep it
@@ -5184,8 +5260,7 @@ index 5ae29bf..1377c90 100644
 +static BOOL rclolHasGameTitle(NSString *title) {
 +    return title && [title rangeOfString:@"(TM) Client" options:NSCaseInsensitiveSearch].location != NSNotFound;
 +}
- 
--    return [self modifierFlagsForState: r.mods];
++
 +BOOL X11IsLeagueGameWindow(Display *display, Window window, NSWindow *delegate) {
 +    /* Tooltips, menus and other panels are not the game window even in the game process: a
 +     * tooltip treated as the game was made managed and EWMH fullscreen, a black screen on top. */
@@ -5263,16 +5338,18 @@ index 5ae29bf..1377c90 100644
 +    return NO;
 +}
 +
-+- (NSUInteger) currentModifierFlags {
+ - (NSUInteger) currentModifierFlags {
 +    if (rclolFresh(&rclolModsStamp)) return rclolMods;
-+    XkbStateRec r;
+     XkbStateRec r;
+-    if (XkbGetState(_display, XkbUseCoreKbd, &r) != Success)
 +    if (XkbGetState(_display, XkbUseCoreKbd, &r) != Success) {
 +        rclolModsStamp = 0;
-+        return 0;
+         return 0;
 +    }
 +    return rclolMods = [self modifierFlagsForState: r.mods];
 +}
-+
+ 
+-    return [self modifierFlagsForState: r.mods];
 +- (NSUInteger) pressedMouseButtons {
 +    if (!rclolQueryPointer(_display)) return 0;
 +    unsigned int state = rclolPointerState;
@@ -5497,7 +5574,12 @@ index 5ae29bf..1377c90 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1010,17 +1642,157 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1005,22 +1637,160 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         [result addObject: @([win windowNumber])];
+     }
+ 
+-    NSUnimplementedFunction(); // (Window numbers not even remotely ordered)
+-
      return result;
  }
  
@@ -5655,7 +5737,7 @@ index 5ae29bf..1377c90 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1030,7 +1802,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +1800,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              break;
  
          if (ev->type == KeyPress) {
@@ -5668,7 +5750,7 @@ index 5ae29bf..1377c90 100644
              buf[strLen] = 0;
          } else {
              // Xutf8LookupString() may not be used with KeyRelease
-@@ -1038,6 +1814,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,6 +1812,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -5687,7 +5769,7 @@ index 5ae29bf..1377c90 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1865,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +1863,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
@@ -5720,7 +5802,7 @@ index 5ae29bf..1377c90 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +1900,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +1898,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -5731,7 +5813,7 @@ index 5ae29bf..1377c90 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +1910,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +1908,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -5742,7 +5824,7 @@ index 5ae29bf..1377c90 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1923,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +1921,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -5756,11 +5838,12 @@ index 5ae29bf..1377c90 100644
      case ButtonRelease:
 -        pos = [window
 -                transformPoint: NSMakePoint(ev->xbutton.x, ev->xbutton.y)];
+-
 +        // One scroll event per notch, sent on press; releases are not clicks.
 +        if (ev->xbutton.button >= Button4 && ev->xbutton.button <= 7) break;
 +        pos = [self locationInWindow: window x: ev->xbutton.x y: ev->xbutton.y
 +                               rootX: ev->xbutton.x_root rootY: ev->xbutton.y_root];
- 
++
 +        if (ev->xbutton.button == Button2 || ev->xbutton.button >= 8) {
 +            unsigned b = ev->xbutton.button == Button2 ? 2 : ev->xbutton.button - 5;
 +            if (b < 32) _otherButtonsDown &= ~(1u << b);
@@ -5768,7 +5851,7 @@ index 5ae29bf..1377c90 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1948,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +1946,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -5783,7 +5866,7 @@ index 5ae29bf..1377c90 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +1961,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +1959,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -5794,7 +5877,7 @@ index 5ae29bf..1377c90 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +1972,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +1970,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -5811,10 +5894,7 @@ index 5ae29bf..1377c90 100644
  
 -            CGFloat deltaX = pos.x - lastMotionPos.x;
 -            CGFloat deltaY = pos.y - lastMotionPos.y;
-+            double deltaX, deltaY;
-+            CGPoint rclolEventPos = pos, rclolLastPos = lastMotionPos;
-+            const char *rclolDecision = "absolute";
- 
+-
 -            // NSLog(@"cursorGrabbed=%d, deltaX=%f, deltaY=%f\n",
 -            // _cursorGrabbed, deltaX, deltaY);
 -            if (_cursorGrabbed) {
@@ -5833,6 +5913,10 @@ index 5ae29bf..1377c90 100644
 -                    pos.y = lastMotionPos.y;
 -                } else {
 -                    // This is an event generated by [self warpMouse:] above
++            double deltaX, deltaY;
++            CGPoint rclolEventPos = pos, rclolLastPos = lastMotionPos;
++            const char *rclolDecision = "absolute";
++
 +            if (_relativeMouse.active) {
 +                /* The cursor is disassociated (CGAssociateMouseAndMouseCursorPosition(false)): physical motion
 +                 * only produces deltas and the event reports the frozen virtual cursor. Where warps are honoured
@@ -5887,8 +5971,7 @@ index 5ae29bf..1377c90 100644
 +                rclolTraceMotion(ev, _relativeMouse.active, rclolEventPos, rclolLastPos, deltaX, deltaY, rclolDecision,
 +                                 type != NSMouseMoved || [delegate acceptsMouseMovedEvents] ||
 +                                         getenv("RCLOL_FORWARD_MOUSE_MOVED") != NULL);
- 
--            event = [NSEvent
++
 +            if (inputTrace) {
 +                static NSTimeInterval lastMotionTrace;
 +                NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -5901,7 +5984,8 @@ index 5ae29bf..1377c90 100644
 +                        getenv("RCLOL_FORWARD_MOUSE_MOVED") != NULL);
 +                }
 +            }
-+
+ 
+-            event = [NSEvent
 +            if (type != NSMouseMoved || [delegate acceptsMouseMovedEvents] ||
 +                getenv("RCLOL_FORWARD_MOUSE_MOVED")) {
 +            /* Relative motion is all in the deltas: keep those of the queued events coalesced below. */
@@ -5915,7 +5999,7 @@ index 5ae29bf..1377c90 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +2069,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +2067,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -5976,7 +6060,7 @@ index 5ae29bf..1377c90 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2131,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2129,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -6041,7 +6125,7 @@ index 5ae29bf..1377c90 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2223,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2221,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -6069,7 +6153,7 @@ index 5ae29bf..1377c90 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2251,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2249,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -6091,7 +6175,7 @@ index 5ae29bf..1377c90 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2289,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2287,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -6100,7 +6184,7 @@ index 5ae29bf..1377c90 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1392,6 +2339,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1392,6 +2337,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
      case MappingNotify:
          NSLog(@"MappingNotify");
@@ -6110,7 +6194,7 @@ index 5ae29bf..1377c90 100644
          break;
  
      case GenericEvent:
-@@ -1399,7 +2349,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2347,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -6121,7 +6205,7 @@ index 5ae29bf..1377c90 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2385,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2383,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -6132,28 +6216,19 @@ index 5ae29bf..1377c90 100644
      return 0;
  }
  
-@@ -1476,54 +2432,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2430,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
--- (void) warpMouse: (NSPoint) position {
--    NSLog(@"Warp to: x=%f, y=%f\n", position.x, position.y);
--    XWarpPointer(_display, None, DefaultRootWindow(_display), 0, 0, 0, 0,
--                 position.x, position.y);
 +/* Moves the X pointer and waits for the server, so the warp's MotionNotify (if any) is already queued on return.
 + * Returns the number of queued events. Callers capture NextRequest before this method to identify the echo. */
 +- (unsigned) warpPointerToRootX: (int) x y: (int) y {
 +    XWarpPointer(_display, None, DefaultRootWindow(_display), 0, 0, 0, 0, x, y);
-     XSync(_display, False);
++    XSync(_display, False);
 +    rclolPointerStamp = 0;
 +    return (unsigned) XEventsQueued(_display, QueuedAlready);
- }
- 
--- (void) grabMouse: (BOOL) doGrab {
--    if (doGrab) {
--        NSWindow *nswin = [NSApp keyWindow];
--        if (!nswin)
--            nswin = [NSApp mainWindow];
++}
++
 +/* Window-local Cocoa location of a pointer event at (x, y) in window, root (rootX, rootY). While relative this is
 + * the virtual cursor: macOS reports the frozen cursor position, not where the physical pointer went. */
 +- (NSPoint) locationInWindow: (X11Window *) window x: (int) x y: (int) y rootX: (int) rootX rootY: (int) rootY {
@@ -6162,19 +6237,9 @@ index 5ae29bf..1377c90 100644
 +                                                   _relativeMouse.virtualY - (rootY - y))];
 +    return [window transformPoint: NSMakePoint(x, y)];
 +}
- 
--        X11Window *xwin = (X11Window *) [nswin platformWindow];
--        Window win = [xwin windowHandle];
--        // Window win = DefaultRootWindow(_display);
--        const unsigned int mask = ButtonPressMask | ButtonReleaseMask |
--                                  PointerMotionMask | FocusChangeMask;
--        int result = XGrabPointer(_display, win, False, mask, GrabModeAsync,
--                                  GrabModeAsync, None, None, CurrentTime);
--        if (result == GrabSuccess) {
--            _cursorGrabbed = YES;
--            NSLog(@"XGrabPointer() succeeded for window %lu\n", win);
++
 +// CGWarpMouseCursorPosition uses the primary screen's top-left, with y down.
-+- (void) warpMouse: (NSPoint) position {
+ - (void) warpMouse: (NSPoint) position {
 +    NSRect primary = [self _primaryRootFrame];
 +    position.x += NSMinX(primary);
 +    position.y += NSMinY(primary);
@@ -6199,19 +6264,13 @@ index 5ae29bf..1377c90 100644
 +            [self suspendRelativeMouse];
 +        return;
 +    }
-+    NSLog(@"Warp to: x=%f, y=%f\n", position.x, position.y);
+     NSLog(@"Warp to: x=%f, y=%f\n", position.x, position.y);
+-    XWarpPointer(_display, None, DefaultRootWindow(_display), 0, 0, 0, 0,
+-                 position.x, position.y);
+-    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
-+}
+ }
  
--            NSRect frame = [xwin transformFrame: nswin.frame];
--            // NSLog(@"Window's frame is at %f,%f, size %fx%f\n",
--            // frame.origin.x, frame.origin.y, frame.size.width,
--            // frame.size.height);
--            CGPoint ptGlobal =
--                    NSMakePoint(frame.size.width / 2.0 + frame.origin.x,
--                                frame.size.height / 2.0 + frame.origin.y);
--            CGPoint ptLocal = NSMakePoint(frame.size.width / 2.0,
--                                          frame.size.height / 2.0);
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -6229,9 +6288,7 @@ index 5ae29bf..1377c90 100644
 +            rclolTraceRated(&rclolConfineChannel, "skip: XGetWindowAttributes failed window=%lu", (unsigned long) win);
 +        return;
 +    }
- 
--            // NSLog(@"setting last known pos in window to x=%f, y=%f\n",
--            // ptLocal.x, ptLocal.y);
++
 +    BOOL fullscreen = NO;
 +    Atom actual; int format; unsigned long count, remaining; unsigned char *data = NULL;
 +    Atom state = XInternAtom(_display, "_NET_WM_STATE", False);
@@ -6242,12 +6299,7 @@ index 5ae29bf..1377c90 100644
 +    }
 +    if (data) XFree(data);
 +    BOOL rclolEwmhFullscreen = fullscreen;
- 
--            [xwin setLastKnownCursorPosition: [xwin transformPoint: ptLocal]];
--            [self warpMouse: ptGlobal];
--        } else {
--            NSLog(@"XGrabPointer() failed with error %d for window %lu\n",
--                  result, win);
++
 +    /* Only the window that holds keyboard focus may take the pointer. Asking the WM to activate
 +     * or focus it from here would fight the user's alt-tab: this runs on every focus, map,
 +     * configure and _NET_WM_STATE change. */
@@ -6289,7 +6341,7 @@ index 5ae29bf..1377c90 100644
 +            _confinedWindow = None;
 +            _confinedWidth = 0;
 +            _confinedHeight = 0;
-         }
++        }
 +        return;
 +    }
 +    _confinedWidth = attrs.width;
@@ -6408,14 +6460,48 @@ index 5ae29bf..1377c90 100644
 +}
 +
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
-+- (void) grabMouse: (BOOL) doGrab {
+ - (void) grabMouse: (BOOL) doGrab {
 +    BOOL rclolRelativeBefore = _relativeMouse.active;
 +    Window rclolConfinedBefore = _confinedWindow;
 +    NSWindow *rclolWindow = nil;
 +    const char *rclolPick = "keyWindow";
 +    int rclolResult = -1;
 +    if (rclolTraceOn()) rclolTraceGrabChanged();
-+    if (doGrab) {
+     if (doGrab) {
+-        NSWindow *nswin = [NSApp keyWindow];
+-        if (!nswin)
+-            nswin = [NSApp mainWindow];
+-
+-        X11Window *xwin = (X11Window *) [nswin platformWindow];
+-        Window win = [xwin windowHandle];
+-        // Window win = DefaultRootWindow(_display);
+-        const unsigned int mask = ButtonPressMask | ButtonReleaseMask |
+-                                  PointerMotionMask | FocusChangeMask;
+-        int result = XGrabPointer(_display, win, False, mask, GrabModeAsync,
+-                                  GrabModeAsync, None, None, CurrentTime);
+-        if (result == GrabSuccess) {
+-            _cursorGrabbed = YES;
+-            NSLog(@"XGrabPointer() succeeded for window %lu\n", win);
+-
+-            NSRect frame = [xwin transformFrame: nswin.frame];
+-            // NSLog(@"Window's frame is at %f,%f, size %fx%f\n",
+-            // frame.origin.x, frame.origin.y, frame.size.width,
+-            // frame.size.height);
+-            CGPoint ptGlobal =
+-                    NSMakePoint(frame.size.width / 2.0 + frame.origin.x,
+-                                frame.size.height / 2.0 + frame.origin.y);
+-            CGPoint ptLocal = NSMakePoint(frame.size.width / 2.0,
+-                                          frame.size.height / 2.0);
+-
+-            // NSLog(@"setting last known pos in window to x=%f, y=%f\n",
+-            // ptLocal.x, ptLocal.y);
+-
+-            [xwin setLastKnownCursorPosition: [xwin transformPoint: ptLocal]];
+-            [self warpMouse: ptGlobal];
+-        } else {
+-            NSLog(@"XGrabPointer() failed with error %d for window %lu\n",
+-                  result, win);
+-        }
 +        _relativeRequested = YES;
 +        rclolResult = [self beginRelativeMouseWithWindow: &rclolWindow pick: &rclolPick];
      } else {
@@ -15171,3 +15257,68 @@ index ebda402..745772d 100644
  #import <QuartzCore/CAOpenGLLayer.h>
  #import <QuartzCore/CAReplicatorLayer.h>
  #import <QuartzCore/CAScrollLayer.h>
+diff --git a/CoreGraphics/CGEvent.m b/CoreGraphics/CGEvent.m
+index a09c912..65bf8c4 100644
+--- a/CoreGraphics/CGEvent.m
++++ b/CoreGraphics/CGEvent.m
+@@ -172,17 +172,19 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
+ 	CGEvent* event = [[CGEvent alloc] initWithSource: (CGEventSource*) source type: kCGEventScrollWheel];
+ 
+ 	double pixelsPerLine = CGEventSourceGetPixelsPerLine(source);
++	event.fields[@(kCGScrollWheelEventIsContinuous)] = @(units == kCGScrollEventUnitPixel ? 1 : 0);
+ 
+ 	if (units == kCGScrollEventUnitPixel)
+ 	{
+-		event.fields[@(kCGScrollWheelEventDeltaAxis1)] = [NSNumber numberWithInt: (int)(wheel1 / pixelsPerLine)];
+-		event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis1)] = [NSNumber numberWithDouble: wheel1 / pixelsPerLine];
++		double lineDelta1 = wheel1 / pixelsPerLine;
++		event.fields[@(kCGScrollWheelEventDeltaAxis1)] = [NSNumber numberWithInt: (int)lineDelta1];
++		event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis1)] = [NSNumber numberWithLongLong: (int64_t)(lineDelta1 * 0x00010000)];
+ 		event.fields[@(kCGScrollWheelEventPointDeltaAxis1)] = [NSNumber numberWithInt: wheel1];
+ 	}
+ 	else
+ 	{
+ 		event.fields[@(kCGScrollWheelEventDeltaAxis1)] = [NSNumber numberWithInt: wheel1];
+-		event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis1)] = [NSNumber numberWithDouble: wheel1];
++		event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis1)] = [NSNumber numberWithLongLong: (int64_t)wheel1 * 0x00010000];
+ 		event.fields[@(kCGScrollWheelEventPointDeltaAxis1)] = [NSNumber numberWithInt: (int)(wheel1 * pixelsPerLine)];
+ 	}
+ 
+@@ -194,14 +196,15 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
+ 		int32_t wheelN = va_arg(vl, int32_t);
+ 		if (units == kCGScrollEventUnitPixel)
+ 		{
+-			event.fields[@(kCGScrollWheelEventDeltaAxis2)] = [NSNumber numberWithInt: (int)(wheelN / pixelsPerLine)];
+-			event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis2)] = [NSNumber numberWithDouble: wheelN / pixelsPerLine];
++			double lineDelta2 = wheelN / pixelsPerLine;
++			event.fields[@(kCGScrollWheelEventDeltaAxis2)] = [NSNumber numberWithInt: (int)lineDelta2];
++			event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis2)] = [NSNumber numberWithLongLong: (int64_t)(lineDelta2 * 0x00010000)];
+ 			event.fields[@(kCGScrollWheelEventPointDeltaAxis2)] = [NSNumber numberWithInt: wheelN];
+ 		}
+ 		else
+ 		{
+ 			event.fields[@(kCGScrollWheelEventDeltaAxis2)] = [NSNumber numberWithInt: wheelN];
+-			event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis2)] = [NSNumber numberWithDouble: wheelN];
++			event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis2)] = [NSNumber numberWithLongLong: (int64_t)wheelN * 0x00010000];
+ 			event.fields[@(kCGScrollWheelEventPointDeltaAxis2)] = [NSNumber numberWithInt: (int)(wheelN * pixelsPerLine)];
+ 		}
+ 
+@@ -210,14 +213,15 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
+ 			wheelN = va_arg(vl, int32_t);
+ 			if (units == kCGScrollEventUnitPixel)
+ 			{
+-				event.fields[@(kCGScrollWheelEventDeltaAxis3)] = [NSNumber numberWithInt: (int)(wheelN / pixelsPerLine)];
+-				event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis3)] = [NSNumber numberWithDouble: wheelN / pixelsPerLine];
++				double lineDelta3 = wheelN / pixelsPerLine;
++				event.fields[@(kCGScrollWheelEventDeltaAxis3)] = [NSNumber numberWithInt: (int)lineDelta3];
++				event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis3)] = [NSNumber numberWithLongLong: (int64_t)(lineDelta3 * 0x00010000)];
+ 				event.fields[@(kCGScrollWheelEventPointDeltaAxis3)] = [NSNumber numberWithInt: wheelN];
+ 			}
+ 			else
+ 			{
+ 				event.fields[@(kCGScrollWheelEventDeltaAxis3)] = [NSNumber numberWithInt: wheelN];
+-				event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis3)] = [NSNumber numberWithDouble: wheelN];
++				event.fields[@(kCGScrollWheelEventFixedPtDeltaAxis3)] = [NSNumber numberWithLongLong: (int64_t)wheelN * 0x00010000];
+ 				event.fields[@(kCGScrollWheelEventPointDeltaAxis3)] = [NSNumber numberWithInt: (int)(wheelN * pixelsPerLine)];
+ 			}
+ 		}
