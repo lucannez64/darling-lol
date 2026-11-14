@@ -239,6 +239,18 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
         self.assertIn('DISPLAY unset', result.stdout)
 
 
+    def test_vulkaninfo_retries_headless_when_display_rejects_surface(self):
+        self.stub('vulkaninfo', '''if [ -n "${DISPLAY:-}" ]; then exit 1; fi
+case "$*" in
+ --summary) printf '%s\\n' 'Devices:' '========' 'GPU0:' '\tapiVersion = 1.4.309' '\tdeviceName = Headless GPU';;
+ *) printf '%s\\n' 'Device Properties and Extensions:' '=================================' 'GPU0:' 'VkPhysicalDeviceProperties:' '\tapiVersion = 1.4.309' '\tdeviceName = Headless GPU' 'VkPhysicalDeviceVulkan12Features:' '\ttimelineSemaphore = true';;
+esac''')
+        result = self.preflight(display=':99')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ok   vulkan', result.stdout)
+        self.assertIn('Headless GPU 1.4', result.stdout)
+
+
     def test_json_report_names_every_check(self):
         result = self.preflight('--json')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

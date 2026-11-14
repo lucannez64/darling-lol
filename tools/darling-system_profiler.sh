@@ -71,6 +71,8 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  [ -n "$profile_vram" ] || profile_vram=${DARLING_METAL_VRAM_MB:-}
  case "$profile_vram" in host) profile_vram=;; esac
  valid_vram "$profile_vram" || profile_vram=
+ host_vram=${RCLOL_HOST_GPU_VRAM_MB:-}
+ valid_vram "$host_vram" || host_vram=
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
   [ -r "$card/device/vendor" ] || continue
   vendor=$(sed 's/^0x//' "$card/device/vendor"); device=$(sed 's/^0x//' "$card/device/device")
@@ -78,9 +80,18 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
   if [ -r "$card/device/mem_info_vram_total" ]; then
    vram=$(awk '{ printf "%d", $1 / 1048576 }' "$card/device/mem_info_vram_total")
   fi
+  [ -n "$vram" ] || vram=$host_vram
   [ -n "$profile_vram" ] && vram=$profile_vram
-  name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
-  bus=builtin
+  name=; bus=builtin
+  if [ "$vendor" = 10de ] && [ -r "$card/device/uevent" ]; then
+   slot=$(sed -n 's/^PCI_SLOT_NAME=//p' "$card/device/uevent" | head -n 1)
+   if [ -n "$slot" ] && [ -r "$host/proc/driver/nvidia/gpus/$slot/information" ]; then
+    name=$(sed -n 's/^Model:[ \t]*//p' "$host/proc/driver/nvidia/gpus/$slot/information" | head -n 1)
+    nv_bus=$(sed -n 's/^Bus Type:[ \t]*//p' "$host/proc/driver/nvidia/gpus/$slot/information" | head -n 1)
+    [ "$nv_bus" = PCIe ] && bus=pcie
+   fi
+  fi
+  [ -n "$name" ] || name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
   if [ "$mac_gpu_profile" = 1 ]; then
    case "$vendor" in
     1002) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'

@@ -23,6 +23,6 @@ fi
 for file in "$source_metal" "$source_indium"; do
 	[ -f "$file" ] || { echo "missing $file" >&2; exit 1; }
 done
-install -m755 "$source_indium" "$indium.next" && mv "$indium.next" "$indium"
-install -m755 "$source_metal" "$metal.next" && mv "$metal.next" "$metal"
+install -m755 "$source_indium" "$indium.next" && mv -f "$indium.next" "$indium"
+install -m755 "$source_metal" "$metal.next" && mv -f "$metal.next" "$metal"
 sha256sum "$indium" "$metal"

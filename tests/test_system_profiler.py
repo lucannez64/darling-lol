@@ -148,6 +148,22 @@ class SystemProfilerTests(unittest.TestCase):
                             RCLOL_GPU_NAME='host', RCLOL_GPU_VRAM_MB='host')
         self.assertNotEqual(item['sppci_model'], 'AMD Radeon Pro 5500M')
 
+    def test_nvidia_proc_model_pcie_bus_and_host_vram_fallback(self):
+        root = Path(self.folder.name) / 'nvidia-root'
+        device_dir = root / 'sys/class/drm/card1/device'
+        device_dir.mkdir(parents=True)
+        (device_dir / 'vendor').write_text('0x10de\n')
+        (device_dir / 'device').write_text('0x2489\n')
+        (device_dir / 'uevent').write_text('DRIVER=nvidia\nPCI_SLOT_NAME=0000:05:00.0\n')
+        nv_info = root / 'proc/driver/nvidia/gpus/0000:05:00.0'
+        nv_info.mkdir(parents=True)
+        (nv_info / 'information').write_text('Model: \t\t NVIDIA GeForce RTX 3060 Ti\nBus Type: \t PCIe\n')
+        item = self.display(root, RCLOL_PLATFORM_PROFILE='host', RCLOL_GPU_NAME='host',
+                            RCLOL_GPU_VRAM_MB='host', RCLOL_HOST_GPU_VRAM_MB='8192')
+        self.assertEqual(item['sppci_model'], 'NVIDIA GeForce RTX 3060 Ti')
+        self.assertEqual(item['spdisplays_bus'], 'spdisplays_pcie')
+        self.assertEqual(item['spdisplays_vram'], '8192 MB')
+
 
 if __name__ == '__main__':
     unittest.main()

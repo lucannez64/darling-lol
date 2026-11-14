@@ -42,11 +42,36 @@ def dotted(value):
     return '.'.join(str(part) for part in value) if value else 'unknown'
 
 
-def output(command, timeout=30):
+def discover_xauthority(env=None):
+    """Find a readable Xwayland cookie in XDG_RUNTIME_DIR when XAUTHORITY is unset or unreadable."""
+    env = os.environ if env is None else env
+    current = env.get('XAUTHORITY')
+    if current and os.access(current, os.R_OK):
+        return current
+    runtime_dir = env.get('XDG_RUNTIME_DIR')
+    if not runtime_dir:
+        return None
+    candidates = []
+    try:
+        for pattern in ('.mutter-Xwaylandauth.*', 'xauth_*'):
+            for path in Path(runtime_dir).glob(pattern):
+                if path.is_file() and os.access(path, os.R_OK):
+                    candidates.append((path.stat().st_mtime, str(path)))
+    except OSError:
+        return None
+    return max(candidates)[1] if candidates else None
+
+
+def output(command, timeout=30, env=None):
     """stdout of a command, or None when it is missing, fails or times out."""
+    run_env = dict(os.environ if env is None else env)
+    if env is None and run_env.get('DISPLAY'):
+        cookie = discover_xauthority(run_env)
+        if cookie:
+            run_env['XAUTHORITY'] = cookie
     try:
         result = subprocess.run(command, capture_output=True, text=True, errors='replace',
-                                timeout=timeout)
+                                timeout=timeout, env=run_env)
     except (OSError, subprocess.SubprocessError):
         return None
     return result.stdout if result.returncode == 0 else None
@@ -180,9 +205,15 @@ def vulkan_devices():
     version of the tool prints.
     """
     summary = output(['vulkaninfo', '--summary'])
+    vulkan_env = None
+    if summary is None and (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+        # vulkaninfo creates a test XCB/Wayland surface when DISPLAY/WAYLAND_DISPLAY is set
+        # and exits 1 if the build shell lacks display auth. Retry headless so builds pass.
+        vulkan_env = {k: v for k, v in os.environ.items() if k not in ('DISPLAY', 'WAYLAND_DISPLAY')}
+        summary = output(['vulkaninfo', '--summary'], env=vulkan_env)
     if summary is None:
         return None
-    features = gpu_blocks(output(['vulkaninfo'], timeout=60))
+    features = gpu_blocks(output(['vulkaninfo'], timeout=60, env=vulkan_env))
     devices = []
     for index, lines in sorted(gpu_blocks(summary).items()):
         found = features.get(index, [])

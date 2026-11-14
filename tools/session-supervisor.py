@@ -436,7 +436,107 @@ LEAGUE_LOL = 'Applications/League of Legends.app/Contents/LoL'
 LEAGUE_APP_PATH = '/League of Legends.app/'
 LEAGUE_UX_PATH = '/LoL/League of Legends.app/'
 QUIT_MARKER = b'Failed to send quit message because there was no connection'
+GAME_EXIT_MARKER = b'Finished Main Loop'
+GAME_WINDOW_CLASS = 'leagueoflegends'
 LEAGUE_QUIT_GRACE = 8.0
+
+
+class GameExitWatch:
+    """Spot when LeagueofLegends finishes its main loop so its frozen window can be hidden.
+
+    After writing 'Finished Main Loop' to *_r3dlog.txt, LeagueofLegends stops
+    pumping X11 events while waiting ~8-11s for its background disconnect
+    timeout before destroying its window. Unmapping the X11 window immediately
+    returns the user to the post-game lobby without touching the game process.
+    """
+
+    def __init__(self, prefix):
+        self.directory = prefix / LEAGUE_LOL / 'Logs/GameLogs'
+        self.offsets = {path: size for path, size in self._logs()}
+
+    def _logs(self):
+        try:
+            for path in self.directory.glob('*/*_r3dlog.txt'):
+                yield path, path.stat().st_size
+        except OSError:
+            return
+
+    def poll(self):
+        """True when a complete new log line carries GAME_EXIT_MARKER."""
+        found = False
+        for path, size in list(self._logs()):
+            offset = self.offsets.get(path, 0)
+            if size < offset:
+                offset = 0
+            if size == offset:
+                continue
+            try:
+                with open(path, 'rb') as handle:
+                    handle.seek(offset)
+                    data = handle.read(size - offset)
+            except OSError:
+                continue
+            complete = data.rfind(b'\n') + 1
+            self.offsets[path] = offset + complete
+            if GAME_EXIT_MARKER in data[:complete]:
+                found = True
+        return found
+
+
+def _unmap_x11_windows(windows):
+    """Best-effort XUnmapWindow for window IDs; never raises."""
+    if not windows:
+        return False
+    import ctypes
+    try:
+        lib = ctypes.CDLL('libX11.so.6')
+        lib.XOpenDisplay.restype = ctypes.c_void_p
+        lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        lib.XUnmapWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        error_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        handler = error_type(lambda _display, _event: 0)
+        lib.XSetErrorHandler.argtypes = [error_type]
+        lib.XSetErrorHandler.restype = ctypes.c_void_p
+        lib.XSetErrorHandler(handler)
+        display = lib.XOpenDisplay(None)
+        if not display:
+            return False
+        try:
+            for window in windows:
+                lib.XUnmapWindow(display, window)
+            lib.XSync(display, 0)
+            return True
+        finally:
+            lib.XCloseDisplay(display)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def hide_finished_game_window(run=subprocess.run, unmap=_unmap_x11_windows, out=sys.stdout):
+    """Unmap managed LeagueofLegends X11 windows after the main loop has ended."""
+    try:
+        listing = run(['xprop', '-root', '_NET_CLIENT_LIST'], text=True,
+                      capture_output=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    lowered = listing.lower()
+    if '_net_client_list' not in lowered or 'not found' in lowered:
+        return []
+    windows = []
+    for raw in sorted(set(re.findall(r'0x[0-9a-fA-F]+', listing))):
+        try:
+            classes = run(['xprop', '-id', raw, 'WM_CLASS'], text=True,
+                          capture_output=True, timeout=5).stdout.lower()
+            window_id = int(raw, 16)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            continue
+        if GAME_WINDOW_CLASS in classes:
+            windows.append(window_id)
+    if windows and unmap(windows):
+        log('game main loop finished; hid %d closing game window(s)' % len(windows), out)
+    return windows
 
 
 class LeagueExitWatch:
@@ -614,12 +714,16 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     if league_exit is None:
         league_exit = os.environ.get('RCLOL_FINISH_LEAGUE_EXIT', '1') != '0'
     exit_watch = LeagueExitWatch(prefix) if league_exit else None
+    hide_game_on_exit = os.environ.get('RCLOL_HIDE_FINISHED_GAME_WINDOW', '1') != '0'
+    game_exit_watch = GameExitWatch(prefix) if hide_game_on_exit else None
     try:
         while child.poll() is None and not stop:
             # Learn the guest namespace while the session runs: after a crash
             # the processes that still carry the socket may be the only proof.
             if namespace is None:
                 namespace = prefix_namespace(prefix, proc_root)
+            if game_exit_watch is not None and game_exit_watch.poll():
+                hide_finished_game_window(run=run, out=out)
             if exit_watch is not None and exit_watch.poll():
                 finish_league_exit(prefix, namespace, proc_root=proc_root, kill=kill,
                                    sleep=sleep, out=out, own_namespace=own_namespace)

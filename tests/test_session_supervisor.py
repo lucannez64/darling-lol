@@ -723,5 +723,40 @@ class LeagueExitTests(unittest.TestCase):
                 out=io.StringIO(), urlopen=lambda *a, **k: mock.Mock())
         self.assertEqual(remaining, [])
         self.assertEqual(signals, [(21, signal.SIGTERM)])
+
+    def test_game_exit_watch_hides_only_finished_game_window(self):
+        game_dir = self.lol / 'Logs/GameLogs/2026-11-13T18-02-46'
+        game_dir.mkdir(parents=True)
+        r3dlog = game_dir / '2026-11-13T18-02-46_1000_r3dlog.txt'
+        r3dlog.write_bytes(b'000001.000| ALWAYS| GAMESTATE_GAMELOOP\n')
+        watch = supervisor.GameExitWatch(self.prefix)
+        self.assertFalse(watch.poll())
+        with open(r3dlog, 'ab') as handle:
+            handle.write(b'001480.080| ALWAYS|  FLOW| Finished Main Loop\n')
+        self.assertTrue(watch.poll())
+        self.assertFalse(watch.poll())
+
+        unmapped = []
+
+        def fake_run(command, **_kwargs):
+            class Result:
+                stdout = ''
+            res = Result()
+            if '_NET_CLIENT_LIST' in command:
+                res.stdout = '_NET_CLIENT_LIST(WINDOW): window id # 0x10, 0x20'
+            elif '0x10' in command:
+                res.stdout = 'WM_CLASS(STRING) = "LeagueClientUx", "LeagueClientUx"'
+            elif '0x20' in command:
+                res.stdout = 'WM_CLASS(STRING) = "LeagueofLegends", "LeagueofLegends"'
+            return res
+
+        out = io.StringIO()
+        found = supervisor.hide_finished_game_window(
+            run=fake_run, unmap=lambda wins: (unmapped.extend(wins) or True), out=out)
+        self.assertEqual(found, [0x20])
+        self.assertEqual(unmapped, [0x20])
+        self.assertIn('hid 1 closing game window(s)', out.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main()
