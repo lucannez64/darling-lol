@@ -519,6 +519,48 @@ Diagnose the match detector without changing any window:
 python3 tools/hide-league-client-in-game.py --once
 ```
 
+### League splash window appears over the client
+
+The League client can create a borderless, override-redirect `512x216` window
+with `WM_CLASS` `LeagueClient/LeagueClient` that shows the League of Legends
+splash overlay. It is not managed by the window manager, does not appear in
+`_NET_CLIENT_LIST`, and may appear at random during a session. It is not the
+main client window and should not be presented. See the observed properties in
+[the splash window note](notes/league-splash-window-512x216.md).
+
+An opt-in helper polls the X11 tree every five seconds and unmaps only windows
+that match the class, the fixed `512x216` size and the override-redirect flag.
+
+Use the standalone wrapper from a terminal (Ctrl+C stops it):
+
+```sh
+./scripts/hide-league-splash-window.sh
+```
+
+Or enable it for the whole launcher run:
+
+```sh
+RCLOL_HIDE_LEAGUE_SPLASH=1 ./scripts/run.sh
+```
+
+Hiding is an unmap, not a destroy, so the client keeps running and the window
+stays hidden. The helper never matches the managed `LeagueClientUx`,
+`RiotClientServices` or `Riot Client` windows and never touches the game. It is
+off by default, fails closed when `DISPLAY` or ownership cannot be read, and
+exits after two minutes without a client session. Diagnose one observation
+without changing any window:
+
+```sh
+python3 tools/hide-league-splash-window.py --once
+```
+
+The helper requires X11 or Xwayland. On a native Wayland compositor without
+Xwayland it cannot enumerate the windows. Stale helpers left by an earlier
+launcher are removed by `RCLOL_CLEAN_STALE_HELPERS=1`.
+
+This is local window management only. It is off by default and does not patch
+client binaries, CEF, anti-cheat or DRM, and it never hides the game window.
+
 ### Riot reports NO INTERNET FOUND while the host is online
 
 Older base runtimes ship Google DNS servers (`8.8.8.8` and `8.8.4.4`), which

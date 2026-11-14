@@ -1,24 +1,474 @@
+diff --git a/include/nw/interface.h b/include/nw/interface.h
+index e1298f0..9cd9ff9 100644
+--- a/include/nw/interface.h
++++ b/include/nw/interface.h
+@@ -25,6 +25,14 @@
+ 
+ _NW_OPAQUE(nw_interface);
+ 
++typedef _NW_ENUM(int, nw_interface_type_t) {
++	nw_interface_type_other = 0,
++	nw_interface_type_wifi = 1,
++	nw_interface_type_cellular = 2,
++	nw_interface_type_wired = 3,
++	nw_interface_type_loopback = 4,
++};
++
+ void* nw_interface_copy_delegate_interface(void);
+ void* nw_interface_copy_dictionary(void);
+ void* nw_interface_copy_ipv4_broadcast_endpoint(void);
 diff --git a/include/nw/path.h b/include/nw/path.h
-index 5ac8c9f..99d1489 100644
+index 5ac8c9f..2533a9e 100644
 --- a/include/nw/path.h
 +++ b/include/nw/path.h
-@@ -183,6 +183,7 @@ void* nw_path_nexus_should_use_event_ring(void);
- void* nw_path_monitor_cancel(void);
- void* nw_path_monitor_create(void);
- void* nw_path_monitor_create_with_type(void);
-+void* nw_path_monitor_prohibit_interface_type(void);
- void* nw_path_monitor_set_cancel_handler(void);
- void* nw_path_monitor_set_queue(void);
- void* nw_path_monitor_set_update_handler(void);
+@@ -26,11 +26,13 @@
+ #include <nw/base.h>
+ #include <nw/interface.h>
+ 
++#include <dispatch/dispatch.h>
++
+ typedef _NW_ENUM(int, nw_path_status_t) {
+-	nw_path_status_satisfied,
+-	nw_path_status_unsatisfied,
+-	nw_path_status_satisfiable,
+-	nw_path_status_invalid,
++	nw_path_status_invalid = 0,
++	nw_path_status_satisfied = 1,
++	nw_path_status_unsatisfied = 2,
++	nw_path_status_satisfiable = 3,
+ };
+ 
+ typedef _NW_ENUM(int, nw_path_reason_t) {
+@@ -40,6 +42,13 @@ typedef _NW_ENUM(int, nw_path_reason_t) {
+ };
+ 
+ _NW_OPAQUE(nw_path);
++_NW_OPAQUE(nw_path_monitor);
++
++#if _NW_BLOCKS
++	typedef bool (^nw_path_enumerate_interfaces_block_t)(nw_interface_t interface);
++	typedef void (^nw_path_monitor_cancel_handler_t)(void);
++	typedef void (^nw_path_monitor_update_handler_t)(nw_path_t path);
++#endif
+ 
+ void* nw_path_allows_multipath(void);
+ void* nw_path_assert_agent(void);
+@@ -85,7 +94,6 @@ void* nw_path_endpoint_is_always_satisfied(void);
+ void* nw_path_enumerate_browse_options(void);
+ void* nw_path_enumerate_gateways(void);
+ void* nw_path_enumerate_interface_options(void);
+-void* nw_path_enumerate_interfaces(void);
+ void* nw_path_enumerate_resolve_options(void);
+ void* nw_path_fillout_route_stats(void);
+ void* nw_path_get_client_id(void);
+@@ -123,7 +131,6 @@ void* nw_path_get_sysctls_region(void);
+ bool nw_path_get_vpn_config_id(nw_path_t path, uuid_t *uuid);
+ void* nw_path_has_advertise_descriptor(void);
+ void* nw_path_has_browse_descriptor(void);
+-void* nw_path_has_dns(void);
+ void* nw_path_has_flow_for_nexus_agent(void);
+ void* nw_path_has_proxy_settings(void);
+ void* nw_path_has_unsatisfied_cellular_agent(void);
+@@ -135,7 +142,6 @@ void* nw_path_ipv6_default_address(void);
+ void* nw_path_is_defunct(void);
+ void* nw_path_is_direct(void);
+ void* nw_path_is_eligible_for_CrazyIvan46(void);
+-void* nw_path_is_equal(void);
+ void* nw_path_is_equal_inner(void);
+ bool nw_path_is_flow_divert(nw_path_t path);
+ void* nw_path_is_listener(void);
+@@ -171,7 +177,6 @@ void* nw_path_trigger_inactive_cellular_agent_if_necessary(void);
+ void* nw_path_unassert_agent(void);
+ void* nw_path_update_parameters_for_fallback(void);
+ void* nw_path_uses_interface_subtype(void);
+-void* nw_path_uses_interface_type(void);
+ void* nw_path_uses_nexus(void);
+ void* nw_path_voluntary_agent_matches_address(void);
+ 
+@@ -180,13 +185,17 @@ void* nw_path_nexus_can_support_user_packet_pool(void);
+ void* nw_path_nexus_should_use_event_ring(void);
+ 
+ // same with these
+-void* nw_path_monitor_cancel(void);
+-void* nw_path_monitor_create(void);
+-void* nw_path_monitor_create_with_type(void);
+-void* nw_path_monitor_set_cancel_handler(void);
+-void* nw_path_monitor_set_queue(void);
+-void* nw_path_monitor_set_update_handler(void);
+-void* nw_path_monitor_start(void);
++nw_path_monitor_t nw_path_monitor_create(void);
++nw_path_monitor_t nw_path_monitor_create_with_type(nw_interface_type_t required_interface_type);
++void nw_path_monitor_prohibit_interface_type(nw_path_monitor_t monitor, nw_interface_type_t interface_type);
++void nw_path_monitor_set_queue(nw_path_monitor_t monitor, dispatch_queue_t queue);
++void nw_path_monitor_start(nw_path_monitor_t monitor);
++void nw_path_monitor_cancel(nw_path_monitor_t monitor);
++
++#if _NW_BLOCKS
++	void nw_path_monitor_set_cancel_handler(nw_path_monitor_t monitor, nw_path_monitor_cancel_handler_t cancel_handler);
++	void nw_path_monitor_set_update_handler(nw_path_monitor_t monitor, nw_path_monitor_update_handler_t update_handler);
++#endif
+ 
+ // maybe these too?
+ void* nw_path_listener_is_interface_specific(void);
+@@ -207,5 +216,12 @@ bool nw_path_is_constrained(nw_path_t path);
+ bool nw_path_is_expensive(nw_path_t path);
+ bool nw_path_has_ipv4(nw_path_t path);
+ bool nw_path_has_ipv6(nw_path_t path);
++bool nw_path_has_dns(nw_path_t path);
++bool nw_path_uses_interface_type(nw_path_t path, nw_interface_type_t interface_type);
++bool nw_path_is_equal(nw_path_t path, nw_path_t other_path);
++
++#if _NW_BLOCKS
++	void nw_path_enumerate_interfaces(nw_path_t path, nw_path_enumerate_interfaces_block_t enumerate_block);
++#endif
+ 
+ #endif // _NW_PATH_H_
+diff --git a/src/nw/nw.m b/src/nw/nw.m
+index 7f7383a..789af07 100644
+--- a/src/nw/nw.m
++++ b/src/nw/nw.m
+@@ -76,11 +76,11 @@ void network_release(void* network_object) {
+ 	DARLING_NW_STUB_PRINT;
+ };
+ 
++// nw objects are Objective-C objects; C and C++ callers own them through these
+ void* nw_retain(void* nw_object) {
+-	DARLING_NW_STUB_PRINT;
+-	return NULL;
++	return [(id)nw_object retain];
+ };
+ 
+ void nw_release(void* nw_object) {
+-	DARLING_NW_STUB_PRINT;
++	[(id)nw_object release];
+ };
 diff --git a/src/nw/path.m b/src/nw/path.m
-index faf486a..0030e4d 100644
+index faf486a..12646c8 100644
 --- a/src/nw/path.m
 +++ b/src/nw/path.m
-@@ -141,6 +141,7 @@ DARLING_NW_STUB(nw_path_may_span_multiple_interfaces);
- DARLING_NW_STUB(nw_path_monitor_cancel);
- DARLING_NW_STUB(nw_path_monitor_create);
- DARLING_NW_STUB(nw_path_monitor_create_with_type);
-+DARLING_NW_STUB(nw_path_monitor_prohibit_interface_type);
- DARLING_NW_STUB(nw_path_monitor_set_cancel_handler);
- DARLING_NW_STUB(nw_path_monitor_set_queue);
- DARLING_NW_STUB(nw_path_monitor_set_update_handler);
+@@ -20,12 +20,92 @@
+ #include <nw/internal/path.h>
+ #include <nw/internal/stubs.h>
+ 
+-@implementation _NW_CONCRETE_IMPL(nw_path)
++#include <Block.h>
++#include <ifaddrs.h>
++#include <net/if.h>
++#include <netinet/in.h>
++
++// A path is an immutable snapshot of the guest's connectivity. Interfaces are
++// not modelled: anything that is not loopback is reported as wired.
++@implementation _NW_CONCRETE_IMPL(nw_path) {
++	@public
++	nw_path_status_t _status;
++	bool _has_ipv4;
++	bool _has_ipv6;
++}
++
++DARLING_NW_CLASS_STUB;
++
++@end
++
++@interface _NW_CONCRETE(nw_path_monitor) {
++	@public
++	dispatch_queue_t _queue;
++	nw_path_monitor_update_handler_t _update_handler;
++	nw_path_monitor_cancel_handler_t _cancel_handler;
++	bool _has_required_type;
++	nw_interface_type_t _required_type;
++	uint32_t _prohibited_types;
++	bool _started;
++	bool _cancelled;
++}
++
++@end
++
++@implementation _NW_CONCRETE_IMPL(nw_path_monitor)
++
++- (void)dealloc {
++	if (_queue)
++		dispatch_release(_queue);
++	if (_update_handler)
++		Block_release(_update_handler);
++	if (_cancel_handler)
++		Block_release(_cancel_handler);
++	[super dealloc];
++}
+ 
+ DARLING_NW_CLASS_STUB;
+ 
+ @end
+ 
++#define NW_PATH(_path) ((_NW_CONCRETE_IMPL(nw_path)*)(_path))
++#define NW_PATH_MONITOR(_monitor) ((_NW_CONCRETE_IMPL(nw_path_monitor)*)(_monitor))
++
++// Satisfied when an interface that is up and not loopback has a routable
++// address, and the monitor's interface type restrictions allow a wired one.
++static nw_path_t nw_path_create_for_monitor(_NW_CONCRETE_IMPL(nw_path_monitor)* monitor) {
++	_NW_CONCRETE_IMPL(nw_path)* path = [_NW_CONCRETE_IMPL(nw_path) new];
++	struct ifaddrs* interfaces = NULL;
++
++	if (getifaddrs(&interfaces) == 0) {
++		for (struct ifaddrs* ifa = interfaces; ifa; ifa = ifa->ifa_next) {
++			if (!ifa->ifa_addr || !(ifa->ifa_flags & IFF_UP) || (ifa->ifa_flags & IFF_LOOPBACK))
++				continue;
++			if (ifa->ifa_addr->sa_family == AF_INET) {
++				uint32_t address = ntohl(((struct sockaddr_in*)ifa->ifa_addr)->sin_addr.s_addr);
++				if ((address >> 16) != 0xa9fe) // 169.254/16 is link-local
++					path->_has_ipv4 = true;
++			} else if (ifa->ifa_addr->sa_family == AF_INET6) {
++				if (!IN6_IS_ADDR_LINKLOCAL(&((struct sockaddr_in6*)ifa->ifa_addr)->sin6_addr))
++					path->_has_ipv6 = true;
++			}
++		}
++		freeifaddrs(interfaces);
++	} else {
++		// The interface list could not be read: do not report a working machine as offline.
++		path->_has_ipv4 = true;
++	}
++
++	bool wired_allowed = !(monitor->_prohibited_types & (1u << nw_interface_type_wired)) &&
++		(!monitor->_has_required_type || monitor->_required_type == nw_interface_type_wired);
++
++	if (!wired_allowed)
++		path->_has_ipv4 = path->_has_ipv6 = false;
++	path->_status = (path->_has_ipv4 || path->_has_ipv6) ? nw_path_status_satisfied : nw_path_status_unsatisfied;
++
++	return path;
++}
++
+ DARLING_NW_STUB(nw_path_allows_multipath);
+ DARLING_NW_STUB(nw_path_assert_agent);
+ DARLING_NW_STUB(nw_path_assert_required_agents);
+@@ -70,7 +150,6 @@ DARLING_NW_STUB(nw_path_endpoint_is_always_satisfied);
+ DARLING_NW_STUB(nw_path_enumerate_browse_options);
+ DARLING_NW_STUB(nw_path_enumerate_gateways);
+ DARLING_NW_STUB(nw_path_enumerate_interface_options);
+-DARLING_NW_STUB(nw_path_enumerate_interfaces);
+ DARLING_NW_STUB(nw_path_enumerate_resolve_options);
+ DARLING_NW_STUB(nw_path_fallback_is_forced);
+ DARLING_NW_STUB(nw_path_fallback_is_weak);
+@@ -110,7 +189,6 @@ DARLING_NW_STUB(nw_path_get_scoped_interface_index);
+ DARLING_NW_STUB(nw_path_get_sysctls_region);
+ DARLING_NW_STUB(nw_path_has_advertise_descriptor);
+ DARLING_NW_STUB(nw_path_has_browse_descriptor);
+-DARLING_NW_STUB(nw_path_has_dns);
+ DARLING_NW_STUB(nw_path_has_flow_for_nexus_agent);
+ DARLING_NW_STUB(nw_path_has_proxy_settings);
+ DARLING_NW_STUB(nw_path_has_unsatisfied_cellular_agent);
+@@ -122,7 +200,6 @@ DARLING_NW_STUB(nw_path_ipv6_default_address);
+ DARLING_NW_STUB(nw_path_is_defunct);
+ DARLING_NW_STUB(nw_path_is_direct);
+ DARLING_NW_STUB(nw_path_is_eligible_for_CrazyIvan46);
+-DARLING_NW_STUB(nw_path_is_equal);
+ DARLING_NW_STUB(nw_path_is_equal_inner);
+ DARLING_NW_STUB(nw_path_is_listener);
+ DARLING_NW_STUB(nw_path_is_local);
+@@ -138,13 +215,6 @@ DARLING_NW_STUB(nw_path_link_quality_abort);
+ DARLING_NW_STUB(nw_path_listener_is_interface_specific);
+ DARLING_NW_STUB(nw_path_listener_uses_nexus_only);
+ DARLING_NW_STUB(nw_path_may_span_multiple_interfaces);
+-DARLING_NW_STUB(nw_path_monitor_cancel);
+-DARLING_NW_STUB(nw_path_monitor_create);
+-DARLING_NW_STUB(nw_path_monitor_create_with_type);
+-DARLING_NW_STUB(nw_path_monitor_set_cancel_handler);
+-DARLING_NW_STUB(nw_path_monitor_set_queue);
+-DARLING_NW_STUB(nw_path_monitor_set_update_handler);
+-DARLING_NW_STUB(nw_path_monitor_start);
+ DARLING_NW_STUB(nw_path_nexus_can_support_user_packet_pool);
+ DARLING_NW_STUB(nw_path_nexus_should_use_event_ring);
+ DARLING_NW_STUB(nw_path_override_interface);
+@@ -167,7 +237,6 @@ DARLING_NW_STUB(nw_path_trigger_inactive_cellular_agent_if_necessary);
+ DARLING_NW_STUB(nw_path_unassert_agent);
+ DARLING_NW_STUB(nw_path_update_parameters_for_fallback);
+ DARLING_NW_STUB(nw_path_uses_interface_subtype);
+-DARLING_NW_STUB(nw_path_uses_interface_type);
+ DARLING_NW_STUB(nw_path_uses_nexus);
+ DARLING_NW_STUB(nw_path_voluntary_agent_matches_address);
+ 
+@@ -177,8 +246,7 @@ int32_t nw_path_get_flow_divert_unit(nw_path_t path) {
+ };
+ 
+ nw_path_status_t nw_path_get_status(nw_path_t path) {
+-	DARLING_NW_STUB_PRINT;
+-	return nw_path_status_invalid;
++	return path ? NW_PATH(path)->_status : nw_path_status_invalid;
+ };
+ 
+ nw_path_reason_t nw_path_get_reason(nw_path_t path) {
+@@ -202,13 +270,35 @@ bool nw_path_is_expensive(nw_path_t path) {
+ };
+ 
+ bool nw_path_has_ipv4(nw_path_t path) {
+-	DARLING_NW_STUB_PRINT;
+-	return false;
++	return path && NW_PATH(path)->_has_ipv4;
+ };
+ 
+ bool nw_path_has_ipv6(nw_path_t path) {
++	return path && NW_PATH(path)->_has_ipv6;
++};
++
++// DNS configuration is not modelled; a satisfied path can resolve names.
++bool nw_path_has_dns(nw_path_t path) {
++	return nw_path_get_status(path) == nw_path_status_satisfied;
++};
++
++bool nw_path_uses_interface_type(nw_path_t path, nw_interface_type_t interface_type) {
++	return interface_type == nw_interface_type_wired && nw_path_get_status(path) == nw_path_status_satisfied;
++};
++
++void nw_path_enumerate_interfaces(nw_path_t path, nw_path_enumerate_interfaces_block_t enumerate_block) {
++	// interfaces are not modelled, so there is nothing to enumerate
+ 	DARLING_NW_STUB_PRINT;
+-	return false;
++};
++
++bool nw_path_is_equal(nw_path_t path, nw_path_t other_path) {
++	if (path == other_path)
++		return true;
++	if (!path || !other_path)
++		return false;
++	return NW_PATH(path)->_status == NW_PATH(other_path)->_status &&
++		NW_PATH(path)->_has_ipv4 == NW_PATH(other_path)->_has_ipv4 &&
++		NW_PATH(path)->_has_ipv6 == NW_PATH(other_path)->_has_ipv6;
+ };
+ 
+ bool nw_path_is_flow_divert(nw_path_t path) {
+@@ -225,3 +315,136 @@ bool nw_path_is_per_app_vpn(nw_path_t path) {
+ 	DARLING_NW_STUB_PRINT;
+ 	return false;
+ }
++
++nw_path_monitor_t nw_path_monitor_create(void) {
++	return [_NW_CONCRETE_IMPL(nw_path_monitor) new];
++};
++
++nw_path_monitor_t nw_path_monitor_create_with_type(nw_interface_type_t required_interface_type) {
++	_NW_CONCRETE_IMPL(nw_path_monitor)* monitor = [_NW_CONCRETE_IMPL(nw_path_monitor) new];
++	monitor->_has_required_type = true;
++	monitor->_required_type = required_interface_type;
++	return monitor;
++};
++
++void nw_path_monitor_prohibit_interface_type(nw_path_monitor_t monitor, nw_interface_type_t interface_type) {
++	if (!monitor || (unsigned int)interface_type >= 32)
++		return;
++	@synchronized (monitor) {
++		NW_PATH_MONITOR(monitor)->_prohibited_types |= 1u << interface_type;
++	}
++};
++
++void nw_path_monitor_set_queue(nw_path_monitor_t monitor, dispatch_queue_t queue) {
++	if (!monitor || !queue)
++		return;
++	@synchronized (monitor) {
++		_NW_CONCRETE_IMPL(nw_path_monitor)* m = NW_PATH_MONITOR(monitor);
++		if (m->_started)
++			return;
++		dispatch_retain(queue);
++		if (m->_queue)
++			dispatch_release(m->_queue);
++		m->_queue = queue;
++	}
++};
++
++void nw_path_monitor_set_update_handler(nw_path_monitor_t monitor, nw_path_monitor_update_handler_t update_handler) {
++	if (!monitor)
++		return;
++	@synchronized (monitor) {
++		_NW_CONCRETE_IMPL(nw_path_monitor)* m = NW_PATH_MONITOR(monitor);
++		if (m->_cancelled)
++			return;
++		if (m->_update_handler)
++			Block_release(m->_update_handler);
++		m->_update_handler = update_handler ? Block_copy(update_handler) : NULL;
++	}
++};
++
++void nw_path_monitor_set_cancel_handler(nw_path_monitor_t monitor, nw_path_monitor_cancel_handler_t cancel_handler) {
++	if (!monitor)
++		return;
++	@synchronized (monitor) {
++		_NW_CONCRETE_IMPL(nw_path_monitor)* m = NW_PATH_MONITOR(monitor);
++		if (m->_cancelled)
++			return;
++		if (m->_cancel_handler)
++			Block_release(m->_cancel_handler);
++		m->_cancel_handler = cancel_handler ? Block_copy(cancel_handler) : NULL;
++	}
++};
++
++// Delivers the current path once, on the monitor's queue. Later network
++// changes are not reported: Darling has no network change notifications.
++void nw_path_monitor_start(nw_path_monitor_t monitor) {
++	if (!monitor)
++		return;
++	_NW_CONCRETE_IMPL(nw_path_monitor)* m = NW_PATH_MONITOR(monitor);
++	dispatch_queue_t queue;
++
++	@synchronized (monitor) {
++		// like on macOS, a monitor without a queue cannot be started
++		if (!m->_queue || m->_started || m->_cancelled)
++			return;
++		m->_started = true;
++		queue = m->_queue;
++	}
++
++	// the block keeps the monitor (and with it the queue) alive until it has run
++	dispatch_async(queue, ^{
++		nw_path_monitor_update_handler_t update_handler = NULL;
++
++		@synchronized (m) {
++			if (!m->_cancelled && m->_update_handler)
++				update_handler = Block_copy(m->_update_handler);
++		}
++		if (!update_handler)
++			return;
++
++		nw_path_t path = nw_path_create_for_monitor(m);
++		update_handler(path);
++		[path release];
++		Block_release(update_handler);
++	});
++};
++
++// No update handler is called once this returns, except one already running.
++// The cancel handler then runs once on the queue and both handlers are dropped,
++// which breaks the usual retain cycle between a handler and the monitor's owner.
++void nw_path_monitor_cancel(nw_path_monitor_t monitor) {
++	if (!monitor)
++		return;
++	_NW_CONCRETE_IMPL(nw_path_monitor)* m = NW_PATH_MONITOR(monitor);
++	nw_path_monitor_update_handler_t update_handler;
++	nw_path_monitor_cancel_handler_t cancel_handler;
++	dispatch_queue_t queue;
++
++	@synchronized (monitor) {
++		if (m->_cancelled)
++			return;
++		m->_cancelled = true;
++		update_handler = m->_update_handler;
++		cancel_handler = m->_cancel_handler;
++		m->_update_handler = NULL;
++		m->_cancel_handler = NULL;
++		queue = m->_queue;
++	}
++
++	if (queue) {
++		dispatch_async(queue, ^{
++			if (cancel_handler) {
++				cancel_handler();
++				Block_release(cancel_handler);
++			}
++			if (update_handler)
++				Block_release(update_handler);
++			(void)m; // keeps the queue alive until the cancel handler has run
++		});
++	} else {
++		if (cancel_handler)
++			Block_release(cancel_handler);
++		if (update_handler)
++			Block_release(update_handler);
++	}
++};

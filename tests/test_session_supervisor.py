@@ -325,10 +325,10 @@ class SignalEscalationTests(unittest.TestCase):
         "import os, signal, subprocess, sys, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "worker = subprocess.Popen([sys.executable, '-c', "
-        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(3)'])\n"
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(8)'])\n"
         "with open(sys.argv[1], 'w') as handle:\n"
         "    handle.write('%d %d' % (os.getpid(), worker.pid))\n"
-        "time.sleep(3)\n"
+        "time.sleep(30)\n"
     )
 
     def setUp(self):
@@ -365,6 +365,7 @@ class SignalEscalationTests(unittest.TestCase):
         os.kill(os.getpid(), signal.SIGTERM)
 
     def test_sigterm_reaches_the_grace_period_and_the_group_is_killed(self):
+        started = time.monotonic()
         thread = threading.Thread(target=self.interrupt_when_ready, daemon=True)
         thread.start()
         output = io.StringIO()
@@ -376,9 +377,11 @@ class SignalEscalationTests(unittest.TestCase):
         finally:
             thread.join(timeout=5)
         parent, worker = (int(part) for part in self.pids.read_text().split())
+        elapsed = time.monotonic() - started
         self.assertEqual(code, 137)
         self.assertTrue(self.wait_dead(parent), 'the loader survived the escalation')
         self.assertTrue(self.wait_dead(worker), 'the descendant survived the escalation')
+        self.assertLess(elapsed, 8, 'the worker exited only after its sleep completed')
         self.assertIn('interrupted by signal 15', output.getvalue())
 
 

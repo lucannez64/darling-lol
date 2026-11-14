@@ -75,7 +75,7 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container (Fedora hosts only), keeping build dependencies off the host. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout and run `sh scripts/run.sh` and the update commands from inside the container.
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container (Fedora hosts only), keeping build dependencies off the host. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout then follow the Riot Client installation and launch steps below and run update commands inside the container.
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, the installer runs a full `pacman -Syu` and asks first unless this is given.
 - `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
@@ -129,7 +129,7 @@ Default layout: `/usr/local/libexec/darling`, `~/.darling` and `/Users/$USER` in
 
 ## Launch & Usage
 
-Install the Riot Client (change `euw` to your region), then sign in and install League through Riot's own UI:
+For native and manual builds, install the Riot Client (change `euw` to your region), then sign in and install League through Riot's own UI. For Nix, use the [Nix launch instructions](docs/NIX.md):
 
 ```bash
 ./scripts/installer.sh euw
@@ -149,6 +149,7 @@ First installs and future Riot updates can still hit compatibility gaps (e.g. an
 - **Recover stale client** (client closed but `darlingserver` still running): `RCLOL_RECOVER_STALE_CLIENT=1 ./scripts/run.sh`. Stops only a windowless Riot/League/CEF tree at least 60 s old; preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`. [Details](docs/TROUBLESHOOTING.md#client-remains-running-without-a-window).
 - **Clean orphaned helpers** (several `close-league-client-in-game.py` watchers): `RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh`. Only removes orphaned helpers of this prefix. [Details](docs/TROUBLESHOOTING.md#multiple-client-in-game-helpers).
 - **Client handling in-game:** `RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh`. Reads `lol-user-experience` from `LCULocalPreferences.yaml`; when `potatoModeEnabled` is true, closes or hides the client UI depending on `closeLeagueClientDuringGame`. Missing or invalid values select no action. Low-level switches `RCLOL_CLOSE_CLIENT_IN_GAME` and `RCLOL_HIDE_CLIENT_IN_GAME` remain available. [Details](docs/TROUBLESHOOTING.md#automatic-client-handling-during-a-match).
+- **League splash overlay:** `RCLOL_HIDE_LEAGUE_SPLASH=1 ./scripts/run.sh`. Polls every five seconds and unmaps only the borderless `512x216` override-redirect `LeagueClient/LeagueClient` window that can appear at random. Off by default; local window management only, never hides the game or managed client windows, and does not patch client binaries, CEF, anti-cheat or DRM. Standalone: `./scripts/hide-league-splash-window.sh` (`--once` inspects without changes). [Details](docs/TROUBLESHOOTING.md#league-splash-window-appears-over-the-client).
 
 These window-management helpers are opt-in, off by default, and do not patch client binaries.
 
@@ -158,7 +159,7 @@ These window-management helpers are opt-in, off by default, and do not patch cli
 
 Exit the game and both clients first.
 
-**Nix users:** update through the launcher with `nix run github:lucannez64/darling-lol#default -- --update` (see [Nix setup](docs/SETUP.md#nixos-package)); the commands below are for native and manual builds.
+**Nix users:** use `nix run --refresh github:lucannez64/darling-lol#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`. The commands below are for native and manual builds.
 
 **Native / manual builds** (for a `--toolbox` install, run these inside the container):
 

@@ -15,6 +15,7 @@ spec.loader.exec_module(clean_stale_helpers)
 
 HELPER = '/repo/tools/close-league-client-in-game.py'
 HIDE_HELPER = '/repo/tools/hide-league-client-in-game.py'
+SPLASH_HELPER = '/repo/tools/hide-league-splash-window.py'
 
 
 class CleanStaleHelpersTests(unittest.TestCase):
@@ -67,6 +68,7 @@ class CleanStaleHelpersTests(unittest.TestCase):
     def test_removes_only_orphaned_helpers_of_this_prefix(self):
         self.process(100, HELPER)
         self.process(101, HIDE_HELPER)
+        self.process(102, SPLASH_HELPER)
         self.process(200, HELPER, parent_pid=600, parent_comm='darling')
         self.process(201, HELPER, prefix=self.other)
         self.process(202, HELPER, argv0='/usr/bin/vim')
@@ -78,8 +80,9 @@ class CleanStaleHelpersTests(unittest.TestCase):
         self.assertEqual(sorted(killed), sorted([
             (100, signal.SIGTERM), (100, signal.SIGKILL),
             (101, signal.SIGTERM), (101, signal.SIGKILL),
+            (102, signal.SIGTERM), (102, signal.SIGKILL),
         ]))
-        self.assertIn('removing 2 orphaned helper(s): 100,101', output)
+        self.assertIn('removing 3 orphaned helper(s): 100,101,102', output)
 
     def test_dry_run_reports_without_signalling(self):
         self.process(100)

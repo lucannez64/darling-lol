@@ -147,6 +147,27 @@ case "$guest_home" in
  "$prefix"/*) guest_path=/${guest_home#"$prefix"/} ;;
  *) echo "RIOT_GUEST_HOME must be inside DPREFIX" >&2; exit 1 ;;
 esac
+# The client saves its locale in RiotClientSettings.yaml and prefers it over --locale, so
+# an explicit RCLOL_LOCALE is ignored once a session has run in another language. The
+# in-client language switch needs a self-restart, which closes the client under Darling,
+# so sync an explicit RCLOL_LOCALE into the saved settings before the client starts.
+# The game keeps its own language in the League product settings; sync that too so the
+# client and the game use the same locale. Only `locale:` lines change, not default_locale.
+if [ -n "${RCLOL_LOCALE:-}" ]; then
+ case "$RCLOL_LOCALE" in
+  [a-z][a-z]_[A-Z][A-Z])
+   for settings in \
+    "$guest_home/Library/Application Support/Riot Games/Riot Client/Config/RiotClientSettings.yaml" \
+    "$prefix/Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.product_settings.yaml"; do
+    if [ -w "$settings" ]; then
+     # The files use CRLF line endings; keep whatever follows the closing quote.
+     sed -i "s/^\( *locale: \)\"[A-Za-z_]*\"/\1\"$RCLOL_LOCALE\"/" "$settings"
+    fi
+   done
+   ;;
+  *) echo "RCLOL_LOCALE must look like pt_BR; ignoring '$RCLOL_LOCALE'" >&2; unset RCLOL_LOCALE ;;
+ esac
+fi
 # The first-time installer puts the client in /Users/Shared/Riot Games and then
 # hands off through LaunchServices, which does not start it under Darling. Link
 # the installed client where the normal launch expects it.
@@ -190,6 +211,9 @@ if [ -z "${RIOT_LAUNCHER_HOST:-}" ]; then
   python3 "$runner_dir/close-league-client-in-game.py" --detach &
  elif [ "${RCLOL_HIDE_CLIENT_IN_GAME:-0}" = 1 ]; then
   python3 "$runner_dir/hide-league-client-in-game.py" --detach &
+ fi
+ if [ "${RCLOL_HIDE_LEAGUE_SPLASH:-0}" = 1 ]; then
+  python3 "$runner_dir/hide-league-splash-window.py" --detach &
  fi
 fi
 A=${RIOT_LAUNCHER_HOST:-"$client/Contents/MacOS/RiotClientServices"}
@@ -290,6 +314,8 @@ fi
 # owned it. Set RCLOL_CLEAN_ON_EXIT=0 for the previous exec-only behaviour, and
 # RCLOL_STOP_AFTER_CLIENT_SECONDS=N to stop once the client window has been
 # gone for N seconds with no game running.
+export RCLOL_STOP_AFTER_CLIENT_SECONDS="${RCLOL_STOP_AFTER_CLIENT_SECONDS:-60}"
+
 exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   --darling "${darling_bin:-darling}" --runtime-at-start "$runtime_at_start" \
   --guest-log "$prefix_dir$guest_path/Library/Logs/Riot Games/Riot Client" -- \

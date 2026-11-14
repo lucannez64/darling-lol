@@ -14080,7 +14080,7 @@ index d6f86b3..88ee7bb 100644
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
 diff --git a/QuartzCore/CAMetalLayer.mm b/QuartzCore/CAMetalLayer.mm
-index b81e2e1..6353344 100644
+index b81e2e1..8d7ca14 100644
 --- a/QuartzCore/CAMetalLayer.mm
 +++ b/QuartzCore/CAMetalLayer.mm
 @@ -25,7 +25,79 @@
@@ -14163,7 +14163,7 @@ index b81e2e1..6353344 100644
  
  #import "CALayerInternal.h"
  
-@@ -205,6 +277,65 @@ static void reportGLErrors(void) {
+@@ -205,6 +277,69 @@ static void reportGLErrors(void) {
  
  @end
  
@@ -14226,10 +14226,14 @@ index b81e2e1..6353344 100644
 +}
 +}
 +
++// The layer the main thread is waiting on in nextDrawable, if any. Written and compared under that layer's
++// _drawableCondition, so queuePresent: can wake the waiter; there is one main thread, so one slot is enough.
++static std::atomic<void*> mainThreadDrawableWaiter{nullptr};
++
  @implementation CAMetalLayerInternal
  
  #if DARLING_METAL_ENABLED
-@@ -363,12 +494,15 @@ static void reportGLErrors(void) {
+@@ -363,23 +498,64 @@ static void reportGLErrors(void) {
  - (id<CAMetalDrawable>)nextDrawable
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
@@ -14239,22 +14243,65 @@ index b81e2e1..6353344 100644
  
  	NSDate* endTime = [NSDate dateWithTimeIntervalSinceNow: 1];
  
++	// Only evaluated once the pool is empty, so the usual call does not pay for it.
++	int onMainThread = -1;
++	unsigned inlinePresents = 0;
++
  	while (_usableDrawablesBitmap == 0) {
+-		if (_allowsNextDrawableTimeout) {
+-			if (![_drawableCondition waitUntilDate: endTime]) {
+-				break;
++		if (onMainThread < 0) {
++			onMainThread = [NSThread isMainThread] ? 1 : 0;
++		}
++		// A presented drawable only returns to the pool in prepareRender, which runs from the block queuePresent:
++		// sends to the main queue. On macOS the window server recycles drawables whatever the application's main
++		// thread does; here a main thread that asks for a drawable while every one is queued or on screen would
++		// wait for blocks only it can run, and always time out (League does this twice when its loading screen
++		// ends: two "Metal Device timed out giving us a Drawable" lines, 1 s each). So present the queued
++		// drawables right here, exactly as the pending blocks would; those blocks later find the queue empty,
++		// which is the path any other re-render of the window takes. Bounded: two presents always free a drawable,
++		// and a context that cannot render yet falls back to the timed wait.
++		if (onMainThread == 1 && _queuedDrawableCount > 0 && inlinePresents < 4) {
++			++inlinePresents;
++			[_drawableCondition unlock];
++			CFTimeInterval inlineStart = CACurrentMediaTime();
++			@autoreleasepool {
++				[_context render];
++				[_context flush];
+ 			}
++			darlingMetalTiming("nextDrawableInlinePresent", CACurrentMediaTime() - inlineStart);
++			[_drawableCondition lock];
++			continue;
++		}
 +		// No drawable is free: this thread really blocks here (the wait is what the pool starvation costs the game).
 +		Indium::Waits::Block block("nextDrawable");
- 		if (_allowsNextDrawableTimeout) {
- 			if (![_drawableCondition waitUntilDate: endTime]) {
- 				break;
-@@ -380,6 +514,8 @@ static void reportGLErrors(void) {
++		BOOL signaled = YES;
++		if (onMainThread == 1) {
++			// The submit worker may still be about to queue a presentation: have queuePresent: wake this wait.
++			mainThreadDrawableWaiter.store((void*) self, std::memory_order_relaxed);
++		}
++		if (_allowsNextDrawableTimeout) {
++			signaled = [_drawableCondition waitUntilDate: endTime];
+ 		} else {
+ 			[_drawableCondition wait];
+ 		}
++		if (onMainThread == 1) {
++			mainThreadDrawableWaiter.store(nullptr, std::memory_order_relaxed);
++		}
++		if (!signaled) {
++			break;
++		}
+ 	}
  
  	if (_usableDrawablesBitmap == 0) {
  		// timeout reached
-+		darlingMetalTiming("nextDrawableTimeout", CACurrentMediaTime() - waitStart);
++		darlingMetalTiming(onMainThread == 1 ? "nextDrawableTimeoutMainThread" : "nextDrawableTimeout", CACurrentMediaTime() - waitStart);
 +		darlingMetalTrace("nextDrawable-timeout", (long) _queuedDrawableCount, 0);
  		[_drawableCondition unlock];
  		return nil;
  	}
-@@ -400,6 +536,8 @@ static void reportGLErrors(void) {
+@@ -400,6 +576,8 @@ static void reportGLErrors(void) {
  	}
  
  	_usableDrawablesBitmap &= ~(1u << drawableID);
@@ -14263,7 +14310,7 @@ index b81e2e1..6353344 100644
  
  	drawable = _drawables[drawableID];
  
-@@ -410,20 +548,36 @@ static void reportGLErrors(void) {
+@@ -410,20 +588,40 @@ static void reportGLErrors(void) {
  
  - (void)queuePresent: (NSUInteger)drawableID
  {
@@ -14272,6 +14319,10 @@ index b81e2e1..6353344 100644
  	_queuedDrawables[_queuedDrawableCount] = drawableID;
  	++_queuedDrawableCount;
 +	darlingMetalTrace("queuePresent", (long) drawableID, (long) _queuedDrawableCount);
++	if (mainThreadDrawableWaiter.load(std::memory_order_relaxed) == (void*) self) {
++		// The main thread is waiting in nextDrawable and cannot run the block below: let it present this itself.
++		[_drawableCondition broadcast];
++	}
  	[_drawableCondition unlock];
  
  	// we now need to schedule a render
@@ -14301,7 +14352,7 @@ index b81e2e1..6353344 100644
  	[_drawableCondition lock];
  	_usableDrawablesBitmap |= 1u << drawableID;
  	[_drawableCondition signal];
-@@ -455,7 +609,7 @@ static void reportGLErrors(void) {
+@@ -455,7 +653,7 @@ static void reportGLErrors(void) {
  	}
  	_usableDrawablesBitmap = 0;
  
@@ -14310,7 +14361,7 @@ index b81e2e1..6353344 100644
  		// can't create new drawables
  		[_drawableCondition unlock];
  		return;
-@@ -506,6 +660,10 @@ static void reportGLErrors(void) {
+@@ -506,6 +704,10 @@ static void reportGLErrors(void) {
  			glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -14321,7 +14372,7 @@ index b81e2e1..6353344 100644
  			reportGLErrors();
  		}
  	}
-@@ -516,6 +674,10 @@ static void reportGLErrors(void) {
+@@ -516,6 +718,10 @@ static void reportGLErrors(void) {
  - (void)prepareRender
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
@@ -14332,7 +14383,7 @@ index b81e2e1..6353344 100644
  
  	[_drawableCondition lock];
  	if (_queuedDrawableCount > 0) {
-@@ -528,11 +690,62 @@ static void reportGLErrors(void) {
+@@ -528,11 +734,62 @@ static void reportGLErrors(void) {
  	if (drawable) {
  		// wait for the drawable to be fully rendered before copying it to the render texture
  		// (this is a GPU-side wait)
@@ -14395,7 +14446,7 @@ index b81e2e1..6353344 100644
  	}
  
  	@synchronized(self) {
-@@ -575,6 +788,11 @@ static void reportGLErrors(void) {
+@@ -575,6 +832,11 @@ static void reportGLErrors(void) {
  {
  	[super _setContext: context];
  
@@ -14407,7 +14458,7 @@ index b81e2e1..6353344 100644
  	if (_tex == 0) {
  		// create our textures now using the context's CGLContext
  		CGLContextObj prev = CGLGetCurrentContext();
-@@ -589,10 +807,15 @@ static void reportGLErrors(void) {
+@@ -589,10 +851,15 @@ static void reportGLErrors(void) {
  		glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);

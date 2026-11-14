@@ -2688,7 +2688,7 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..938f00d 100644
+index f273989..d8e6830 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,6 +9,9 @@
@@ -2805,7 +2805,7 @@ index f273989..938f00d 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,7 +130,12 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,10 +130,19 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -2819,10 +2819,18 @@ index f273989..938f00d 100644
  	{ .oid = -1 }
  };
  
-@@ -71,6 +151,35 @@ static const struct host_basic_info* gethostinfo(void)
++// The host's real memory size, before the profile's RCLOL_MEMORY_BYTES replaces
++// hinfo.max_mem (see darling_hw_memsize below).
++static unsigned long long host_real_mem;
++
+ static const struct host_basic_info* gethostinfo(void)
+ {
+ 	static struct host_basic_info hinfo;
+@@ -71,6 +155,36 @@ static const struct host_basic_info* gethostinfo(void)
  		hself = mach_host_self();
  		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
  		mach_port_deallocate(mach_task_self(), hself);
++		host_real_mem = hinfo.max_mem;
 +
 +		// Keep the emulated MacBookPro16,1 hw.model, but report the host's real
 +		// CPU counts and the profile-selected memory size. The game and the
@@ -2855,7 +2863,7 @@ index f273989..938f00d 100644
  	}
  
  	return &hinfo;
-@@ -83,6 +192,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +197,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -2869,7 +2877,25 @@ index f273989..938f00d 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -169,16 +285,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -111,6 +232,17 @@ sysctl_handler(handle_logicalcpu_max)
+ 	return 0;
+ }
+ 
++// darling-lol: the value hw.memsize reports and the host's real memory size.
++// libsyscall's host_statistics64 wrapper uses the pair to keep the page counts
++// of HOST_VM_INFO64 within hw.memsize when the profile's memory size is smaller
++// than the host's.
++__attribute__((visibility("hidden")))
++void darling_hw_memsize(unsigned long long* reported, unsigned long long* host_real)
++{
++	*reported = gethostinfo()->max_mem;
++	*host_real = host_real_mem;
++}
++
+ sysctl_handler(handle_memsize)
+ {
+ 
+@@ -169,16 +301,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -2934,7 +2960,7 @@ index f273989..938f00d 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +350,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +366,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -3666,7 +3692,7 @@ index 4319355..da10132 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
-index 8fabdda..6cc204e 100644
+index 8fabdda..c472a3f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c
 @@ -22,6 +22,7 @@ static sysctl_handler(handle_route);
@@ -3677,7 +3703,28 @@ index 8fabdda..6cc204e 100644
  #define LINUX_SIOCGIFHWADDR 0x8927
  #define LINUX_SIOCGIFBRDADDR 0x8919
  #define LINUX_SIOCGIFNETMASK 0x891b
-@@ -144,6 +145,16 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+@@ -29,6 +30,13 @@ static int do_iflist(void* old, unsigned long* oldlen);
+ 
+ #define MAC_LENGTH 6
+ 
++// Linux hardware types (SIOCGIFHWADDR sa_family) and the BSD link types they map to.
++#define LINUX_ARPHRD_ETHER 1
++#define LINUX_ARPHRD_LOOPBACK 772
++#define BSD_IFT_OTHER 0x1
++#define BSD_IFT_ETHER 0x6
++#define BSD_IFT_LOOP 0x18
++
+ struct linux_sockaddr {
+ 	unsigned short sa_family;
+ 	char sa_data[14];
+@@ -137,18 +145,37 @@ static int do_iflist(void* old, unsigned long* oldlen) {
+ 			dl->sdl_len = sizeof(struct sockaddr_dl) + additional_sockaddr_len;
+ 			dl->sdl_family = AF_LINK;
+ 			dl->sdl_index = ifm->ifm_index;
+-			/* dl->sdl_type = 0; */ // TODO: determine this somehow
+ 			dl->sdl_nlen = name_len;
+ 			dl->sdl_alen = MAC_LENGTH;
+ 			dl->sdl_slen = 0; // ???
  
  			memcpy(dl->sdl_data, curr->lifr_name, name_len);
  
@@ -3694,6 +3741,22 @@ index 8fabdda..6cc204e 100644
  			// grab the MAC
  			memcpy(tmp.lifr_name, curr->lifr_name, sizeof(curr->lifr_name));
  			if ((status = __real_ioctl(tmp_sock, LINUX_SIOCGIFHWADDR, &tmp)) < 0)
+ 				goto out;
+-			memcpy(LLADDR(dl), tmp.lifr_hwaddr.sa_data, MAC_LENGTH);
++			// Consumers that look for a hardware address select the link entry by type
++			// (Ethernet) and skip anything else; only Ethernet has an address to copy.
++			if (tmp.lifr_hwaddr.sa_family == LINUX_ARPHRD_ETHER) {
++				dl->sdl_type = BSD_IFT_ETHER;
++				memcpy(LLADDR(dl), tmp.lifr_hwaddr.sa_data, MAC_LENGTH);
++			} else {
++				dl->sdl_type = (tmp.lifr_hwaddr.sa_family == LINUX_ARPHRD_LOOPBACK) ? BSD_IFT_LOOP : BSD_IFT_OTHER;
++				dl->sdl_alen = 0;
++			}
++			ifm->ifm_data.ifi_type = dl->sdl_type;
++			ifm->ifm_data.ifi_addrlen = dl->sdl_alen;
+ 
+ 			old_ptr += ifm_length;
+ 		}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
 index 5a49882..5dc5fa7 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
@@ -7514,6 +7577,72 @@ index 88658cb..83ce61c 100644
  	errno = err;
  	int *tsderrno = (int*)_os_tsd_get_direct(__TSD_ERRNO);
  	if (tsderrno) {
+diff --git a/libsyscall/mach/host.c b/libsyscall/mach/host.c
+index 6d977fd..ec68ce4 100644
+--- a/libsyscall/mach/host.c
++++ b/libsyscall/mach/host.c
+@@ -108,3 +108,61 @@ host_create_mach_voucher(mach_port_name_t host,
+ 
+ 	return rv;
+ }
++
++/*
++ * darling-lol: HOST_VM_INFO64 comes from darlingserver with the host's real
++ * page counts, while hw.memsize may be the smaller memory size of the selected
++ * hardware profile (RCLOL_MEMORY_BYTES, read from this process's environment
++ * by the hw sysctls). Free memory larger than the installed memory is not a
++ * state a real machine reports, so when hw.memsize is below the host's memory
++ * the page counts are scaled by hw.memsize / host memory. free + active +
++ * inactive + wire then stays within hw.memsize. Event counters are not
++ * touched, and nothing changes when hw.memsize covers the host's memory.
++ */
++extern kern_return_t
++_kernelrpc_host_statistics64(host_t host, host_flavor_t flavor,
++    host_info64_t info, mach_msg_type_number_t *count);
++
++extern void darling_hw_memsize(unsigned long long *reported,
++    unsigned long long *host_real);
++
++kern_return_t
++host_statistics64(host_t host, host_flavor_t flavor, host_info64_t info,
++    mach_msg_type_number_t *count)
++{
++	kern_return_t rv = _kernelrpc_host_statistics64(host, flavor, info, count);
++
++	if (rv == KERN_SUCCESS && flavor == HOST_VM_INFO64 &&
++	    *count >= HOST_VM_INFO64_REV0_COUNT) {
++		vm_statistics64_t stat = (vm_statistics64_t)info;
++		unsigned long long reported = 0, host_real = 0;
++		/* MiB units keep the arithmetic in 32-bit operands for i386 */
++		uint32_t reported_mb, host_mb;
++
++		darling_hw_memsize(&reported, &host_real);
++		reported_mb = (uint32_t)(reported >> 20);
++		host_mb = (uint32_t)(host_real >> 20);
++
++		if (reported_mb != 0 && reported_mb < host_mb) {
++			double ratio = (double)reported_mb / (double)host_mb;
++
++#define DARLING_SCALE_PAGES(field) \
++	stat->field = (natural_t)((double)stat->field * ratio)
++			DARLING_SCALE_PAGES(free_count);
++			DARLING_SCALE_PAGES(active_count);
++			DARLING_SCALE_PAGES(inactive_count);
++			DARLING_SCALE_PAGES(wire_count);
++			DARLING_SCALE_PAGES(purgeable_count);
++			DARLING_SCALE_PAGES(speculative_count);
++			if (*count >= HOST_VM_INFO64_REV1_COUNT) {
++				DARLING_SCALE_PAGES(compressor_page_count);
++				DARLING_SCALE_PAGES(throttled_count);
++				DARLING_SCALE_PAGES(external_page_count);
++				DARLING_SCALE_PAGES(internal_page_count);
++			}
++#undef DARLING_SCALE_PAGES
++		}
++	}
++
++	return rv;
++}
 diff --git a/libsyscall/os/tsd.h b/libsyscall/os/tsd.h
 index 6619381..78d90df 100644
 --- a/libsyscall/os/tsd.h
@@ -9578,3 +9707,21 @@ index 0000000..85e0663
 +
 +	return ts.tv_sec * 1000000000L + ts.tv_nsec;
 +}
+diff --git a/osfmk/mach/mach_host.defs b/osfmk/mach/mach_host.defs
+index a1b55f5..03dab69 100644
+--- a/osfmk/mach/mach_host.defs
++++ b/osfmk/mach/mach_host.defs
+@@ -236,10 +236,13 @@ routine host_lockgroup_info(
+ 
+ /*
+  *	Return 64-bit statistics from this host.
++ *	darling-lol: the user side is wrapped in libsyscall/mach/host.c.
+  */
+ routine
+ #ifdef KERNEL_SERVER
+ host_statistics64_from_user(
++#elif !KERNEL && !LIBSYSCALL_INTERFACE
++_kernelrpc_host_statistics64(
+ #else
+ host_statistics64(
+ #endif

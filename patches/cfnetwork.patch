@@ -21,6 +21,35 @@ index e2326a3..32efa89 100644
  }
  
  @property(retain) NSOperationQueue *realDelegateQueue; // @synthesize realDelegateQueue=_realDelegateQueue;
+diff --git a/src/Cookies/CFHTTPCookie.c b/src/Cookies/CFHTTPCookie.c
+index 6b2a485..dedb42c 100644
+--- a/src/Cookies/CFHTTPCookie.c
++++ b/src/Cookies/CFHTTPCookie.c
+@@ -88,7 +88,10 @@ CFStringRef CFHTTPCookieGetName(CFHTTPCookieRef cookie) {
+ 
+ CFStringRef CFHTTPCookieGetDomain(CFHTTPCookieRef cookie) {
+     if (cookie->_domain == NULL) {
+-        cookie->_domain = CFStringCreateCopy(kCFAllocatorDefault, CFDictionaryGetValue(cookie->_properties, kCFHTTPCookieDomain));
++        /* A Set-Cookie header without a Domain attribute has no such property; CFStringCreateCopy(NULL) crashes. */
++        CFStringRef domain = CFDictionaryGetValue(cookie->_properties, kCFHTTPCookieDomain);
++        if (domain != NULL)
++            cookie->_domain = CFStringCreateCopy(kCFAllocatorDefault, domain);
+         
+         if (cookie->_domain == NULL) {
+             CFTypeRef urlString = CFDictionaryGetValue(cookie->_properties, kCFHTTPCookieOriginURL);
+@@ -274,8 +277,10 @@ CFArrayRef CFHTTPCookieCreateWithResponseHeaderFields(CFDictionaryRef headerFiel
+             
+             CFHTTPCookieRef cookie = CFHTTPCookieCreateWithProperties(properties);
+             CFRelease(properties);
+-            CFArrayAppendValue(mutableResult, cookie);
+-            CFRelease(cookie);
++            if (cookie != NULL) {
++                CFArrayAppendValue(mutableResult, cookie);
++                CFRelease(cookie);
++            }
+             
+         }
+         CFRelease(path);
 diff --git a/src/Host/CFHost.c b/src/Host/CFHost.c
 index 91c0d0f..d6e3daf 100644
 --- a/src/Host/CFHost.c
@@ -38,6 +67,91 @@ index 91c0d0f..d6e3daf 100644
  			NULL,							// copyDescription
  			NULL,							// equal
  			NULL,							// hash
+diff --git a/src/Stream/CFSocketStream.c b/src/Stream/CFSocketStream.c
+index 05e8e4c..8d334e5 100644
+--- a/src/Stream/CFSocketStream.c
++++ b/src/Stream/CFSocketStream.c
+@@ -6277,7 +6277,11 @@ _SocketStreamSecuritySetInfo_NoLock(_CFSocketStreamContext* ctxt, CFDictionaryRe
+ 		
+ 		/* Figure out the correct security level to set and set it. */
+         value = CFDictionaryGetValue(settings, kCFStreamSSLLevel);
+-        if ((!value || CFEqual(value, kCFStreamSocketSecurityLevelNegotiatedSSL)) && SSLSetProtocolVersion(security, kTLSProtocol1))
++        /* Negotiated means the highest version both sides support. SSLSetProtocolVersion(kTLSProtocol1)
++         * capped the offer at TLS 1.0, which current servers refuse (protocol_version alert) or which
++         * fails in the TLS 1.0 record layer; Secure Transport here negotiates TLS 1.2. */
++        if ((!value || CFEqual(value, kCFStreamSocketSecurityLevelNegotiatedSSL)) &&
++            (SSLSetProtocolVersionMin(security, kTLSProtocol1) || SSLSetProtocolVersionMax(security, kTLSProtocol12)))
+             break;
+ 
+         else if (value) {
+diff --git a/src/URL/CFURLConnection.c b/src/URL/CFURLConnection.c
+index fdc7bc7..932eb03 100644
+--- a/src/URL/CFURLConnection.c
++++ b/src/URL/CFURLConnection.c
+@@ -432,21 +432,24 @@ static void connectionDecodeData(struct _CFURLConnection *connection, CFDataRef
+     CFMutableDataRef outputData = CFDataCreateMutable(kCFAllocatorDefault, 0);
+     CFDataIncreaseLength(outputData, length + halfLength);
+ 
+-    z_stream zStream = *connection->zStream;
+-    zStream.next_in = (Bytef *)CFDataGetMutableBytePtr((CFMutableDataRef)data);
+-    zStream.avail_in = (unsigned int)length;
+-    zStream.avail_out = 0;
+-    zStream.total_out = 0;
+-    while (zStream.avail_in != 0) {
+-
+-        if (zStream.total_out >= CFDataGetLength(outputData)) {
+-            CFDataIncreaseLength(outputData, halfLength);
++    /* Inflate with the connection's own stream: zlib rejects a copied z_stream (its state points back at
++     * the original), and a copy would also drop the state needed by the next chunk of the body. */
++    z_stream *zStream = connection->zStream;
++    zStream->next_in = (Bytef *)CFDataGetMutableBytePtr((CFMutableDataRef)data);
++    zStream->avail_in = (unsigned int)length;
++    zStream->avail_out = 0;
++    zStream->total_out = 0;
++    while (zStream->avail_in != 0) {
++
++        if (zStream->total_out >= CFDataGetLength(outputData)) {
++            /* At least one byte: a one-byte read has halfLength 0, and inflate() with no output space fails. */
++            CFDataIncreaseLength(outputData, halfLength > 0 ? halfLength : 1);
+         }
+ 
+-        zStream.next_out = (Bytef *)CFDataGetMutableBytePtr(outputData) + zStream.total_out;
+-        zStream.avail_out = (unsigned int)(CFDataGetLength(outputData) - zStream.total_out);
++        zStream->next_out = (Bytef *)CFDataGetMutableBytePtr(outputData) + zStream->total_out;
++        zStream->avail_out = (unsigned int)(CFDataGetLength(outputData) - zStream->total_out);
+ 
+-        status = inflate(&zStream, Z_BLOCK);
++        status = inflate(zStream, Z_BLOCK);
+         if (status == Z_STREAM_END) {
+             break;
+         } else if (status < 0) {
+@@ -455,7 +458,7 @@ static void connectionDecodeData(struct _CFURLConnection *connection, CFDataRef
+     }
+ 
+     if (status == Z_OK || status == Z_STREAM_END) {
+-        CFDataSetLength(outputData, zStream.total_out);
++        CFDataSetLength(outputData, zStream->total_out);
+         connectionGotData(connection, outputData);
+     } else {
+         CFErrorRef error = CFErrorCreate(kCFAllocatorDefault, ErrorDomain, kCFURLErrorCannotDecodeRawData, nil);
+@@ -660,10 +663,14 @@ static void readStreamEvent(CFReadStreamRef stream, CFStreamEventType type, void
+             }
+ 
+             if (length) {
+-                if (connection->contentEncoding == kContentEncodingNone) {
+-                    connectionGotData(connection, data);
+-                } else {
++                /* Only gzip and deflate bodies are decoded. Any other Content-Encoding value (servers send
++                 * things like "utf-8" or "identity") is delivered as received, as CFNetwork on macOS does;
++                 * failing it with kCFURLErrorCannotDecodeRawData lost the body of a valid response. */
++                if (connection->contentEncoding == kContentEncodingGZIP ||
++                    connection->contentEncoding == kContentEncodingDeflate) {
+                     connectionDecodeData(connection, data);
++                } else {
++                    connectionGotData(connection, data);
+                 }
+             }
+ 
 diff --git a/src/URL/NSCFURLSession.m b/src/URL/NSCFURLSession.m
 index 95a726b..86291e8 100644
 --- a/src/URL/NSCFURLSession.m
@@ -171,10 +285,10 @@ index 95a726b..86291e8 100644
  
  - (NSURLSessionDataTask *)dataTaskWithHTTPGetRequest:(NSURL *)url
 diff --git a/src/URL/NSURLSession.m b/src/URL/NSURLSession.m
-index 39367a5..ef3fdbc 100644
+index 39367a5..b6a0660 100644
 --- a/src/URL/NSURLSession.m
 +++ b/src/URL/NSURLSession.m
-@@ -7,6 +7,12 @@
+@@ -7,10 +7,58 @@
  
  #import <Foundation/NSURLSession.h>
  #import <objc/runtime.h>
@@ -182,12 +296,58 @@ index 39367a5..ef3fdbc 100644
 +#import <Foundation/NSError.h>
 +#import <Foundation/NSURLError.h>
 +#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSURL.h>
++#import <Foundation/NSURLRequest.h>
 +#import <Foundation/NSOperation.h>
 +#import <dispatch/dispatch.h>
  
  const int64_t NSURLSessionTransferSizeUnknown = -1LL;
  NSString* const NSURLSessionDownloadTaskResumeData = @"NSURLSessionDownloadTaskResumeData";
-@@ -28,7 +34,114 @@ NSString* const NSURLSessionDownloadTaskResumeData = @"NSURLSessionDownloadTaskR
+ 
++// NSURLSession reports transport failures in NSURLErrorDomain. The CFNetwork loader below returns the raw
++// stream error (Secure Transport status, errno, host lookup code); callers that classify failures by
++// NSURLError code would treat every one of them as an unknown error. Unrecognised errors pass through.
++static NSError *_NSURLSessionTransportError(NSError *error, NSURLRequest *request)
++{
++    if (error == nil || [[error domain] isEqualToString:NSURLErrorDomain])
++        return error;
++    NSString *domain = [error domain];
++    NSInteger code = [error code];
++    NSInteger mapped = 0;
++    if ([domain isEqualToString:@"SSL"] || ([domain isEqualToString:NSOSStatusErrorDomain] && code <= -9800 && code >= -9899)) {
++        switch (code) {
++            case -9807: case -9812: case -9813: case -9843: mapped = NSURLErrorServerCertificateUntrusted; break;
++            case -9814: mapped = NSURLErrorServerCertificateHasBadDate; break;
++            case -9815: mapped = NSURLErrorServerCertificateNotYetValid; break;
++            default: mapped = NSURLErrorSecureConnectionFailed; break;
++        }
++    } else if ([domain isEqualToString:@"POSIX"] || [domain isEqualToString:NSPOSIXErrorDomain]) {
++        switch (code) {
++            case 50: case 51: case 61: case 64: case 65: mapped = NSURLErrorCannotConnectToHost; break; // ENETDOWN, ENETUNREACH, ECONNREFUSED, EHOSTDOWN, EHOSTUNREACH
++            case 60: mapped = NSURLErrorTimedOut; break;                                             // ETIMEDOUT
++            case 32: case 53: case 54: mapped = NSURLErrorNetworkConnectionLost; break;              // EPIPE, ECONNABORTED, ECONNRESET
++            default: break;
++        }
++    } else if ([domain isEqualToString:@"NetDB"] || ([domain isEqualToString:@"com.apple.cfnetwork"] && (code == 1 || code == 2))) {
++        mapped = NSURLErrorCannotFindHost;                                                          // kCFHostErrorHostNotFound, kCFHostErrorUnknown
++    }
++    if (mapped == 0)
++        return error;
++    NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:error forKey:NSUnderlyingErrorKey];
++    NSURL *url = [request URL];
++    if (url) {
++        [info setObject:url forKey:NSURLErrorFailingURLErrorKey];
++        [info setObject:[url absoluteString] forKey:NSURLErrorFailingURLStringErrorKey];
++    }
++    return [NSError errorWithDomain:NSURLErrorDomain code:mapped userInfo:info];
++}
++
+ @implementation NSURLSession
+ 
+ + (void)initialize
+@@ -28,7 +76,114 @@ NSString* const NSURLSessionDownloadTaskResumeData = @"NSURLSessionDownloadTaskR
  @implementation NSURLSessionTask
  @end
  
@@ -266,7 +426,7 @@ index 39367a5..ef3fdbc 100644
 +            NSURLResponse *response = nil;
 +            NSError *error = nil;
 +            NSData *data = [NSURLConnection sendSynchronousRequest:_taskRequest returningResponse:&response error:&error];
-+            [self _finishWithData:data response:response error:error];
++            [self _finishWithData:data response:response error:_NSURLSessionTransportError(error, _taskRequest)];
 +        }
 +    });
 +}
