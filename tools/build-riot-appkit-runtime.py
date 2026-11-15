@@ -12,7 +12,7 @@ for line in (framework / 'CMakeFiles/AppKit.dir/flags.make').read_text().splitli
         name, value = line.split(' = ', 1)
         flags[name] = shlex.split(value)
 link = shlex.split((framework / 'CMakeFiles/AppKit.dir/link.txt').read_text())
-for name in ['NSResponder', 'NSApplication', 'NSWindow', 'NSDisplay', 'NSView', 'NSThemeFrame', 'NSTextInput', 'NSBitmapImageRep', 'NSEvent.subproj/NSEvent', 'NSEvent.subproj/NSEvent_mouse']:
+for name in ['NSResponder', 'NSApplication', 'NSWindow', 'NSDisplay', 'NSView', 'NSThemeFrame', 'NSTextInput', 'NSBitmapImageRep', 'NSSpellChecker', 'NSEvent.subproj/NSEvent', 'NSEvent.subproj/NSEvent_mouse']:
     obj = project / f'build/riot-{Path(name).name}.o'
     subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
                     '-O3', '-march=native', '-mtune=generic', '-Wno-macro-redefined', '-c',

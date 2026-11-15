@@ -679,7 +679,7 @@ diff --git a/NSNumber.m b/NSNumber.m
 index 7f15af6..f7d35ca 100644
 --- a/NSNumber.m
 +++ b/NSNumber.m
-@@ -16,6 +16,74 @@ CF_EXPORT CFNumberType _CFNumberGetType(CFNumberRef num);
+@@ -16,6 +16,82 @@ CF_EXPORT CFNumberType _CFNumberGetType(CFNumberRef num);
  CF_EXPORT CFNumberType _CFNumberGetType2(CFNumberRef number);
  CF_EXPORT CFStringRef __CFNumberCreateFormattingDescription(CFAllocatorRef allocator, CFTypeRef cf, CFDictionaryRef formatOptions);
  
@@ -718,6 +718,14 @@ index 7f15af6..f7d35ca 100644
 +    {
 +        double value = [self doubleValue];
 +        double otherValue = [other doubleValue];
++        if (value != value || otherValue != otherValue)
++        {
++            /* Match CFNumberCompare: NaN equals NaN and orders below every
++             * non-negative number (above negatives). */
++            if (value != value && otherValue != otherValue) return NSOrderedSame;
++            if (value != value) return __builtin_signbit(otherValue) ? NSOrderedDescending : NSOrderedAscending;
++            return __builtin_signbit(value) ? NSOrderedAscending : NSOrderedDescending;
++        }
 +        if (value < otherValue) return NSOrderedAscending;
 +        if (value > otherValue) return NSOrderedDescending;
 +        return NSOrderedSame;

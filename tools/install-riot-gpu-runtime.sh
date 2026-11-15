@@ -60,7 +60,7 @@ for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGra
  Metal) source=build/riot-Metal;;
  esac
  install -m755 "$source" "$binary.next"
- mv "$binary.next" "$binary"
+ mv -f "$binary.next" "$binary"
  # Dyld resolves Versions/A. Preserve the standard outer symlink as well.
  if [ ! -L "$framework/$name" ]; then rm -f "$framework/$name"; ln -s "Versions/Current/$name" "$framework/$name"; fi
 done
@@ -75,9 +75,9 @@ if [ ! -f "$gl_wrapper.before-float-resolver" ]; then
  else cp -p "@DARLING_SDK@"/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib "$gl_wrapper.before-float-resolver"; fi
 fi
 install -m755 build/darling-src/build/src/native/libGL.dylib "$gl_wrapper.next"
-mv "$gl_wrapper.next" "$gl_wrapper"
+mv -f "$gl_wrapper.next" "$gl_wrapper"
 install -m755 build/darling-src/build/src/native/libGL.dylib "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib.next"
-mv "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib.next" "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib"
+mv -f "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib.next" "$guest_home/RuntimeFrameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib"
 launchservices="$guest_home/RuntimeFrameworks/LaunchServices.framework"
 if [ ! -d "$launchservices" ]; then
  cp -a "@DARLING_SDK@"/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework "$launchservices"
@@ -85,7 +85,7 @@ fi
 launchservices_binary="$launchservices/Versions/A/LaunchServices"
 if [ ! -f "$launchservices_binary.before-null-error" ]; then cp -p "$launchservices_binary" "$launchservices_binary.before-null-error"; fi
 install -m755 build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices/LaunchServices "$launchservices_binary.next"
-mv "$launchservices_binary.next" "$launchservices_binary"
+mv -f "$launchservices_binary.next" "$launchservices_binary"
 # Electron opens this subframework by its absolute path, bypassing the
 # framework search override. Replace the same binary in the stopped prefix.
 launchservices_prefix="$prefix_dir/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices"
@@ -95,7 +95,7 @@ if [ ! -f "$launchservices_prefix.before-null-error" ]; then
  else cp -p "@DARLING_SDK@"/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices "$launchservices_prefix.before-null-error"; fi
 fi
 install -m755 build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices/LaunchServices "$launchservices_prefix.next"
-mv "$launchservices_prefix.next" "$launchservices_prefix"
+mv -f "$launchservices_prefix.next" "$launchservices_prefix"
 # Accelerate re-exports libvDSP by absolute path, so replace it in the stopped prefix too.
 vdsp_prefix="$prefix_dir/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib"
 mkdir -p "$(dirname "$vdsp_prefix")"
@@ -104,7 +104,7 @@ if [ ! -f "$vdsp_prefix.before-vdsp" ]; then
  else cp -p "@DARLING_SDK@"/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib "$vdsp_prefix.before-vdsp"; fi
 fi
 install -m755 build/darling-src/build/src/frameworks/Accelerate/vecLib/vDSP/libvDSP.dylib "$vdsp_prefix.next"
-mv "$vdsp_prefix.next" "$vdsp_prefix"
+mv -f "$vdsp_prefix.next" "$vdsp_prefix"
 
 component="$guest_home/Library/Audio/Plug-Ins/Components/DarlingRiotAudio.component"
 if [ ! -d "$component" ]; then
@@ -114,7 +114,7 @@ fi
 component_binary="$component/Contents/MacOS/CoreAudio"
 if [ ! -f "$component_binary.before-gpu-direct" ]; then cp -p "$component_binary" "$component_binary.before-gpu-direct"; fi
 install -m755 build/riot-CoreAudioComponent "$component_binary.next"
-mv "$component_binary.next" "$component_binary"
+mv -f "$component_binary.next" "$component_binary"
 python3 - "$component/Contents/Info.plist" <<'PY'
 from pathlib import Path
 import plistlib
@@ -129,23 +129,23 @@ x11="$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C/Resources/Backend
 appkit="$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C/AppKit"
 if [ ! -f "$appkit.before-gpu-direct" ]; then cp -p "$appkit" "$appkit.before-gpu-direct"; fi
 install -m755 build/riot-AppKit "$appkit.next"
-mv "$appkit.next" "$appkit"
+mv -f "$appkit.next" "$appkit"
 if [ ! -f "$x11.before-gpu-direct" ]; then cp -p "$x11" "$x11.before-gpu-direct"; fi
 install -m755 build/riot-X11 "$x11.next"
-mv "$x11.next" "$x11"
+mv -f "$x11.next" "$x11"
 kernel="$guest_home/RuntimeLibraries/libsystem_kernel.dylib"
 if [ ! -f "$kernel.before-gpu-direct" ]; then cp -p "$kernel" "$kernel.before-gpu-direct"; fi
 install -m755 build/riot-libsystem_kernel.dylib "$kernel.next"
-mv "$kernel.next" "$kernel"
+mv -f "$kernel.next" "$kernel"
 allocator="$guest_home/RuntimeLibraries/libsystem_malloc.dylib"
 if [ ! -f "$allocator.before-gpu-direct" ]; then
  if [ -f "$allocator" ]; then cp -p "$allocator" "$allocator.before-gpu-direct"
  else cp -p "@DARLING_SDK@"/usr/lib/system/libsystem_malloc.dylib "$allocator.before-gpu-direct"; fi
 fi
 install -m755 build/riot-libsystem_malloc.dylib "$allocator.next"
-mv "$allocator.next" "$allocator"
+mv -f "$allocator.next" "$allocator"
 if [ -f build/libdarling-xshm.so ] && [ ! -f build/libdarling-xshm.so.before-gpu-direct ]; then cp -p build/libdarling-xshm.so build/libdarling-xshm.so.before-gpu-direct; fi
-mv build/libdarling-xshm.so.next build/libdarling-xshm.so
+mv -f build/libdarling-xshm.so.next build/libdarling-xshm.so
 
 objc_library="$guest_home/RuntimeLibraries/libobjc.A.dylib"
 if [ ! -f "$objc_library.before-m761" ]; then
@@ -153,7 +153,7 @@ if [ ! -f "$objc_library.before-m761" ]; then
  else cp -p "@DARLING_SDK@"/usr/lib/libobjc.A.dylib "$objc_library.before-m761"; fi
 fi
 install -m755 build/riot-libobjc.A.dylib "$objc_library.next"
-mv "$objc_library.next" "$objc_library"
+mv -f "$objc_library.next" "$objc_library"
 
 cxxabi_library="$guest_home/RuntimeLibraries/libc++abi.dylib"
 if [ ! -f "$cxxabi_library.before-m765" ]; then
@@ -161,7 +161,7 @@ if [ ! -f "$cxxabi_library.before-m765" ]; then
  else cp -p "@DARLING_SDK@"/usr/lib/libc++abi.dylib "$cxxabi_library.before-m765"; fi
 fi
 install -m755 build/riot-libc++abi.dylib "$cxxabi_library.next"
-mv "$cxxabi_library.next" "$cxxabi_library"
+mv -f "$cxxabi_library.next" "$cxxabi_library"
 
 indium_library="$guest_home/RuntimeLibraries/libindium.dylib"
 if [ ! -f "$indium_library.before-m766" ]; then
@@ -169,7 +169,7 @@ if [ ! -f "$indium_library.before-m766" ]; then
  else cp -p "@DARLING_SDK@"/usr/lib/darling/libindium.dylib "$indium_library.before-m766"; fi
 fi
 install -m755 build/riot-libindium.dylib "$indium_library.next"
-mv "$indium_library.next" "$indium_library"
+mv -f "$indium_library.next" "$indium_library"
 
 # libindium loads libiridium (shader translation and reflection) from the library path
 iridium_library="$guest_home/RuntimeLibraries/libiridium.dylib"
@@ -178,7 +178,7 @@ if [ ! -f "$iridium_library.before-m767" ]; then
  else cp -p "@DARLING_SDK@"/usr/lib/darling/libiridium.dylib "$iridium_library.before-m767"; fi
 fi
 install -m755 build/riot-libiridium.dylib "$iridium_library.next"
-mv "$iridium_library.next" "$iridium_library"
+mv -f "$iridium_library.next" "$iridium_library"
 
 pthread_library="$guest_home/RuntimeLibraries/libsystem_pthread.dylib"
 if [ ! -f "$pthread_library.before-gpu-direct" ]; then
@@ -186,4 +186,4 @@ if [ ! -f "$pthread_library.before-gpu-direct" ]; then
  else cp -p "@DARLING_SDK@"/usr/lib/system/libsystem_pthread.dylib "$pthread_library.before-gpu-direct"; fi
 fi
 install -m755 build/riot-libsystem_pthread.dylib "$pthread_library.next"
-mv "$pthread_library.next" "$pthread_library"
+mv -f "$pthread_library.next" "$pthread_library"
