@@ -207,7 +207,7 @@ index ce2819c..06b871d 100644
              if (loaded)
 diff --git a/src/NSConstantNumber.m b/src/NSConstantNumber.m
 new file mode 100644
-index 0000000..e4b61f1
+index 0000000..9171830
 --- /dev/null
 +++ b/src/NSConstantNumber.m
 @@ -0,0 +1,318 @@

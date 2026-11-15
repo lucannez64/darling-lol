@@ -52,10 +52,6 @@ if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
   python3 build/runtime/tools/install-riot-libs-runtime.py
 fi
 python3 build/runtime/tools/install-darling-system-profiler.py
-if [ -f build/runtime/tools/build-riot-foundation-runtime.py ]; then
-  python3 build/runtime/tools/build-riot-foundation-runtime.py
-  python3 tools/install-riot-foundation-runtime.py
-fi
 # Riot Client 142 (Electron 43) hard-links QuickLookUI, MediaPlayer, CoreML, CoreHaptics and
 # Accessibility; without these stubs in RuntimeFrameworks dyld aborts before the first window.
 python3 tools/build-riot-electron43-frameworks.py --install
