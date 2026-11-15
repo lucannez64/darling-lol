@@ -329,12 +329,15 @@ prefix so `scripts/installer.sh <region>` can reinstall from scratch, run:
 sh scripts/uninstall.sh
 ```
 
-The script stops the runtime, saves the Riot logs under
+Close the game and both clients first: the script refuses to run while a Riot
+Client or League process is running. It lists what it will remove and keep and
+asks for confirmation (`--yes` skips the question, and is required when there
+is no terminal), then stops the runtime, saves the Riot logs under
 `build/uninstall-log-backups/`, removes the client, its metadata and settings,
 and keeps the Darling runtime (overlays, certificate store) and the Mesa shader
-cache. `--with-game` keeps the game and its product metadata instead of
-removing it, and `--all` removes the whole prefix (asked to confirm; `--yes`
-skips the question).
+cache. `--keep-game` keeps the game and its product metadata instead of
+removing it, and `--all` removes the whole prefix. Only a Darling prefix is
+accepted; any other directory is refused.
 
 ## Riot exits and League reports that it lost its connection
 
