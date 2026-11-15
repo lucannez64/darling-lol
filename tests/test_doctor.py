@@ -204,6 +204,26 @@ class GpuAndVulkanTests(unittest.TestCase):
             self.assertEqual(gpus, [{'card': 'card0', 'driver': 'i915', 'vendor_id': '0x8086',
                                      'device_id': '0x9b41', 'name': 'Intel UHD 620'}])
 
+    def test_read_gpus_uses_nvidia_proc_model_when_product_name_missing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            sys_root = root / 'sys'
+            proc_root = root / 'proc'
+            card = sys_root / 'class/drm/card1/device'
+            card.mkdir(parents=True)
+            (card / 'vendor').write_text('0x10de\n')
+            (card / 'device').write_text('0x2489\n')
+            (card / 'uevent').write_text('DRIVER=nvidia\nPCI_SLOT_NAME=0000:05:00.0\n')
+            drivers = sys_root / 'drivers/nvidia'
+            drivers.mkdir(parents=True)
+            (card / 'driver').symlink_to(drivers)
+            nv_info = proc_root / 'driver/nvidia/gpus/0000:05:00.0'
+            nv_info.mkdir(parents=True)
+            (nv_info / 'information').write_text('Model:\t\t NVIDIA GeForce RTX 3060 Ti\nBus Type:\t PCIe\n')
+            gpus = doctor.read_gpus(sys_root, proc_root)
+            self.assertEqual(gpus, [{'card': 'card1', 'driver': 'nvidia', 'vendor_id': '0x10de',
+                                     'device_id': '0x2489', 'name': 'NVIDIA GeForce RTX 3060 Ti'}])
+
     def test_vulkan_icds_deduplicate(self):
         with tempfile.TemporaryDirectory() as folder:
             icd = Path(folder) / 'vulkan/icd.d'
