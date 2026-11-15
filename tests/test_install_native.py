@@ -18,6 +18,8 @@ def installer_env(**extra):
     env.pop('RCLOL_LOCALE', None)
     # Use the default desktop-entry policy unless a test overrides it.
     env.pop('DARLING_LOL_DESKTOP_ENTRY', None)
+    # Keep default-release cases hermetic unless a test overrides it.
+    env.pop('DARLING_LOL_TOOLBOX_RELEASE', None)
     # Keep locale detection deterministic unless a test overrides it.
     env['LC_ALL'] = ''
     env['LC_MESSAGES'] = ''
@@ -361,21 +363,26 @@ class RegionPromptTests(unittest.TestCase):
 class DetectDistributionTests(unittest.TestCase):
     FEDORA_40 = 'ID=fedora\nID_LIKE="rhel fedora"\nVERSION_ID="40"\n'
     FEDORA_44 = 'ID=fedora\nID_LIKE="rhel fedora"\nVERSION_ID="44"\n'
+    FEDORA_47 = 'ID=fedora\nID_LIKE="rhel fedora"\nVERSION_ID="47"\n'
     UBUNTU_2404 = 'ID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n'
     ZORIN_17 = 'ID=zorin\nID_LIKE="ubuntu debian"\nVERSION_ID="17"\n'
     OPENSUSE_LEAP = 'ID=opensuse-leap\nID_LIKE="suse opensuse"\nVERSION_ID="16.0"\n'
 
-    def detect(self, os_release, *, container=0):
+    def detect(self, os_release, *, container=0, release=''):
         with tempfile.TemporaryDirectory(prefix='install-native-distro ') as folder:
-            release = Path(folder) / 'os-release'
-            release.write_text(os_release)
+            release_file = Path(folder) / 'os-release'
+            release_file.write_text(os_release)
             snippet = (
                 'source "$INSTALLER"\n'
                 f'CONTAINER_INSTALL={container}\n'
                 'detect_distribution\n'
                 'printf "FAMILY=%s\\n" "$FAMILY"\n'
+                'printf "TOOLBOX_RELEASE=%s\\n" "$TOOLBOX_RELEASE"\n'
             )
-            return run_sourced(snippet, DARLING_OS_RELEASE=str(release))
+            env = {'DARLING_OS_RELEASE': str(release_file)}
+            if release:
+                env['DARLING_LOL_TOOLBOX_RELEASE'] = release
+            return run_sourced(snippet, **env)
 
     def test_container_mode_skips_host_version_gates(self):
         result = self.detect(self.UBUNTU_2404, container=1)
@@ -394,10 +401,23 @@ class DetectDistributionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('Fedora 44', result.stderr)
         self.assertIn('FAMILY=fedora', result.stdout)
+        # An old host is bumped to the minimum release, keeping the banner and
+        # the created container consistent.
+        self.assertIn('TOOLBOX_RELEASE=44', result.stdout)
 
         result = self.detect(self.FEDORA_40)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Fedora 44 or newer', result.stderr)
+
+    def test_toolbox_release_resolution_matches_the_container(self):
+        result = self.detect(self.FEDORA_47, container=1)
+        self.assertIn('TOOLBOX_RELEASE=47', result.stdout)
+
+        result = self.detect(self.UBUNTU_2404, container=1)
+        self.assertIn('TOOLBOX_RELEASE=44', result.stdout)
+
+        result = self.detect(self.FEDORA_47, container=1, release='45')
+        self.assertIn('TOOLBOX_RELEASE=45', result.stdout)
 
     def test_a_current_fedora_host_still_passes_natively(self):
         result = self.detect(self.FEDORA_44)
@@ -714,7 +734,7 @@ create_desktop_entry
 
 class ToolboxInvocationTests(unittest.TestCase):
     def run_install_toolbox(self, *, yes=0, verbose=0, name='darling-lol', exists=False,
-                            locale='pt_BR', family='', release=''):
+                            locale='pt_BR', family='', release='', toolbox_release=''):
         with tempfile.TemporaryDirectory(prefix='install-native-toolbox ') as folder:
             log = Path(folder) / 'log'
             snippet = f'''
@@ -730,6 +750,7 @@ VERBOSE={verbose}
 REGION=EUW
 LOCALE="{locale}"
 FAMILY="{family}"
+TOOLBOX_RELEASE="{toolbox_release}"
 TOOLBOX_NAME="{name}"
 install_toolbox
 '''
@@ -774,12 +795,12 @@ install_toolbox
         self.assertIn('--container my-box', command)
         self.assertIn('DARLING_LOL_TOOLBOX_NAME=my-box', command)
 
-    def test_fedora_hosts_use_the_toolbox_default_image(self):
-        result, lines = self.run_install_toolbox(family='fedora')
+    def test_a_fedora_host_reuses_its_supported_release(self):
+        result, lines = self.run_install_toolbox(family='fedora', toolbox_release='47')
         self.assertEqual(result.returncode, 0, result.stderr)
         create = next(line for line in lines if 'toolbox create' in line)
         self.assertIn('--distro fedora', create)
-        self.assertNotIn('--release', create)
+        self.assertIn('--release 47', create)
 
     def test_non_fedora_hosts_pin_the_minimum_fedora_release(self):
         result, lines = self.run_install_toolbox(family='debian')
@@ -834,7 +855,8 @@ class RiotInstallerOfferTests(unittest.TestCase):
     def test_accepting_launches_the_installer_with_the_region(self):
         code, output, log = self.run_offer(b'y\n')
         self.assertEqual(code, 0)
-        self.assertIn('▶ Launch the Riot Client installer (br)? [Y/n]', output)
+        self.assertIn('▶ Launch the Riot Client installer? [Y/n]', output)
+        self.assertNotIn('(br)', output)
         self.assertIn('OFFER_RC=0', output)
         self.assertEqual(log.strip(), 'RIOT br')
 
@@ -868,7 +890,8 @@ class RiotInstallerOfferTests(unittest.TestCase):
 
     def test_the_region_comes_from_the_selected_region(self):
         code, output, log = self.run_offer(b'y\n', region='EUW')
-        self.assertIn('(euw)? [Y/n]', output)
+        self.assertIn('Launch the Riot Client installer? [Y/n]', output)
+        self.assertNotIn('(euw)', output)
         self.assertIn('OFFER_RC=0', output)
         self.assertEqual(log.strip(), 'RIOT euw')
 

@@ -343,12 +343,17 @@ detect_distribution() {
       *' debian '*|*' ubuntu '*) FAMILY=debian ;;
       *) FAMILY=other ;;
     esac
-    # The release the Toolbox image will use: explicit override, otherwise the
-    # host's own Fedora release, otherwise the minimum supported one.
-    TOOLBOX_RELEASE=${DARLING_LOL_TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}
-    if [[ -z ${DARLING_LOL_TOOLBOX_RELEASE:-} && $FAMILY == fedora &&
-          $ver_major =~ ^[0-9]+$ ]]; then
+    # Effective Toolbox image release: explicit override, then the host's own
+    # Fedora release when it already meets the minimum, then the minimum
+    # supported one. The banner shows the release that will be created, so an
+    # old Fedora host is bumped up instead of showing its unsupported version.
+    if [[ -n ${DARLING_LOL_TOOLBOX_RELEASE:-} ]]; then
+      TOOLBOX_RELEASE=$DARLING_LOL_TOOLBOX_RELEASE
+    elif [[ $FAMILY == fedora && $ver_major =~ ^[0-9]+$ ]] &&
+         (( ver_major >= DEFAULT_FEDORA_RELEASE )); then
       TOOLBOX_RELEASE=$ver_major
+    else
+      TOOLBOX_RELEASE=$DEFAULT_FEDORA_RELEASE
     fi
     return 0
   fi
@@ -582,15 +587,10 @@ verify_ffmpeg() {
 
 install_toolbox() {
   local create_args=(--assumeyes --distro fedora)
-  local release=${DARLING_LOL_TOOLBOX_RELEASE:-}
-
-  if [[ -n $release ]]; then
-    create_args+=(--release "$release")
-  elif [[ $FAMILY != fedora ]]; then
-    # Non-Fedora hosts cannot infer a default Fedora release; older toolbox
-    # builds refuse to create the container without an explicit one.
-    create_args+=(--release "$DEFAULT_FEDORA_RELEASE")
-  fi
+  # TOOLBOX_RELEASE is resolved in detect_distribution (override > host Fedora
+  # release when it meets the minimum > minimum supported). The env override
+  # is honored here too so the create call stays self-contained.
+  create_args+=(--release "${DARLING_LOL_TOOLBOX_RELEASE:-${TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}}")
 
   if ! podman container exists "$TOOLBOX_NAME"; then
     run "Creating Toolbox container '$TOOLBOX_NAME'" \
@@ -858,7 +858,18 @@ create_desktop_entry() {
     args+=(--toolbox "$TOOLBOX_NAME")
   fi
 
-  if ! python3 "$helper" "${args[@]}"; then
+  # Re-emit the helper's report in the dim summary color; stderr passes
+  # through untouched, and the helper's exit status decides the warning.
+  local helper_output='' helper_rc=0 line
+  helper_output=$(python3 "$helper" "${args[@]}") || helper_rc=$?
+
+  if [[ -n $helper_output ]]; then
+    while IFS= read -r line; do
+      printf '%s%s%s\n' "$DIM" "$line" "$RESET"
+    done <<<"$helper_output"
+  fi
+
+  if (( helper_rc != 0 )); then
     warning 'Could not create the desktop entry. Run scripts/create-desktop-entry.sh afterwards.'
   fi
 }
@@ -912,7 +923,7 @@ offer_riot_client_installer() {
   local region=${REGION:-$DEFAULT_REGION}
   printf '\n'
   local reply
-  read -r -p "${CYAN}${ICON_INFO}${RESET} Launch the Riot Client installer (${region,,})? [Y/n]: " reply || return 1
+  read -r -p "${CYAN}${ICON_INFO}${RESET} Launch the Riot Client installer? [Y/n]: " reply || return 1
   reply=${reply,,}
   case "$reply" in
     ''|y|yes) ;;
@@ -932,11 +943,11 @@ finish() {
 
   printf '\n%s%sDarling-LoL installed successfully%s %s(total %dm%02ds)%s\n\n' \
     "$GREEN" "$BOLD" "$RESET" "$DIM" "$((SECONDS / 60))" "$((SECONDS % 60))" "$RESET"
-  printf 'Repository: %s\n' "$TARGET_DIR"
-  printf 'Branch: %s\n' "${branch:-detached HEAD}"
-  printf 'Commit: %s\n' "${commit:-unknown}"
-  printf 'Region/locale: %s / %s\n' "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
-  printf 'Log: %s\n\n' "$LOG"
+  printf '%sRepository: %s%s\n' "$DIM" "$TARGET_DIR" "$RESET"
+  printf '%sBranch: %s%s\n' "$DIM" "${branch:-detached HEAD}" "$RESET"
+  printf '%sCommit: %s%s\n' "$DIM" "${commit:-unknown}" "$RESET"
+  printf '%sRegion/locale: %s / %s%s\n' "$DIM" "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}" "$RESET"
+  printf '%sLog: %s%s\n\n' "$DIM" "$LOG" "$RESET"
   offer_desktop_entry
 
   local riot_launched=0

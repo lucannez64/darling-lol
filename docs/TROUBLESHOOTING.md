@@ -96,7 +96,7 @@ Either way, recreate the container from a current image:
 
 ```sh
 toolbox rm --force darling-lol
-toolbox create --distro fedora darling-lol
+toolbox create --distro fedora --release 44 darling-lol
 bash scripts/install-native.sh --toolbox
 ```
 
