@@ -184,6 +184,8 @@ int main(int argc, char** argv) {
 	sigset_t blocked, seen;
 	sigemptyset(&blocked);
 	sigaddset(&blocked, SIGUSR2);
+	/* the mask survives exec, so start from a known state */
+	CHECK(pthread_sigmask(SIG_UNBLOCK, &blocked, NULL) == 0);
 	ucontext_t before;
 	volatile int resumed = 0;
 	dserver_getcontext(&before);
