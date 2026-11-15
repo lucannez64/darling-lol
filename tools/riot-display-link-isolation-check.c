@@ -1,14 +1,15 @@
 #include <CoreVideo/CVDisplayLink.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <unistd.h>
 
-static volatile unsigned ticks[3];
+static _Atomic unsigned ticks[3];
 static CVReturn tick(CVDisplayLinkRef link, const CVTimeStamp *now,
                      const CVTimeStamp *output, CVOptionFlags input,
                      CVOptionFlags *flags, void *context) {
     unsigned long index = (unsigned long)context;
-    __sync_fetch_and_add(&ticks[index], 1);
+    atomic_fetch_add_explicit(&ticks[index], 1, memory_order_relaxed);
     if (index == 2) assert(CVDisplayLinkStop(link) == 0);
     return kCVReturnSuccess;
 }

@@ -4179,10 +4179,10 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..b153e7f5e 100644
+index 3e9cba226..a19f75367 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,932 @@
+@@ -1,38 +1,939 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -4912,7 +4912,11 @@ index 3e9cba226..b153e7f5e 100644
 +        uint64_t owner = 0;
 +        clockRead(fd, &owner, sizeof(owner), offsetof(CVLinkStateRec, reserved));
 +        uint64_t thread = (uintptr_t)pthread_self();
-+        if (!owner || owner != thread) locked = clockFlock(fd, LOCK_EX) == 0;
++        if (owner && owner == thread) return; // Callback-side reentrancy.
++        int result;
++        do { result = clockFlock(fd, LOCK_EX); } while (result == -4); // Linux EINTR.
++        locked = result == 0;
++        if (!locked) { clockClose(fd); fd = -1; }
 +    }
 +    ~CVStateGuard() {
 +        if (fd >= 0) { if (locked) clockFlock(fd, LOCK_UN); clockClose(fd); }
@@ -5067,12 +5071,15 @@ index 3e9cba226..b153e7f5e 100644
 +        }
 +    }
 +}
-+static void InstallDispatchPump(void) {
-+    pthread_attr_t attr;pthread_attr_init(&attr);
-+    pthread_attr_setstacksize(&attr,1024*1024);
++static bool InstallDispatchPump(void) {
++    pthread_attr_t attr;
++    if (pthread_attr_init(&attr) != 0) return false;
++    int result = pthread_attr_setstacksize(&attr, 1024 * 1024);
 +    pthread_t thread;
-+    if(pthread_create(&thread,&attr,displayClockThread,NULL)==0)pthread_detach(thread);
++    if (result == 0) result = pthread_create(&thread, &attr, displayClockThread, NULL);
++    if (result == 0) pthread_detach(thread);
 +    pthread_attr_destroy(&attr);
++    return result == 0;
 +}
 +
  CVReturn CVDisplayLinkCreateWithActiveCGDisplays(CVDisplayLinkRef* displayLinkOut)
@@ -5123,12 +5130,13 @@ index 3e9cba226..b153e7f5e 100644
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,35 +935,100 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,35 +942,111 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
 -	// TODO
 +    CVStateGuard guard;
++    if (guard.fd < 0) return kCVReturnError;
 +
 +	/* Install in every process that loads CoreVideo.  The renderer may not
 +	 * create a CVDisplayLink of its own, so CVDisplayLinkStart is too late to
@@ -5143,7 +5151,11 @@ index 3e9cba226..b153e7f5e 100644
 +    // The clock thread is shared, but callback and running state are per link.
 +    static bool started = false;
 +    if (!started) {
-+        InstallDispatchPump();
++        if (!InstallDispatchPump()) {
++            rec.running = 0;
++            writeState(&rec);
++            return kCVReturnError;
++        }
 +        started = true;
 +    }
  	return kCVReturnSuccess;
@@ -5156,7 +5168,9 @@ index 3e9cba226..b153e7f5e 100644
 -	// TODO
 -	return kCVReturnSuccess;
 +    if(!displayLink)return kCVReturnInvalidArgument;
-+    CVStateGuard guard;CVLinkStateRec rec;
++    CVStateGuard guard;
++    if (guard.fd < 0) return kCVReturnError;
++    CVLinkStateRec rec;
 +    if(readState(&rec, displayLink)) { rec.running=0;writeState(&rec); }
 +    return kCVReturnSuccess;
  }
@@ -5165,6 +5179,7 @@ index 3e9cba226..b153e7f5e 100644
  {
 -	if (!displayLink)
 +    CVStateGuard guard;
++    if (guard.fd < 0) return false;
 +    if(!displayLink)return false;
 +	CVLinkStateRec rec;
 +	if (!readState(&rec, displayLink))
@@ -5179,6 +5194,7 @@ index 3e9cba226..b153e7f5e 100644
 +	/* darling-lol M57: Chromium's DisplayLinkMac retains/releases the link. */
 +	if (displayLink) {
 +        CVStateGuard guard;
++    if (guard.fd < 0) return NULL;
 +		[(NSMutableDictionary*) displayLink retain];
 +		/* Retain this registration independently of other links. */
 +		CVLinkStateRec rec;
@@ -5198,6 +5214,7 @@ index 3e9cba226..b153e7f5e 100644
 +	if (!displayLink)
 +		return;
 +    CVStateGuard guard;
++    if (guard.fd < 0) return;
 +	/* Retire only this registration when its final reference is released. */
 +	CVLinkStateRec rec;
 +	if (readState(&rec, displayLink)) {
@@ -5224,6 +5241,7 @@ index 3e9cba226..b153e7f5e 100644
 +		return kCVReturnInvalidArgument;
 +
 +    CVStateGuard guard;
++    if (guard.fd < 0) return kCVReturnError;
 +	CVLinkStateRec rec;
 +    if (!readState(&rec, displayLink)) return kCVReturnInvalidArgument;
 +
@@ -5235,7 +5253,7 @@ index 3e9cba226..b153e7f5e 100644
  	return kCVReturnSuccess;
  }
  
-@@ -91,7 +1050,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
+@@ -91,7 +1068,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
  			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
  			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
  
@@ -5244,7 +5262,7 @@ index 3e9cba226..b153e7f5e 100644
  					forKey: kDirectDisplayArray];
  			return kCVReturnSuccess;
  		}
-@@ -117,14 +1076,34 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+@@ -117,14 +1094,34 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -5282,7 +5300,7 @@ index 3e9cba226..b153e7f5e 100644
  	return kCVReturnSuccess;
  }
  
-@@ -150,3 +1129,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
+@@ -150,3 +1147,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
  	CGDisplayModeRelease(mode);
  	return time;
  }

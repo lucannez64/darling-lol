@@ -1382,8 +1382,20 @@ visibly with hardware acceleration enabled. This addresses the reproduced frame
 stall; the reporter's exact authenticated ToS case and normal window-close
 event still need confirmation.
 
-After the normal runtime build, the native regression is available as
-`riot-display-link-isolation-check` in the runtime build directory and can be
-run through the configured `tools/run-riot-native-check.py` helper with
-`riot-display-link-isolation-check` as its argument. As with
-other native probes, use an idle test prefix; it does not launch Riot or League.
+After the base build, compile CoreVideo and the native regression without
+installing them, from the configured runtime workspace:
+
+```sh
+cd build/runtime
+python3 tools/build-m58f341-corevideo.py
+```
+
+This produces `build/riot-display-link-isolation-check`. After selecting an
+idle test prefix with the corrected CoreVideo installed, run from the same
+workspace:
+
+```sh
+python3 tools/run-riot-native-check.py riot-display-link-isolation-check
+```
+
+The probe does not launch Riot or League.
