@@ -12,10 +12,17 @@ touch "$log"
 chmod 600 "$log"
 exec >>"$log" 2>&1
 
-# The same prefix view the runtime uses: runtime-paths.sh defaults to
-# ~/.darling and honors DPREFIX. Inside a Toolbox container HOME is the host
-# home, so one check serves both the native and the container entry.
-prefix=${DPREFIX:-"${HOME:-}/.darling"}
+# The prefix the launcher itself uses. Like run.sh, refresh the configured
+# tools, then let runtime-paths.sh answer: it honors DPREFIX and otherwise
+# uses the prefix recorded by `configure.py --prefix` in build/config.json.
+# Without a known prefix the installer must not run, because it could then
+# start over an existing install.
+if ! python3 "$repo/scripts/configure.py" >/dev/null ||
+   ! prefix=$(. "$repo/build/runtime/tools/runtime-paths.sh" >/dev/null &&
+              printf '%s' "$prefix_dir") || [ -z "$prefix" ]; then
+  echo 'Could not resolve the Darling prefix from build/config.json; not starting the Riot Client installer.'
+  exit 1
+fi
 client="$prefix/Applications/Riot Client.app"
 shared="$prefix/Users/Shared/Riot Games/Riot Client.app"
 if [ -e "$client" ] || [ -d "$shared" ]; then

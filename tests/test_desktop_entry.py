@@ -162,6 +162,31 @@ class DesktopEntryTests(unittest.TestCase):
                                    capture_output=True, text=True, check=False)
             self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
 
+    def handler_exec_line(self):
+        handler = self.home / '.local/share/applications/darling-url-handler.desktop'
+        return handler, next(line for line in handler.read_text().splitlines()
+                             if line.startswith('Exec='))
+
+    def test_toolbox_link_handler_opens_inside_the_container(self):
+        project = self.project()
+        result = self.install(project, '--toolbox', 'my-box')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        handler, exec_line = self.handler_exec_line()
+        self.assertEqual(
+            exec_line, f'Exec=toolbox run -c my-box "{project}/scripts/open-guest-url.sh" %u')
+        self.assertIn('MimeType=x-scheme-handler/riotclient;', handler.read_text())
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(handler)],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_native_link_handler_runs_the_script_directly(self):
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, exec_line = self.handler_exec_line()
+        self.assertEqual(exec_line, f'Exec="{project}/scripts/open-guest-url.sh" %u')
+
     def test_identity_fields_match_the_packaged_entry(self):
         project = self.project()
         result = self.install(project)

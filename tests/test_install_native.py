@@ -146,6 +146,34 @@ class RegionAndArgumentTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Invalid locale', result.stderr)
 
+    def test_an_explicit_locale_the_client_does_not_ship_is_refused(self):
+        for arguments in ('--locale fr_CA', '--locale=de-at'):
+            with self.subTest(arguments=arguments):
+                result = run_sourced(f'source "$INSTALLER"\nparse_args {arguments}\necho reached')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Unsupported locale', result.stderr)
+                self.assertIn('Supported locales: ', result.stderr)
+                self.assertIn('fr_FR', result.stderr)
+                self.assertNotIn('reached', result.stdout)
+
+        result = run_sourced('source "$INSTALLER"\nresolve_locale\necho reached',
+                             RCLOL_LOCALE='fr_CA')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unsupported RCLOL_LOCALE 'fr_CA'", result.stderr)
+        self.assertNotIn('reached', result.stdout)
+
+    def test_the_locale_list_matches_the_one_configure_uses(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('rclol_common', ROOT / 'scripts/common.py')
+        common = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(common)
+        result = run_sourced('source "$INSTALLER"\nlocale_codes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), list(common.LOCALES))
+        self.assertIn(common.DEFAULTS['locale'], common.LOCALES)
+        # Every region the installer offers is one configure.py accepts.
+        self.assertLessEqual(set(REGION_CODES), set(common.REGIONS))
+
 
 class LocaleDetectionTests(unittest.TestCase):
     def test_detect_system_locale_uses_lc_all_then_messages_then_lang(self):
@@ -238,12 +266,13 @@ class LocaleDetectionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'pt_BR')
 
+        # Without a terminal the system locale is never used.
         result = run_sourced(
             'source "$INSTALLER"\nresolve_locale\nprintf "%s\\n" "$LOCALE"',
             RCLOL_LOCALE='', LC_ALL='', LC_MESSAGES='', LANG='pt_BR.UTF-8',
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), 'pt_BR')
+        self.assertEqual(result.stdout.strip(), 'en_GB')
 
         result = run_sourced(
             'source "$INSTALLER"\nresolve_locale\nprintf "%s\\n" "$LOCALE"',
@@ -279,6 +308,7 @@ class LocaleDetectionTests(unittest.TestCase):
         result = run_sourced(
             'source "$INSTALLER"\n'
             'LOCALE=pt_BR\n'
+            'LOCALE_EXPLICIT=1\n'
             'YES=1\n'
             'resolve_region\n'
             'printf "%s\\n" "$REGION"',
@@ -286,6 +316,46 @@ class LocaleDetectionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'BR')
+
+    def unattended(self, arguments='--yes', **environment):
+        """Region and locale as main() resolves them, without a terminal."""
+        return run_sourced(
+            'source "$INSTALLER"\n'
+            f'parse_args {arguments}\n'
+            'resolve_locale\nselect_locale\nresolve_region\n'
+            'printf "%s/%s\\n" "$REGION" "$LOCALE"',
+            **environment,
+        )
+
+    def test_unattended_runs_keep_the_default_region_and_locale(self):
+        for system in ('en_US.UTF-8', 'pt_BR.UTF-8', 'fr_CA.UTF-8', 'de_AT.UTF-8', 'C.UTF-8'):
+            for arguments in ('--yes', ''):
+                with self.subTest(system=system, arguments=arguments):
+                    result = self.unattended(arguments, LANG=system)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), 'EUW/en_GB')
+
+    def test_an_explicit_locale_still_derives_the_region_when_unattended(self):
+        result = self.unattended('--yes --locale pt_BR', LANG='en_US.UTF-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'BR/pt_BR')
+
+        result = self.unattended('--yes', LANG='en_US.UTF-8', RCLOL_LOCALE='ko_KR')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'KR/ko_KR')
+
+        result = self.unattended('--yes --locale pt_BR --region na', LANG='en_US.UTF-8')
+        self.assertEqual(result.stdout.strip(), 'NA/pt_BR')
+
+    def test_supported_system_locale_drops_locales_the_client_does_not_ship(self):
+        result = run_sourced('source "$INSTALLER"\nsupported_system_locale', LANG='en_US.UTF-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'en_US')
+        for system in ('fr_CA.UTF-8', 'de_AT.UTF-8', 'C.UTF-8'):
+            with self.subTest(system=system):
+                result = run_sourced('source "$INSTALLER"\nsupported_system_locale', LANG=system)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, '')
 
     def test_resolve_region_rejects_an_invalid_environment_value(self):
         result = run_sourced(
@@ -298,8 +368,56 @@ class LocaleDetectionTests(unittest.TestCase):
         self.assertIn('Invalid RCLOL_REGION', result.stderr)
 
 
+class LocalePromptTests(unittest.TestCase):
+    """The system locale is only the suggested answer of the interactive picker."""
+
+    def run_prompt(self, reply, *, system, yes=0):
+        snippet = (
+            'source "$INSTALLER"\n'
+            f'YES={yes}\n'
+            'resolve_locale\n'
+            'printf "BEFORE=%s\\n" "$LOCALE"\n'
+            'select_locale\n'
+            'printf "LOCALE=%s\\n" "$LOCALE"\n'
+        )
+        return run_sourced_pty(snippet, reply, LANG=system)
+
+    def test_the_system_locale_is_offered_and_confirmed_with_enter(self):
+        code, output = self.run_prompt(b'\n', system='en_US.UTF-8')
+        self.assertEqual(code, 0, output)
+        self.assertIn('BEFORE=\r\n', output)
+        self.assertIn('▶ Locale [en_US]: ', output)
+        self.assertIn('LOCALE=en_US', output)
+
+    def test_another_listed_locale_can_be_typed(self):
+        code, output = self.run_prompt(b'FR-fr\n', system='en_US.UTF-8')
+        self.assertEqual(code, 0, output)
+        self.assertIn('LOCALE=fr_FR', output)
+
+    def test_an_unshipped_system_locale_suggests_the_default(self):
+        for system in ('fr_CA.UTF-8', 'de_AT.UTF-8'):
+            with self.subTest(system=system):
+                code, output = self.run_prompt(b'\n', system=system)
+                self.assertEqual(code, 0, output)
+                self.assertIn('▶ Locale [en_GB]: ', output)
+                self.assertIn('LOCALE=en_GB', output)
+
+    def test_an_unshipped_answer_asks_again(self):
+        code, output = self.run_prompt(b'fr_CA\nes_MX\n', system='en_US.UTF-8')
+        self.assertEqual(code, 0, output)
+        self.assertIn('Unsupported locale. Choose one of the listed locales.', output)
+        self.assertIn('LOCALE=es_MX', output)
+
+    def test_yes_never_asks(self):
+        code, output = self.run_prompt(b'', system='en_US.UTF-8', yes=1)
+        self.assertEqual(code, 0, output)
+        self.assertNotIn('Locale [', output)
+        self.assertIn('BEFORE=en_GB', output)
+        self.assertIn('LOCALE=en_GB', output)
+
+
 class RegionPromptTests(unittest.TestCase):
-    """Interactive shortcut when the system locale maps to a server."""
+    """Interactive shortcut when the chosen locale maps to a server."""
 
     def run_prompt(self, locale, reply, *, yes=0):
         snippet = (
@@ -316,7 +434,7 @@ class RegionPromptTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         # The arrow marks an input prompt, and no region code leaks from
         # region_for_country's stdout before it.
-        self.assertIn('▶ Use the region server for your system locale (BR)? [Y/n]', output)
+        self.assertIn('▶ Use the region server for your locale (BR)? [Y/n]', output)
         self.assertNotIn('BRUse', output)
         self.assertNotIn('Region number or code', output)
         self.assertIn('REGION=BR', output)
@@ -330,7 +448,7 @@ class RegionPromptTests(unittest.TestCase):
     def test_declining_the_shortcut_falls_back_to_the_region_list(self):
         code, output = self.run_prompt('pt_BR', b'n\n4\n')
         self.assertEqual(code, 0, output)
-        self.assertIn('▶ Use the region server for your system locale (BR)? [Y/n]', output)
+        self.assertIn('▶ Use the region server for your locale (BR)? [Y/n]', output)
         self.assertIn('▶ Region number or code [BR]', output)
         self.assertIn('REGION=BR', output)
 
@@ -347,17 +465,20 @@ class RegionPromptTests(unittest.TestCase):
         self.assertIn('▶ Region number or code [EUW]', output)
         self.assertIn('REGION=NA', output)
 
-    def test_non_interactive_and_yes_runs_keep_the_auto_region(self):
-        snippet = (
-            'source "$INSTALLER"\n'
-            'LOCALE=pt_BR\n'
-            'YES=0\n'
-            'resolve_region\n'
-            'printf "REGION=%s\\n" "$REGION"\n'
-        )
-        result = run_sourced(snippet)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), 'REGION=BR')
+    def test_non_interactive_runs_derive_the_region_only_from_an_explicit_locale(self):
+        for explicit, expected in ((1, 'REGION=BR'), (0, 'REGION=EUW')):
+            with self.subTest(explicit=explicit):
+                snippet = (
+                    'source "$INSTALLER"\n'
+                    'LOCALE=pt_BR\n'
+                    f'LOCALE_EXPLICIT={explicit}\n'
+                    'YES=0\n'
+                    'resolve_region\n'
+                    'printf "REGION=%s\\n" "$REGION"\n'
+                )
+                result = run_sourced(snippet)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
 
 
 class DetectDistributionTests(unittest.TestCase):
@@ -550,7 +671,7 @@ class PreflightTests(unittest.TestCase):
 
 class ShowBannerTests(unittest.TestCase):
     def run_banner(self, *, container=0, family='debian', region='EUW', locale='pt_BR',
-                   toolbox_release=''):
+                   toolbox_release='', explicit=1, yes=0):
         release_line = f'\nTOOLBOX_RELEASE="{toolbox_release}"' if toolbox_release else ''
         snippet = (
             'source "$INSTALLER"\n'
@@ -558,6 +679,8 @@ class ShowBannerTests(unittest.TestCase):
             f'FAMILY={family}\n'
             f'REGION={region}\n'
             f'LOCALE={locale}\n'
+            f'LOCALE_EXPLICIT={explicit}\n'
+            f'YES={yes}\n'
             'TOOLBOX_NAME="my-box"\n'
             f'{release_line}\n'
             'show_banner\n'
@@ -584,6 +707,13 @@ class ShowBannerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Riot Client region: BR', result.stdout)
         self.assertNotIn('(from the system locale)', result.stdout)
+
+
+    def test_an_unattended_banner_shows_the_defaults(self):
+        result = self.run_banner(region='', locale='en_GB', explicit=0, yes=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Riot Client region: EUW (default)', result.stdout)
+        self.assertIn('Riot Client locale: en_GB (default)', result.stdout)
 
 
 class ArchUpgradeTests(unittest.TestCase):
@@ -882,7 +1012,7 @@ class RiotInstallerOfferTests(unittest.TestCase):
                 helper = target / 'scripts' / 'installer.sh'
                 helper.write_text(
                     '#!/bin/sh\n'
-                    'printf "RIOT %s\\n" "$1" > riot.log\n'
+                    'printf "RIOT %s %s\\n" "$1" "${RCLOL_LOCALE:-unset}" > riot.log\n'
                     f'exit {installer_rc}\n'
                 )
                 helper.chmod(0o755)
@@ -890,6 +1020,7 @@ class RiotInstallerOfferTests(unittest.TestCase):
                 'source "$INSTALLER"\n'
                 f'TARGET_DIR="{target}"\n'
                 f'REGION={region}\n'
+                'LOCALE=pt_BR\n'
                 f'YES={yes}\n'
                 'offer_riot_client_installer\n'
                 'printf "OFFER_RC=%s\\n" "$?"\n'
@@ -901,18 +1032,19 @@ class RiotInstallerOfferTests(unittest.TestCase):
                 log = log_file.read_text()
             return code, output, log
 
-    def test_accepting_launches_the_installer_with_the_region(self):
+    def test_accepting_launches_the_installer_with_the_region_and_locale(self):
         code, output, log = self.run_offer(b'y\n')
         self.assertEqual(code, 0)
-        self.assertIn('▶ Launch the Riot Client installer? [Y/n]', output)
+        self.assertIn('▶ Launch the Riot Client installer now? [y/N]', output)
         self.assertNotIn('(br)', output)
         self.assertIn('OFFER_RC=0', output)
-        self.assertEqual(log.strip(), 'RIOT br')
+        self.assertEqual(log.strip(), 'RIOT br pt_BR')
 
-    def test_an_empty_answer_takes_the_default_yes(self):
+    def test_an_empty_answer_takes_the_default_no(self):
         code, output, log = self.run_offer(b'\n')
-        self.assertIn('OFFER_RC=0', output)
-        self.assertEqual(log.strip(), 'RIOT br')
+        self.assertIn('Launch the Riot Client installer now? [y/N]', output)
+        self.assertIn('OFFER_RC=1', output)
+        self.assertEqual(log, '')
 
     def test_declining_skips_the_installer(self):
         code, output, log = self.run_offer(b'n\n')
@@ -923,13 +1055,31 @@ class RiotInstallerOfferTests(unittest.TestCase):
     def test_the_installer_exit_code_propagates(self):
         code, output, log = self.run_offer(b'y\n', installer_rc=3)
         self.assertIn('OFFER_RC=3', output)
-        self.assertEqual(log.strip(), 'RIOT br')
+        self.assertEqual(log.strip(), 'RIOT br pt_BR')
 
     def test_yes_runs_skip_the_prompt(self):
         code, output, log = self.run_offer(b'', yes=1)
         self.assertNotIn('Launch the Riot Client installer', output)
         self.assertIn('OFFER_RC=1', output)
         self.assertEqual(log, '')
+
+    def test_a_run_without_a_terminal_skips_the_prompt(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-riot ') as folder:
+            target = Path(folder) / 'repo'
+            (target / 'scripts').mkdir(parents=True)
+            helper = target / 'scripts' / 'installer.sh'
+            helper.write_text('#!/bin/sh\ntouch riot.log\n')
+            helper.chmod(0o755)
+            result = run_sourced(
+                'source "$INSTALLER"\n'
+                f'TARGET_DIR="{target}"\n'
+                'REGION=BR\nYES=0\n'
+                'offer_riot_client_installer\n'
+                'printf "OFFER_RC=%s\\n" "$?"\n'
+            )
+            self.assertNotIn('Launch the Riot Client installer', result.stdout + result.stderr)
+            self.assertIn('OFFER_RC=1', result.stdout)
+            self.assertFalse((target / 'riot.log').exists())
 
     def test_a_missing_installer_script_is_not_offered(self):
         code, output, log = self.run_offer(b'\n', installer=False)
@@ -939,10 +1089,10 @@ class RiotInstallerOfferTests(unittest.TestCase):
 
     def test_the_region_comes_from_the_selected_region(self):
         code, output, log = self.run_offer(b'y\n', region='EUW')
-        self.assertIn('Launch the Riot Client installer? [Y/n]', output)
+        self.assertIn('Launch the Riot Client installer now? [y/N]', output)
         self.assertNotIn('(euw)', output)
         self.assertIn('OFFER_RC=0', output)
-        self.assertEqual(log.strip(), 'RIOT euw')
+        self.assertEqual(log.strip(), 'RIOT euw pt_BR')
 
 
 class FinishTests(unittest.TestCase):
@@ -1014,6 +1164,32 @@ finish
         self.assertLess(result.stdout.index('RIOT_OFFER'),
                         result.stdout.index('To start the runtime'))
         self.assertNotIn('To install Riot Client later', result.stdout)
+
+    def test_the_safety_notice_precedes_the_riot_offer(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-finish-') as folder:
+            snippet = f'''
+source "$INSTALLER"
+exec 2>&1
+git() {{ :; }}
+offer_desktop_entry() {{ return 1; }}
+offer_riot_client_installer() {{ printf "RIOT_OFFER\\n"; return 0; }}
+TARGET_DIR="{folder}"
+LOG="{folder}/install.log"
+REGION=EUW
+LOCALE=pt_BR
+SECONDS=0
+finish
+'''
+            result = run_sourced(snippet)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout.count('safety notice'), 1, result.stdout)
+        self.assertLess(result.stdout.index('safety notice'),
+                        result.stdout.index('RIOT_OFFER'))
+
+    def test_the_summary_does_not_promise_a_locale_change_on_existing_installs(self):
+        result = self.finish_snippet(riot_offer_rc=1)
+        self.assertIn('Region/locale: EUW / pt_BR (used for new installs and the first launch)',
+                      result.stdout)
 
     def test_a_skipped_riot_offer_keeps_the_manual_hint(self):
         result = self.finish_snippet(riot_offer_rc=1)
