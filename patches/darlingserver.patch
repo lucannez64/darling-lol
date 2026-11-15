@@ -2466,10 +2466,10 @@ index cc10f1d..0ff928a 100644
  	int code = 0;
  	std::vector<uint32_t> oldGroups;
 diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
-index f79f057..54c42aa 100644
+index f79f057..74252c8 100644
 --- a/src/darlingserver.cpp
 +++ b/src/darlingserver.cpp
-@@ -497,6 +497,45 @@ static void handle_sigusr1(int signum) {
+@@ -497,6 +497,113 @@ static void handle_sigusr1(int signum) {
  };
  #endif
  
@@ -2512,10 +2512,78 @@ index f79f057..54c42aa 100644
 +	/* keep running: the goal is to survive teardown races and name the sender */
 +};
 +
++/* darling-lol: on hybrid Intel CPUs the scheduler tends to place the server's
++ * short, frequent bursts on efficiency cores, where every call takes longer.
++ * DSERVER_PCORE_AFFINITY=1 restricts the server's own threads to the
++ * performance cores the kernel lists in /sys/devices/cpu_core/cpus. Call it
++ * after launchd has been forked and before any server thread exists: threads
++ * inherit the creating thread's mask, and guest processes keep their own.
++ * Without the variable, or on a CPU without that topology, nothing changes. */
++static void pinToPerformanceCoresIfRequested() {
++	const char* value = getenv("DSERVER_PCORE_AFFINITY");
++	if (!value || strcmp(value, "1") != 0) {
++		return;
++	}
++
++	char list[512] = {0};
++	FILE* file = fopen("/sys/devices/cpu_core/cpus", "r");
++	bool ok = file && fgets(list, sizeof(list), file) != NULL;
++	if (file) {
++		fclose(file);
++	}
++	if (!ok) {
++		fprintf(stderr, "darlingserver: DSERVER_PCORE_AFFINITY=1, but this CPU reports no performance cores; not pinning\n");
++		return;
++	}
++	list[strcspn(list, "\n")] = '\0';
++
++	cpu_set_t set;
++	CPU_ZERO(&set);
++	int count = 0;
++	const char* cursor = list;
++	while (ok && *cursor != '\0') {
++		char* end;
++		long first = strtol(cursor, &end, 10);
++		long last = first;
++		if (end == cursor || first < 0) {
++			ok = false;
++			break;
++		}
++		if (*end == '-') {
++			cursor = end + 1;
++			last = strtol(cursor, &end, 10);
++			if (end == cursor || last < first) {
++				ok = false;
++				break;
++			}
++		}
++		for (long cpu = first; cpu <= last && cpu < CPU_SETSIZE; ++cpu) {
++			CPU_SET(cpu, &set);
++			++count;
++		}
++		cursor = end;
++		if (*cursor == ',') {
++			++cursor;
++		} else if (*cursor != '\0') {
++			ok = false;
++		}
++	}
++	if (!ok || count == 0) {
++		fprintf(stderr, "darlingserver: DSERVER_PCORE_AFFINITY=1, but the performance-core list '%s' could not be read; not pinning\n", list);
++		return;
++	}
++
++	if (sched_setaffinity(0, sizeof(set), &set) != 0) {
++		fprintf(stderr, "darlingserver: DSERVER_PCORE_AFFINITY=1, but pinning failed: %s\n", strerror(errno));
++		return;
++	}
++	fprintf(stderr, "darlingserver: pinned server threads to performance cores %s\n", list);
++};
++
  int main(int argc, char** argv) {
  	const char* prefix = NULL;
  	uid_t originalUID = -1;
-@@ -515,6 +554,30 @@ int main(int argc, char** argv) {
+@@ -515,6 +622,30 @@ int main(int argc, char** argv) {
  	char putOld[4096];
  	char *p;
  
@@ -2546,7 +2614,7 @@ index f79f057..54c42aa 100644
  	if (argc < 6) {
  		fprintf(stderr, "darlingserver is not meant to be started manually\n");
  		exit(1);
-@@ -577,8 +640,15 @@ int main(int argc, char** argv) {
+@@ -577,8 +708,15 @@ int main(int argc, char** argv) {
  
  		// now set our increased rlimit
  		if (setrlimit(RLIMIT_NOFILE, &increased_limit) != 0) {
@@ -2564,7 +2632,7 @@ index f79f057..54c42aa 100644
  		}
  
  #endif
-@@ -745,6 +815,13 @@ int main(int argc, char** argv) {
+@@ -745,6 +883,15 @@ int main(int argc, char** argv) {
  #endif
  
  	// create the server
@@ -2575,6 +2643,8 @@ index f79f057..54c42aa 100644
 +	if (getenv("RCLOL_DEBUG_ATTACH")) {
 +		prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 +	}
++	// launchd is forked above; the server's threads are created from here on
++	pinToPerformanceCoresIfRequested();
  	auto server = new DarlingServer::Server(prefix);
  
  	// tell the child to go ahead; the socket has been created
