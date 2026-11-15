@@ -15,6 +15,8 @@ def installer_env(**extra):
     env = dict(os.environ, INSTALLER=str(SCRIPT), NO_COLOR='1')
     env.pop('RCLOL_REGION', None)
     env.pop('RCLOL_LOCALE', None)
+    # Use the default desktop-entry policy unless a test overrides it.
+    env.pop('DARLING_LOL_DESKTOP_ENTRY', None)
     # Keep locale detection deterministic unless a test overrides it.
     env['LC_ALL'] = ''
     env['LC_MESSAGES'] = ''

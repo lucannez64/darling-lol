@@ -523,9 +523,15 @@ install_toolbox() {
   if (( YES )); then args+=(--yes); fi
   if (( VERBOSE )); then args+=(--verbose); fi
 
+  # Forward the desktop-entry choice only when set: the inner installer treats
+  # unset as "prompt" and 0 as "suppress the prompt without creating an entry".
+  local inner_env=(env DARLING_LOL_TOOLBOX=1 DARLING_LOL_TOOLBOX_NAME="$TOOLBOX_NAME")
+  if [[ -n ${DARLING_LOL_DESKTOP_ENTRY+x} ]]; then
+    inner_env+=(DARLING_LOL_DESKTOP_ENTRY="$DARLING_LOL_DESKTOP_ENTRY")
+  fi
+
   exec toolbox run --container "$TOOLBOX_NAME" \
-    env DARLING_LOL_TOOLBOX=1 DARLING_LOL_TOOLBOX_NAME="$TOOLBOX_NAME" \
-    bash "$SCRIPT_PATH" "${args[@]}"
+    "${inner_env[@]}" bash "$SCRIPT_PATH" "${args[@]}"
 }
 
 show_banner() {
