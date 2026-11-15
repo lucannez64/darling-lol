@@ -3899,10 +3899,227 @@ index e502e28..c1d9b8f 100644
 +	}
  };
 diff --git a/src/thread.cpp b/src/thread.cpp
-index 5563ad9..c07ba94 100644
+index 5563ad9..59aa110 100644
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
-@@ -717,6 +717,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -53,6 +53,120 @@
+ #define USE_THREAD_GUARD_PAGES 1
+ #define IDLE_THREAD_STACK_COUNT 8
+ 
++/* darling-lol: microthread switches without the signal mask.
++ *
++ * glibc's getcontext() and setcontext() each save or restore the signal mask
++ * with an rt_sigprocmask syscall, and every call from a guest goes through two
++ * of each. darlingserver never changes a thread's signal mask, so every context
++ * it saves carries the same mask as the thread that later resumes it, and the
++ * four syscalls per call change nothing.
++ *
++ * These two do exactly what glibc's x86-64 versions do (same ucontext_t fields,
++ * so glibc's makecontext() still prepares new stacks), minus the mask.
++ * Set DSERVER_GLIBC_CONTEXT in darlingserver's environment to use glibc's again. */
++#if defined(__x86_64__) && defined(__GLIBC__)
++#include <stddef.h>
++#include <stdlib.h>
++#include <ucontext.h>
++
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R8]) == 40, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R9]) == 48, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R12]) == 72, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R13]) == 80, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R14]) == 88, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R15]) == 96, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RDI]) == 104, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RSI]) == 112, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RBP]) == 120, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RBX]) == 128, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RDX]) == 136, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RCX]) == 152, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RSP]) == 160, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RIP]) == 168, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.fpregs) == 224, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, __fpregs_mem) == 424, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, __fpregs_mem.mxcsr) == 448, "ucontext_t layout");
++
++extern "C" {
++	int dserver_getcontext(ucontext_t* context) __attribute__((returns_twice));
++	int dserver_setcontext(const ucontext_t* context);
++}
++
++// DSERVER-FAST-CONTEXT-BEGIN
++__asm__(R"asm(
++	.text
++	.p2align 4
++	.globl dserver_getcontext
++	.hidden dserver_getcontext
++	.type dserver_getcontext, @function
++dserver_getcontext:
++	endbr64
++	movq %rbx, 128(%rdi)
++	movq %rbp, 120(%rdi)
++	movq %r12, 72(%rdi)
++	movq %r13, 80(%rdi)
++	movq %r14, 88(%rdi)
++	movq %r15, 96(%rdi)
++	movq %rdi, 104(%rdi)
++	movq %rsi, 112(%rdi)
++	movq %rdx, 136(%rdi)
++	movq %rcx, 152(%rdi)
++	movq %r8, 40(%rdi)
++	movq %r9, 48(%rdi)
++	movq (%rsp), %rcx
++	movq %rcx, 168(%rdi)
++	leaq 8(%rsp), %rcx
++	movq %rcx, 160(%rdi)
++	leaq 424(%rdi), %rcx
++	movq %rcx, 224(%rdi)
++	fnstenv (%rcx)
++	fldenv (%rcx)
++	stmxcsr 448(%rdi)
++	xorl %eax, %eax
++	ret
++	.size dserver_getcontext, .-dserver_getcontext
++
++	.p2align 4
++	.globl dserver_setcontext
++	.hidden dserver_setcontext
++	.type dserver_setcontext, @function
++dserver_setcontext:
++	endbr64
++	movq %rdi, %rdx
++	movq 224(%rdx), %rcx
++	fldenv (%rcx)
++	ldmxcsr 448(%rdx)
++	movq 160(%rdx), %rsp
++	movq 128(%rdx), %rbx
++	movq 120(%rdx), %rbp
++	movq 72(%rdx), %r12
++	movq 80(%rdx), %r13
++	movq 88(%rdx), %r14
++	movq 96(%rdx), %r15
++	movq 168(%rdx), %rcx
++	pushq %rcx
++	movq 112(%rdx), %rsi
++	movq 104(%rdx), %rdi
++	movq 152(%rdx), %rcx
++	movq 40(%rdx), %r8
++	movq 48(%rdx), %r9
++	movq 136(%rdx), %rdx
++	xorl %eax, %eax
++	ret
++	.size dserver_setcontext, .-dserver_setcontext
++)asm");
++// DSERVER-FAST-CONTEXT-END
++
++static const bool useGlibcContext = getenv("DSERVER_GLIBC_CONTEXT") != nullptr;
++
++// macros, not functions: the getcontext call has to stay in the frame that is resumed
++#define dsGetContext(context) (__builtin_expect(useGlibcContext, 0) ? getcontext(context) : dserver_getcontext(context))
++#define dsSetContext(context) (__builtin_expect(useGlibcContext, 0) ? setcontext(context) : dserver_setcontext(context))
++#else
++#define dsGetContext(context) getcontext(context)
++#define dsSetContext(context) setcontext(context)
++#endif
++
+ static thread_local std::shared_ptr<DarlingServer::Thread> currentThreadVar = nullptr;
+ static thread_local bool returningToThreadTop = false;
+ static thread_local ucontext_t backToThreadTopContext;
+@@ -350,14 +464,14 @@ void DarlingServer::Thread::microthreadWorker() {
+ #if DSERVER_ASAN
+ 		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
+ #endif
+-		setcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++		dsSetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 	} else {
+ #if DSERVER_ASAN
+ 		// we're exiting normally, so we might not re-enter this microthread; tell ASAN to drop the fake stack
+ 		__sanitizer_start_switch_fiber(NULL, asanOldStackBottom, asanOldStackSize);
+ #endif
+ 
+-		setcontext(&backToThreadTopContext);
++		dsSetContext(&backToThreadTopContext);
+ 	}
+ 	__builtin_unreachable();
+ };
+@@ -381,13 +495,13 @@ void DarlingServer::Thread::microthreadContinuation() {
+ #if DSERVER_ASAN
+ 		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
+ #endif
+-		setcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++		dsSetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 	} else {
+ #if DSERVER_ASAN
+ 		// see microthreadWorker()
+ 		__sanitizer_start_switch_fiber(NULL, asanOldStackBottom, asanOldStackSize);
+ #endif
+-		setcontext(&backToThreadTopContext);
++		dsSetContext(&backToThreadTopContext);
+ 	}
+ 	__builtin_unreachable();
+ };
+@@ -432,7 +546,7 @@ void DarlingServer::Thread::doWork() {
+ 
+ 	_runningCondvar.notify_all();
+ 
+-	getcontext(&backToThreadTopContext);
++	dsGetContext(&backToThreadTopContext);
+ 
+ 	if (returningToThreadTop) {
+ 		// someone jumped back to the top of the microthread
+@@ -503,7 +617,7 @@ void DarlingServer::Thread::doWork() {
+ 			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
+ #endif
+ 
+-			setcontext(&_resumeContext);
++			dsSetContext(&_resumeContext);
+ 		} else {
+ 			if (!_pendingCall) {
+ 				// if we don't actually have a pending call, we have nothing to do
+@@ -520,7 +634,7 @@ void DarlingServer::Thread::doWork() {
+ 			stackPool.allocate(_stack);
+ 
+ 			ucontext_t newContext;
+-			getcontext(&newContext);
++			dsGetContext(&newContext);
+ 			newContext.uc_stack.ss_sp = _stack.base;
+ 			newContext.uc_stack.ss_size = _stack.size;
+ 			newContext.uc_stack.ss_flags = 0;
+@@ -531,7 +645,7 @@ void DarlingServer::Thread::doWork() {
+ 			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
+ #endif
+ 
+-			setcontext(&newContext);
++			dsSetContext(&newContext);
+ 		}
+ 
+ 		// inform the compiler that it shouldn't do anything that would live past the setcontext calls
+@@ -602,7 +716,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+ 
+ 	unlockMeWhenSuspending = unlockMe;
+ 
+-	getcontext(&_resumeContext);
++	dsGetContext(&_resumeContext);
+ 
+ 	_rwlock.lock();
+ 	if (_suspended) {
+@@ -620,7 +734,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+ 		__sanitizer_start_switch_fiber((continuationCallback) ? nullptr : &asanOldFakeStack, asanOldStackBottom, asanOldStackSize);
+ #endif
+ 
+-		setcontext(&backToThreadTopContext);
++		dsSetContext(&backToThreadTopContext);
+ 		__builtin_unreachable();
+ 	} else {
+ 		// we've been resumed
+@@ -690,7 +804,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
+ 	std::unique_lock lock(_rwlock);
+ 	_continuationCallback = startupCallback;
+ 	_suspended = true;
+-	getcontext(&_resumeContext);
++	dsGetContext(&_resumeContext);
+ };
+ 
+ void DarlingServer::Thread::startKernelThread(std::function<void()> startupCallback) {
+@@ -717,6 +831,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  		std::unique_lock lock(_rwlock);
  		oldThread = _impersonating;
  		_impersonating = thread;
@@ -3910,7 +4127,7 @@ index 5563ad9..c07ba94 100644
  	}
  
  	if (oldThread) {
-@@ -730,6 +731,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -730,6 +845,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  };
  
  std::shared_ptr<DarlingServer::Thread> DarlingServer::Thread::impersonatingThread() const {
@@ -3924,6 +4141,42 @@ index 5563ad9..c07ba94 100644
  	std::shared_lock lock(_rwlock);
  	return _impersonating;
  };
+@@ -768,7 +890,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+ 			__sanitizer_start_switch_fiber(nullptr, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
+ 		}
+ #endif
+-		setcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++		dsSetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 		__builtin_unreachable();
+ 	}
+ 
+@@ -776,7 +898,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+ #if DSERVER_ASAN
+ 	__sanitizer_start_switch_fiber(nullptr, asanOldStackBottom, asanOldStackSize);
+ #endif
+-	setcontext(&backToThreadTopContext);
++	dsSetContext(&backToThreadTopContext);
+ 	__builtin_unreachable();
+ };
+ 
+@@ -1443,7 +1565,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
+ #if DSERVER_ASAN
+ 	__sanitizer_start_switch_fiber(&asanOldFakeStack, stack, stackSize);
+ #endif
+-	setcontext(&_resumeContext);
++	dsSetContext(&_resumeContext);
+ 	__builtin_unreachable();
+ };
+ 
+@@ -1543,7 +1665,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
+ 	dtape_thread_sigexc_enter(currentThreadVar->_dtapeThread);
+ 
+ 	currentThreadVar->_didSyscallReturnDuringInterrupt = false;
+-	getcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++	dsGetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 
+ 	if (!currentThreadVar->_didSyscallReturnDuringInterrupt) {
+ 		if (interruptedContinuation) {
 diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
 new file mode 100644
 index 0000000..6faa042
