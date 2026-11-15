@@ -9327,19 +9327,20 @@ index 6617ef8..73071f7 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +873,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +873,12 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
-+	// darling-lol: placed above the slots because its slot was taken (socket_bitmap_place).
-+	if (socket > bitmap->highest) {
++	// darling-lol: not a slot we track: its slot was taken and it was placed above the slots or below them all
++	// (socket_bitmap_place). There is no bit to clear; indexing with it wrote past the bitmap, or through NULL.
++	if (!bitmap->bits || socket > bitmap->highest || (size_t)(bitmap->highest - socket) >= bitmap->bit_length) {
 +		goto out;
 +	}
 +
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +903,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +904,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -9354,7 +9355,7 @@ index 6617ef8..73071f7 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +921,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +922,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -9380,7 +9381,7 @@ index 6617ef8..73071f7 100644
  		}
  	}
  
-@@ -698,6 +942,39 @@ out:
+@@ -698,6 +943,39 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -9420,7 +9421,7 @@ index 6617ef8..73071f7 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +984,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +985,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -9440,7 +9441,7 @@ index 6617ef8..73071f7 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -740,7 +1010,9 @@ int __mldr_create_rpc_socket(void) {
+@@ -740,7 +1011,9 @@ int __mldr_create_rpc_socket(void) {
  out:
  	return fd;
  
@@ -9451,7 +9452,7 @@ index 6617ef8..73071f7 100644
  	if (fd >= 0) {
  		socket_bitmap_put(&socket_bitmap, fd);
  		close(fd);
-@@ -750,6 +1022,8 @@ err_out:
+@@ -750,6 +1023,8 @@ err_out:
  		close(pre_fd);
  	}
  
@@ -9460,7 +9461,7 @@ index 6617ef8..73071f7 100644
  	return -1;
  };
  
-@@ -772,17 +1046,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -772,17 +1047,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -9479,7 +9480,7 @@ index 6617ef8..73071f7 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1157,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1158,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  
