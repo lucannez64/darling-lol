@@ -65,7 +65,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 
 Installs dependencies, configures the build environment and compiles Darling-LoL. Requires at least **50 GiB** free.
 
-Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+.
+Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+. Hosts outside this list (for example Ubuntu 24.04 and its derivatives) can still install through a Fedora Toolbox container with `--toolbox`.
 
 ```bash
 git clone https://github.com/lucannez64/darling-lol
@@ -75,10 +75,11 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container (Fedora hosts only), keeping build dependencies off the host. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout then follow the Riot Client installation and launch steps below and run update commands inside the container.
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`); run later update commands inside it (`toolbox enter darling-lol`, then `cd` to the checkout).
 - `--verbose`, `-v`: Full command output.
-- `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, the installer runs a full `pacman -Syu` and asks first unless this is given.
-- `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
+- `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, a native install runs a full `pacman -Syu` and asks first unless this is given.
+- `--region CODE`: Riot region (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`). Without it, an interactive install asks; with `--yes` or without a terminal it is the region of an explicit `--locale`, else `EUW`.
+- `--locale CODE`: Riot Client language for new installs, for example `pt_BR`. Without it, an interactive install asks and suggests the system locale; with `--yes` or without a terminal it is `en_GB`. A prefix that already ran the client keeps its saved language unless `RCLOL_LOCALE` is exported at launch.
 
 Options can be combined: `bash scripts/install-native.sh --toolbox --verbose`
 

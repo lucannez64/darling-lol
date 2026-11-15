@@ -22,7 +22,9 @@ REQUIRED = {
     'DRI_PRIME': '1', 'MESA_NO_ERROR': '1', 'mesa_glthread': 'false', '__GL_THREADED_OPTIMIZATIONS': '0',
     '__NV_PRIME_RENDER_OFFLOAD': '1', '__EGL_VENDOR_LIBRARY_FILENAMES': '/usr/share/glvnd/egl_vendor.d/10_nvidia.json',
     'VK_ICD_FILENAMES': '/usr/share/vulkan/icd.d/nvidia_icd.json', 'LIBGL_ALWAYS_SOFTWARE': '0',
-    'LD_PRELOAD': 'libgamemodeauto.so.0', 'LD_LIBRARY_PATH': '/run/opengl-driver/lib',
+    # Paths that cannot exist: the exec tests start real children, and a host library such as
+    # libgamemodeauto would load there, open its own sockets and contact the host daemon.
+    'LD_PRELOAD': '/nonexistent/libgamemodeauto.so.0', 'LD_LIBRARY_PATH': '/nonexistent/opengl-driver/lib',
     'HOME': '/home/u', 'USER': 'u', 'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8',
     'DPREFIX': '/home/u/.darling', 'RCLOL_REFRESH_HZ': '144', 'DYLD_LIBRARY_PATH': '/Users/u/RuntimeLibraries',
 }
