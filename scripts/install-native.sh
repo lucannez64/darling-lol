@@ -811,8 +811,6 @@ main() {
 
   detect_distribution
   preflight
-  # Fail fast: surface an active Riot/League session before the long build.
-  ensure_no_active_session
 
   if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
     check_toolbox_support
@@ -843,6 +841,10 @@ main() {
   else
     run 'Installing build dependencies' install_packages
   fi
+
+  # Fail fast: surface an active Riot/League session before the long build,
+  # but after dependency installation so hosts without Python can reach it.
+  ensure_no_active_session
 
   command -v python3 >/dev/null 2>&1 || fail 'Python 3 is required.'
   run 'Checking FFmpeg compatibility' verify_ffmpeg
