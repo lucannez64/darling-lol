@@ -108,6 +108,58 @@ exec REAL_INSTALL "$@"'''.replace('REAL_INSTALL', shutil.which('install')))
         self.configure()
         self.assertTrue(generated.stat().st_mode & 0o200)
 
+    def test_configure_persists_region_and_locale_for_the_launcher(self):
+        result = self.run_script('scripts/configure.py', '--region', 'br', '--locale', 'PT_br')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config_value('region'), 'BR')
+        self.assertEqual(self.config_value('locale'), 'pt_BR')
+        generated = self.root / 'build/runtime/tools/run-riot-client.sh'
+        launcher = generated.read_text()
+        self.assertIn('--region="${RCLOL_REGION:-BR}"', launcher)
+        self.assertIn('--locale="${RCLOL_LOCALE:-pt_BR}"', launcher)
+
+        # run.sh calls configure.py without arguments on every launch.
+        self.configure()
+        self.assertEqual(self.config_value('region'), 'BR')
+        self.assertEqual(self.config_value('locale'), 'pt_BR')
+
+    def test_configure_keeps_region_and_locale_defaults(self):
+        self.configure()
+        self.assertEqual(self.config_value('region'), 'EUW')
+        self.assertEqual(self.config_value('locale'), 'en_GB')
+        launcher = (self.root / 'build/runtime/tools/run-riot-client.sh').read_text()
+        self.assertIn('--region="${RCLOL_REGION:-EUW}"', launcher)
+        self.assertIn('--locale="${RCLOL_LOCALE:-en_GB}"', launcher)
+
+    def test_configure_rejects_an_invalid_locale(self):
+        result = self.run_script('scripts/configure.py', '--locale', 'portuguese')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('locale must look like pt_BR', result.stderr)
+
+    def test_configure_rejects_a_locale_the_client_does_not_ship(self):
+        self.configure()
+        for locale in ('fr_CA', 'de-at'):
+            with self.subTest(locale=locale):
+                result = self.run_script('scripts/configure.py', '--locale', locale)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('is not a Riot Client locale', result.stderr)
+                self.assertEqual(self.config_value('locale'), 'en_GB')
+
+    def test_configure_rejects_a_region_outside_the_known_list(self):
+        self.configure()
+        for region in ('$(touch pwned)', 'EUW"; id; "', 'XX', ' '):
+            with self.subTest(region=region):
+                result = self.run_script('scripts/configure.py', '--region', region)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('region must be one of EUW', result.stderr)
+                self.assertEqual(self.config_value('region'), 'EUW')
+        launcher = (self.root / 'build/runtime/tools/run-riot-client.sh').read_text()
+        self.assertIn('--region="${RCLOL_REGION:-EUW}"', launcher)
+        # The platform codes scripts/installer.sh uses stay accepted.
+        result = self.run_script('scripts/configure.py', '--region', 'la1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config_value('region'), 'LA1')
+
 
     def test_configure_unlinks_dangling_symlink_without_writing_victim(self):
         self.configure()
