@@ -148,32 +148,34 @@ if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
  fi
 fi
 # On GNOME/Mutter Wayland, Xwayland writes its auth cookie under XDG_RUNTIME_DIR
-# (.mutter-Xwaylandauth.*). Auto-discover it before any helper can start Darling
-# so launchd and iokitd inherit XAUTHORITY (and ~/.Xauthority fallback).
+# (.mutter-Xwaylandauth.*), a new one at every login. Export the newest one before any
+# helper can start Darling so launchd and iokitd inherit XAUTHORITY. Nothing is copied
+# to ~/.Xauthority: a copy outlives the session and then holds a dead cookie.
+# Prints the newest readable cookie file in directory $1 that has an entry for display $2.
+newest_xwayland_cookie() {
+ newest=
+ for candidate in "$1"/.mutter-Xwaylandauth.* "$1"/xauth_*; do
+  [ -f "$candidate" ] && [ -r "$candidate" ] || continue
+  # Without xauth the entries cannot be checked, so every readable file is a candidate.
+  # Mutter writes entries with an empty display number, which match any display.
+  if command -v xauth >/dev/null 2>&1; then
+   display_num=${2##*:}; display_num=${display_num%%.*}
+   xauth -f "$candidate" list 2>/dev/null | awk -v n="$display_num" '
+    { k = $1; sub(/.*:/, "", k); if (k == n || k == "") found = 1 } END { exit !found }' || continue
+  fi
+  # The same choice as scripts/preflight.py: the newest file, the later name on a tie.
+  if [ -z "$newest" ] || [ ! "$newest" -nt "$candidate" ]; then newest=$candidate; fi
+ done
+ [ -z "$newest" ] || printf '%s\n' "$newest"
+}
 if [ -n "${DISPLAY:-}" ] && { [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-}" ]; }; then
  xauth_dir=${XDG_RUNTIME_DIR:-}
  if [ -n "$xauth_dir" ] && [ -d "$xauth_dir" ]; then
-  for candidate in "$xauth_dir"/.mutter-Xwaylandauth.* "$xauth_dir"/xauth_*; do
-   [ -f "$candidate" ] && [ -r "$candidate" ] || continue
-   # Without xauth the entries cannot be checked, so the first readable file is used.
-   # Mutter writes entries with an empty display number, which match any display.
-   if command -v xauth >/dev/null 2>&1; then
-    display_num=${DISPLAY##*:}; display_num=${display_num%%.*}
-    xauth -f "$candidate" list 2>/dev/null | awk -v n="$display_num" '
-     { k = $1; sub(/.*:/, "", k); if (k == n || k == "") found = 1 } END { exit !found }' || continue
-   fi
-   XAUTHORITY=$candidate
+  xauth_cookie=$(newest_xwayland_cookie "$xauth_dir" "$DISPLAY")
+  if [ -n "$xauth_cookie" ]; then
+   XAUTHORITY=$xauth_cookie
    export XAUTHORITY
-   # Never replace an existing ~/.Xauthority, even one this user cannot read.
-   if [ -n "${HOME:-}" ] && [ ! -e "$HOME/.Xauthority" ] && [ ! -L "$HOME/.Xauthority" ]; then
-    # mktemp creates the copy with mode 0600; ln fails if the name appeared meanwhile.
-    xauth_tmp=$(mktemp "$HOME/.Xauthority.XXXXXX" 2>/dev/null) && {
-     cat "$candidate" > "$xauth_tmp" && ln "$xauth_tmp" "$HOME/.Xauthority" 2>/dev/null
-     rm -f "$xauth_tmp"
-    } || true
-   fi
-   break
-  done
+  fi
  fi
 fi
 # Capture ownership before the certificate helper can start this session's runtime.
