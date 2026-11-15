@@ -117,7 +117,7 @@ index d17993c..0458265 100644
  	};
  };
 diff --git a/include/iridium/iridium.hpp b/include/iridium/iridium.hpp
-index 900d03a..ae5eff1 100644
+index 900d03a..611b287 100644
 --- a/include/iridium/iridium.hpp
 +++ b/include/iridium/iridium.hpp
 @@ -1,6 +1,7 @@
@@ -128,7 +128,23 @@ index 900d03a..ae5eff1 100644
  
  #include <vector>
  #include <unordered_map>
-@@ -90,9 +91,25 @@ namespace Iridium {
+@@ -10,6 +11,15 @@ namespace Iridium {
+ 	bool init();
+ 	void finit();
+ 
++	/**
++	 * Names the translator behind `translate`: a hash of the Iridium sources this library was built from,
++	 * and the version of the LLVM library it loaded. Output of `translate` that was stored under one
++	 * identity must not be reused under another.
++	 *
++	 * @returns An empty string unless `init` has succeeded; nothing may be stored or reused then.
++	 */
++	std::string translatorIdentity();
++
+ 	enum class FunctionType {
+ 		Vertex = 1,
+ 		Fragment = 2,
+@@ -90,9 +100,25 @@ namespace Iridium {
  		float lodMax;
  	};
  
@@ -1491,10 +1507,10 @@ index d49b5f4..45bbd42 100644
  			case VertexFormat::UChar:                 return VK_FORMAT_R8_UINT;
  			case VertexFormat::Char:                  return VK_FORMAT_R8_SINT;
 diff --git a/private-include/iridium/dynamic-llvm.hpp b/private-include/iridium/dynamic-llvm.hpp
-index b3756ef..ceb41ce 100644
+index b3756ef..ac6ea2e 100644
 --- a/private-include/iridium/dynamic-llvm.hpp
 +++ b/private-include/iridium/dynamic-llvm.hpp
-@@ -2,10 +2,14 @@
+@@ -2,16 +2,23 @@
  
  #include <llvm-c/BitReader.h>
  #include <llvm-c/Core.h>
@@ -1509,7 +1525,16 @@ index b3756ef..ceb41ce 100644
  
  namespace Iridium {
  	namespace DynamicLLVM {
-@@ -58,6 +62,9 @@ namespace Iridium {
+ 		bool init();
+ 		void finit();
+ 
++		// "major.minor.patch" of the LLVM library that init() loaded; empty when none is loaded.
++		const std::string& loadedVersion();
++
+ 		void* resolveSymbol(const char* name);
+ 
+ 		struct DynamicFunctionBase {
+@@ -58,6 +65,9 @@ namespace Iridium {
  		};
  
  		#define IRIDIUM_DYNAMICLLVM_FUNCTION_FOREACH(_macro) \
@@ -1519,7 +1544,7 @@ index b3756ef..ceb41ce 100644
  			_macro(LLVMBasicBlockAsValue) \
  			_macro(LLVMConstIntGetSExtValue) \
  			_macro(LLVMConstIntGetZExtValue) \
-@@ -68,6 +75,15 @@ namespace Iridium {
+@@ -68,6 +78,15 @@ namespace Iridium {
  			_macro(LLVMCreateMemoryBufferWithMemoryRange) \
  			_macro(LLVMDisposeMemoryBuffer) \
  			_macro(LLVMDisposeMessage) \
@@ -1535,7 +1560,7 @@ index b3756ef..ceb41ce 100644
  			_macro(LLVMDisposeModule) \
  			_macro(LLVMGetAlignment) \
  			_macro(LLVMGetArrayLength) \
-@@ -77,6 +93,11 @@ namespace Iridium {
+@@ -77,6 +96,11 @@ namespace Iridium {
  			_macro(LLVMGetElementAsConstant) \
  			_macro(LLVMGetElementType) \
  			_macro(LLVMGetFCmpPredicate) \
@@ -1547,7 +1572,7 @@ index b3756ef..ceb41ce 100644
  			_macro(LLVMGetFirstBasicBlock) \
  			_macro(LLVMGetFirstInstruction) \
  			_macro(LLVMGetFirstNamedMetadata) \
-@@ -84,6 +105,7 @@ namespace Iridium {
+@@ -84,6 +108,7 @@ namespace Iridium {
  			_macro(LLVMGetIncomingValue) \
  			_macro(LLVMGetIndices) \
  			_macro(LLVMGetInitializer) \
@@ -1555,7 +1580,7 @@ index b3756ef..ceb41ce 100644
  			_macro(LLVMGetInstructionOpcode) \
  			_macro(LLVMGetIntTypeWidth) \
  			_macro(LLVMGetLastInstruction) \
-@@ -107,6 +129,7 @@ namespace Iridium {
+@@ -107,6 +132,7 @@ namespace Iridium {
  			_macro(LLVMGetPointerAddressSpace) \
  			_macro(LLVMGetReturnType) \
  			_macro(LLVMGetSuccessor) \
@@ -2973,7 +2998,7 @@ index 5f62ad0..a2906f3 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..4db08bf 100644
+index 322e186..b3a6a42 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,10 @@
@@ -2987,7 +3012,7 @@ index 322e186..4db08bf 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,39 +18,211 @@
+@@ -12,39 +18,212 @@
  
  #include <iridium/iridium.hpp>
  
@@ -3002,6 +3027,7 @@ index 322e186..4db08bf 100644
 +#include <cstdio>
 +#include <cstdlib>
  #include <cstring>
++#include <dirent.h>
 +#include <string>
 +#include <sys/stat.h>
 +#include <unistd.h>
@@ -3205,7 +3231,7 @@ index 322e186..4db08bf 100644
  			continue;
  		}
  
-@@ -67,12 +245,105 @@ void Indium::initGlobalDeviceList() {
+@@ -67,12 +246,105 @@ void Indium::initGlobalDeviceList() {
  		DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
  
  		if (!features12.timelineSemaphore) {
@@ -3313,7 +3339,7 @@ index 322e186..4db08bf 100644
  };
  
  void Indium::finitGlobalDeviceList() {
-@@ -83,8 +354,16 @@ Indium::Device::~Device() {};
+@@ -83,8 +355,16 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -3331,7 +3357,7 @@ index 322e186..4db08bf 100644
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
  	uint32_t count = 0;
-@@ -233,6 +512,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +513,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -3368,7 +3394,7 @@ index 322e186..4db08bf 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +555,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +556,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -3376,7 +3402,7 @@ index 322e186..4db08bf 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -294,9 +604,380 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -294,9 +605,449 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  			abort();
  		}
  	}
@@ -3471,15 +3497,51 @@ index 322e186..4db08bf 100644
 +		return *map;
 +	}
 +
-+	constexpr char kIridiumCacheMagic[8] = {'I', 'R', 'D', 'C', 3, 0, 0, 0};
++	constexpr char kIridiumCacheMagic[8] = {'I', 'R', 'D', 'C', 4, 0, 0, 0};
 +
-+	std::string iridiumCacheFilePath(const std::string& dir, const LibraryCacheKey& key) {
-+		char name[128];
-+		snprintf(name, sizeof(name), "/iridium-v3-%016llx-%016llx-%zx.bin",
++	uint64_t fnv1a64(const void* data, size_t length) {
++		const auto* bytes = static_cast<const uint8_t*>(data);
++		uint64_t hash = 14695981039346656037ULL;
++		for (size_t i = 0; i < length; ++i) {
++			hash ^= bytes[i];
++			hash *= 1099511628211ULL;
++		}
++		return hash;
++	}
++
++	// A translation is only valid for the translator that made it. `identity` is Iridium::translatorIdentity():
++	// it changes with the Iridium sources and with the LLVM loaded at run time. It is part of every file name,
++	// so entries from another translator are never opened, and it is repeated in full in the file header.
++	std::string iridiumCacheFilePrefix(const std::string& identity) {
++		char prefix[32];
++		snprintf(prefix, sizeof(prefix), "iridium-%016llx-",
++			static_cast<unsigned long long>(fnv1a64(identity.data(), identity.size())));
++		return prefix;
++	}
++
++	std::string iridiumCacheFilePath(const std::string& dir, const std::string& identity, const LibraryCacheKey& key) {
++		char name[96];
++		snprintf(name, sizeof(name), "%016llx-%016llx-%zx.bin",
 +			static_cast<unsigned long long>(key.h1),
 +			static_cast<unsigned long long>(key.h2),
 +			key.length);
-+		return dir + name;
++		return dir + "/" + iridiumCacheFilePrefix(identity) + name;
++	}
++
++	// Translations left by another translator can never be read again; delete them instead of piling them up.
++	void removeForeignTranslations(const std::string& dir, const std::string& identity) {
++		const std::string own = iridiumCacheFilePrefix(identity);
++		DIR* handle = opendir(dir.c_str());
++		if (!handle) return;
++		std::vector<std::string> foreign;
++		while (const dirent* item = readdir(handle)) {
++			const std::string name = item->d_name;
++			if (name.compare(0, 8, "iridium-") == 0 && name.compare(0, own.size(), own) != 0) {
++				foreign.push_back(name);
++			}
++		}
++		closedir(handle);
++		for (const auto& name : foreign) unlink((dir + "/" + name).c_str());
 +	}
 +
 +	void writeU32(std::vector<uint8_t>& out, uint32_t v) {
@@ -3526,12 +3588,12 @@ index 322e186..4db08bf 100644
 +		}
 +	};
 +
-+	bool loadTranslatedLibraryFromDisk(const std::string& path, size_t expectedInputLength, CachedTranslatedLibrary& out) {
++	bool loadTranslatedLibraryFromDisk(const std::string& path, const std::string& identity, size_t expectedInputLength, CachedTranslatedLibrary& out) {
 +		FILE* f = fopen(path.c_str(), "rb");
 +		if (!f) return false;
 +		if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
 +		long fileSize = ftell(f);
-+		if (fileSize < 28 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
++		if (fileSize < 40 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
 +		std::vector<uint8_t> buf(static_cast<size_t>(fileSize));
 +		if (fread(buf.data(), 1, buf.size(), f) != buf.size()) {
 +			fclose(f);
@@ -3541,10 +3603,15 @@ index 322e186..4db08bf 100644
 +
 +		ByteReader r {buf.data(), buf.size(), 0};
 +		char magic[8];
++		std::string writerIdentity;
++		uint64_t bodyHash = 0;
 +		uint64_t inputLength = 0;
 +		uint64_t spirvSize = 0;
 +		uint32_t numFunctions = 0;
 +		if (!r.readBytes(magic, sizeof(magic)) || memcmp(magic, kIridiumCacheMagic, sizeof(magic)) != 0) return false;
++		if (!r.readString(writerIdentity) || writerIdentity != identity) return false;
++		// The hash covers every byte after it, so a damaged entry is translated again instead of being used.
++		if (!r.readU64(bodyHash) || bodyHash != fnv1a64(r.data + r.offset, r.size - r.offset)) return false;
 +		if (!r.readU64(inputLength) || inputLength != expectedInputLength) return false;
 +		if (!r.readU64(spirvSize) || spirvSize == 0 || (spirvSize & 3) != 0 || spirvSize > r.size - r.offset) return false;
 +		out.spirv.resize(static_cast<size_t>(spirvSize));
@@ -3599,10 +3666,13 @@ index 322e186..4db08bf 100644
 +		return r.offset == r.size;
 +	}
 +
-+	void saveTranslatedLibraryToDisk(const std::string& path, size_t inputLength, const CachedTranslatedLibrary& entry) {
++	void saveTranslatedLibraryToDisk(const std::string& path, const std::string& identity, size_t inputLength, const CachedTranslatedLibrary& entry) {
 +		std::vector<uint8_t> buf;
-+		buf.reserve(64 + entry.spirv.size());
++		buf.reserve(128 + identity.size() + entry.spirv.size());
 +		writeBytes(buf, kIridiumCacheMagic, sizeof(kIridiumCacheMagic));
++		writeString(buf, identity);
++		const size_t bodyHashOffset = buf.size();
++		writeU64(buf, 0);
 +		writeU64(buf, static_cast<uint64_t>(inputLength));
 +		writeU64(buf, static_cast<uint64_t>(entry.spirv.size()));
 +		writeBytes(buf, entry.spirv.data(), entry.spirv.size());
@@ -3634,6 +3704,9 @@ index 322e186..4db08bf 100644
 +				}
 +			}
 +		}
++		const size_t bodyOffset = bodyHashOffset + sizeof(uint64_t);
++		const uint64_t bodyHash = fnv1a64(buf.data() + bodyOffset, buf.size() - bodyOffset);
++		memcpy(buf.data() + bodyHashOffset, &bodyHash, sizeof(bodyHash));
 +
 +		std::string tmpPath = path + ".tmp." + std::to_string(getpid());
 +		if (FILE* f = fopen(tmpPath.c_str(), "wb")) {
@@ -3645,6 +3718,28 @@ index 322e186..4db08bf 100644
 +			}
 +		}
 +		unlink(tmpPath.c_str());
++	}
++
++	// Fills `entry` from the entry on disk for this translator, or from `translate` when there is none or it
++	// cannot be used, and then stores the fresh result. An empty `dir` or `identity` turns the disk cache off:
++	// without an identity, a stored translation could not be told apart from one made by another translator.
++	template<typename Translate>
++	bool loadOrTranslateLibrary(const std::string& dir, const std::string& identity, const LibraryCacheKey& key, CachedTranslatedLibrary& entry, Translate&& translate) {
++		const std::string diskPath = (dir.empty() || identity.empty()) ? std::string() : iridiumCacheFilePath(dir, identity, key);
++		if (!diskPath.empty()) {
++			// A rejected entry may be half parsed; never let it leak into the translated result.
++			CachedTranslatedLibrary loaded;
++			if (loadTranslatedLibraryFromDisk(diskPath, identity, key.length, loaded)) {
++				entry.spirv = std::move(loaded.spirv);
++				entry.outputInfo = std::move(loaded.outputInfo);
++				return true;
++			}
++		}
++		if (!translate(entry)) return false;
++		if (!diskPath.empty()) {
++			saveTranslatedLibraryToDisk(diskPath, identity, key.length, entry);
++		}
++		return true;
 +	}
 +}
 +
@@ -3757,7 +3852,7 @@ index 322e186..4db08bf 100644
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +989,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +1059,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3781,7 +3876,7 @@ index 322e186..4db08bf 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +1015,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +1085,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3794,7 +3889,7 @@ index 322e186..4db08bf 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -336,10 +1034,54 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
+@@ -336,10 +1104,57 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
  };
  
  std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* data, size_t length) {
@@ -3820,25 +3915,28 @@ index 322e186..4db08bf 100644
 +
 +	if (!cached) {
 +		auto entry = std::make_shared<CachedTranslatedLibrary>();
-+		std::string cacheDir = indiumCacheDir();
-+		std::string diskPath = cacheDir.empty() ? std::string() : iridiumCacheFilePath(cacheDir, key);
-+		if (diskPath.empty() || !loadTranslatedLibraryFromDisk(diskPath, length, *entry)) {
++		const std::string cacheDir = indiumCacheDir();
++		const std::string identity = Iridium::translatorIdentity();
++		if (!cacheDir.empty() && !identity.empty()) {
++			static std::once_flag foreignTranslationsRemoved;
++			std::call_once(foreignTranslationsRemoved, [&]() { removeForeignTranslations(cacheDir, identity); });
++		}
++		const bool translated = loadOrTranslateLibrary(cacheDir, identity, key, *entry, [&](CachedTranslatedLibrary& fresh) {
 +			size_t translatedSize = 0;
 +			uint64_t translateStart = SlowLog::enabled() ? SlowLog::now() : 0;
-+			auto translatedData = Iridium::translate(data, length, translatedSize, entry->outputInfo);
++			auto translatedData = Iridium::translate(data, length, translatedSize, fresh.outputInfo);
 +			if (translateStart) {
 +				SlowLog::write("translate", static_cast<double>(SlowLog::now() - translateStart) / 1e6, nullptr, nullptr, translatedSize);
 +			}
 +			if (!translatedData || translatedSize == 0) {
 +				if (translatedData) free(translatedData);
-+				return nullptr;
++				return false;
 +			}
-+			entry->spirv.assign(static_cast<const char*>(translatedData), static_cast<const char*>(translatedData) + translatedSize);
++			fresh.spirv.assign(static_cast<const char*>(translatedData), static_cast<const char*>(translatedData) + translatedSize);
 +			free(translatedData);
-+			if (!diskPath.empty()) {
-+				saveTranslatedLibraryToDisk(diskPath, length, *entry);
-+			}
-+		}
++			return true;
++		});
++		if (!translated) return nullptr;
 +		std::lock_guard<std::mutex> lock(libraryCacheMutex());
 +		auto [it, inserted] = libraryCacheMap().emplace(key, entry);
 +		cached = it->second;
@@ -3853,7 +3951,7 @@ index 322e186..4db08bf 100644
  	PrivateLibrary::FunctionInfoMap funcInfoMap;
  
  	for (const auto& [name, info]: outputInfo.functionInfos) {
-@@ -357,12 +1099,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,12 +1172,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -3899,7 +3997,7 @@ index 322e186..4db08bf 100644
  	return lib;
  };
  
-@@ -382,6 +1155,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
+@@ -382,6 +1228,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
  	return globalDeviceList.empty() ? nullptr : globalDeviceList.front();
  };
  
@@ -3919,7 +4017,7 @@ index 322e186..4db08bf 100644
  void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	// this is held for the entire duration of the poll so we can
  	// ensure we're the only one polling, which allows us to avoid
-@@ -393,9 +1179,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -393,9 +1252,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	const std::vector<VkSemaphore> semaphores = _eventLoopSemaphores;
  	const std::vector<uint64_t> values = _eventLoopWaitValues;
  	const std::vector<std::function<void()>> callbacks = _eventLoopCallbacks;
@@ -3955,7 +4053,7 @@ index 322e186..4db08bf 100644
  	VkSemaphoreWaitInfo info {};
  	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
  	info.semaphoreCount = semaphores.size();
-@@ -403,7 +1215,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -403,7 +1288,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	info.pValues = values.data();
  	info.flags = VK_SEMAPHORE_WAIT_ANY_BIT;
  
@@ -3976,7 +4074,7 @@ index 322e186..4db08bf 100644
  
  	if (result == VK_TIMEOUT) {
  		// timed out with no semaphores ready
-@@ -474,15 +1298,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -474,15 +1371,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  		_eventLoopSemaphores.push_back(semaphore);
  		_eventLoopWaitValues.push_back(targetValue);
  		_eventLoopCallbacks.push_back(callback);
@@ -4010,7 +4108,7 @@ index 322e186..4db08bf 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +1344,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +1417,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -4026,7 +4124,7 @@ index 322e186..4db08bf 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +1397,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +1470,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -9850,7 +9948,7 @@ new file mode 100644
 +	}
 +}
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 8d95863..1af3167 100644
+index 8d95863..b24f2b4 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -2,6 +2,41 @@ project(indium)
@@ -9895,7 +9993,7 @@ index 8d95863..1af3167 100644
  find_package(LLVM REQUIRED CONFIG)
  
  if (DARLING)
-@@ -158,11 +193,35 @@ if (NOT DARLING)
+@@ -158,16 +193,64 @@ if (NOT DARLING)
  	)
  endif()
  
@@ -9936,8 +10034,37 @@ index 8d95863..1af3167 100644
  
  target_compile_definitions(iridium PRIVATE
  	"HOST_LLVM_LIBNAME=\"${HOST_LLVM_LIBNAME}\""
+ )
+ 
++# Indium keeps translated shaders on disk under Iridium::translatorIdentity(), which starts with this hash of every
++# Iridium source and header: translations made by a different translator are never reused. Configure again whenever
++# one of these files changes, so that the hash cannot fall behind the sources.
++file(GLOB_RECURSE iridium_identity_files LIST_DIRECTORIES false RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
++	"${CMAKE_CURRENT_SOURCE_DIR}/include/iridium/*"
++	"${CMAKE_CURRENT_SOURCE_DIR}/private-include/iridium/*"
++	"${CMAKE_CURRENT_SOURCE_DIR}/src/iridium/*"
++)
++list(SORT iridium_identity_files)
++set(iridium_identity_input "")
++foreach(iridium_identity_file IN LISTS iridium_identity_files)
++	file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${iridium_identity_file}" iridium_identity_file_hash)
++	string(APPEND iridium_identity_input "${iridium_identity_file}:${iridium_identity_file_hash}\n")
++	set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${iridium_identity_file}")
++endforeach()
++if (NOT iridium_identity_input)
++	message(FATAL_ERROR "No Iridium sources found to hash under ${CMAKE_CURRENT_SOURCE_DIR}")
++endif()
++string(SHA256 IRIDIUM_SOURCE_HASH "${iridium_identity_input}")
++
++target_compile_definitions(iridium PRIVATE
++	"IRIDIUM_SOURCE_HASH=\"${IRIDIUM_SOURCE_HASH}\""
++)
++
+ if (DARLING)
+ 	target_link_libraries(iridium PRIVATE
+ 		cxx
 diff --git a/src/iridium/dynamic-llvm.cpp b/src/iridium/dynamic-llvm.cpp
-index 1b5876e..03af560 100644
+index 1b5876e..7e2a422 100644
 --- a/src/iridium/dynamic-llvm.cpp
 +++ b/src/iridium/dynamic-llvm.cpp
 @@ -1,4 +1,7 @@
@@ -9948,7 +10075,15 @@ index 1b5876e..03af560 100644
  
  #ifdef DARLING
  	#include <elfcalls.h>
-@@ -19,7 +22,20 @@ bool Iridium::DynamicLLVM::init() {
+@@ -6,6 +9,7 @@
+ #endif
+ 
+ static void* libraryHandle = NULL;
++static std::string loadedVersionString;
+ 
+ #define DYNAMICLLVM_FUNCTION_DEF(_name) \
+ 	Iridium::DynamicLLVM::DynamicFunction<decltype(_name)> Iridium::DynamicLLVM::_name(#_name);
+@@ -19,10 +23,29 @@ bool Iridium::DynamicLLVM::init() {
  	libraryHandle = dlopen(HOST_LLVM_LIBNAME, RTLD_LAZY);
  #endif
  
@@ -9966,10 +10101,19 @@ index 1b5876e..03af560 100644
 +			std::to_string(LLVM_VERSION_MAJOR) + ", loaded LLVM " + std::to_string(major) +
 +			" from " HOST_LLVM_LIBNAME "; rebuild and reinstall the runtime with matching LLVM headers and library");
 +	}
++	loadedVersionString = std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch);
 +	return true;
++};
++
++const std::string& Iridium::DynamicLLVM::loadedVersion() {
++	return loadedVersionString;
  };
  
  void Iridium::DynamicLLVM::finit() {
++	loadedVersionString.clear();
+ 	if (libraryHandle) {
+ #ifdef DARLING
+ 		_elfcalls->dlclose(libraryHandle);
 diff --git a/private-include/indium/completion-spin.private.hpp b/private-include/indium/completion-spin.private.hpp
 new file mode 100644
 index 0000000..962fdad
@@ -10288,3 +10432,34 @@ index 759a4df..3ee4321 100644
 +		std::vector<std::pair<Size, VkPipeline>> _cachedPipelines;
  	};
  };
+diff --git a/src/iridium/iridium.cpp b/src/iridium/iridium.cpp
+index 6e2db34..cf2a98f 100644
+--- a/src/iridium/iridium.cpp
++++ b/src/iridium/iridium.cpp
+@@ -7,6 +7,13 @@
+ 
+ #include <cstdlib>
+ 
++// The build supplies a hash of every Iridium source and header (see CMakeLists.txt). There is no default:
++// a constant here would let translations cached by an older translator be reused after a fix.
++#ifndef IRIDIUM_SOURCE_HASH
++	#error "IRIDIUM_SOURCE_HASH is not defined: compile Iridium with -DIRIDIUM_SOURCE_HASH=\"<hash of its sources>\""
++#endif
++static_assert(sizeof(IRIDIUM_SOURCE_HASH) > 16, "IRIDIUM_SOURCE_HASH must be a hash of the Iridium sources");
++
+ bool Iridium::init() {
+ 	return Iridium::DynamicLLVM::init();
+ };
+@@ -15,6 +22,12 @@ void Iridium::finit() {
+ 	Iridium::DynamicLLVM::finit();
+ };
+ 
++std::string Iridium::translatorIdentity() {
++	const auto& llvmVersion = Iridium::DynamicLLVM::loadedVersion();
++	if (llvmVersion.empty()) return {};
++	return std::string(IRIDIUM_SOURCE_HASH) + "-llvm" + llvmVersion;
++};
++
+ void* Iridium::translate(const void* inputData, size_t inputSize, size_t& outputSize, OutputInfo& outputInfo) {
+ 	AIR::Library lib(inputData, inputSize);
+ 	SPIRV::Builder builder;
