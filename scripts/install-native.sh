@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
 
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
 TARGET_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)
@@ -99,11 +98,6 @@ cleanup() {
   fi
 }
 
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'printf "\n%s%s Unexpected failure at line %s: %s%s\n" "$RED" "$ICON_ERR" "$LINENO" "$BASH_COMMAND" "$RESET" >&2' ERR
-
 region_codes() {
   local entry codes=()
   for entry in "${REGIONS[@]}"; do
@@ -180,6 +174,7 @@ Options:
   -v, --verbose       Show all command output
   -t, --toolbox       Run inside a Fedora Toolbox container
   -y, --yes           Skip confirmations (required for non-interactive use)
+      --no-confirm     Skip the INSTALL confirmation only (used by the Toolbox re-exec; does not imply --yes)
       --region CODE   Riot server region: $(region_codes)
                       (default: derived from the system locale, or ${DEFAULT_REGION})
       --locale CODE   Riot client locale, for example pt_BR
@@ -674,6 +669,12 @@ install_packages() {
   git lfs install --skip-repo
 }
 
+install_packages_tee() {
+  # Log the interactive pacman output as well: 'run' with VERBOSE=1 prints to
+  # the terminal only, and pipefail propagates install_packages' exit code.
+  install_packages 2>&1 | tee -a "$LOG"
+}
+
 prepare_python_env() {
   cd "$TARGET_DIR" &&
     python3 -m venv build/venv &&
@@ -767,7 +768,7 @@ offer_desktop_entry() {
 }
 
 finish() {
-  local branch commit
+  local branch commit region=${REGION:-$DEFAULT_REGION}
   branch=$(git -C "$TARGET_DIR" branch --show-current 2>/dev/null || true)
   commit=$(git -C "$TARGET_DIR" rev-parse --short HEAD 2>/dev/null || true)
 
@@ -786,8 +787,8 @@ finish() {
   printf '  cd "%s"\n' "$TARGET_DIR"
   printf '  RCLOL_REGION=%s RCLOL_LOCALE=%s sh scripts/run.sh\n\n' \
     "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
-  printf 'To install Riot Client later (%s):\n' "$REGION"
-  printf '  ./scripts/installer.sh %s\n\n' "${REGION,,}"
+  printf 'To install Riot Client later (%s):\n' "$region"
+  printf '  ./scripts/installer.sh %s\n\n' "${region,,}"
   if [[ -f $TARGET_DIR/README.md ]]; then
     warning "Read the safety notice in $TARGET_DIR/README.md before launching Riot Client."
   else
@@ -796,6 +797,12 @@ finish() {
 }
 
 main() {
+  set -Eeuo pipefail
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'printf "\n%s%s Unexpected failure at line %s: %s%s\n" "$RED" "$ICON_ERR" "$LINENO" "$BASH_COMMAND" "$RESET" >&2' ERR
+
   parse_args "$@"
 
   if (( INSIDE_TOOLBOX )); then
@@ -804,6 +811,8 @@ main() {
 
   detect_distribution
   preflight
+  # Fail fast: surface an active Riot/League session before the long build.
+  ensure_no_active_session
 
   if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
     check_toolbox_support
@@ -829,7 +838,7 @@ main() {
   if [[ $FAMILY == arch ]] && (( ! YES )); then
     prev_verbose=$VERBOSE
     VERBOSE=1
-    run 'Installing build dependencies' install_packages
+    run 'Installing build dependencies' install_packages_tee
     VERBOSE=$prev_verbose
   else
     run 'Installing build dependencies' install_packages
