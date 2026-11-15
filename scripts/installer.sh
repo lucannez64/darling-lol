@@ -60,15 +60,54 @@ notify() {
   notify-send -a 'Darling-LoL' "$@" 2>/dev/null || true
 }
 
+# One install at a time. A second menu click during a slow install would
+# otherwise reach clean_partial_install and delete the bundle the first run is
+# still downloading. The lock is a directory (mkdir is atomic) holding the
+# owner's pid; a lock whose owner is gone is stale and is taken over.
+lock_dir="$repo/build/installer.lock"
+lock_held=0
+release_lock() {
+  if [ "$lock_held" = 1 ]; then
+    lock_held=0
+    rm -rf "$lock_dir"
+  fi
+}
+acquire_lock() {
+  mkdir -p "$repo/build"
+  tries=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    owner=$(cat "$lock_dir/pid" 2>/dev/null) || owner=
+    case "$owner" in ''|*[!0-9]*) owner= ;; esac
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      echo "A Riot Client install is already running (pid $owner); not starting another one." >&2
+      notify 'Riot Client install already running' 'Wait for it to finish.'
+      exit 1
+    fi
+    # No live owner. An owner that just created the directory may not have
+    # written its pid yet, so give it a moment before calling the lock stale.
+    tries=$((tries + 1))
+    if [ -z "$owner" ] && [ "$tries" -le 2 ]; then sleep 1; continue; fi
+    if [ "$tries" -gt 4 ]; then
+      echo "Could not take the install lock $lock_dir; not installing." >&2
+      exit 1
+    fi
+    echo "Removing the stale install lock $lock_dir${owner:+ (pid $owner is gone)}" >&2
+    rm -rf "$lock_dir"
+  done
+  lock_held=1
+  echo "$$" > "$lock_dir/pid"
+}
 # An interrupt stops the installer at once: no retry, and nothing more is
 # removed. The shell runs these traps when the foreground run.sh returns.
 interrupted() {
   echo 'Riot Client install interrupted; not retrying.' >&2
   exit "$1"
 }
+trap release_lock EXIT
 trap 'interrupted 129' HUP
 trap 'interrupted 130' INT
 trap 'interrupted 143' TERM
+acquire_lock
 
 bash build/runtime/tools/fetch-installer.sh "$region" build/installer
 unzip -q -o "build/installer/live.$region.zip" -d build/installer
@@ -109,5 +148,7 @@ if ! client_installed; then
 fi
 
 notify 'Riot Client installed' 'Starting it.'
-trap - HUP INT TERM
+# exec keeps this pid for the whole client session, so give the lock back now.
+release_lock
+trap - EXIT HUP INT TERM
 exec sh scripts/run.sh

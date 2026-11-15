@@ -119,6 +119,10 @@ The menu/desktop shortcut runs `scripts/launch-shortcut.sh` (or `toolbox run -c 
 - Ctrl-C (or a `SIGTERM` to `installer.sh`) stops the installer without a
   retry and without removing what the interrupted attempt wrote; the next run
   cleans it up.
+- `A Riot Client install is already running (pid N)` means a second launch
+  reached the installer while the first one was still working; it exits
+  without touching anything. The lock is `build/installer.lock`, and one left
+  by a killed installer is detected as stale and replaced on the next run.
 
 ## Memory installer: permission denied
 
