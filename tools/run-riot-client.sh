@@ -327,6 +327,6 @@ exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}" \
   DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}" \
   DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}" \
-  "$darling_bin" "$A" --region="${RCLOL_REGION:-EUW}" --locale="${RCLOL_LOCALE:-en_GB}" \
+  "$darling_bin" "$A" --region="${RCLOL_REGION:-@REGION@}" --locale="${RCLOL_LOCALE:-@LOCALE@}" \
     "$@" \
     --log-dir="$guest_path/Library/Logs/Riot Games/Riot Client"

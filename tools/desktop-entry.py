@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Create and install the GNOME / FreeDesktop desktop entry and launcher icon."""
+import argparse
 import os
 import shutil
 import subprocess
@@ -9,9 +10,13 @@ PROJECT_ROOT = Path("@PROJECT_ROOT@")
 HOST_HOME = Path("@HOST_HOME@")
 
 # Marks a launcher entry created by this project.  Previous versions pointed
-# Exec at this checkout's desktop-run.sh, so an entry without that marker
-# belongs to someone else and is left alone.
+# Exec at this checkout's desktop-run.sh, so an entry without one of these
+# markers belongs to someone else and is left alone.
 LEGACY_RUN_SCRIPT = "scripts/desktop-run.sh"
+# Current Exec target: it starts the Riot Client installer automatically when
+# the client is missing, then delegates to desktop-run.sh.
+LAUNCH_SHORTCUT_SCRIPT = "scripts/launch-shortcut.sh"
+URL_HANDLER_SCRIPT = "scripts/open-guest-url.sh"
 
 # Distinctive fragments of the artwork the previous helper wrote.
 LEGACY_SVG_MARKERS = ('id="goldGrad"', 'M172 108 L242 108')
@@ -35,9 +40,27 @@ def quote_exec_argument(value: str) -> str:
     return f'"{escaped}"'
 
 
+def exec_command(script: str, toolbox: str | None = None) -> str:
+    """Return the Exec value for a project script, optionally through Toolbox.
+
+    The native installer runs inside Toolbox when it is invoked with
+    ``--toolbox``; every entry must then re-enter the same container instead
+    of running on the host, where neither Darling nor its dependencies are
+    installed.  That holds for the launcher and for the sign-in link handler.
+    """
+    command = str(PROJECT_ROOT / script)
+    if toolbox is None:
+        return quote_exec_argument(command)
+    return " ".join(
+        quote_exec_argument(part)
+        for part in ("toolbox", "run", "-c", toolbox, command)
+    )
+
+
 def legacy_entry_owned(path: Path) -> bool:
     """Return True when a launcher entry was created by this project."""
-    marker = str(PROJECT_ROOT / LEGACY_RUN_SCRIPT)
+    markers = [str(PROJECT_ROOT / script) for script in (LEGACY_RUN_SCRIPT,
+                                                         LAUNCH_SHORTCUT_SCRIPT)]
     try:
         text = path.read_text(errors="ignore")
     except OSError:
@@ -46,7 +69,8 @@ def legacy_entry_owned(path: Path) -> bool:
             text = os.readlink(path)
         except OSError:
             return False
-    return marker in text or marker.replace("%", "%%") in text
+    return any(marker in text or marker.replace("%", "%%") in text
+               for marker in markers)
 
 
 def remove_legacy_entry(path: Path) -> bool:
@@ -88,7 +112,7 @@ def shortcut_directories() -> list[Path]:
     return directories
 
 
-def main():
+def main(toolbox: str | None = None):
     icons_base = HOST_HOME / ".local/share/icons"
     apps_base = HOST_HOME / ".local/share/applications"
 
@@ -136,10 +160,10 @@ def main():
     # WM_CLASS from -[NSProcessInfo processName], which is the basename of
     # argv[0], and the launcher starts .../RiotClientServices.  It is an
     # interoperability identifier, not a user-visible name.
-    # Terminal stays false here because this entry runs desktop-run.sh, which
-    # saves session output in build/desktop-launch.log; the packaged entry runs
-    # the session directly and therefore needs a terminal.
-    exec_cmd = quote_exec_argument(str(PROJECT_ROOT / LEGACY_RUN_SCRIPT))
+    # Terminal stays false here because this entry runs launch-shortcut.sh,
+    # which saves session output in build/desktop-launch.log; the packaged
+    # entry runs the session directly and therefore needs a terminal.
+    exec_cmd = exec_command(LAUNCH_SHORTCUT_SCRIPT, toolbox)
     project_path = escape_string(str(PROJECT_ROOT))
     desktop_content = f"""[Desktop Entry]
 Version=1.0
@@ -176,7 +200,9 @@ StartupNotify=false
     # running in Darling. Hidden from menus and never placed on the desktop.
     # Declaring the MimeType makes it the handler only while no other app claims
     # the scheme; the user's explicit choices in mimeapps.list are left alone.
-    handler_exec = quote_exec_argument(str(PROJECT_ROOT / "scripts/open-guest-url.sh"))
+    # In a Toolbox install open-guest-url.sh needs `darling`, which only exists
+    # inside the container, so the handler re-enters it like the launcher does.
+    handler_exec = exec_command(URL_HANDLER_SCRIPT, toolbox)
     handler_file = apps_base / "darling-url-handler.desktop"
     handler_file.write_text(f"""[Desktop Entry]
 Version=1.0
@@ -207,4 +233,9 @@ StartupNotify=false
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--toolbox", metavar="CONTAINER",
+        help="launch the entry through 'toolbox run -c CONTAINER'",
+    )
+    main(parser.parse_args().toolbox)
