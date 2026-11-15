@@ -79,6 +79,34 @@ export RCLOL_PLATFORM_PROFILE="$profile"
 case "$memory_bytes" in ''|*[!0-9]*) ;; *) export RCLOL_MEMORY_BYTES="$memory_bytes";; esac
 export RCLOL_GPU_NAME="$gpu_name"
 export RCLOL_GPU_VRAM_MB="$gpu_vram"
+# True when the host has a DRM card and every card is NVIDIA (vendor 0x10de), so not on
+# a hybrid laptop. $1 replaces /sys/class/drm in tests.
+host_gpus_all_nvidia() {
+ drm_vendors=
+ for vfile in "${1:-/sys/class/drm}"/card[0-9]/device/vendor "${1:-/sys/class/drm}"/card[0-9][0-9]/device/vendor; do
+  [ -r "$vfile" ] || continue
+  v=$(sed 's/^0x//' "$vfile" 2>/dev/null || true)
+  case " $drm_vendors " in *" $v "*) ;; *) drm_vendors="${drm_vendors:+$drm_vendors }$v";; esac
+ done
+ [ "$drm_vendors" = 10de ]
+}
+# Prints the VRAM in MB of the only NVIDIA GPU. The profiler applies this one scalar to
+# NVIDIA cards, so nothing is printed unless nvidia-smi reports exactly one GPU. Other
+# hosts never run nvidia-smi; it gets a time limit because it can hang on a broken driver.
+host_nvidia_vram_mb() {
+ host_gpus_all_nvidia "${1:-/sys/class/drm}" || return 0
+ command -v nvidia-smi >/dev/null 2>&1 || return 0
+ if command -v timeout >/dev/null 2>&1; then
+  nv_out=$(timeout -k 2 5 nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null) || return 0
+ else
+  nv_out=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null) || return 0
+ fi
+ printf '%s\n' "$nv_out" | awk 'NF { n++; v = $1 } END { if (n == 1 && v ~ /^[0-9]+$/) print v }'
+}
+if [ -z "${RCLOL_HOST_GPU_VRAM_MB:-}" ]; then
+ nv_vram=$(host_nvidia_vram_mb)
+ [ -z "$nv_vram" ] || export RCLOL_HOST_GPU_VRAM_MB="$nv_vram"
+fi
 if [ "$profile" = compat ]; then
  # User-supplied DARLING_METAL_* values win over the profile, as in HOST.
  case "$gpu_name" in
@@ -114,6 +142,59 @@ fi
 # The bundled downloader rejects IPv6 CONNECT_TO addresses. Only Riot CDN
 # AAAA lookups are suppressed; set this to 0 to retain the upstream resolver.
 export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
+# --- NVIDIA Vulkan ICD pin, before any helper can start Darling ---
+# Guest services started by ensure-darling-root-certificates.py inherit this environment.
+# When NVIDIA is the only active DRM GPU and Mesa's software ICD (lvp_icd) is
+# installed alongside nvidia_icd.json, pin the NVIDIA Vulkan ICD so the loader
+# cannot enumerate llvmpipe ahead of the presenting GPU (issue #127).
+if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
+ if host_gpus_all_nvidia; then
+  has_sw_icd=0
+  for sw in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
+   [ -r "$sw" ] && { has_sw_icd=1; break; }
+  done
+  if [ "$has_sw_icd" = 1 ]; then
+   for nvicd in /usr/share/vulkan/icd.d/nvidia_icd*.json /etc/vulkan/icd.d/nvidia_icd*.json; do
+    if [ -r "$nvicd" ]; then
+     export VK_DRIVER_FILES="$nvicd"
+     export VK_ICD_FILENAMES="$nvicd"
+     break
+    fi
+   done
+  fi
+ fi
+fi
+# On GNOME/Mutter Wayland, Xwayland writes its auth cookie under XDG_RUNTIME_DIR
+# (.mutter-Xwaylandauth.*), a new one at every login. Export the newest one before any
+# helper can start Darling so launchd and iokitd inherit XAUTHORITY. Nothing is copied
+# to ~/.Xauthority: a copy outlives the session and then holds a dead cookie.
+# Prints the newest readable cookie file in directory $1 that has an entry for display $2.
+newest_xwayland_cookie() {
+ newest=
+ for candidate in "$1"/.mutter-Xwaylandauth.* "$1"/xauth_*; do
+  [ -f "$candidate" ] && [ -r "$candidate" ] || continue
+  # Without xauth the entries cannot be checked, so every readable file is a candidate.
+  # Mutter writes entries with an empty display number, which match any display.
+  if command -v xauth >/dev/null 2>&1; then
+   display_num=${2##*:}; display_num=${display_num%%.*}
+   xauth -f "$candidate" list 2>/dev/null | awk -v n="$display_num" '
+    { k = $1; sub(/.*:/, "", k); if (k == n || k == "") found = 1 } END { exit !found }' || continue
+  fi
+  # The same choice as scripts/preflight.py: the newest file, the later name on a tie.
+  if [ -z "$newest" ] || [ ! "$newest" -nt "$candidate" ]; then newest=$candidate; fi
+ done
+ [ -z "$newest" ] || printf '%s\n' "$newest"
+}
+if [ -n "${DISPLAY:-}" ] && { [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-}" ]; }; then
+ xauth_dir=${XDG_RUNTIME_DIR:-}
+ if [ -n "$xauth_dir" ] && [ -d "$xauth_dir" ]; then
+  xauth_cookie=$(newest_xwayland_cookie "$xauth_dir" "$DISPLAY")
+  if [ -n "$xauth_cookie" ]; then
+   XAUTHORITY=$xauth_cookie
+   export XAUTHORITY
+  fi
+ fi
+fi
 # Capture ownership before the certificate helper can start this session's runtime.
 runtime_at_start=$(python3 "$runner_dir/session-supervisor.py" --prefix "$prefix_dir" --probe-runtime)
 python3 "$runner_dir/ensure-darling-runtime.py"

@@ -87,7 +87,7 @@ def kernel_tuple(release):
     return tuple(int(part) for part in numbers[0].split('.'))
 
 
-def read_gpus(sys_root=Path('/sys')):
+def read_gpus(sys_root=Path('/sys'), proc_root=Path('/proc')):
     """Return one entry per DRM card with its driver and PCI identity."""
     cards = []
     drm = Path(sys_root) / 'class/drm'
@@ -111,6 +111,14 @@ def read_gpus(sys_root=Path('/sys')):
             name = read_text(candidate).strip()
             if name:
                 break
+        if not name and vendor == '0x10de':
+            uevent = read_text(device / 'uevent')
+            slot_match = re.search(r'^PCI_SLOT_NAME=(\S+)', uevent, re.M)
+            if slot_match:
+                info = read_text(Path(proc_root) / 'driver/nvidia/gpus' / slot_match.group(1) / 'information')
+                model_match = re.search(r'^Model:\s+(.+)', info, re.M)
+                if model_match:
+                    name = model_match.group(1).strip()
         cards.append({
             'card': entry.name,
             'driver': driver,
@@ -225,7 +233,7 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
             'swap_gib': gib(swap),
         },
         'disk': {'free': free_disk, 'free_gib': gib(free_disk)},
-        'gpus': read_gpus(sys_root),
+        'gpus': read_gpus(sys_root, proc_root),
         'vulkan_icds': vulkan_icds(env),
         'prefix': str(prefix),
         'workspace': env.get('DARLING_WORKSPACE', ''),

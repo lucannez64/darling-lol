@@ -26,9 +26,9 @@ clang -target x86_64-apple-macosx11.0 -fuse-ld=lld -dynamiclib -nostdlib -O3 -ma
 # Stop before changing the overlay's upper directory, even with atomic writes.
 python3 "$project_dir/tools/stop-darling-runtime.py"
 mkdir -p "$guest_home"
-mv "$project_dir/build/libdarling-xshm.next.so" "$project_dir/build/libdarling-xshm.so"
+mv -f "$project_dir/build/libdarling-xshm.next.so" "$project_dir/build/libdarling-xshm.so"
 install -m755 "$project_dir/build/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.next.dylib"
-mv "$guest_home/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.dylib"
+mv -f "$guest_home/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.dylib"
 mkdir -p "$guest_home/RuntimeFrameworks"
 for framework in AppKit QuartzCore CoreFoundation SystemConfiguration CFNetwork; do
   if [ ! -d "$guest_home/RuntimeFrameworks/$framework.framework" ]; then
@@ -37,7 +37,7 @@ for framework in AppKit QuartzCore CoreFoundation SystemConfiguration CFNetwork;
 done
 atomic_install() {
   install -m755 "$1" "$2.next"
-  mv "$2.next" "$2"
+  mv -f "$2.next" "$2"
 }
 atomic_install "$build_dir/src/external/cocotron/AppKit/AppKit" "$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C/AppKit"
 atomic_install "$build_dir/src/external/cocotron/AppKit/X11" "$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C/Resources/Backends/X11.backend/Contents/MacOS/X11"
