@@ -7533,14 +7533,20 @@ diff --git a/libsyscall/CMakeLists.txt b/libsyscall/CMakeLists.txt
 index 57cebad..3014255 100755
 --- a/libsyscall/CMakeLists.txt
 +++ b/libsyscall/CMakeLists.txt
-@@ -104,6 +104,18 @@ foreach(MIG_FILENAME IN LISTS LIBSYSCALL_MIGS)
+@@ -104,6 +104,24 @@ foreach(MIG_FILENAME IN LISTS LIBSYSCALL_MIGS)
  	)
  endforeach()
  
 +# emulation/src/xnu_syscall/mach/impl/mach_traps.c wraps semaphore_create/semaphore_destroy
 +# (process-local semaphores) and mach_vm_region_recurse (own task). The MIG stubs get private
 +# names, which the wrappers call.
++# mach_host.defs already names the host_statistics64 stub _kernelrpc_host_statistics64, but MIG
++# reruns only when migcom changes, so build trees from before that rename keep the public name.
++# The define renames it there too, and changes nothing in a fresh stub.
 +foreach(MIG_ARCH i386 x86_64)
++	set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/mach/mach_host-${MIG_ARCH}-User.c" PROPERTIES
++		COMPILE_DEFINITIONS "host_statistics64=_kernelrpc_host_statistics64"
++	)
 +	set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/mach/task-${MIG_ARCH}-User.c" PROPERTIES
 +		COMPILE_DEFINITIONS "semaphore_create=__darling_rpc_semaphore_create;semaphore_destroy=__darling_rpc_semaphore_destroy"
 +	)
