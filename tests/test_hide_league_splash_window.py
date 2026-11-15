@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -115,6 +116,34 @@ class SplashWindowTests(unittest.TestCase):
         )
         watcher.run(max_steps=3)
         self.assertEqual(x11.unmapped, [])
+
+    def test_unreadable_setuid_wrapper_does_not_block_client_detection(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            prefix = root / 'prefix'
+            prefix.mkdir()
+            procs = root / 'proc'
+            for pid, argv, env in (
+                ('100', b'/usr/local/bin/darling\0/x/RiotClientServices\0', None),
+                ('200', b'/x/RiotClientServices\0',
+                 b'__mldr_sockpath=' + bytes(prefix / '.darlingserver.sock') + b'\0'),
+            ):
+                proc = procs / pid
+                proc.mkdir(parents=True)
+                (proc / 'stat').write_text(f'{pid} (x) S 1')
+                (proc / 'cmdline').write_bytes(argv)
+                (proc / 'environ').write_bytes(env or b'')
+            real_read_bytes = Path.read_bytes
+
+            def read_bytes(path):
+                if path == procs / '100' / 'environ':
+                    raise PermissionError(13, 'Permission denied')
+                return real_read_bytes(path)
+
+            with patch.object(Path, 'read_bytes', read_bytes), \
+                 patch.object(Path, 'iterdir',
+                              lambda path: iter(sorted(path / n for n in os.listdir(path)))):
+                self.assertIs(hide_splash.client_running(prefix, procs), True)
 
     def test_once_does_not_hide_anything(self):
         x11 = FakeX11([0x10], {

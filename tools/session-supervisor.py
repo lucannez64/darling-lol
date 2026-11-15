@@ -33,6 +33,13 @@ local API and then stops the League client processes that are left. It never
 touches a running game or the Riot Client. RCLOL_FINISH_LEAGUE_EXIT=0 turns
 this off.
 
+League splash: the same early link drop can also lose the UX's "loaded" report,
+and LeagueClient then keeps its 512x216 splash on screen. When the LeagueClient
+log shows UX_PROCESS_BOOTSTRAP_COMPLETE without "Ux reports successful load"
+3 seconds later, the supervisor delivers that report over the local API
+(PUT /riotclient/ux-load-complete), and LeagueClient hides the splash itself.
+RCLOL_FINISH_LEAGUE_LOAD=0 turns this off.
+
 Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
 alone when the launcher exits.
 
@@ -439,14 +446,14 @@ QUIT_MARKER = b'Failed to send quit message because there was no connection'
 LEAGUE_QUIT_GRACE = 8.0
 
 
-class LeagueExitWatch:
-    """Spot a League client Exit that the client itself cannot deliver.
+class LeagueLogTail:
+    """New complete lines of the League client logs matching one pattern.
 
-    LeagueClientUx 16.22 drops its link to LeagueClient (close code 1003,
-    "Unsupported Data Type") early in the session. From then on Exit and the
-    window close button only log QUIT_MARKER and the client stays open. Lines
-    already in a log when the supervisor starts are history and never count.
+    Lines already in a log when the supervisor starts are history and are
+    never returned.
     """
+
+    pattern = '*.log'
 
     def __init__(self, prefix):
         self.directory = prefix / LEAGUE_LOL / 'Logs/LeagueClient Logs'
@@ -454,14 +461,14 @@ class LeagueExitWatch:
 
     def _logs(self):
         try:
-            for path in self.directory.glob('*_LeagueClientUx.log'):
+            for path in self.directory.glob(self.pattern):
                 yield path, path.stat().st_size
         except OSError:
             return
 
-    def poll(self):
-        """True when a complete new log line carries QUIT_MARKER."""
-        found = False
+    def new_lines(self):
+        """Complete lines appended since the last call, in file order."""
+        lines = []
         for path, size in list(self._logs()):
             offset = self.offsets.get(path, 0)
             if size < offset:
@@ -476,9 +483,58 @@ class LeagueExitWatch:
                 continue
             complete = data.rfind(b'\n') + 1
             self.offsets[path] = offset + complete
-            if QUIT_MARKER in data[:complete]:
-                found = True
-        return found
+            lines.extend(data[:complete].splitlines())
+        return lines
+
+
+class LeagueExitWatch(LeagueLogTail):
+    """Spot a League client Exit that the client itself cannot deliver.
+
+    LeagueClientUx 16.22 drops its link to LeagueClient (close code 1003,
+    "Unsupported Data Type") early in the session. From then on Exit and the
+    window close button only log QUIT_MARKER and the client stays open.
+    """
+
+    pattern = '*_LeagueClientUx.log'
+
+    def poll(self):
+        """True when a complete new log line carries QUIT_MARKER."""
+        return any(QUIT_MARKER in line for line in self.new_lines())
+
+
+BOOTSTRAP_MARKER = b'UX_PROCESS_BOOTSTRAP_COMPLETE'
+LOADED_MARKER = b'Ux reports successful load'
+LEAGUE_LOAD_GRACE = 3.0
+
+
+class LeagueLoadWatch(LeagueLogTail):
+    """Spot a League client UX load report that never reached LeagueClient.
+
+    LeagueClient hides its 512x216 splash only when the UX reports a
+    successful load, which normally follows UX_PROCESS_BOOTSTRAP_COMPLETE
+    within a second. When the UX drops its link (close code 1003) before
+    sending that report, the splash stays on screen for the whole session.
+    """
+
+    pattern = '*_LeagueClient.log'
+
+    def __init__(self, prefix, clock=time.monotonic, grace=LEAGUE_LOAD_GRACE):
+        super().__init__(prefix)
+        self.clock = clock
+        self.grace = grace
+        self.waiting_since = None
+
+    def poll(self):
+        """True once when a bootstrapped UX has not reported its load in time."""
+        for line in self.new_lines():
+            if BOOTSTRAP_MARKER in line:
+                self.waiting_since = self.clock()
+            elif LOADED_MARKER in line:
+                self.waiting_since = None
+        if self.waiting_since is None or self.clock() - self.waiting_since < self.grace:
+            return False
+        self.waiting_since = None
+        return True
 
 
 def league_client_processes(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
@@ -510,6 +566,19 @@ def league_game_present(prefix, namespace, proc_root=Path('/proc'), own_namespac
 
 def request_league_quit(prefix, urlopen=None):
     """Ask LeagueClient to quit over its local API; False when that fails."""
+    return league_api(prefix, 'POST', '/process-control/v1/process/quit', urlopen)
+
+
+def report_league_load(prefix, out=sys.stdout, urlopen=None):
+    """Deliver the UX load report LeagueClient never received."""
+    sent = league_api(prefix, 'PUT', '/riotclient/ux-load-complete', urlopen)
+    log('League UX load report was lost; %s' % (
+        'delivered it over the local API' if sent else 'local API request failed'), out)
+    return sent
+
+
+def league_api(prefix, method, path, urlopen=None):
+    """One request to LeagueClient's local API; False when that fails."""
     import base64
     import ssl
     import urllib.request
@@ -525,8 +594,8 @@ def request_league_quit(prefix, urlopen=None):
     context.verify_mode = ssl.CERT_NONE
     try:
         request = urllib.request.Request(
-            '%s://127.0.0.1:%d/process-control/v1/process/quit' % (scheme, port),
-            data=b'', method='POST', headers={'Authorization': 'Basic ' + token})
+            '%s://127.0.0.1:%d%s' % (scheme, port, path),
+            data=b'', method=method, headers={'Authorization': 'Basic ' + token})
         (urlopen or urllib.request.urlopen)(request, timeout=3, context=context).close()
         return True
     except Exception:  # noqa: BLE001 - any failure falls through to stopping
@@ -578,7 +647,7 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
                    own_namespace=None, runtime_at_start=None, guest_log=None,
-                   league_exit=None):
+                   league_exit=None, league_load=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
@@ -614,6 +683,9 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     if league_exit is None:
         league_exit = os.environ.get('RCLOL_FINISH_LEAGUE_EXIT', '1') != '0'
     exit_watch = LeagueExitWatch(prefix) if league_exit else None
+    if league_load is None:
+        league_load = os.environ.get('RCLOL_FINISH_LEAGUE_LOAD', '1') != '0'
+    load_watch = LeagueLoadWatch(prefix) if league_load else None
     try:
         while child.poll() is None and not stop:
             # Learn the guest namespace while the session runs: after a crash
@@ -623,6 +695,8 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
             if exit_watch is not None and exit_watch.poll():
                 finish_league_exit(prefix, namespace, proc_root=proc_root, kill=kill,
                                    sleep=sleep, out=out, own_namespace=own_namespace)
+            if load_watch is not None and load_watch.poll():
+                report_league_load(prefix, out=out)
             if stop_after > 0:
                 now = time.monotonic()
                 seen_client, idle_since, stop_now = idle_decision(
