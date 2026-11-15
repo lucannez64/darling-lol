@@ -2,6 +2,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,14 @@ class LaunchShortcutTests(unittest.TestCase):
         (self.repo / 'scripts').mkdir(parents=True)
         shutil.copy2(SCRIPT, self.repo / 'scripts/launch-shortcut.sh')
         self.repo.joinpath('scripts/launch-shortcut.sh').chmod(0o755)
+        # The launcher resolves the prefix through the real configure step.
+        for name in ('configure.py', 'common.py'):
+            shutil.copy2(ROOT / 'scripts' / name, self.repo / 'scripts' / name)
+        (self.repo / 'tools').mkdir()
+        for name in ('runtime-paths.sh', 'runtime_paths.py'):
+            shutil.copy2(ROOT / 'tools' / name, self.repo / 'tools' / name)
+        self.home = self.root / 'home'
+        self.home.mkdir()
         self.prefix = self.root / 'prefix'
         self.prefix.mkdir()
 
@@ -45,10 +54,12 @@ class LaunchShortcutTests(unittest.TestCase):
                         f'echo "NOTIFY $*" >> {log}')
         return sandbox
 
-    def write_config(self, region):
-        config = self.repo / 'build'
-        config.mkdir(exist_ok=True)
-        (config / 'config.json').write_text(f'{{"region": "{region}"}}\n')
+    def write_config(self, region, prefix=None):
+        command = [sys.executable, str(self.repo / 'scripts/configure.py'), '--region', region]
+        if prefix is not None:
+            command += ['--prefix', str(prefix)]
+        subprocess.run(command, check=True, capture_output=True,
+                       env=dict(os.environ, HOME=str(self.home)))
 
     def mark_installed(self, *, client=False, shared=False):
         if client:
@@ -56,14 +67,17 @@ class LaunchShortcutTests(unittest.TestCase):
         if shared:
             (self.prefix / 'Users/Shared/Riot Games/Riot Client.app').mkdir(parents=True)
 
-    def run_launcher(self, *, notify=False):
+    def run_launcher(self, *, notify=False, dprefix=True):
         stub_script(self.repo / 'scripts/desktop-run.sh', 'echo "RUN $*"')
         stub_script(self.repo / 'scripts/installer.sh', 'echo "INSTALL $*"')
+        env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin_sandbox(notify)))
+        env.pop('DPREFIX', None)
+        env.pop('RIOT_GUEST_HOME', None)
+        if dprefix:
+            env['DPREFIX'] = str(self.prefix)
         result = subprocess.run(
             [str(self.repo / 'scripts/launch-shortcut.sh')],
-            capture_output=True, text=True, check=False,
-            env=dict(os.environ, DPREFIX=str(self.prefix),
-                     PATH=str(self.bin_sandbox(notify))),
+            capture_output=True, text=True, check=False, env=env,
         )
         log = self.repo / 'build/desktop-launch.log'
         return result, log.read_text() if log.exists() else ''
@@ -81,6 +95,39 @@ class LaunchShortcutTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('RUN', log)
         self.assertNotIn('INSTALL', log)
+
+    def test_a_client_in_the_configured_prefix_never_starts_the_installer(self):
+        # `configure.py --prefix` recorded a custom prefix; DPREFIX is not
+        # exported by a menu launch and ~/.darling does not exist.
+        self.write_config('BR', prefix=self.prefix)
+        for layout in ({'client': True}, {'shared': True}):
+            with self.subTest(layout=layout):
+                shutil.rmtree(self.prefix)
+                self.prefix.mkdir()
+                self.mark_installed(**layout)
+                (self.repo / 'build/desktop-launch.log').unlink(missing_ok=True)
+                shutil.rmtree(self.root / 'bin', ignore_errors=True)
+                result, log = self.run_launcher(dprefix=False)
+                self.assertEqual(result.returncode, 0, log)
+                self.assertIn('RUN', log)
+                self.assertNotIn('INSTALL', log)
+
+    def test_a_missing_client_in_the_configured_prefix_names_that_prefix(self):
+        self.write_config('BR', prefix=self.prefix)
+        result, log = self.run_launcher(dprefix=False)
+        self.assertEqual(result.returncode, 0, log)
+        self.assertIn(f'Riot Client is not installed in {self.prefix};', log)
+        self.assertIn('INSTALL br', log)
+
+    def test_an_unreadable_configuration_never_starts_the_installer(self):
+        (self.repo / 'build').mkdir()
+        (self.repo / 'build/config.json').write_text('{not json')
+        self.mark_installed(client=True)
+        result, log = self.run_launcher(dprefix=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Could not resolve the Darling prefix', log)
+        self.assertNotIn('INSTALL', log)
+        self.assertNotIn('RUN', log)
 
     def test_a_missing_client_starts_the_installer_with_the_region(self):
         self.write_config('BR')
