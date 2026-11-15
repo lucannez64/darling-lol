@@ -53,6 +53,13 @@ int main(void)
         expect_ok("constant hash matches built", [constant hash] == [built hash]);
         expect_ok("unsigned maximum orders above signed negative",
                   [unsignedConstant compare:negative] == NSOrderedDescending);
+        struct const_int five = { objc_getClass("NSConstantIntegerNumber"), "Q", 5 };
+        NSNumber *unsignedFive = (NSNumber *)&five;
+        NSNumber *notANumber = [NSNumber numberWithDouble:__builtin_nan("")];
+        expect_ok("unsigned constant orders above NaN",
+                  [unsignedFive compare:notANumber] == NSOrderedDescending);
+        expect_ok("NaN orders below unsigned constant",
+                  [notANumber compare:unsignedFive] == NSOrderedAscending);
         expect_ok("unsigned maximum converts to positive double", [unsignedConstant doubleValue] > 0);
         expect_ok("empty array singleton layout", [(NSArray *)&__NSArray0__struct count] == 0);
         expect_ok("empty dictionary singleton layout", [(NSDictionary *)&__NSDictionary0__struct count] == 0);

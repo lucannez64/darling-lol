@@ -85,6 +85,30 @@ python3 scripts/preflight.py --json
 
 If a required check is stricter than your setup, `RCLOL_SKIP_PREFLIGHT=1 ./scripts/build.sh` (and the same for `scripts/install-runtime.sh`) skips the gate for that run. Include the preflight output when reporting a setup failure, and keep `--json` output when a tool needs to parse it.
 
+## Toolbox install fails with an old Fedora container
+
+With `--toolbox`, the installer validates the distribution and the FFmpeg libraries inside the container, and requires Fedora 44 or newer there. Two ways the created container can end up older than that:
+
+- **Non-Fedora hosts:** `toolbox` cannot infer a default Fedora release when the requested distribution does not match the host, so the installer pins `--release 44` (the minimum supported Fedora, overridable with `DARLING_LOL_TOOLBOX_RELEASE`). When 44 stops being the minimum, update the installer constant or set the variable.
+- **Old toolbox packages:** some Ubuntu and Debian releases ship outdated `toolbox` builds that can pull an old default image even on their own; the inner check then fails with `Fedora 44 or newer is required (FFmpeg 8 or 9)` after the container already exists.
+
+Either way, recreate the container from a current image:
+
+```sh
+toolbox rm --force darling-lol
+toolbox create --distro fedora --release 44 darling-lol
+bash scripts/install-native.sh --toolbox
+```
+
+If `toolbox` keeps pulling an old image, create the container from an explicit registry tag (for example `toolbox create --image registry.fedoraproject.org/fedora-toolbox:44 darling-lol`). The same requirements apply when you enter the container manually later (Distrobox included): run `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh` from the checkout inside the container.
+
+## The Darling Launcher shortcut does nothing
+
+The menu/desktop shortcut runs `scripts/launch-shortcut.sh` (or `toolbox run -c <container> .../scripts/launch-shortcut.sh` in Toolbox mode). It checks for the Riot Client and, when it is missing, sends a desktop notification and runs `scripts/installer.sh` with the region recorded in `build/config.json`. Both outcomes write to `build/desktop-launch.log`, so read that file when a launch appears to do nothing:
+
+- `Riot Client is not installed in ...; launching scripts/installer.sh <region>` followed by installer output means the auto-install started; it can take several minutes without any on-screen progress.
+- Without `notify-send` (or a session DBus) the notification is skipped silently; the log is the only feedback channel.
+
 ## Memory installer: permission denied
 
 An earlier sudo server installation can create root-owned `build/backups`. The old memory installer tried to create `build/backups/memory-runtime` there and failed at `backup_folder.mkdir(...)`. The corrected default is a separate user-owned `build/memory-runtime-backups` directory:

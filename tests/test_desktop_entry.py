@@ -39,12 +39,12 @@ class DesktopEntryTests(unittest.TestCase):
         shutil.copy2(ROOT / 'darling-lol.png', project / 'darling-lol.png')
         return project
 
-    def install(self, project):
+    def install(self, project, *args):
         script = project / 'desktop-entry.py'
         script.write_text(HELPER.read_text()
                           .replace('@PROJECT_ROOT@', str(project))
                           .replace('@HOST_HOME@', str(self.home)))
-        return subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+        return subprocess.run([sys.executable, str(script), *args], capture_output=True, text=True,
                               env=dict(os.environ, HOME=str(self.home)), check=False)
 
     def entry(self):
@@ -62,6 +62,8 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertIn('Name=Darling Launcher\n', text)
         self.assertIn('Icon=darling-launcher\n', text)
         self.assertIn(f'Path={project}\n', text)
+        exec_line = next(line for line in text.splitlines() if line.startswith('Exec='))
+        self.assertIn(str(project / 'scripts/launch-shortcut.sh'), exec_line)
         for field in ('Name', 'Comment', 'GenericName', 'Keywords'):
             line = next(line for line in text.splitlines() if line.startswith(field + '='))
             for brand in ('League', 'LoL', 'Riot', 'Vanguard', 'anti-cheat'):
@@ -88,6 +90,22 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertTrue(legacy_entry.is_file())
         self.assertTrue(desktop_entry.is_file())
         self.assertEqual((icons / 'league-of-legends.png').read_text(), 'user icon')
+        self.assertTrue(self.entry().is_file())
+
+    def test_removes_legacy_artifacts_pointing_at_the_current_launcher(self):
+        project = self.project()
+        applications = self.home / '.local/share/applications'
+        applications.mkdir(parents=True)
+        owned = f'[Desktop Entry]\nExec="{project}/scripts/launch-shortcut.sh"\n'
+        legacy_entry = applications / 'league-of-legends.desktop'
+        legacy_entry.write_text(owned)
+        (self.home / 'Desktop').mkdir()
+        desktop_link = self.home / 'Desktop/league-of-legends.desktop'
+        desktop_link.symlink_to(project / 'scripts/launch-shortcut.sh')
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(legacy_entry.exists())
+        self.assertFalse(desktop_link.is_symlink())
         self.assertTrue(self.entry().is_file())
 
     def test_removes_legacy_artifacts_it_created(self):
@@ -130,6 +148,44 @@ class DesktopEntryTests(unittest.TestCase):
             check = subprocess.run(['desktop-file-validate', str(self.entry())],
                                    capture_output=True, text=True, check=False)
             self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_toolbox_entry_launches_through_the_container(self):
+        project = self.project()
+        result = self.install(project, '--toolbox', 'darling-lol')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.entry().read_text()
+        exec_line = next(line for line in text.splitlines() if line.startswith('Exec='))
+        self.assertTrue(exec_line.startswith('Exec=toolbox run -c darling-lol '), exec_line)
+        self.assertIn(str(project / 'scripts/launch-shortcut.sh'), exec_line)
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(self.entry())],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def handler_exec_line(self):
+        handler = self.home / '.local/share/applications/darling-url-handler.desktop'
+        return handler, next(line for line in handler.read_text().splitlines()
+                             if line.startswith('Exec='))
+
+    def test_toolbox_link_handler_opens_inside_the_container(self):
+        project = self.project()
+        result = self.install(project, '--toolbox', 'my-box')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        handler, exec_line = self.handler_exec_line()
+        self.assertEqual(
+            exec_line, f'Exec=toolbox run -c my-box "{project}/scripts/open-guest-url.sh" %u')
+        self.assertIn('MimeType=x-scheme-handler/riotclient;', handler.read_text())
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(handler)],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_native_link_handler_runs_the_script_directly(self):
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, exec_line = self.handler_exec_line()
+        self.assertEqual(exec_line, f'Exec="{project}/scripts/open-guest-url.sh" %u')
 
     def test_identity_fields_match_the_packaged_entry(self):
         project = self.project()
