@@ -2,7 +2,7 @@
 """Render local paths into ignored runtime tools; never alter the source snapshot."""
 import argparse,json,os,re,shutil,sys
 from pathlib import Path
-from common import ROOT,configuration,render
+from common import LOCALES,REGIONS,ROOT,configuration,render
 
 def warn(message):
     """Diagnostics go to stderr: launcher/run.sh keep stdout for their own output."""
@@ -55,16 +55,21 @@ def stale_cache(build):
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--guest-user');p.add_argument('--prefix',type=Path);p.add_argument('--sdk',type=Path)
-p.add_argument('--region');p.add_argument('--locale')
+p.add_argument('--region',help='Riot server region the launcher uses when RCLOL_REGION is not set')
+p.add_argument('--locale',help='Riot client locale for new installs and the first launch; a prefix that '
+               'already ran the client keeps its saved language unless RCLOL_LOCALE is exported')
 a=p.parse_args();c=configuration()
 if a.region:
     region=a.region.strip().upper()
-    if not region:p.error('region must not be empty')
+    # The region is rendered into the launcher's shell text, so only known codes may pass.
+    if region not in REGIONS:p.error('region must be one of '+' '.join(REGIONS))
     c['region']=region
 if a.locale:
     locale=a.locale.strip().replace('-','_')
     if not re.fullmatch('[A-Za-z]{2}_[A-Za-z]{2}',locale):p.error('locale must look like pt_BR')
-    c['locale']=locale[:2].lower()+'_'+locale[-2:].upper()
+    locale=locale[:2].lower()+'_'+locale[-2:].upper()
+    if locale not in LOCALES:p.error(f'locale {locale} is not a Riot Client locale; use one of '+' '.join(LOCALES))
+    c['locale']=locale
 # Keep defaults for configurations written before locale selection existed.
 c.setdefault('region','EUW');c.setdefault('locale','en_GB')
 if a.guest_user:

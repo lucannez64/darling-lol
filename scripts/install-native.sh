@@ -26,6 +26,13 @@ readonly -a REGIONS=(
   'TR|Turkey'
   'RU|Russia'
 )
+# Locales the Riot Client ships; keep in sync with LOCALES in scripts/common.py
+# (tests/test_install_native.py compares the two lists).
+readonly -a LOCALES=(
+  ar_AE cs_CZ de_DE el_GR en_AU en_GB en_PH en_SG en_US es_AR es_ES es_MX
+  fr_FR hu_HU id_ID it_IT ja_JP ko_KR pl_PL pt_BR ro_RO ru_RU th_TH tr_TR
+  vi_VN zh_CN zh_MY zh_TW
+)
 
 VERBOSE=0
 USE_TOOLBOX=0
@@ -39,6 +46,9 @@ PACKAGE_MANAGER=''
 PACKAGES=()
 REGION=''
 LOCALE=''
+# 1 when the locale came from --locale or RCLOL_LOCALE. Only such a locale may
+# pick the region without asking; the system locale is never used unattended.
+LOCALE_EXPLICIT=0
 BG_PID=''
 SUDO_PID=''
 
@@ -130,8 +140,40 @@ normalize_locale() {
   return 1
 }
 
+locale_codes() {
+  printf '%s' "${LOCALES[*]}"
+}
+
 valid_locale() {
-  [[ $1 =~ ^[a-z]{2}_[A-Z]{2}$ ]]
+  local entry
+  for entry in "${LOCALES[@]}"; do
+    [[ $entry == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# Normalize a locale the user gave and refuse one the Riot Client does not
+# ship. $1 names the source (--locale, RCLOL_LOCALE) for the message.
+explicit_locale() {
+  local source=$1 value=$2 normalized
+  normalized=$(normalize_locale "$value") ||
+    fail "Invalid $source '$value'. Expected a value like pt_BR."
+  valid_locale "$normalized" ||
+    fail "Unsupported $source '$value'. Supported locales: $(locale_codes)."
+  printf '%s' "$normalized"
+}
+
+# The system locale when the Riot Client ships it; fails otherwise (fr_CA,
+# de_AT, C, ...), so callers fall back to the default.
+supported_system_locale() {
+  local detected
+  detected=$(detect_system_locale) || return 1
+  valid_locale "$detected" || return 1
+  printf '%s' "$detected"
+}
+
+interactive_run() {
+  (( ! YES )) && [[ -t 0 ]]
 }
 
 detect_system_locale() {
@@ -195,14 +237,18 @@ Options:
   -y, --yes           Skip confirmations (required for non-interactive use)
       --no-confirm     Skip the INSTALL confirmation only (used by the Toolbox re-exec; does not imply --yes)
       --region CODE   Riot server region: $(region_codes)
-                      (default: derived from the system locale, or ${DEFAULT_REGION})
-      --locale CODE   Riot client locale, for example pt_BR
-                      (default: current system locale, or ${DEFAULT_LOCALE})
+                      (asked interactively; with --yes or without a terminal:
+                      the region of an explicit locale, else ${DEFAULT_REGION})
+      --locale CODE   Riot client locale for new installs, for example pt_BR
+                      (asked interactively, with the system locale suggested;
+                      with --yes or without a terminal: ${DEFAULT_LOCALE})
+                      A prefix that already ran the client keeps its saved
+                      language unless RCLOL_LOCALE is exported at launch.
   -h, --help          Show this help
 
 Environment:
-  RCLOL_REGION               Override the detected Riot server region
-  RCLOL_LOCALE               Override the detected Riot client locale
+  RCLOL_REGION               Riot server region, same as --region
+  RCLOL_LOCALE               Riot client locale, same as --locale
   DARLING_LOL_TOOLBOX_NAME   Toolbox container name (default: darling-lol)
   DARLING_LOL_TOOLBOX_RELEASE  Fedora release for 'toolbox create' on non-Fedora
                              hosts (default: ${DEFAULT_FEDORA_RELEASE})
@@ -231,13 +277,13 @@ parse_args() {
         ;;
       --locale)
         (( $# >= 2 )) || fail '--locale requires a value.'
-        LOCALE=$(normalize_locale "$2") ||
-          fail "Invalid locale '$2'. Expected a value like pt_BR."
+        LOCALE=$(explicit_locale locale "$2") || exit 1
+        LOCALE_EXPLICIT=1
         shift
         ;;
       --locale=*)
-        LOCALE=$(normalize_locale "${1#*=}") ||
-          fail "Invalid locale '${1#*=}'. Expected a value like pt_BR."
+        LOCALE=$(explicit_locale locale "${1#*=}") || exit 1
+        LOCALE_EXPLICIT=1
         ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; fail "Unknown option: $1" ;;
@@ -623,18 +669,20 @@ show_banner() {
     region_note=$REGION
   elif [[ -n ${RCLOL_REGION:-} ]]; then
     region_note=${RCLOL_REGION^^}
-  elif [[ -n $LOCALE ]]; then
+  elif (( LOCALE_EXPLICIT )); then
     region_note="$(region_for_locale "$LOCALE")"
-  elif (( YES )); then
+  elif ! interactive_run; then
     region_note="$DEFAULT_REGION (default)"
   else
     region_note='selected interactively after confirmation'
   fi
 
-  if [[ -n $LOCALE ]]; then
+  if (( LOCALE_EXPLICIT )); then
     locale_note=$LOCALE
+  elif [[ -n $LOCALE ]]; then
+    locale_note="$LOCALE (default)"
   else
-    locale_note="$DEFAULT_LOCALE (default)"
+    locale_note='selected interactively after confirmation'
   fi
 
   distribution="Distribution: $FAMILY"
@@ -695,18 +743,62 @@ choose_region() {
   done
 }
 
+# Runs before the INSTALL confirmation. An explicit locale wins; an unattended
+# run keeps the default and never reads the system locale. An interactive run
+# leaves LOCALE empty for select_locale.
 resolve_locale() {
   if [[ -n $LOCALE ]]; then
     return 0
   fi
   if [[ -n ${RCLOL_LOCALE:-} ]]; then
-    LOCALE=$(normalize_locale "$RCLOL_LOCALE") ||
-      fail "Invalid RCLOL_LOCALE '$RCLOL_LOCALE'. Expected a value like pt_BR."
+    LOCALE=$(explicit_locale RCLOL_LOCALE "$RCLOL_LOCALE") || exit 1
+    LOCALE_EXPLICIT=1
     return 0
   fi
-  if ! LOCALE=$(detect_system_locale); then
+  if ! interactive_run; then
     LOCALE=$DEFAULT_LOCALE
   fi
+}
+
+choose_locale() {
+  local default_locale=${1:-$DEFAULT_LOCALE}
+  local choice normalized
+
+  printf '\n%s%sSelect the Riot Client language:%s\n' "$BOLD" "$CYAN" "$RESET"
+  local index line=' '
+  for index in "${!LOCALES[@]}"; do
+    line+=" ${LOCALES[index]}"
+    if (( (index + 1) % 7 == 0 )); then
+      printf '%s\n' "$line"
+      line=' '
+    fi
+  done
+  [[ $line == ' ' ]] || printf '%s\n' "$line"
+  while true; do
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Locale [${default_locale}]: " choice ||
+      fail 'No input received while selecting the locale.'
+    choice=${choice:-$default_locale}
+    if normalized=$(normalize_locale "$choice") && valid_locale "$normalized"; then
+      LOCALE=$normalized
+      return 0
+    fi
+    warning 'Unsupported locale. Choose one of the listed locales.'
+  done
+}
+
+# Interactive runs only: suggest the system locale when the Riot Client ships
+# it, and let the user confirm or change it.
+select_locale() {
+  local suggested
+  if [[ -n $LOCALE ]]; then
+    return 0
+  fi
+  if ! interactive_run; then
+    LOCALE=$DEFAULT_LOCALE
+    return 0
+  fi
+  suggested=$(supported_system_locale) || suggested=$DEFAULT_LOCALE
+  choose_locale "$suggested"
 }
 
 resolve_region() {
@@ -721,18 +813,23 @@ resolve_region() {
     return 0
   fi
 
-  detected=$(region_for_locale "$LOCALE")
-  if (( YES )) || [[ ! -t 0 ]]; then
-    REGION=$detected
+  if ! interactive_run; then
+    # Unattended: only a locale the user gave may pick the region.
+    if (( LOCALE_EXPLICIT )); then
+      REGION=$(region_for_locale "$LOCALE")
+    else
+      REGION=$DEFAULT_REGION
+    fi
     return 0
   fi
+  detected=$(region_for_locale "$LOCALE")
 
-  # When the system locale maps to a server, offer it as a one-key shortcut
+  # When the chosen locale maps to a server, offer it as a one-key shortcut
   # before falling back to the manual region list. The redirect keeps
   # region_for_country's stdout out of the terminal (it runs outside $(...)).
   if [[ $LOCALE == *_* ]] && region_for_country "${LOCALE#*_}" >/dev/null; then
     while true; do
-      read -r -p "${CYAN}${ICON_INFO}${RESET} Use the region server for your system locale (${detected})? [Y/n]: " reply ||
+      read -r -p "${CYAN}${ICON_INFO}${RESET} Use the region server for your locale (${detected})? [Y/n]: " reply ||
         fail 'No input received while selecting the region.'
       reply=${reply,,}
       case "$reply" in
@@ -967,7 +1064,8 @@ finish() {
   printf '%sRepository: %s%s\n' "$DIM" "$TARGET_DIR" "$RESET"
   printf '%sBranch: %s%s\n' "$DIM" "${branch:-detached HEAD}" "$RESET"
   printf '%sCommit: %s%s\n' "$DIM" "${commit:-unknown}" "$RESET"
-  printf '%sRegion/locale: %s / %s%s\n' "$DIM" "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}" "$RESET"
+  printf '%sRegion/locale: %s / %s (used for new installs and the first launch)%s\n' \
+    "$DIM" "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}" "$RESET"
   printf '%sLog: %s%s\n\n' "$DIM" "$LOG" "$RESET"
   local shortcut_ready=0
   if offer_desktop_entry; then
@@ -1028,6 +1126,7 @@ main() {
 
   resolve_locale
   confirm_install
+  select_locale
   resolve_region
   confirm_arch_upgrade
   init_log
