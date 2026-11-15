@@ -437,7 +437,7 @@ Runtime ownership is captured before startup helpers run, so a certificate refre
 Closing the client window is not the same as quitting the client. The window is
 gone but `RiotClientServices`, `LeagueClientUx` and their CEF helpers stay
 resident, and `xwininfo` can still list their windows. If closing the window
-should end the session, opt in to an idle stop:
+should end the session, the launcher stops it itself after a quiet period:
 
 ```sh
 RCLOL_STOP_AFTER_CLIENT_SECONDS=120 ./scripts/run.sh
@@ -447,7 +447,10 @@ The session stops after no managed League/Riot window and no game process have
 been seen for that many seconds, but only after a client window was seen. It
 never stops while a game runs, and it never stops when the window state cannot
 be read (for example a missing display or `xprop`), so a Wayland session without
-Xwayland still has to quit the client normally. The default is off.
+Xwayland still has to quit the client normally. The default is 15 seconds; set
+a larger value when the client hands a game off more slowly than that after its
+window disappears, because a stop during that hand-off would end the game
+launch as well.
 
 Quit the Riot Client itself (tray icon, then Quit) to end the session in every
 setup. If the launcher was killed with `SIGKILL`, or the whole terminal was

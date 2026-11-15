@@ -314,7 +314,7 @@ fi
 # owned it. Set RCLOL_CLEAN_ON_EXIT=0 for the previous exec-only behaviour, and
 # RCLOL_STOP_AFTER_CLIENT_SECONDS=N to stop once the client window has been
 # gone for N seconds with no game running.
-export RCLOL_STOP_AFTER_CLIENT_SECONDS="${RCLOL_STOP_AFTER_CLIENT_SECONDS:-60}"
+export RCLOL_STOP_AFTER_CLIENT_SECONDS="${RCLOL_STOP_AFTER_CLIENT_SECONDS:-15}"
 
 exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   --darling "${darling_bin:-darling}" --runtime-at-start "$runtime_at_start" \
