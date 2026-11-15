@@ -14,8 +14,8 @@ class DisplayLinkFailureChecks(unittest.TestCase):
             self.skipTest('C++ compiler required')
         source = runtime.CompatibilityChecks().patched(
             'darling', 'src/frameworks/CoreVideo/src/CVDisplayLink.mm')
-        guard_start = source.index('struct CVStateGuard {')
-        guard_end = source.index('\n};', guard_start) + 3
+        guard_start = source.index('static __thread int callbackClockFD')
+        guard_end = source.index('\n};', source.index('struct CVStateGuard {', guard_start)) + 3
         bodies = source[guard_start:guard_end]
         for name in ('readHeader', 'slotOffset', 'readState', 'writeState'):
             bodies += runtime.function(source, name)
@@ -45,13 +45,9 @@ static bool read_failure, write_failure;
 static void releaseObject(CVDisplayLinkRef) { ++releases; }
 
 static int lock_calls, unlock_calls, closes, lock_mode, creates;
-static uint64_t owner;
 static int clockOpen() { if(open_fds>=fd_limit)return -1; ++open_fds; return 42; }
 static void clockClose(int) { ++closes; --open_fds; }
 static long clockRead(int, void *out, size_t size, off_t offset) {
-    if (offset == offsetof(CVLinkStateRec, reserved) && size == sizeof(owner)) {
-        *(uint64_t *)out = owner; return sizeof(owner);
-    }
     if (read_failure) return -5;
     assert(offset >= 0 && offset + size <= sizeof(records));
     memcpy(out, (char *)records + offset, size); return size;
@@ -68,7 +64,6 @@ static int clockFlock(int, int operation) {
     if (lock_mode == 2) return -9;
     return 0;
 }
-static pthread_t fake_self() { return (pthread_t)1; }
 static int fake_create(pthread_t *thread, const pthread_attr_t *,
                        void *(*)(void *), void *) {
     *thread = (pthread_t)1;
@@ -77,7 +72,6 @@ static int fake_create(pthread_t *thread, const pthread_attr_t *,
 static int fake_detach(pthread_t) { return 0; }
 static void *displayClockThread(void *) { return nullptr; }
 static void installFrameSinkBridge() {}
-#define pthread_self fake_self
 #define pthread_create fake_create
 #define pthread_detach fake_detach
 '''
@@ -94,10 +88,23 @@ int main() {
     // A failed lock must prevent record access and thread creation.
     assert(CVDisplayLinkStart((void *)1) == kCVReturnError);
     assert(state.running == 0 && creates == 0);
-    owner=1; lock_calls=unlock_calls=0;
-    { CVStateGuard guard; assert(guard.fd == 42 && !guard.locked); }
-    assert(lock_calls == 0 && unlock_calls == 0);
-    owner=0; lock_mode=0;
+    lock_mode=0; lock_calls=unlock_calls=closes=0;
+    fd_limit=1;
+    {
+        CVStateGuard outer;
+        assert(outer.fd == 42 && outer.locked && !outer.borrowed);
+        int calls=lock_calls;
+        {
+            CVCallbackScope scope(outer.fd);
+            CVStateGuard inner;
+            assert(inner.fd == outer.fd && inner.borrowed && !inner.locked);
+            assert(open_fds == 1 && lock_calls == calls);
+            assert(CVDisplayLinkStop((void *)1) == kCVReturnSuccess);
+            assert(open_fds == 1 && lock_calls == calls);
+        }
+        assert(callbackClockFD == -1 && open_fds == 1 && unlock_calls == 0);
+    }
+    assert(open_fds == 0 && closes == 1 && unlock_calls == 1);
     assert(CVDisplayLinkStart((void *)1) == kCVReturnError);
     assert(state.running == 0 && creates == 1);
     assert(CVDisplayLinkStart((void *)1) == kCVReturnSuccess);

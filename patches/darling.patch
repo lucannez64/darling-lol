@@ -4179,10 +4179,10 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..4aa3ffd3e 100644
+index 3e9cba226..a50629bad 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,935 @@
+@@ -1,38 +1,941 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -4905,21 +4905,30 @@ index 3e9cba226..4aa3ffd3e 100644
 +static off_t slotOffset(uint32_t slot) {
 +    return ((off_t)slot + 1) * sizeof(CVLinkStateRec);
 +}
++// Callback reentrancy belongs to the calling thread, not a fallible file
++// record. Borrow the pump's locked descriptor; other threads still lock it.
++static __thread int callbackClockFD = -1;
++struct CVCallbackScope {
++    int previous;
++    explicit CVCallbackScope(int fd) : previous(callbackClockFD) { callbackClockFD = fd; }
++    ~CVCallbackScope() { callbackClockFD = previous; }
++};
 +struct CVStateGuard {
-+    int fd; bool locked;
-+    CVStateGuard() : fd(clockOpen()), locked(false) {
++    int fd; bool locked; bool borrowed;
++    CVStateGuard() : fd(callbackClockFD), locked(false), borrowed(fd >= 0) {
++        if (borrowed) return;
++        fd = clockOpen();
 +        if (fd < 0) return;
-+        uint64_t owner = 0;
-+        clockRead(fd, &owner, sizeof(owner), offsetof(CVLinkStateRec, reserved));
-+        uint64_t thread = (uintptr_t)pthread_self();
-+        if (owner && owner == thread) return; // Callback-side reentrancy.
 +        int result;
 +        do { result = clockFlock(fd, LOCK_EX); } while (result == -4); // Linux EINTR.
 +        locked = result == 0;
 +        if (!locked) { clockClose(fd); fd = -1; }
 +    }
 +    ~CVStateGuard() {
-+        if (fd >= 0) { if (locked) clockFlock(fd, LOCK_UN); clockClose(fd); }
++        if (fd >= 0 && !borrowed) {
++            if (locked) clockFlock(fd, LOCK_UN);
++            clockClose(fd);
++        }
 +    }
 +};
 +static bool readState(int fd, CVLinkStateRec *out, CVDisplayLinkRef link) {
@@ -5021,8 +5030,7 @@ index 3e9cba226..4aa3ffd3e 100644
 +    CVStateGuard guard;
 +    CVLinkStateRec header;
 +    if (guard.fd < 0 || !readHeader(guard.fd, &header)) return;
-+    uint64_t owner = (uintptr_t)pthread_self();
-+    clockWrite(guard.fd, &owner, sizeof(owner), offsetof(CVLinkStateRec, reserved));
++    CVCallbackScope callbacks(guard.fd);
 +    for (uint32_t i = 0; i < header.refs; ++i) {
 +        CVLinkStateRec rec;
 +        if (clockRead(guard.fd, &rec, sizeof(rec), slotOffset(i)) != sizeof(rec)) break;
@@ -5035,8 +5043,6 @@ index 3e9cba226..4aa3ffd3e 100644
 +            writeState(guard.fd, &current);
 +        }
 +    }
-+    owner = 0;
-+    clockWrite(guard.fd, &owner, sizeof(owner), offsetof(CVLinkStateRec, reserved));
 +}
 +
 +/* Keep callbacks off Darling's dispatch trampoline: Chromium can leave its
@@ -5126,7 +5132,7 @@ index 3e9cba226..4aa3ffd3e 100644
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,35 +938,102 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,35 +944,102 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
@@ -5240,7 +5246,7 @@ index 3e9cba226..4aa3ffd3e 100644
  	return kCVReturnSuccess;
  }
  
-@@ -91,7 +1055,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
+@@ -91,7 +1061,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
  			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
  			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
  
@@ -5249,7 +5255,7 @@ index 3e9cba226..4aa3ffd3e 100644
  					forKey: kDirectDisplayArray];
  			return kCVReturnSuccess;
  		}
-@@ -117,14 +1081,34 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+@@ -117,14 +1087,34 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -5287,7 +5293,7 @@ index 3e9cba226..4aa3ffd3e 100644
  	return kCVReturnSuccess;
  }
  
-@@ -150,3 +1134,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
+@@ -150,3 +1140,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
  	CGDisplayModeRelease(mode);
  	return time;
  }
