@@ -4479,7 +4479,7 @@ index d56a213..d416ace 100644
 +
 +const std::vector<Iridium::ArgumentInfo>& Indium::PrivateFunction::argumentInfo() const { return _functionInfo.arguments; }
 diff --git a/src/indium/render-command-encoder.cpp b/src/indium/render-command-encoder.cpp
-index b27ffe5..c9f5289 100644
+index b27ffe5..4210d15 100644
 --- a/src/indium/render-command-encoder.cpp
 +++ b/src/indium/render-command-encoder.cpp
 @@ -1,3 +1,9 @@
@@ -5214,17 +5214,17 @@ index b27ffe5..c9f5289 100644
  	switch (primitiveType) {
  		case PrimitiveType::Point:
 -			pipeline = _privatePSO->pipelines()[0];
-+			pipeline = _privatePSO->pipelineForTopologyIndex(0);
++			pipeline = _privatePSO->pipelineForTopologyIndex(0, _renderPass);
  			break;
  		case PrimitiveType::Line:
  		case PrimitiveType::LineStrip:
 -			pipeline = _privatePSO->pipelines()[1];
-+			pipeline = _privatePSO->pipelineForTopologyIndex(1);
++			pipeline = _privatePSO->pipelineForTopologyIndex(1, _renderPass);
  			break;
  		case PrimitiveType::Triangle:
  		case PrimitiveType::TriangleStrip:
 -			pipeline = _privatePSO->pipelines()[2];
-+			pipeline = _privatePSO->pipelineForTopologyIndex(2);
++			pipeline = _privatePSO->pipelineForTopologyIndex(2, _renderPass);
  			break;
  		default:
  			throw BadEnumValue();
@@ -5415,17 +5415,17 @@ index b27ffe5..c9f5289 100644
  	switch (primitiveType) {
  		case PrimitiveType::Point:
 -			pipeline = _privatePSO->pipelines()[0];
-+			pipeline = _privatePSO->pipelineForTopologyIndex(0);
++			pipeline = _privatePSO->pipelineForTopologyIndex(0, _renderPass);
  			break;
  		case PrimitiveType::Line:
  		case PrimitiveType::LineStrip:
 -			pipeline = _privatePSO->pipelines()[1];
-+			pipeline = _privatePSO->pipelineForTopologyIndex(1);
++			pipeline = _privatePSO->pipelineForTopologyIndex(1, _renderPass);
  			break;
  		case PrimitiveType::Triangle:
  		case PrimitiveType::TriangleStrip:
 -			pipeline = _privatePSO->pipelines()[2];
-+			pipeline = _privatePSO->pipelineForTopologyIndex(2);
++			pipeline = _privatePSO->pipelineForTopologyIndex(2, _renderPass);
  			break;
  		default:
  			throw BadEnumValue();
@@ -5528,7 +5528,7 @@ index b27ffe5..c9f5289 100644
 +    DynamicVK::vkCmdPipelineBarrier(buf->commandBuffer(), stages, stages, VK_DEPENDENCY_BY_REGION_BIT, 1, &barrier, 0, nullptr, 0, nullptr);
 +}
 diff --git a/src/indium/render-pipeline.cpp b/src/indium/render-pipeline.cpp
-index 1b6bb3b..4674d2e 100644
+index 1b6bb3b..fca921b 100644
 --- a/src/indium/render-pipeline.cpp
 +++ b/src/indium/render-pipeline.cpp
 @@ -1,10 +1,19 @@
@@ -5694,12 +5694,10 @@ index 1b6bb3b..4674d2e 100644
  			DynamicVK::vkDestroyPipeline(_privateDevice->device(), pipeline, nullptr);
  			pipeline = VK_NULL_HANDLE;
  		}
-@@ -59,14 +175,64 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -59,14 +175,66 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		_pipelineLayout = VK_NULL_HANDLE;
  	}
  
-+	_compatibleRenderPass = compatibleRenderPass;
-+
 +	std::vector<size_t> inputLocations;
 +	for (const auto& binding : _vertexFunction->functionInfo().bindings)
 +		if (binding.type == Iridium::BindingType::VertexInput) inputLocations.push_back(binding.index);
@@ -5728,13 +5726,17 @@ index 1b6bb3b..4674d2e 100644
 +	} else if (_primitiveTopology == PrimitiveTopologyClass::Line) {
 +		primaryIndex = 1;
 +	}
-+	pipelineForTopologyIndex(primaryIndex);
++	pipelineForTopologyIndex(primaryIndex, compatibleRenderPass);
 +};
 +
-+VkPipeline Indium::PrivateRenderPipelineState::pipelineForTopologyIndex(size_t index) {
++VkPipeline Indium::PrivateRenderPipelineState::pipelineForTopologyIndex(size_t index, VkRenderPass compatibleRenderPass) {
 +	if (index >= _pipelines.size()) {
 +		abort();
 +	}
++	if (_pipelines[index]) {
++		return _pipelines[index];
++	}
++	std::lock_guard<std::mutex> lock(_lazyPipelineMutex);
 +	if (_pipelines[index]) {
 +		return _pipelines[index];
 +	}
@@ -5759,7 +5761,7 @@ index 1b6bb3b..4674d2e 100644
  	shaderStage.module = _vertexFunction->library()->shaderModule();
  	shaderStage.pName = vertexFunctionName.c_str();
  	stages.push_back(shaderStage);
-@@ -82,51 +248,15 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -82,51 +250,15 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  	std::vector<VkVertexInputBindingDescription> vertexBindingDescs;
  	std::vector<VkVertexInputAttributeDescription> vertexAttrDescs;
  
@@ -5816,11 +5818,11 @@ index 1b6bb3b..4674d2e 100644
 +    const auto plan = vertexInputPlan(_vertexDescriptor.value_or(VertexDescriptor{}), inputLocations);
 +    vertexBindingDescs = plan.bindings;
 +    vertexAttrDescs = plan.attributes;
-+    _vertexInputBindings = plan.metalBindings;
++    // recreatePipeline has set _vertexInputBindings from the same plan; encoders may be reading it now.
  
  	vertexInputState.vertexBindingDescriptionCount = vertexBindingDescs.size();
  	vertexInputState.pVertexBindingDescriptions = vertexBindingDescs.data();
-@@ -135,6 +265,8 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -135,6 +267,8 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  
  	VkPipelineInputAssemblyStateCreateInfo inputAssemblyState {};
  	inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -5829,7 +5831,7 @@ index 1b6bb3b..4674d2e 100644
  
  	VkPipelineTessellationStateCreateInfo tesselationState {};
  	tesselationState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-@@ -144,8 +276,6 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -144,8 +278,6 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  
  	VkPipelineRasterizationStateCreateInfo rasterizationState {};
  	rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -5838,7 +5840,7 @@ index 1b6bb3b..4674d2e 100644
  	rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
  	rasterizationState.lineWidth = 1.0f;
  
-@@ -168,6 +298,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -168,6 +300,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  		tmp.dstAlphaBlendFactor = blendFactorToVkBlendFactor(colorInfo.destinationAlphaBlendFactor);
  		tmp.alphaBlendOp = blendOperationToVkBlendOp(colorInfo.alphaBlendOperation);
  		tmp.colorWriteMask = colorWriteMaskToVkColorComponentFlags(colorInfo.writeMask);
@@ -5846,7 +5848,7 @@ index 1b6bb3b..4674d2e 100644
  		colorBlendStates.push_back(tmp);
  	}
  	VkPipelineColorBlendStateCreateInfo colorBlendState {};
-@@ -204,20 +335,6 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+@@ -204,20 +337,6 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  	dynamicState.dynamicStateCount = dynamicStates.size();
  	dynamicState.pDynamicStates = dynamicStates.data();
  
@@ -5867,12 +5869,10 @@ index 1b6bb3b..4674d2e 100644
  	VkGraphicsPipelineCreateInfo pipelineCreateInfo {};
  	pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
  	pipelineCreateInfo.stageCount = stages.size();
-@@ -232,32 +349,14 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
- 	pipelineCreateInfo.pColorBlendState = &colorBlendState;
- 	pipelineCreateInfo.pDynamicState = &dynamicState;
+@@ -234,30 +353,14 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
  	pipelineCreateInfo.layout = _pipelineLayout;
--	pipelineCreateInfo.renderPass = compatibleRenderPass;
--
+ 	pipelineCreateInfo.renderPass = compatibleRenderPass;
+ 
 -	// we can set the primitive topology dynamically, but unfortunately, we can only set it for a different topology
 -	// in the same topology class that the pipeline was created for. this means we need to create 3 pipelines
 -	// (one for each topology class) rather than 5 (one for each primitive topology).
@@ -5890,17 +5890,18 @@ index 1b6bb3b..4674d2e 100644
 -		// TODO
 -		abort();
 -	}
-+	pipelineCreateInfo.renderPass = _compatibleRenderPass;
- 
+-
 -	// finally, one for triangles
 -	inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 -	if (DynamicVK::vkCreateGraphicsPipelines(_privateDevice->device(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &_pipelines[2]) != VK_SUCCESS) {
-+	if (DynamicVK::vkCreateGraphicsPipelines(_privateDevice->device(), _privateDevice->pipelineCache(), 1, &pipelineCreateInfo, nullptr, &_pipelines[index]) != VK_SUCCESS) {
++	VkPipeline pipeline = VK_NULL_HANDLE;
++	if (DynamicVK::vkCreateGraphicsPipelines(_privateDevice->device(), _privateDevice->pipelineCache(), 1, &pipelineCreateInfo, nullptr, &pipeline) != VK_SUCCESS) {
  		// TODO
  		abort();
  	}
++	_pipelines[index] = pipeline;
 +	_privateDevice->notePipelineCreated();
-+	return _pipelines[index];
++	return pipeline;
  };
  
  const Indium::FunctionInfo& Indium::PrivateRenderPipelineState::vertexFunctionInfo() {
@@ -10139,10 +10140,18 @@ index 0000000..962fdad
 +}
 +}
 diff --git a/private-include/indium/render-pipeline.private.hpp b/private-include/indium/render-pipeline.private.hpp
-index 7e5f242..7a4ad51 100644
+index 7e5f242..0ee5e62 100644
 --- a/private-include/indium/render-pipeline.private.hpp
 +++ b/private-include/indium/render-pipeline.private.hpp
-@@ -22,6 +22,9 @@ namespace Indium {
+@@ -6,6 +6,7 @@
+ #include <vulkan/vulkan.h>
+ 
+ #include <array>
++#include <mutex>
+ #include <optional>
+ 
+ namespace Indium {
+@@ -22,6 +23,9 @@ namespace Indium {
  			std::optional<VertexDescriptor> _vertexDescriptor;
  
  		public:
@@ -10152,11 +10161,14 @@ index 7e5f242..7a4ad51 100644
  			PrivateRenderPipelineState(std::shared_ptr<PrivateDevice> device, const RenderPipelineDescriptor& descriptor);
  			~PrivateRenderPipelineState();
  
-@@ -37,9 +40,17 @@ namespace Indium {
+@@ -37,9 +41,20 @@ namespace Indium {
  			//       if so, we would always be able to create the pipeline immediately
  			//       in the constructor.
  			void recreatePipeline(VkRenderPass compatibleRenderPass, bool force);
-+			VkPipeline pipelineForTopologyIndex(size_t index);
++			// Point and line pipelines are built on their first draw, against the render pass of the encoder
++			// that draws: a render pass may be destroyed with its encoder, so none is kept here. Any render
++			// pass this state is used with is assumed compatible with the first one, as in recreatePipeline.
++			VkPipeline pipelineForTopologyIndex(size_t index, VkRenderPass compatibleRenderPass);
 +
 +            bool ready() const {
 +                return _pipelineLayout && (_pipelines[0] || _pipelines[1] || _pipelines[2]);
@@ -10170,12 +10182,13 @@ index 7e5f242..7a4ad51 100644
  
  			INDIUM_PROPERTY_READONLY_OBJECT(PrivateDevice, p, P,rivateDevice);
  
-@@ -51,5 +62,7 @@ namespace Indium {
+@@ -51,5 +66,8 @@ namespace Indium {
  			INDIUM_PROPERTY_REF(DescriptorSetLayouts<2>, d, D,escriptorSetLayouts);
  
  			INDIUM_PROPERTY_READONLY_REF(std::vector<size_t>, v,V,ertexInputBindings);
 +		private:
-+			VkRenderPass _compatibleRenderPass = VK_NULL_HANDLE;
++			// Encoders on different threads may draw a new topology class with the same state.
++			std::mutex _lazyPipelineMutex;
  	};
  };
 diff --git a/private-include/indium/vertex-input.private.hpp b/private-include/indium/vertex-input.private.hpp
