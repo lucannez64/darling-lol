@@ -1513,7 +1513,7 @@ index d49b5f4..45bbd42 100644
  			case VertexFormat::UChar:                 return VK_FORMAT_R8_UINT;
  			case VertexFormat::Char:                  return VK_FORMAT_R8_SINT;
 diff --git a/private-include/iridium/dynamic-llvm.hpp b/private-include/iridium/dynamic-llvm.hpp
-index b3756ef..ac6ea2e 100644
+index b3756ef..f6d648f 100644
 --- a/private-include/iridium/dynamic-llvm.hpp
 +++ b/private-include/iridium/dynamic-llvm.hpp
 @@ -2,16 +2,23 @@
@@ -1594,6 +1594,23 @@ index b3756ef..ac6ea2e 100644
  			_macro(LLVMGetTypeKind) \
  			_macro(LLVMGetUndefMaskElem) \
  			_macro(LLVMGetValueKind) \
+@@ -118,7 +141,15 @@ namespace Iridium {
+ 			_macro(LLVMParseBitcode2) \
+ 			_macro(LLVMPrintModuleToString) \
+ 			_macro(LLVMStructGetTypeAtIndex) \
+-			_macro(LLVMTypeOf)
++			_macro(LLVMTypeOf) \
++			_macro(LLVMGetModuleContext) \
++			_macro(LLVMGetFirstFunction) \
++			_macro(LLVMGetNextFunction) \
++			_macro(LLVMIsDeclaration) \
++			_macro(LLVMGetEnumAttributeKindForName) \
++			_macro(LLVMCreateEnumAttribute) \
++			_macro(LLVMAddAttributeAtIndex) \
++			_macro(LLVMRemoveEnumAttributeAtIndex)
+ 
+ 		#define IRIDIUM_DYNAMICLLVM_FUNCTION_DECL(_name) \
+ 			extern DynamicFunction<decltype(_name)> _name;
 diff --git a/private-include/iridium/spirv.hpp b/private-include/iridium/spirv.hpp
 index 95cd3de..8fa6b1a 100644
 --- a/private-include/iridium/spirv.hpp
@@ -6485,7 +6502,7 @@ index 1e3e971..4c18554 100644
 -	DynamicVK::vkFreeCommandBuffers(_device->device(), _device->oneshotCommandPool(), 1, &cmdBuf);
  };
 diff --git a/src/iridium/air.cpp b/src/iridium/air.cpp
-index 21c501f..3d3b3c0 100644
+index 21c501f..f6c6283 100644
 --- a/src/iridium/air.cpp
 +++ b/src/iridium/air.cpp
 @@ -4,9 +4,46 @@
@@ -6535,16 +6552,32 @@ index 21c501f..3d3b3c0 100644
  // special thanks to https://github.com/YuAo/MetalLibraryArchive for information on the library format
  
  // we use LLVM's C API because it's much more stable than the C++ API and it's good enough for our needs
-@@ -29,6 +66,16 @@ Iridium::AIR::Function::Function(Type type, const std::string& name, const void*
+@@ -29,6 +66,32 @@ Iridium::AIR::Function::Function(Type type, const std::string& name, const void*
  	}
  
  	_module = LLVMSupport::Module(moduleRef, DynamicLLVM::LLVMDisposeModule);
++    // Inline internal helper functions (e.g. _ZL11sampleDepth...) into the entry point
++    // before SSA promotion and control-flow structurization.
++    if (auto entryFn = DynamicLLVM::LLVMGetNamedFunction(moduleRef, _name.c_str())) {
++        auto ctx = DynamicLLVM::LLVMGetModuleContext(moduleRef);
++        unsigned alwaysInlineKind = DynamicLLVM::LLVMGetEnumAttributeKindForName("alwaysinline", 12);
++        unsigned noInlineKind = DynamicLLVM::LLVMGetEnumAttributeKindForName("noinline", 8);
++        unsigned optNoneKind = DynamicLLVM::LLVMGetEnumAttributeKindForName("optnone", 7);
++        auto alwaysInlineAttr = alwaysInlineKind ? DynamicLLVM::LLVMCreateEnumAttribute(ctx, alwaysInlineKind, 0) : nullptr;
++        for (auto fn = DynamicLLVM::LLVMGetFirstFunction(moduleRef); fn; fn = DynamicLLVM::LLVMGetNextFunction(fn)) {
++            if (DynamicLLVM::LLVMIsDeclaration(fn) || fn == entryFn) continue;
++            // optnone requires noinline, so a helper loses both; the entry point keeps its attributes
++            if (optNoneKind) DynamicLLVM::LLVMRemoveEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, optNoneKind);
++            if (noInlineKind) DynamicLLVM::LLVMRemoveEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, noInlineKind);
++            if (alwaysInlineAttr) DynamicLLVM::LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, alwaysInlineAttr);
++        }
++    }
 +    // Normalize local aggregate copies into SSA, then give nested selections and loops
 +    // distinct merges before lowering them into Vulkan's structured control flow.
 +    std::string triple=DynamicLLVM::LLVMGetTarget(moduleRef);
 +    DynamicLLVM::LLVMSetTarget(moduleRef,"spirv64-unknown-unknown");
 +    auto options=DynamicLLVM::LLVMCreatePassBuilderOptions();
-+    auto error=DynamicLLVM::LLVMRunPasses(moduleRef,"function(sroa,mem2reg,loop-unroll,sroa,mem2reg,simplifycfg,structurizecfg)",nullptr,options);
++    auto error=DynamicLLVM::LLVMRunPasses(moduleRef,"always-inline,function(sroa,mem2reg,loop-unroll,sroa,mem2reg,simplifycfg,structurizecfg)",nullptr,options);
 +    DynamicLLVM::LLVMDisposePassBuilderOptions(options);
 +    DynamicLLVM::LLVMSetTarget(moduleRef,triple.c_str());
 +    if(error){auto message=DynamicLLVM::LLVMGetErrorMessage(error);std::string detail=message?message:"unknown LLVM error";DynamicLLVM::LLVMDisposeErrorMessage(message);throw std::runtime_error("Cannot normalize AIR control flow: "+detail);}
@@ -6552,7 +6585,7 @@ index 21c501f..3d3b3c0 100644
  
  	_function = DynamicLLVM::LLVMGetNamedFunction(_module.get(), _name.c_str());
  
-@@ -41,7 +88,86 @@ Iridium::AIR::Function::Function(Type type, const std::string& name, const void*
+@@ -41,7 +104,86 @@ Iridium::AIR::Function::Function(Type type, const std::string& name, const void*
  // TEST
  #include <iostream>
  
@@ -6640,7 +6673,7 @@ index 21c501f..3d3b3c0 100644
  
  static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& builder, LLVMTypeRef llvmType) {
  	using namespace Iridium::SPIRV;
-@@ -68,6 +194,10 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
+@@ -68,6 +210,10 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
  			return builder.declareType(Type(Type::FloatTag {}, 128));
  
  		case LLVMIntegerTypeKind:
@@ -6651,7 +6684,7 @@ index 21c501f..3d3b3c0 100644
  			return builder.declareType(Type(Type::IntegerTag {}, DynamicLLVM::LLVMGetIntTypeWidth(llvmType), /* TODO: how to determine this? */ true));
  
  		case LLVMFunctionTypeKind: {
-@@ -117,28 +247,35 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
+@@ -117,28 +263,35 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
  			}
  			// align the final offset to determine the structure size
  			offset = (offset + (structAlignment - 1)) & ~(structAlignment - 1);
@@ -6691,7 +6724,76 @@ index 21c501f..3d3b3c0 100644
  		} break;
  
  		default:
-@@ -162,14 +299,60 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -146,6 +299,68 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
+ 	}
+ };
+ 
++// AIR i1 values, and vectors of them, are SPIR-V booleans; the integer instructions do not accept them.
++static bool isBooleanLLVMType(LLVMTypeRef type) {
++	if (DynamicLLVM::LLVMGetTypeKind(type) == LLVMVectorTypeKind) type = DynamicLLVM::LLVMGetElementType(type);
++	return DynamicLLVM::LLVMGetTypeKind(type) == LLVMIntegerTypeKind && DynamicLLVM::LLVMGetIntTypeWidth(type) == 1;
++}
++
++// An integer constant whose SPIR-V type has the width llvmTypeToSPIRVType gives an AIR integer of `width` bits.
++static Iridium::SPIRV::ResultID integerConstant(Iridium::SPIRV::Builder& builder, unsigned width, uint64_t value) {
++	switch (width) {
++		case 8: return builder.declareConstantScalar<int8_t>(value);
++		case 16: return builder.declareConstantScalar<int16_t>(value);
++		case 32: return builder.declareConstantScalar<int32_t>(value);
++		case 64: return builder.declareConstantScalar<int64_t>(value);
++		default: throw std::runtime_error("Unsupported AIR integer constant width: " + std::to_string(width));
++	}
++}
++
++// The constant `value` as an integer or floating-point AIR type; a vector type gets a splat.
++static Iridium::SPIRV::ResultID numericConstant(Iridium::SPIRV::Builder& builder, LLVMTypeRef type, int value) {
++	bool isVector = DynamicLLVM::LLVMGetTypeKind(type) == LLVMVectorTypeKind;
++	auto scalarType = isVector ? DynamicLLVM::LLVMGetElementType(type) : type;
++	Iridium::SPIRV::ResultID scalar = Iridium::SPIRV::ResultIDInvalid;
++	switch (DynamicLLVM::LLVMGetTypeKind(scalarType)) {
++		case LLVMIntegerTypeKind: scalar = integerConstant(builder, DynamicLLVM::LLVMGetIntTypeWidth(scalarType), static_cast<int64_t>(value)); break;
++		case LLVMFloatTypeKind: scalar = builder.declareConstantScalar<float>(value); break;
++		case LLVMDoubleTypeKind: scalar = builder.declareConstantScalar<double>(value); break;
++		case LLVMHalfTypeKind: {
++			Iridium::Float16 tmp = static_cast<float>(value);
++			scalar = builder.declareConstantScalar<const Iridium::Float16*>(&tmp);
++		} break;
++		default: throw std::runtime_error("Unsupported AIR numeric constant type");
++	}
++	if (!isVector) return scalar;
++	return builder.declareConstantComposite(llvmTypeToSPIRVType(builder, type), std::vector<Iridium::SPIRV::ResultID>(DynamicLLVM::LLVMGetVectorSize(type), scalar));
++}
++
++// AIR reads and writes the leading scalar or vector of a local or global aggregate through the
++// aggregate's own (opaque) pointer. SPIR-V wants the access chain to that element spelled out.
++// Returns `pointer` unchanged when it already points at `valueType` or does not start with one.
++static Iridium::SPIRV::ResultID leadingElementPointer(Iridium::SPIRV::Builder& builder, Iridium::SPIRV::ResultID pointer, LLVMTypeRef llvmValueType) {
++	using namespace Iridium::SPIRV;
++	switch (DynamicLLVM::LLVMGetTypeKind(llvmValueType)) {
++		case LLVMIntegerTypeKind: case LLVMHalfTypeKind: case LLVMFloatTypeKind: case LLVMDoubleTypeKind: case LLVMVectorTypeKind: break;
++		default: return pointer;
++	}
++	auto pointerType = builder.reverseLookupType(builder.lookupResultType(pointer));
++	if (!pointerType || (pointerType->pointerStorageClass != StorageClass::Private && pointerType->pointerStorageClass != StorageClass::Function)) return pointer;
++	auto valueType = llvmTypeToSPIRVType(builder, llvmValueType);
++	size_t depth = 0;
++	for (auto current = pointerType->targetType; current != valueType; ++depth) {
++		auto type = builder.reverseLookupType(current);
++		if (type && type->backingType == Type::BackingType::Array) current = type->targetType;
++		else if (type && type->backingType == Type::BackingType::Structure && !type->structureMembers.empty()) current = type->structureMembers[0].id;
++		else return pointer;
++	}
++	if (depth == 0) return pointer;
++	auto elementPointer = builder.declareType(Type(Type::PointerTag {}, pointerType->pointerStorageClass, valueType, 8));
++	auto result = builder.encodeAccessChain(elementPointer, pointer, std::vector<ResultID>(depth, builder.declareConstantScalar<int32_t>(0)));
++	builder.setResultType(result, elementPointer);
++	return result;
++}
++
+ static std::string_view llvmMDStringToStringView(LLVMValueRef llvmMDString) {
+ 	unsigned int length = 0;
+ 	auto rawStr = DynamicLLVM::LLVMGetMDString(llvmMDString, &length);
+@@ -162,16 +377,63 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  	{
  		ResultID maybe = builder.lookupResultID(reinterpret_cast<uintptr_t>(llvmValue));
  		if (maybe != ResultIDInvalid) {
@@ -6709,7 +6811,7 @@ index 21c501f..3d3b3c0 100644
 +		if (kind == LLVMConstantIntValueKind) {
 +			auto val = DynamicLLVM::LLVMConstIntGetZExtValue(llvmValue);
 +			auto width = DynamicLLVM::LLVMGetIntTypeWidth(elementType);
-+			element = width == 1 ? builder.declareConstantBool(val != 0) : ((width <= 32) ? builder.declareConstantScalar<int32_t>(val) : builder.declareConstantScalar<int64_t>(val));
++			element = width == 1 ? builder.declareConstantBool(val != 0) : integerConstant(builder, width, val);
 +		} else {
 +			LLVMBool losesInfo = false;
 +			auto val = DynamicLLVM::LLVMConstRealGetDouble(llvmValue, &losesInfo);
@@ -6750,9 +6852,13 @@ index 21c501f..3d3b3c0 100644
 +				return builder.declareConstantBool(val != 0);
 +			}
  			// TODO: how to determine if it's signed or not?
- 			return (width <= 32) ? builder.declareConstantScalar<int32_t>(val) : builder.declareConstantScalar<int64_t>(val);
+-			return (width <= 32) ? builder.declareConstantScalar<int32_t>(val) : builder.declareConstantScalar<int64_t>(val);
++			// The constant has the width of its type: an i8 or i16 array element is not a 32-bit value.
++			return integerConstant(builder, width, val);
  		} break;
-@@ -191,13 +374,15 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+ 
+ 		case LLVMConstantFPValueKind: {
+@@ -191,13 +453,15 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  				} break;
  
  				default:
@@ -6771,7 +6877,7 @@ index 21c501f..3d3b3c0 100644
  
  			for (size_t i = 0; i < count; ++i) {
  				auto constant = DynamicLLVM::LLVMGetOperand(llvmValue, i);
-@@ -207,10 +392,11 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -207,10 +471,11 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  			return builder.declareConstantComposite(llvmTypeToSPIRVType(builder, type), vals);
  		} break;
  
@@ -6785,7 +6891,7 @@ index 21c501f..3d3b3c0 100644
  
  			for (size_t i = 0; i < count; ++i) {
  				auto constant = DynamicLLVM::LLVMGetElementAsConstant(llvmValue, i);
-@@ -220,7 +406,8 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -220,7 +485,8 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  			return builder.declareConstantComposite(llvmTypeToSPIRVType(builder, type), vals);
  		} break;
  
@@ -6795,7 +6901,7 @@ index 21c501f..3d3b3c0 100644
  			return builder.declareUndefinedValue(llvmTypeToSPIRVType(builder, type));
  		} break;
  
-@@ -231,6 +418,21 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -231,6 +497,26 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  
  		case LLVMConstantExprValueKind: {
  			switch (DynamicLLVM::LLVMGetConstOpcode(llvmValue)) {
@@ -6807,6 +6913,11 @@ index 21c501f..3d3b3c0 100644
 +                        throw ImpossibleResultID("Constant AIR GEP requires a zero initial index");
 +                    std::vector<ResultID> indices;
 +                    for (unsigned i=2;i<DynamicLLVM::LLVMGetNumOperands(llvmValue);++i) indices.push_back(llvmValueToResultID(builder,DynamicLLVM::LLVMGetOperand(llvmValue,i)));
++                    // The selected member has the layout mode its global or local was declared with.
++                    LayoutFreeScope layoutFree(baseType.pointerStorageClass == StorageClass::Private || baseType.pointerStorageClass == StorageClass::Function);
++                    // An access chain cannot reinterpret the base as another aggregate.
++                    if (llvmTypeToSPIRVType(builder,DynamicLLVM::LLVMGetGEPSourceElementType(llvmValue)) != baseType.targetType)
++                        throw ImpossibleResultID("Constant AIR GEP reinterprets its base: " + describeLLVMValue(llvmValue));
 +                    auto element = llvmTypeToSPIRVType(builder,gepElementType(llvmValue));
 +                    auto pointer = builder.declareType(Type(Type::PointerTag{},baseType.pointerStorageClass,element,8));
 +                    auto result = indices.empty() ? base : builder.encodeAccessChain(pointer,base,indices);
@@ -6817,7 +6928,7 @@ index 21c501f..3d3b3c0 100644
  				case LLVMBitCast: {
  					auto target = DynamicLLVM::LLVMGetOperand(llvmValue, 0);
  					auto targetID = llvmValueToResultID(builder, target);
-@@ -254,13 +456,315 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -254,13 +540,378 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  				} break;
  
  				default:
@@ -6842,7 +6953,7 @@ index 21c501f..3d3b3c0 100644
 +		}
 +		parts.push_back(name.substr(start, dot - start));
 +		start = dot + 1;
-+	}
+ 	}
 +	return parts;
 +};
 +
@@ -6850,7 +6961,7 @@ index 21c501f..3d3b3c0 100644
 +static bool airTypeTokenIsFloat(std::string_view token) {
 +	if (token.empty()) {
 +		return false;
- 	}
++	}
 +	if (token[0] == 'v') {
 +		token.remove_prefix(1);
 +		while (!token.empty() && token[0] >= '0' && token[0] <= '9') {
@@ -6873,6 +6984,10 @@ index 21c501f..3d3b3c0 100644
 +	constexpr uint16_t FRem = 140;
 +	constexpr uint16_t Any = 154;
 +	constexpr uint16_t All = 155;
++	constexpr uint16_t LogicalEqual = 164;
++	constexpr uint16_t LogicalNotEqual = 165;
++	constexpr uint16_t LogicalOr = 166;
++	constexpr uint16_t LogicalAnd = 167;
 +	constexpr uint16_t Select = 169;
 +	constexpr uint16_t IEqual = 170;
 +	constexpr uint16_t INotEqual = 171;
@@ -6898,6 +7013,7 @@ index 21c501f..3d3b3c0 100644
 +	constexpr uint16_t FUnordGreaterThanEqual = 191;
 +	constexpr uint16_t Ordered = 162;
 +	constexpr uint16_t Unordered = 163;
++	constexpr uint16_t BitwiseAnd = 199;
 +	constexpr uint16_t DPdx = 207;
 +	constexpr uint16_t DPdy = 208;
 +	constexpr uint16_t Fwidth = 209;
@@ -7131,11 +7247,69 @@ index 21c501f..3d3b3c0 100644
 +		return true;
 +	}
 +
++	// packed integer to float vector: air.unpack.<format>[.srgb].<dst type>
++	if ((parts.size() == 4 || parts.size() == 5) && fn == "unpack") {
++		auto format = parts[2];
++		bool isSrgb = parts.size() == 5 && parts[3] == "srgb";
++		if (parts.size() == 5 && !isSrgb) {
++			return false;
++		}
++
++		GLSLOpcode unpackOp;
++		size_t laneCount = 0;
++		if (format == "unorm4x8") {
++			unpackOp = GLSLOpcode::UnpackUnorm4x8;
++			laneCount = 4;
++		} else if (format == "snorm4x8") {
++			unpackOp = GLSLOpcode::UnpackSnorm4x8;
++			laneCount = 4;
++		} else if (format == "unorm2x16") {
++			unpackOp = GLSLOpcode::UnpackUnorm2x16;
++			laneCount = 2;
++		} else if (format == "snorm2x16") {
++			unpackOp = GLSLOpcode::UnpackSnorm2x16;
++			laneCount = 2;
++		} else {
++			return false;
++		}
++
++		auto argType = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMTypeOf(DynamicLLVM::LLVMGetOperand(inst, 0)));
++		auto u32Type = integerTypeWithSign(builder, argType, false);
++		auto packed = builder.encodeBitcast(u32Type, operand(0));
++		auto f32Type = builder.declareType(Type(Type::FloatTag {}, 32));
++		auto unpackVecType = builder.declareType(Type(Type::VectorTag {}, laneCount, f32Type, laneCount * 4, laneCount == 4 ? 16 : 8));
++		auto unpacked = builder.encodeGLSLOp(unpackOp, unpackVecType, { packed });
++
++		if (isSrgb && laneCount == 4) {
++			auto boolType = builder.declareType(Type(Type::BooleanTag {}));
++			auto cThreshold = builder.declareConstantScalar<float>(0.04045f);
++			auto cLinearDiv = builder.declareConstantScalar<float>(12.92f);
++			auto cOffset = builder.declareConstantScalar<float>(0.055f);
++			auto cScale = builder.declareConstantScalar<float>(1.055f);
++			auto cGamma = builder.declareConstantScalar<float>(2.4f);
++			std::vector<ResultID> channels(4);
++			for (unsigned c = 0; c < 3; ++c) {
++				auto ch = builder.encodeCompositeExtract(f32Type, unpacked, { c });
++				auto cond = builder.encodeRawOp(SPIRVOp::FOrdLessThanEqual, boolType, { ch, cThreshold });
++				auto lo = builder.encodeArithBinop(Opcode::FDiv, f32Type, ch, cLinearDiv);
++				auto shifted = builder.encodeArithBinop(Opcode::FAdd, f32Type, ch, cOffset);
++				auto scaled = builder.encodeArithBinop(Opcode::FDiv, f32Type, shifted, cScale);
++				auto hi = builder.encodePow(f32Type, scaled, cGamma);
++				channels[c] = builder.encodeRawOp(SPIRVOp::Select, f32Type, { cond, lo, hi });
++			}
++			channels[3] = builder.encodeCompositeExtract(f32Type, unpacked, { 3 });
++			unpacked = builder.encodeRawOp(80, unpackVecType, channels);
++		}
++
++		resID = (type == unpackVecType) ? unpacked : builder.encodeFConvert(type, unpacked);
++		return true;
++	}
++
 +	return false;
  };
  
  void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& outputInfo) {
-@@ -312,7 +816,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -312,7 +963,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		});
  
  		// declare the GLSL PerVertex structure
@@ -7144,7 +7318,7 @@ index 21c501f..3d3b3c0 100644
  			SPIRV::Type::Member {
  				vec4Type,
  				0,
-@@ -321,13 +825,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -321,13 +972,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				}
  			},
  			// TODO: declare the rest of the structure
@@ -7167,7 +7341,7 @@ index 21c501f..3d3b3c0 100644
  
  		// declare the GLSL VertexIndex input variable
  		vertexIndexVar = builder.addGlobalVariable(ptrIntType, SPIRV::StorageClass::Input);
-@@ -425,7 +937,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -425,7 +1084,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  	// if the function returns a structure, we need to separate the components
  	// into separate output variables.
  
@@ -7176,7 +7350,7 @@ index 21c501f..3d3b3c0 100644
  	auto funcRetType = DynamicLLVM::LLVMGetReturnType(llfuncType);
  	std::vector<LLVMTypeRef> funcParamTypes(DynamicLLVM::LLVMCountParamTypes(llfuncType));
  	DynamicLLVM::LLVMGetParamTypes(llfuncType, funcParamTypes.data());
-@@ -460,7 +972,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -460,7 +1119,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				auto type = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMStructGetTypeAtIndex(funcRetType, i));
  				auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
  				auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
@@ -7185,7 +7359,7 @@ index 21c501f..3d3b3c0 100644
  				++location;
  				_outputValueIDs.push_back(var);
  				builder.referenceGlobalVariable(var);
-@@ -472,13 +984,69 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -472,13 +1131,69 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		auto type = llvmTypeToSPIRVType(builder, funcRetType);
  		auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
  		auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
@@ -7256,7 +7430,7 @@ index 21c501f..3d3b3c0 100644
  
  	//
  	// analyze parameters and mark special values (like the vertex ID)
-@@ -519,7 +1087,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -519,7 +1234,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			auto kind = llvmMDStringToStringView(parameterInfo[1]);
  
  			if (kind == "air.buffer") {
@@ -7267,7 +7441,7 @@ index 21c501f..3d3b3c0 100644
  				auto addrPtrTypeInst = SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::PhysicalStorageBuffer, type, 8);
  				auto addrPtrType = builder.declareType(addrPtrTypeInst);
  				bufferMembers.push_back(SPIRV::Type::Member { addrPtrType, 8 * bufferIndex, {} });
-@@ -575,7 +1145,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -575,7 +1292,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			_parameterIDs.push_back(load);
  			builder.associateExistingResultID(load, llparamVal);
  			builder.setResultType(load, intType);
@@ -7290,7 +7464,7 @@ index 21c501f..3d3b3c0 100644
  			// find the location index info
  			size_t infoIdx = 0;
  			for (; infoIdx < parameterInfo.size(); ++infoIdx) {
-@@ -620,7 +1204,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -620,7 +1351,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Input);
  			auto load = builder.encodeLoad(type, var);
  
@@ -7299,7 +7473,7 @@ index 21c501f..3d3b3c0 100644
  			++paramLocation;
  
  			builder.referenceGlobalVariable(var);
-@@ -631,9 +1215,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -631,9 +1362,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			builder.setResultType(load, type);
  		} else if (kind == "air.vertex_input") {
  			auto type = llvmTypeToSPIRVType(builder, funcParamTypes[i]);
@@ -7320,7 +7494,7 @@ index 21c501f..3d3b3c0 100644
  
  			// find the location index info
  			size_t infoIdx = 0;
-@@ -761,14 +1354,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -761,14 +1501,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				realSampleType = fakeSampleType;
  			}
  
@@ -7348,7 +7522,7 @@ index 21c501f..3d3b3c0 100644
  			auto imagePtrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::UniformConstant, imageType, 8));
  			auto var = builder.addGlobalVariable(imagePtrType, SPIRV::StorageClass::UniformConstant);
  			//auto load = builder.encodeLoad(imageType, var);
-@@ -959,68 +1557,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -959,68 +1704,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  	enum class CFGType {
  		None = 0,
  		Selection,
@@ -7496,7 +7670,7 @@ index 21c501f..3d3b3c0 100644
  		if (isFirst) {
  			isFirst = false;
  
-@@ -1030,16 +1658,54 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1030,16 +1805,59 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			builder.insertLabel(builder.lookupResultID(reinterpret_cast<uintptr_t>(bb)));
  		}
  
@@ -7516,6 +7690,20 @@ index 21c501f..3d3b3c0 100644
 +                case LLVMUIToFP: case LLVMSIToFP: case LLVMFPExt: {
 +                    auto source=DynamicLLVM::LLVMGetOperand(inst,0);auto arg=llvmValueToResultID(builder,source);
 +                    auto type=llvmTypeToSPIRVType(builder,DynamicLLVM::LLVMTypeOf(inst));
++                    auto sourceLLType=DynamicLLVM::LLVMTypeOf(source);auto targetLLType=DynamicLLVM::LLVMTypeOf(inst);
++                    if(isBooleanLLVMType(sourceLLType)||isBooleanLLVMType(targetLLType)){
++                        // AIR i1 is a SPIR-V boolean, which the conversion instructions do not accept.
++                        SPIRV::ResultID result=SPIRV::ResultIDInvalid;
++                        if(opcode==LLVMSExt||opcode==LLVMSIToFP)result=builder.encodeRawOp(SPIRVOp::Select,type,{arg,numericConstant(builder,targetLLType,-1),numericConstant(builder,targetLLType,0)});
++                        else if(opcode==LLVMUIToFP)result=builder.encodeRawOp(SPIRVOp::Select,type,{arg,numericConstant(builder,targetLLType,1),numericConstant(builder,targetLLType,0)});
++                        else if(opcode==LLVMTrunc){
++                            // truncation to i1 keeps the lowest bit
++                            auto bit=builder.encodeRawOp(SPIRVOp::BitwiseAnd,llvmTypeToSPIRVType(builder,sourceLLType),{arg,numericConstant(builder,sourceLLType,1)});
++                            result=builder.encodeRawOp(SPIRVOp::INotEqual,type,{bit,numericConstant(builder,sourceLLType,0)});
++                        }else throw std::runtime_error("Unsupported AIR boolean conversion: "+describeLLVMValue(inst));
++                        builder.associateExistingResultID(result,reinterpret_cast<uintptr_t>(inst));builder.setResultType(result,type);
++                        break;
++                    }
 +                    uint16_t op=opcode==LLVMSExt?114:(opcode==LLVMTrunc?113:(opcode==LLVMFPToUI?109:(opcode==LLVMFPToSI?110:(opcode==LLVMUIToFP?112:(opcode==LLVMSIToFP?111:115)))));
 +                    auto resultType=opcode==LLVMFPToUI?integerTypeWithSign(builder,type,false):type;
 +                    if(opcode==LLVMUIToFP){auto unsignedType=integerTypeWithSign(builder,llvmTypeToSPIRVType(builder,DynamicLLVM::LLVMTypeOf(source)),false);arg=builder.encodeBitcast(unsignedType,arg);}
@@ -7537,22 +7725,13 @@ index 21c501f..3d3b3c0 100644
 +					// AIR i1 is a SPIR-V boolean, not an integer accepted by OpUConvert.
 +					// Keep the declared destination type so later PHIs see the same signedness.
 +					auto sourceType = DynamicLLVM::LLVMTypeOf(source);
-+					auto constant = [&](int value) {
-+						switch (DynamicLLVM::LLVMGetIntTypeWidth(targetType)) {
-+							case 8: return builder.declareConstantScalar<int8_t>(value);
-+							case 16: return builder.declareConstantScalar<int16_t>(value);
-+							case 32: return builder.declareConstantScalar<int32_t>(value);
-+							case 64: return builder.declareConstantScalar<int64_t>(value);
-+							default: throw std::runtime_error("Unsupported AIR boolean extension width");
-+						}
-+					};
-+					auto resID = DynamicLLVM::LLVMGetTypeKind(sourceType) == LLVMIntegerTypeKind && DynamicLLVM::LLVMGetIntTypeWidth(sourceType) == 1
-+						? builder.encodeRawOp(169, type, {argument, constant(1), constant(0)})
++					auto resID = isBooleanLLVMType(sourceType)
++						? builder.encodeRawOp(169, type, {argument, numericConstant(builder, targetType, 1), numericConstant(builder, targetType, 0)})
 +						: builder.encodeBitcast(type, builder.encodeUConvert(type, argument));
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
  					builder.setResultType(resID, type);
-@@ -1048,6 +1714,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1048,6 +1866,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				// TODO: look into using physical addressing instead of logical addressing, which should simplify the translation process
  				//       (since i *think* that's the same addressing mode used by Metal code)
  
@@ -7571,7 +7750,7 @@ index 21c501f..3d3b3c0 100644
  				case LLVMGetElementPtr: {
  					auto base = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto targetType = DynamicLLVM::LLVMTypeOf(inst);
-@@ -1060,17 +1738,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1060,17 +1890,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						indices.push_back(llvmValueToResultID(builder, llindex));
  					}
  
@@ -7605,17 +7784,27 @@ index 21c501f..3d3b3c0 100644
  					// strangely enough, SPIR-V provides no instruction that can do an initial pointer offset like LLVM's GEP does.
  					// there's OpPtrAccessChain, which is tantalizingly named, but unfortunately that instruction doesn't work as expected
  					// either. i've tried using the raw index (i.e. in element units) and the multiplied index (i.e. in bytes), but no dice.
-@@ -1112,6 +1805,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1112,6 +1957,10 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						op = access;
  					}
  
++                    op = leadingElementPointer(builder, op, targetType);
 +                    // Opaque LLVM pointers may be used with more than one load type.
 +                    auto currentPointer=*builder.reverseLookupType(builder.lookupResultType(op));
 +                    if(currentPointer.targetType!=type){auto pointer=builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag{},currentPointer.pointerStorageClass,type,8));op=builder.encodeBitcast(pointer,op);builder.setResultType(op,pointer);}
  					auto resID = builder.encodeLoad(type, op, alignment);
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-@@ -1149,50 +1845,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1123,7 +1972,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+ 					auto llval = DynamicLLVM::LLVMGetOperand(inst, 0);
+ 					auto llptr = DynamicLLVM::LLVMGetOperand(inst, 1);
+ 					auto val = llvmValueToResultID(builder, llval);
+-					auto ptr = llvmValueToResultID(builder, llptr);
++					auto ptr = leadingElementPointer(builder, llvmValueToResultID(builder, llptr), DynamicLLVM::LLVMTypeOf(llval));
+ 
+ 					// TODO: also handle runtime arrays properly here
+ 
+@@ -1149,50 +1998,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeConvertUToF(type, llvmValueToResultID(builder, arg));
@@ -7668,12 +7857,14 @@ index 21c501f..3d3b3c0 100644
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeFConvert(type, llvmValueToResultID(builder, arg));
-@@ -1223,14 +1877,33 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1223,14 +2030,39 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto operand2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  
  						resID = builder.encodeFMax(type, llvmValueToResultID(builder, operand1), llvmValueToResultID(builder, operand2));
 +					} else if (translateAirIntrinsic(builder, inst, name, type, resID, blockTerminated)) {
 +						// handled
++					} else if (name.substr(0, 14) == "llvm.lifetime.") {
++						// always-inline adds lifetime markers; they carry no semantics for SPIR-V.
  					} else {
 -						throw std::runtime_error(std::string("TODO: support actual function calls (name = ") + name.data() + ")");
 +						throw std::runtime_error(std::string("TODO: support actual function calls (name = ") + std::string(name) + ")");
@@ -7698,14 +7889,18 @@ index 21c501f..3d3b3c0 100644
 +                      case LLVMUDiv:op=134;break;case LLVMSDiv:op=135;break;case LLVMURem:op=137;break;case LLVMSRem:op=138;break;
 +                      case LLVMShl:op=196;break;case LLVMLShr:op=194;break;case LLVMAShr:op=195;break;
 +                      case LLVMAnd:op=199;break;case LLVMOr:op=197;break;case LLVMXor:op=198;break;default:break;}
-+                    auto t=*builder.reverseLookupType(type);
-+                    if(t.backingType==SPIRV::Type::BackingType::Boolean){op=opcode==LLVMAnd?167:(opcode==LLVMOr?166:165);}
++                    if(isBooleanLLVMType(DynamicLLVM::LLVMTypeOf(inst))){
++                        // modulo 2, add and sub are xor and mul is and; the others have no boolean form
++                        switch(opcode){case LLVMAnd:case LLVMMul:op=SPIRVOp::LogicalAnd;break;case LLVMOr:op=SPIRVOp::LogicalOr;break;
++                          case LLVMXor:case LLVMAdd:case LLVMSub:op=SPIRVOp::LogicalNotEqual;break;
++                          default:throw std::runtime_error("Unsupported AIR boolean arithmetic: "+describeLLVMValue(inst));}
++                    }
 +                    auto result=builder.encodeRawOp(op,type,{lhs,rhs});builder.associateExistingResultID(result,reinterpret_cast<uintptr_t>(inst));
 +                } break;
  				case LLVMFMul:
  				case LLVMFDiv:
  				case LLVMFAdd:
-@@ -1365,28 +2038,81 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1365,28 +2197,90 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto op1 = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto op2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  					auto predicate = DynamicLLVM::LLVMGetFCmpPredicate(inst);
@@ -7738,20 +7933,20 @@ index 21c501f..3d3b3c0 100644
 +					}
 +
 +					auto resID = builder.encodeRawOp(spirvOpcode, type, { llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2) });
- 
--						case LLVMRealOLT: {
--							resID = builder.encodeFOrdLessThan(llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2));
--						} break;
++
 +					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
 +					builder.setResultType(resID, type);
 +				} break;
  
+-						case LLVMRealOLT: {
+-							resID = builder.encodeFOrdLessThan(llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2));
+-						} break;
 +				case LLVMICmp: {
 +					auto op1 = DynamicLLVM::LLVMGetOperand(inst, 0);
 +					auto op2 = DynamicLLVM::LLVMGetOperand(inst, 1);
 +					auto predicate = DynamicLLVM::LLVMGetICmpPredicate(inst);
 +					auto type = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMTypeOf(inst));
-+
+ 
 +					uint16_t spirvOpcode = 0;
 +					switch (predicate) {
 +						case LLVMIntEQ: spirvOpcode = SPIRVOp::IEqual; break;
@@ -7768,13 +7963,23 @@ index 21c501f..3d3b3c0 100644
 -							throw std::runtime_error("TODO: handle fcmp predicate: " + std::to_string(predicate));
 +							throw std::runtime_error("TODO: handle icmp predicate: " + std::to_string(predicate));
  					}
- 
++					if (isBooleanLLVMType(DynamicLLVM::LLVMTypeOf(op1))) {
++						// OpIEqual and the ordered integer comparisons require integer operands
++						switch (predicate) {
++							case LLVMIntEQ: spirvOpcode = SPIRVOp::LogicalEqual; break;
++							case LLVMIntNE: spirvOpcode = SPIRVOp::LogicalNotEqual; break;
++							default:
++								throw std::runtime_error("Unsupported AIR boolean comparison: " + describeLLVMValue(inst));
++						}
++					}
++
 +					auto resID = builder.encodeRawOp(spirvOpcode, type, { llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2) });
-+
-+					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-+					builder.setResultType(resID, type);
-+				} break;
-+
+ 
+ 					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
+ 					builder.setResultType(resID, type);
+ 				} break;
+ 
+-				case LLVMBr: {
 +				case LLVMSelect: {
 +					auto type = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMTypeOf(inst));
 +					auto resID = builder.encodeRawOp(SPIRVOp::Select, type, {
@@ -7783,11 +7988,10 @@ index 21c501f..3d3b3c0 100644
 +						llvmValueToResultID(builder, DynamicLLVM::LLVMGetOperand(inst, 2)),
 +					});
 +
- 					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
- 					builder.setResultType(resID, type);
- 				} break;
- 
--				case LLVMBr: {
++					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
++					builder.setResultType(resID, type);
++				} break;
++
 +				IRIDIUM_BR_CASES: {
 +                    auto loop=cfgInfos.find(builder.lookupResultID(reinterpret_cast<uintptr_t>(bb)));
 +                    if(loop!=cfgInfos.end() && loop->second.type==CFGType::Loop){
@@ -7798,7 +8002,7 @@ index 21c501f..3d3b3c0 100644
  					if (DynamicLLVM::LLVMIsConditional(inst)) {
  						auto condition = DynamicLLVM::LLVMGetCondition(inst);
  						auto trueLabel = DynamicLLVM::LLVMBasicBlockAsValue(DynamicLLVM::LLVMGetSuccessor(inst, 0));
-@@ -1422,25 +2148,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1422,25 +2316,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto type = llvmTypeToSPIRVType(builder, lltype);
  
  					std::vector<std::pair<SPIRV::ResultID, SPIRV::ResultID>> variablesAndBlocks;
@@ -7840,7 +8044,7 @@ index 21c501f..3d3b3c0 100644
  
  					// ensure the resulting pointer storage class is the same as the input pointer storage class
  					auto typeInst = *builder.reverseLookupType(type);
-@@ -1474,6 +2213,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1474,6 +2381,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		}
  	}
  

@@ -29,11 +29,14 @@ int main(void) {
         assert(![event hasPreciseScrollingDeltas]);
         assert([event scrollingDeltaX]==axes[i][0]);
         assert([event scrollingDeltaY]==axes[i][1]);
+        assert([event timestamp] > 0.0 && [event timestamp] < 315360000.0);
         CGEventRef cg=[event CGEvent];
         assert(cg && CGEventGetType(cg)==kCGEventScrollWheel);
         assert(CGEventGetIntegerValueField(cg,kCGScrollWheelEventIsContinuous)==0);
         assert(CGEventGetIntegerValueField(cg,kCGScrollWheelEventDeltaAxis1)==axes[i][1]);
         assert(CGEventGetIntegerValueField(cg,kCGScrollWheelEventDeltaAxis2)==axes[i][0]);
+        assert(CGEventGetDoubleValueField(cg,kCGScrollWheelEventFixedPtDeltaAxis1)==axes[i][1]);
+        assert(CGEventGetDoubleValueField(cg,kCGScrollWheelEventFixedPtDeltaAxis2)==axes[i][0]);
     }
     puts("SCROLL_EVENT vertical=pass horizontal=pass phases=none cg_notches=pass");
     [pool drain];

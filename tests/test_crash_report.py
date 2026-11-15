@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'tools/crash-report.py'
@@ -167,6 +168,10 @@ class BuildTests(unittest.TestCase):
         self.launch = self.root / 'launch.log'
         self.launch.write_text('launcher line\n')
         self.env = {'USER': 'joe', 'HOME': str(Path.home()), 'SECRET_TOKEN': 'do-not-publish'}
+        # The default launch log falls back to this checkout's build/; never read the real one.
+        checkout = patch.object(crash_report, 'CHECKOUT', self.root / 'checkout')
+        checkout.start()
+        self.addCleanup(checkout.stop)
 
     def tearDown(self):
         self.folder.cleanup()

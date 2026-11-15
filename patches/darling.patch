@@ -8820,7 +8820,7 @@ index fee1bde8..14733ac4 100644
  #endif
 -
 diff --git a/src/startup/mldr/mldr.c b/src/startup/mldr/mldr.c
-index 6617ef82b..dff86b468 100644
+index 6617ef8..73071f7 100644
 --- a/src/startup/mldr/mldr.c
 +++ b/src/startup/mldr/mldr.c
 @@ -21,6 +21,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -9327,19 +9327,20 @@ index 6617ef82b..dff86b468 100644
  static int socket_bitmap_get(socket_bitmap_t* bitmap) {
  	int fd = -1;
  	bool updated = false;
-@@ -648,6 +873,11 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -648,6 +873,12 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  	pthread_mutex_lock(&bitmap->mutex);
  
-+	// darling-lol: placed above the slots because its slot was taken (socket_bitmap_place).
-+	if (socket > bitmap->highest) {
++	// darling-lol: not a slot we track: its slot was taken and it was placed above the slots or below them all
++	// (socket_bitmap_place). There is no bit to clear; indexing with it wrote past the bitmap, or through NULL.
++	if (!bitmap->bits || socket > bitmap->highest || (size_t)(bitmap->highest - socket) >= bitmap->bit_length) {
 +		goto out;
 +	}
 +
  	index = bitmap->highest - socket;
  
  	bitmap->bits[index / 8] &= ~(1 << (index % 8));
-@@ -673,7 +903,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -673,7 +904,13 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  				}
  			}
  
@@ -9354,7 +9355,7 @@ index 6617ef82b..dff86b468 100644
  				// this bit is in-use, so we can't shrink any further
  				break;
  			}
-@@ -685,12 +921,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
+@@ -685,12 +922,20 @@ static void socket_bitmap_put(socket_bitmap_t* bitmap, int socket) {
  
  		if (old_byte_size != new_byte_size) {
  			// we can free one or more bytes from the bitmap
@@ -9380,7 +9381,7 @@ index 6617ef82b..dff86b468 100644
  		}
  	}
  
-@@ -698,6 +942,22 @@ out:
+@@ -698,6 +943,39 @@ out:
  	pthread_mutex_unlock(&bitmap->mutex);
  };
  
@@ -9394,8 +9395,25 @@ index 6617ef82b..dff86b468 100644
 +	}
 +
 +	int placed = fcntl(fd, F_DUPFD, slot);
++
++	/* darling-lol: EMFILE here only means every number from the slot up to the limit is taken (the slot by a foreign
++	 * descriptor, the rest by our sockets), not that the table is full. Failing aborted the new thread ("Failed to
++	 * create socket") and took RiotClientServices and the whole session down (#216). Take the highest free number
++	 * below the slot instead; F_DUPFD still never replaces a descriptor if another thread takes it first. */
++	for (int n = slot - 1; placed < 0 && (errno == EMFILE || errno == EINVAL) && n >= 0; --n) {
++		if (fcntl(n, F_GETFD) >= 0) {
++			continue; // in use; errno unchanged
++		}
++		if (errno != EBADF) {
++			break;
++		}
++		placed = fcntl(fd, F_DUPFD, n);
++	}
++
 +	if (placed != slot) {
++		int saved_errno = errno;
 +		socket_bitmap_put(&socket_bitmap, slot);
++		errno = saved_errno;
 +	}
 +	return placed;
 +}
@@ -9403,7 +9421,7 @@ index 6617ef82b..dff86b468 100644
  int __mldr_create_rpc_socket(void) {
  	int pre_fd = -1;
  	int fd = -1;
-@@ -707,18 +967,11 @@ int __mldr_create_rpc_socket(void) {
+@@ -707,18 +985,11 @@ int __mldr_create_rpc_socket(void) {
  		goto err_out;
  	}
  
@@ -9423,7 +9441,27 @@ index 6617ef82b..dff86b468 100644
  	close(pre_fd);
  	pre_fd = -1;
  
-@@ -772,17 +1025,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
+@@ -740,7 +1011,9 @@ int __mldr_create_rpc_socket(void) {
+ out:
+ 	return fd;
+ 
+-err_out:
++err_out:;
++	int saved_errno = errno;
++
+ 	if (fd >= 0) {
+ 		socket_bitmap_put(&socket_bitmap, fd);
+ 		close(fd);
+@@ -750,6 +1023,8 @@ err_out:
+ 		close(pre_fd);
+ 	}
+ 
++	// darling-lol: the caller reports why (#216)
++	errno = saved_errno;
+ 	return -1;
+ };
+ 
+@@ -772,17 +1047,11 @@ int __mldr_create_process_lifetime_pipe(int* fds) {
  	}
  
  	for (int i = 0; i < 2; ++i) {
@@ -9442,7 +9480,7 @@ index 6617ef82b..dff86b468 100644
  		close(pre_fds[i]);
  		pre_fds[i] = -1;
  	}
-@@ -889,6 +1136,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
+@@ -889,6 +1158,22 @@ static void setup_space(struct load_results* lr, bool is_64_bit) {
  	// keep our write end while closing the unused read end.
  	__mldr_close_process_lifetime_pipe(lifetime_pipe[0]);
  
@@ -12123,10 +12161,33 @@ index 0000000..1f3c473
 +}
 +#endif
 diff --git a/src/startup/mldr/elfcalls/threads.c b/src/startup/mldr/elfcalls/threads.c
-index e789986..0d56b4e 100644
+index e789986..7e056a3 100644
 --- a/src/startup/mldr/elfcalls/threads.c
 +++ b/src/startup/mldr/elfcalls/threads.c
-@@ -387,8 +387,9 @@ int __darling_thread_rpc_socket(void) {
+@@ -32,6 +32,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #include <sys/socket.h>
+ #include <stdio.h>
+ #include <fcntl.h>
++#include <errno.h>
++#include <sys/resource.h>
+ 
+ #include "dthreads.h"
+ 
+@@ -216,7 +218,12 @@ static void* darling_thread_entry(void* p)
+ 	int new_rpc_fd = __mldr_create_rpc_socket();
+ 	if (new_rpc_fd < 0) {
+ 		// we can't do anything if we don't get our own separate connection to darlingserver
+-		fprintf(stderr, "Failed to create socket\n");
++		// darling-lol: say why, so a report tells a full table from a placement failure (#216)
++		int err = errno;
++		struct rlimit limit = { 0 };
++		getrlimit(RLIMIT_NOFILE, &limit);
++		fprintf(stderr, "Failed to create socket: %s (errno %d, RLIMIT_NOFILE %llu)\n",
++			strerror(err), err, (unsigned long long)limit.rlim_cur);
+ 		abort();
+ 	}
+ 
+@@ -387,8 +394,9 @@ int __darling_thread_rpc_socket(void) {
  			// this is the main thread
  			t_server_socket = __dserver_main_thread_socket_fd;
  		} else {
