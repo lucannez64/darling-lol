@@ -1847,6 +1847,27 @@ index b960f17..5f0e621 100644
  		int _wakeupFD;
  		int _timerFD;
  		uint64_t _currentTimerDeadline = 0;
+diff --git a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
+index 57117f2..fd55fee 100644
+--- a/internal-include/darlingserver/thread.hpp
++++ b/internal-include/darlingserver/thread.hpp
+@@ -21,6 +21,7 @@
+ #define _DARLINGSERVER_THREAD_HPP_
+ 
+ #include <memory>
++#include <atomic>
+ #include <sys/types.h>
+ #include <mutex>
+ #include <shared_mutex>
+@@ -88,6 +89,8 @@ namespace DarlingServer {
+ 		bool _terminating = false;
+ 		std::shared_ptr<Call> _activeCall = nullptr;
+ 		std::shared_ptr<Thread> _impersonating = nullptr;
++		// darling-lol: true only while `_impersonating` is set, so the current-thread hooks can skip `_rwlock`
++		std::atomic<bool> _isImpersonating = false;
+ 		bool _processingSignal = false;
+ 		bool _pendingCallOverride = false;
+ 		dtape_semaphore_t* _s2cPerformSempahore = nullptr;
 diff --git a/scripts/generate-rpc-wrappers.py b/scripts/generate-rpc-wrappers.py
 index e35221c..cb399e1 100755
 --- a/scripts/generate-rpc-wrappers.py
@@ -2466,10 +2487,10 @@ index cc10f1d..0ff928a 100644
  	int code = 0;
  	std::vector<uint32_t> oldGroups;
 diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
-index f79f057..54c42aa 100644
+index f79f057..74252c8 100644
 --- a/src/darlingserver.cpp
 +++ b/src/darlingserver.cpp
-@@ -497,6 +497,45 @@ static void handle_sigusr1(int signum) {
+@@ -497,6 +497,113 @@ static void handle_sigusr1(int signum) {
  };
  #endif
  
@@ -2512,10 +2533,78 @@ index f79f057..54c42aa 100644
 +	/* keep running: the goal is to survive teardown races and name the sender */
 +};
 +
++/* darling-lol: on hybrid Intel CPUs the scheduler tends to place the server's
++ * short, frequent bursts on efficiency cores, where every call takes longer.
++ * DSERVER_PCORE_AFFINITY=1 restricts the server's own threads to the
++ * performance cores the kernel lists in /sys/devices/cpu_core/cpus. Call it
++ * after launchd has been forked and before any server thread exists: threads
++ * inherit the creating thread's mask, and guest processes keep their own.
++ * Without the variable, or on a CPU without that topology, nothing changes. */
++static void pinToPerformanceCoresIfRequested() {
++	const char* value = getenv("DSERVER_PCORE_AFFINITY");
++	if (!value || strcmp(value, "1") != 0) {
++		return;
++	}
++
++	char list[512] = {0};
++	FILE* file = fopen("/sys/devices/cpu_core/cpus", "r");
++	bool ok = file && fgets(list, sizeof(list), file) != NULL;
++	if (file) {
++		fclose(file);
++	}
++	if (!ok) {
++		fprintf(stderr, "darlingserver: DSERVER_PCORE_AFFINITY=1, but this CPU reports no performance cores; not pinning\n");
++		return;
++	}
++	list[strcspn(list, "\n")] = '\0';
++
++	cpu_set_t set;
++	CPU_ZERO(&set);
++	int count = 0;
++	const char* cursor = list;
++	while (ok && *cursor != '\0') {
++		char* end;
++		long first = strtol(cursor, &end, 10);
++		long last = first;
++		if (end == cursor || first < 0) {
++			ok = false;
++			break;
++		}
++		if (*end == '-') {
++			cursor = end + 1;
++			last = strtol(cursor, &end, 10);
++			if (end == cursor || last < first) {
++				ok = false;
++				break;
++			}
++		}
++		for (long cpu = first; cpu <= last && cpu < CPU_SETSIZE; ++cpu) {
++			CPU_SET(cpu, &set);
++			++count;
++		}
++		cursor = end;
++		if (*cursor == ',') {
++			++cursor;
++		} else if (*cursor != '\0') {
++			ok = false;
++		}
++	}
++	if (!ok || count == 0) {
++		fprintf(stderr, "darlingserver: DSERVER_PCORE_AFFINITY=1, but the performance-core list '%s' could not be read; not pinning\n", list);
++		return;
++	}
++
++	if (sched_setaffinity(0, sizeof(set), &set) != 0) {
++		fprintf(stderr, "darlingserver: DSERVER_PCORE_AFFINITY=1, but pinning failed: %s\n", strerror(errno));
++		return;
++	}
++	fprintf(stderr, "darlingserver: pinned server threads to performance cores %s\n", list);
++};
++
  int main(int argc, char** argv) {
  	const char* prefix = NULL;
  	uid_t originalUID = -1;
-@@ -515,6 +554,30 @@ int main(int argc, char** argv) {
+@@ -515,6 +622,30 @@ int main(int argc, char** argv) {
  	char putOld[4096];
  	char *p;
  
@@ -2546,7 +2635,7 @@ index f79f057..54c42aa 100644
  	if (argc < 6) {
  		fprintf(stderr, "darlingserver is not meant to be started manually\n");
  		exit(1);
-@@ -577,8 +640,15 @@ int main(int argc, char** argv) {
+@@ -577,8 +708,15 @@ int main(int argc, char** argv) {
  
  		// now set our increased rlimit
  		if (setrlimit(RLIMIT_NOFILE, &increased_limit) != 0) {
@@ -2564,7 +2653,7 @@ index f79f057..54c42aa 100644
  		}
  
  #endif
-@@ -745,6 +815,13 @@ int main(int argc, char** argv) {
+@@ -745,6 +883,15 @@ int main(int argc, char** argv) {
  #endif
  
  	// create the server
@@ -2575,6 +2664,8 @@ index f79f057..54c42aa 100644
 +	if (getenv("RCLOL_DEBUG_ATTACH")) {
 +		prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 +	}
++	// launchd is forked above; the server's threads are created from here on
++	pinToPerformanceCoresIfRequested();
  	auto server = new DarlingServer::Server(prefix);
  
  	// tell the child to go ahead; the socket has been created
@@ -3561,7 +3652,7 @@ index 9cd7b81..f6b87cf 100644
  			continue;
  		}
 diff --git a/src/server.cpp b/src/server.cpp
-index e502e28..20926bc 100644
+index e502e28..c1d9b8f 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
 @@ -28,6 +28,8 @@
@@ -3751,7 +3842,18 @@ index e502e28..20926bc 100644
  	// remove the old socket (if it exists)
  	unlink(_socketPath.c_str());
  
-@@ -540,6 +650,7 @@ void DarlingServer::Server::start() {
+@@ -532,6 +642,10 @@ void DarlingServer::Server::start() {
+ 	// perform dtape initialization that requires a microthread context
+ 	Thread::kernelSync(dtape_init_in_thread);
+ 
++	// the eventfd is registered armed (EPOLLIN | EPOLLONESHOT) in the constructor
++	bool wakeupArmed = true;
++	bool wakeupFired = false;
++
+ 	while (true) {
+ 		if (_canRead) {
+ 			_canRead = _inbox.receiveMany(_listenerSocket);
+@@ -540,25 +654,40 @@ void DarlingServer::Server::start() {
  				// TODO: this could be done concurrently
  				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
  				if (call) {
@@ -3759,9 +3861,19 @@ index e502e28..20926bc 100644
  					_workQueue.push(call->thread());
  				}
  			}
-@@ -549,13 +660,15 @@ void DarlingServer::Server::start() {
- 		eventfd_t value;
- 		eventfd_read(_wakeupFD, &value);
+ 		}
+ 
+-		// reset the eventfd by reading from it
+-		eventfd_t value;
+-		eventfd_read(_wakeupFD, &value);
++		/* darling-lol: the eventfd only needs to be reset after it actually woke us.
++		 * If it is written while we skip the read, it is still armed (see below),
++		 * so the next epoll_wait returns at once and we reset it then. */
++		if (wakeupFired) {
++			wakeupFired = false;
++			eventfd_t value;
++			eventfd_read(_wakeupFD, &value);
++		}
  
 -		if (_canWrite) {
 +		if (_canWrite || !_outbox.empty()) {
@@ -3771,13 +3883,36 @@ index e502e28..20926bc 100644
  		struct epoll_event settings;
  		settings.data.ptr = &_wakeupFD;
 -		settings.events = (_canWrite) ? (EPOLLIN | EPOLLONESHOT) : 0;
+-
+-		if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
+-			throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
 +		// keep the wakeup armed while replies may still be waiting for the socket
 +		// to become writable again, so a producer's failed direct send is retried
-+		settings.events = (_canWrite || !_outbox.empty()) ? (EPOLLIN | EPOLLONESHOT) : 0;
++		bool wantWakeup = _canWrite || !_outbox.empty();
++		settings.events = wantWakeup ? (EPOLLIN | EPOLLONESHOT) : 0;
++
++		/* darling-lol: the registration is one-shot, so it only changes when the
++		 * eventfd fires (which disarms it) or when we change it here. Re-arming it
++		 * on every pass cost one epoll_ctl per message for no effect. */
++		if (wantWakeup != wakeupArmed) {
++			if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
++				throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
++			}
++			wakeupArmed = wantWakeup;
+ 		}
  
- 		if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
- 			throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
-@@ -604,6 +717,25 @@ void DarlingServer::Server::start() {
+ 		struct epoll_event events[16];
+@@ -586,6 +715,9 @@ void DarlingServer::Server::start() {
+ 			} else if (event->data.ptr == &_wakeupFD) {
+ 				// we allow the loop to go back to the top and try to send some messages
+ 				// (if _canWrite is true, the eventfd will be reset; otherwise, there's no point in resetting it)
++				// the one-shot registration is now disarmed and the eventfd has a count to reset
++				wakeupArmed = false;
++				wakeupFired = true;
+ 			} else if (event->data.ptr == &_timerFD) {
+ 				std::unique_lock lock(_timerLock);
+ 				uint64_t expirations = 0;
+@@ -604,6 +736,25 @@ void DarlingServer::Server::start() {
  					continue;
  				}
  
@@ -3803,7 +3938,7 @@ index e502e28..20926bc 100644
  				// we're done handling the timerfd;
  				// we don't need to lock anymore (and the following call might need to arm the timer again)
  				lock.unlock();
-@@ -681,6 +813,7 @@ std::string DarlingServer::Server::prefix() const {
+@@ -681,6 +832,7 @@ std::string DarlingServer::Server::prefix() const {
  };
  
  void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
@@ -3811,7 +3946,7 @@ index e502e28..20926bc 100644
  	thread->doWork();
  };
  
-@@ -815,5 +948,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
+@@ -815,5 +967,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
@@ -3833,6 +3968,285 @@ index e502e28..20926bc 100644
 +		 * microthread must not throw. */
 +	}
  };
+diff --git a/src/thread.cpp b/src/thread.cpp
+index 5563ad9..59aa110 100644
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -53,6 +53,120 @@
+ #define USE_THREAD_GUARD_PAGES 1
+ #define IDLE_THREAD_STACK_COUNT 8
+ 
++/* darling-lol: microthread switches without the signal mask.
++ *
++ * glibc's getcontext() and setcontext() each save or restore the signal mask
++ * with an rt_sigprocmask syscall, and every call from a guest goes through two
++ * of each. darlingserver never changes a thread's signal mask, so every context
++ * it saves carries the same mask as the thread that later resumes it, and the
++ * four syscalls per call change nothing.
++ *
++ * These two do exactly what glibc's x86-64 versions do (same ucontext_t fields,
++ * so glibc's makecontext() still prepares new stacks), minus the mask.
++ * Set DSERVER_GLIBC_CONTEXT in darlingserver's environment to use glibc's again. */
++#if defined(__x86_64__) && defined(__GLIBC__)
++#include <stddef.h>
++#include <stdlib.h>
++#include <ucontext.h>
++
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R8]) == 40, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R9]) == 48, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R12]) == 72, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R13]) == 80, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R14]) == 88, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_R15]) == 96, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RDI]) == 104, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RSI]) == 112, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RBP]) == 120, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RBX]) == 128, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RDX]) == 136, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RCX]) == 152, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RSP]) == 160, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.gregs[REG_RIP]) == 168, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, uc_mcontext.fpregs) == 224, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, __fpregs_mem) == 424, "ucontext_t layout");
++static_assert(offsetof(ucontext_t, __fpregs_mem.mxcsr) == 448, "ucontext_t layout");
++
++extern "C" {
++	int dserver_getcontext(ucontext_t* context) __attribute__((returns_twice));
++	int dserver_setcontext(const ucontext_t* context);
++}
++
++// DSERVER-FAST-CONTEXT-BEGIN
++__asm__(R"asm(
++	.text
++	.p2align 4
++	.globl dserver_getcontext
++	.hidden dserver_getcontext
++	.type dserver_getcontext, @function
++dserver_getcontext:
++	endbr64
++	movq %rbx, 128(%rdi)
++	movq %rbp, 120(%rdi)
++	movq %r12, 72(%rdi)
++	movq %r13, 80(%rdi)
++	movq %r14, 88(%rdi)
++	movq %r15, 96(%rdi)
++	movq %rdi, 104(%rdi)
++	movq %rsi, 112(%rdi)
++	movq %rdx, 136(%rdi)
++	movq %rcx, 152(%rdi)
++	movq %r8, 40(%rdi)
++	movq %r9, 48(%rdi)
++	movq (%rsp), %rcx
++	movq %rcx, 168(%rdi)
++	leaq 8(%rsp), %rcx
++	movq %rcx, 160(%rdi)
++	leaq 424(%rdi), %rcx
++	movq %rcx, 224(%rdi)
++	fnstenv (%rcx)
++	fldenv (%rcx)
++	stmxcsr 448(%rdi)
++	xorl %eax, %eax
++	ret
++	.size dserver_getcontext, .-dserver_getcontext
++
++	.p2align 4
++	.globl dserver_setcontext
++	.hidden dserver_setcontext
++	.type dserver_setcontext, @function
++dserver_setcontext:
++	endbr64
++	movq %rdi, %rdx
++	movq 224(%rdx), %rcx
++	fldenv (%rcx)
++	ldmxcsr 448(%rdx)
++	movq 160(%rdx), %rsp
++	movq 128(%rdx), %rbx
++	movq 120(%rdx), %rbp
++	movq 72(%rdx), %r12
++	movq 80(%rdx), %r13
++	movq 88(%rdx), %r14
++	movq 96(%rdx), %r15
++	movq 168(%rdx), %rcx
++	pushq %rcx
++	movq 112(%rdx), %rsi
++	movq 104(%rdx), %rdi
++	movq 152(%rdx), %rcx
++	movq 40(%rdx), %r8
++	movq 48(%rdx), %r9
++	movq 136(%rdx), %rdx
++	xorl %eax, %eax
++	ret
++	.size dserver_setcontext, .-dserver_setcontext
++)asm");
++// DSERVER-FAST-CONTEXT-END
++
++static const bool useGlibcContext = getenv("DSERVER_GLIBC_CONTEXT") != nullptr;
++
++// macros, not functions: the getcontext call has to stay in the frame that is resumed
++#define dsGetContext(context) (__builtin_expect(useGlibcContext, 0) ? getcontext(context) : dserver_getcontext(context))
++#define dsSetContext(context) (__builtin_expect(useGlibcContext, 0) ? setcontext(context) : dserver_setcontext(context))
++#else
++#define dsGetContext(context) getcontext(context)
++#define dsSetContext(context) setcontext(context)
++#endif
++
+ static thread_local std::shared_ptr<DarlingServer::Thread> currentThreadVar = nullptr;
+ static thread_local bool returningToThreadTop = false;
+ static thread_local ucontext_t backToThreadTopContext;
+@@ -350,14 +464,14 @@ void DarlingServer::Thread::microthreadWorker() {
+ #if DSERVER_ASAN
+ 		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
+ #endif
+-		setcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++		dsSetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 	} else {
+ #if DSERVER_ASAN
+ 		// we're exiting normally, so we might not re-enter this microthread; tell ASAN to drop the fake stack
+ 		__sanitizer_start_switch_fiber(NULL, asanOldStackBottom, asanOldStackSize);
+ #endif
+ 
+-		setcontext(&backToThreadTopContext);
++		dsSetContext(&backToThreadTopContext);
+ 	}
+ 	__builtin_unreachable();
+ };
+@@ -381,13 +495,13 @@ void DarlingServer::Thread::microthreadContinuation() {
+ #if DSERVER_ASAN
+ 		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
+ #endif
+-		setcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++		dsSetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 	} else {
+ #if DSERVER_ASAN
+ 		// see microthreadWorker()
+ 		__sanitizer_start_switch_fiber(NULL, asanOldStackBottom, asanOldStackSize);
+ #endif
+-		setcontext(&backToThreadTopContext);
++		dsSetContext(&backToThreadTopContext);
+ 	}
+ 	__builtin_unreachable();
+ };
+@@ -432,7 +546,7 @@ void DarlingServer::Thread::doWork() {
+ 
+ 	_runningCondvar.notify_all();
+ 
+-	getcontext(&backToThreadTopContext);
++	dsGetContext(&backToThreadTopContext);
+ 
+ 	if (returningToThreadTop) {
+ 		// someone jumped back to the top of the microthread
+@@ -503,7 +617,7 @@ void DarlingServer::Thread::doWork() {
+ 			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
+ #endif
+ 
+-			setcontext(&_resumeContext);
++			dsSetContext(&_resumeContext);
+ 		} else {
+ 			if (!_pendingCall) {
+ 				// if we don't actually have a pending call, we have nothing to do
+@@ -520,7 +634,7 @@ void DarlingServer::Thread::doWork() {
+ 			stackPool.allocate(_stack);
+ 
+ 			ucontext_t newContext;
+-			getcontext(&newContext);
++			dsGetContext(&newContext);
+ 			newContext.uc_stack.ss_sp = _stack.base;
+ 			newContext.uc_stack.ss_size = _stack.size;
+ 			newContext.uc_stack.ss_flags = 0;
+@@ -531,7 +645,7 @@ void DarlingServer::Thread::doWork() {
+ 			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
+ #endif
+ 
+-			setcontext(&newContext);
++			dsSetContext(&newContext);
+ 		}
+ 
+ 		// inform the compiler that it shouldn't do anything that would live past the setcontext calls
+@@ -602,7 +716,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+ 
+ 	unlockMeWhenSuspending = unlockMe;
+ 
+-	getcontext(&_resumeContext);
++	dsGetContext(&_resumeContext);
+ 
+ 	_rwlock.lock();
+ 	if (_suspended) {
+@@ -620,7 +734,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+ 		__sanitizer_start_switch_fiber((continuationCallback) ? nullptr : &asanOldFakeStack, asanOldStackBottom, asanOldStackSize);
+ #endif
+ 
+-		setcontext(&backToThreadTopContext);
++		dsSetContext(&backToThreadTopContext);
+ 		__builtin_unreachable();
+ 	} else {
+ 		// we've been resumed
+@@ -690,7 +804,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
+ 	std::unique_lock lock(_rwlock);
+ 	_continuationCallback = startupCallback;
+ 	_suspended = true;
+-	getcontext(&_resumeContext);
++	dsGetContext(&_resumeContext);
+ };
+ 
+ void DarlingServer::Thread::startKernelThread(std::function<void()> startupCallback) {
+@@ -717,6 +831,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+ 		std::unique_lock lock(_rwlock);
+ 		oldThread = _impersonating;
+ 		_impersonating = thread;
++		_isImpersonating.store(!!thread, std::memory_order_release);
+ 	}
+ 
+ 	if (oldThread) {
+@@ -730,6 +845,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+ };
+ 
+ std::shared_ptr<DarlingServer::Thread> DarlingServer::Thread::impersonatingThread() const {
++	/* darling-lol: this runs on every current_thread()/current_task() lookup, and a
++	 * thread is almost never impersonating another one (only while a kqchan
++	 * delivers on its behalf). Skip the lock in the common case. */
++	if (!_isImpersonating.load(std::memory_order_acquire)) {
++		return nullptr;
++	}
++
+ 	std::shared_lock lock(_rwlock);
+ 	return _impersonating;
+ };
+@@ -768,7 +890,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+ 			__sanitizer_start_switch_fiber(nullptr, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
+ 		}
+ #endif
+-		setcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++		dsSetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 		__builtin_unreachable();
+ 	}
+ 
+@@ -776,7 +898,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+ #if DSERVER_ASAN
+ 	__sanitizer_start_switch_fiber(nullptr, asanOldStackBottom, asanOldStackSize);
+ #endif
+-	setcontext(&backToThreadTopContext);
++	dsSetContext(&backToThreadTopContext);
+ 	__builtin_unreachable();
+ };
+ 
+@@ -1443,7 +1565,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
+ #if DSERVER_ASAN
+ 	__sanitizer_start_switch_fiber(&asanOldFakeStack, stack, stackSize);
+ #endif
+-	setcontext(&_resumeContext);
++	dsSetContext(&_resumeContext);
+ 	__builtin_unreachable();
+ };
+ 
+@@ -1543,7 +1665,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
+ 	dtape_thread_sigexc_enter(currentThreadVar->_dtapeThread);
+ 
+ 	currentThreadVar->_didSyscallReturnDuringInterrupt = false;
+-	getcontext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
++	dsGetContext(&currentThreadVar->_syscallReturnHereDuringInterrupt);
+ 
+ 	if (!currentThreadVar->_didSyscallReturnDuringInterrupt) {
+ 		if (interruptedContinuation) {
 diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
 new file mode 100644
 index 0000000..6faa042

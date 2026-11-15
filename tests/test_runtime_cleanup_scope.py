@@ -40,11 +40,13 @@ class RuntimeCleanupScopeTests(unittest.TestCase):
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.enterContext(patch.dict(os.environ, {'DPREFIX': str(self.prefix)}))
         self.enterContext(patch.object(self.cleanup, 'Path', side_effect=self.fake_path))
-        # Its default Path('/proc') is bound at definition time, before patching Path.
-        running = self.cleanup.any_server_running
-        self.enterContext(patch.object(self.cleanup, 'any_server_running',
-                                     side_effect=lambda proc_root=None: running(
-                                         self.proc if proc_root is None else proc_root)))
+        # Their default Path('/proc') is bound at definition time, before patching Path.
+        for name in ('any_server_running', 'stop_orphaned_launchd', 'stop_riot_crashpad'):
+            self.enterContext(patch.object(self.cleanup, name,
+                                           side_effect=self.fake_proc(getattr(self.cleanup, name))))
+
+    def fake_proc(self, function):
+        return lambda proc_root=None: function(self.proc if proc_root is None else proc_root)
 
     def fake_path(self, value):
         # Never inspect host /proc or remove host shared-memory files.
