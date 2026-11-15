@@ -845,6 +845,14 @@ install_user_runtime() {
     sh scripts/install-runtime.sh
 }
 
+launcher_entry_uses_shortcut_script() {
+  # 0 when the installed menu entry exists and already targets the
+  # auto-installing launcher script. A missing entry is not ready, so the
+  # manual runtime instructions must stay visible.
+  local entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
+  [[ -f $entry ]] && grep -q 'scripts/launch-shortcut.sh' "$entry"
+}
+
 create_desktop_entry() {
   local helper="$TARGET_DIR/build/runtime/tools/desktop-entry.py"
   local args=()
@@ -856,6 +864,11 @@ create_desktop_entry() {
 
   if (( INSIDE_TOOLBOX )); then
     args+=(--toolbox "$TOOLBOX_NAME")
+  fi
+
+  local entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
+  if [[ -f $entry ]] && ! grep -q 'scripts/launch-shortcut.sh' "$entry"; then
+    info 'Updating the Darling Launcher shortcut to use scripts/launch-shortcut.sh (Riot Client auto-installer).'
   fi
 
   # Re-emit the helper's report in the dim summary color; stderr passes
@@ -871,6 +884,8 @@ create_desktop_entry() {
 
   if (( helper_rc != 0 )); then
     warning 'Could not create the desktop entry. Run scripts/create-desktop-entry.sh afterwards.'
+  elif [[ -f $entry ]] && ! grep -q 'scripts/launch-shortcut.sh' "$entry"; then
+    warning 'The Darling Launcher shortcut is still outdated; re-run scripts/create-desktop-entry.sh to finish updating it.'
   fi
 }
 
@@ -880,28 +895,34 @@ offer_desktop_entry() {
   case "${choice,,}" in
     1|yes|true)
       create_desktop_entry
-      return 0
+      # Ready means the installed entry targets the auto-installer; a failed
+      # or outdated creation keeps the manual instructions in the summary.
+      launcher_entry_uses_shortcut_script
+      return
       ;;
     0|no|false)
-      return 0
+      return 1
       ;;
   esac
 
   if (( YES )) || [[ ! -t 0 ]]; then
-    return 0
+    return 1
   fi
 
   printf '\n'
   local reply
   while true; do
-    read -r -p "${CYAN}${ICON_INFO}${RESET} Create a desktop entry automatically? [Y/n]: " reply || return 0
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Create a desktop entry automatically? [Y/n]: " reply || return 1
     case "${reply,,}" in
       ''|y|yes)
         create_desktop_entry
-        return 0
+        # Ready means the installed entry targets the auto-installer; a
+        # failed or outdated creation keeps the manual instructions.
+        launcher_entry_uses_shortcut_script
+        return
         ;;
       n|no)
-        return 0
+        return 1
         ;;
       *)
         warning 'Invalid answer. Enter y or n.'
@@ -948,21 +969,29 @@ finish() {
   printf '%sCommit: %s%s\n' "$DIM" "${commit:-unknown}" "$RESET"
   printf '%sRegion/locale: %s / %s%s\n' "$DIM" "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}" "$RESET"
   printf '%sLog: %s%s\n\n' "$DIM" "$LOG" "$RESET"
-  offer_desktop_entry
+  local shortcut_ready=0
+  if offer_desktop_entry; then
+    shortcut_ready=1
+  fi
 
   local riot_launched=0
   if offer_riot_client_installer; then
     riot_launched=1
   fi
 
-  printf 'To start the runtime:\n'
-  if (( INSIDE_TOOLBOX )); then
-    printf '  toolbox enter %s\n' "$TOOLBOX_NAME"
+  # With the launcher shortcut in place the entry script handles both the
+  # launch and the Riot Client auto-install, so the manual instructions
+  # would only repeat what the shortcut already does.
+  if (( ! shortcut_ready )); then
+    printf 'To start the runtime:\n'
+    if (( INSIDE_TOOLBOX )); then
+      printf '  toolbox enter %s\n' "$TOOLBOX_NAME"
+    fi
+    printf '  cd "%s"\n' "$TARGET_DIR"
+    printf '  RCLOL_REGION=%s RCLOL_LOCALE=%s sh scripts/run.sh\n\n' \
+      "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
   fi
-  printf '  cd "%s"\n' "$TARGET_DIR"
-  printf '  RCLOL_REGION=%s RCLOL_LOCALE=%s sh scripts/run.sh\n\n' \
-    "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
-  if (( ! riot_launched )); then
+  if (( ! riot_launched && ! shortcut_ready )); then
     printf 'To install Riot Client later (%s):\n' "$region"
     printf '  ./scripts/installer.sh %s\n\n' "${region,,}"
   fi

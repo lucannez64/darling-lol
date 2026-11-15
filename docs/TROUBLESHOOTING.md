@@ -102,6 +102,13 @@ bash scripts/install-native.sh --toolbox
 
 If `toolbox` keeps pulling an old image, create the container from an explicit registry tag (for example `toolbox create --image registry.fedoraproject.org/fedora-toolbox:44 darling-lol`). The same requirements apply when you enter the container manually later (Distrobox included): run `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh` from the checkout inside the container.
 
+## The Darling Launcher shortcut does nothing
+
+The menu/desktop shortcut runs `scripts/launch-shortcut.sh` (or `toolbox run -c <container> .../scripts/launch-shortcut.sh` in Toolbox mode). It checks for the Riot Client and, when it is missing, sends a desktop notification and runs `scripts/installer.sh` with the region recorded in `build/config.json`. Both outcomes write to `build/desktop-launch.log`, so read that file when a launch appears to do nothing:
+
+- `Riot Client is not installed in ...; launching scripts/installer.sh <region>` followed by installer output means the auto-install started; it can take several minutes without any on-screen progress.
+- Without `notify-send` (or a session DBus) the notification is skipped silently; the log is the only feedback channel.
+
 ## Memory installer: permission denied
 
 An earlier sudo server installation can create root-owned `build/backups`. The old memory installer tried to create `build/backups/memory-runtime` there and failed at `backup_folder.mkdir(...)`. The corrected default is a separate user-owned `build/memory-runtime-backups` directory:

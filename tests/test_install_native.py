@@ -610,124 +610,173 @@ class ArchUpgradeTests(unittest.TestCase):
 
 class DesktopEntryTests(unittest.TestCase):
     def create_entry(self, *, inside_toolbox=0, name='darling-lol', helper=True,
-                     helper_fails=False):
-        with tempfile.TemporaryDirectory(prefix='install-native-desktop ') as folder:
+                     helper_fails=False, entry=None):
+        with tempfile.TemporaryDirectory(prefix='install-native-desktop-') as folder:
             repo = Path(folder) / 'repo'
+            home = Path(folder) / 'home'
+            home.mkdir()
             tools = repo / 'build/runtime/tools'
             tools.mkdir(parents=True)
             if helper:
                 (tools / 'desktop-entry.py').write_text('')
+            entry_file = home / '.local/share/applications/darling-launcher.desktop'
+            if entry is not None:
+                entry_file.parent.mkdir(parents=True)
+                script = ('launch-shortcut.sh' if entry == 'current'
+                          else 'desktop-run.sh')
+                entry_file.write_text(
+                    f'[Desktop Entry]\nExec="{repo}/scripts/{script}"\n')
             args_file = Path(folder) / 'args'
-            fake_python = (f'python3() {{ printf "%s\\n" "$@" > "{args_file}"; }}'
-                           if not helper_fails else 'python3() { return 7; }')
+            # The stub helper records its arguments and, like the real one,
+            # rewrites an existing entry to the current shortcut script.
+            if helper_fails:
+                fake_python = 'python3() { return 7; }'
+            else:
+                refresh = ''
+                if entry is not None:
+                    refresh = (
+                        f'  printf "[Desktop Entry]\\nExec=\\"{repo}/scripts/launch-shortcut.sh\\"\\n"'
+                        f' > "{entry_file}"\n'
+                    )
+                fake_python = (
+                    'python3() {\n'
+                    f'  printf "%s\\n" "$@" > "{args_file}"\n'
+                    f'{refresh}'
+                    '}\n'
+                )
             snippet = f'''
 source "$INSTALLER"
 TARGET_DIR="{repo}"
 TOOLBOX_NAME="{name}"
 INSIDE_TOOLBOX={inside_toolbox}
+HOME="{home}"
 {fake_python}
 create_desktop_entry
 '''
             result = run_sourced(snippet)
             arguments = args_file.read_text().splitlines() if args_file.exists() else []
-            return result, arguments
+            # The disposable tree dies with this helper; hand back content.
+            entry_text = entry_file.read_text() if entry_file.exists() else ''
+            return result, arguments, entry_text
 
     def test_native_install_calls_helper_without_toolbox(self):
-        result, arguments = self.create_entry()
+        result, arguments, _ = self.create_entry()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(arguments), 1)
         self.assertTrue(arguments[0].endswith('build/runtime/tools/desktop-entry.py'))
 
     def test_toolbox_install_passes_the_container_name(self):
-        result, arguments = self.create_entry(inside_toolbox=1, name='my-box')
+        result, arguments, _ = self.create_entry(inside_toolbox=1, name='my-box')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(arguments), 3)
         self.assertEqual(arguments[1:], ['--toolbox', 'my-box'])
         self.assertTrue(arguments[0].endswith('build/runtime/tools/desktop-entry.py'))
 
-    def test_enabled_environment_calls_helper(self):
-        result = run_sourced(
+    def test_an_outdated_shortcut_is_flagged_and_refreshed(self):
+        result, _, entry_text = self.create_entry(entry='old')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Updating the Darling Launcher shortcut', result.stdout)
+        self.assertNotIn('still outdated', result.stderr)
+        self.assertIn('scripts/launch-shortcut.sh', entry_text)
+
+    def test_a_current_shortcut_is_not_flagged(self):
+        result, _, entry_text = self.create_entry(entry='current')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Updating the Darling Launcher shortcut', result.stdout)
+        self.assertNotIn('still outdated', result.stderr)
+        self.assertIn('scripts/launch-shortcut.sh', entry_text)
+
+    def test_a_failed_helper_leaves_the_outdated_shortcut_with_a_warning(self):
+        result, _, entry_text = self.create_entry(entry='old', helper_fails=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('Updating the Darling Launcher shortcut', result.stdout)
+        self.assertIn('Could not create the desktop entry', result.stderr)
+        self.assertIn('scripts/desktop-run.sh', entry_text)
+
+    def offer_home(self, *, ready=False):
+        """A disposable HOME, optionally holding a current launcher entry."""
+        tmp = tempfile.TemporaryDirectory(prefix='install-native-offer-')
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        if ready:
+            entry = home / '.local/share/applications/darling-launcher.desktop'
+            entry.parent.mkdir(parents=True)
+            entry.write_text('[Desktop Entry]\nExec="/repo/scripts/launch-shortcut.sh"\n')
+        return home
+
+    def offer_snippet(self, home, body='YES=0\noffer_desktop_entry'):
+        return (
             'source "$INSTALLER"\n'
             'create_desktop_entry() { printf "CALLED\\n"; }\n'
-            'YES=0\n'
-            'offer_desktop_entry',
+            f'HOME="{home}"\n'
+            f'{body}\n'
+        )
+
+    def test_enabled_environment_calls_helper(self):
+        result = run_sourced(
+            self.offer_snippet(self.offer_home(ready=True)),
             DARLING_LOL_DESKTOP_ENTRY='1',
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('CALLED', result.stdout)
 
-    def test_disabled_environment_skips_helper(self):
+    def test_disabled_environment_skips_helper_and_counts_as_declined(self):
         result = run_sourced(
-            'source "$INSTALLER"\n'
-            'create_desktop_entry() { printf "CALLED\\n"; }\n'
-            'offer_desktop_entry',
+            self.offer_snippet(self.offer_home()),
             DARLING_LOL_DESKTOP_ENTRY='0',
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertNotIn('CALLED', result.stdout)
 
-    def test_assume_yes_and_non_interactive_runs_skip_the_prompt(self):
-        snippet = (
-            'source "$INSTALLER"\n'
-            'create_desktop_entry() { printf "CALLED\\n"; }\n'
-            'YES=1\n'
-            'offer_desktop_entry'
-        )
-        result = run_sourced(snippet)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_assume_yes_and_non_interactive_runs_decline_the_offer(self):
+        result = run_sourced(self.offer_snippet(self.offer_home(), body='YES=1\noffer_desktop_entry'))
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertNotIn('CALLED', result.stdout)
 
-        result = run_sourced(snippet.replace('YES=1', 'YES=0'))
-        self.assertEqual(result.returncode, 0, result.stderr)
+        result = run_sourced(self.offer_snippet(self.offer_home()))
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertNotIn('CALLED', result.stdout)
 
     def test_affirmative_and_negative_prompt_answers(self):
-        snippet = (
-            'source "$INSTALLER"\n'
-            'create_desktop_entry() { printf "CALLED\\n"; }\n'
-            'YES=0\n'
-            'offer_desktop_entry'
-        )
-        code, output = run_sourced_pty(snippet, b'YES\n')
+        code, output = run_sourced_pty(
+            self.offer_snippet(self.offer_home(ready=True)), b'YES\n')
         self.assertEqual(code, 0, output)
         self.assertIn('Create a desktop entry', output)
         self.assertIn('CALLED', output)
 
-        code, output = run_sourced_pty(snippet, b'n\n')
-        self.assertEqual(code, 0, output)
+        code, output = run_sourced_pty(
+            self.offer_snippet(self.offer_home()), b'n\n')
+        self.assertEqual(code, 1, output)
         self.assertNotIn('CALLED', output)
 
     def test_an_empty_answer_defaults_to_yes(self):
-        snippet = (
-            'source "$INSTALLER"\n'
-            'create_desktop_entry() { printf "CALLED\\n"; }\n'
-            'YES=0\n'
-            'offer_desktop_entry'
-        )
-        code, output = run_sourced_pty(snippet, b'\n')
+        code, output = run_sourced_pty(
+            self.offer_snippet(self.offer_home(ready=True)), b'\n')
         self.assertEqual(code, 0, output)
         self.assertIn('Create a desktop entry automatically? [Y/n]', output)
         self.assertIn('CALLED', output)
 
+    def test_an_accepted_offer_without_a_ready_shortcut_counts_as_declined(self):
+        # The stub create_desktop_entry prints but never installs the entry,
+        # mirroring a failed helper: the summary keeps the manual blocks.
+        code, output = run_sourced_pty(self.offer_snippet(self.offer_home()), b'\n')
+        self.assertEqual(code, 1, output)
+        self.assertIn('CALLED', output)
+
     def test_an_invalid_answer_asks_again(self):
-        snippet = (
-            'source "$INSTALLER"\n'
-            'create_desktop_entry() { printf "CALLED\\n"; }\n'
-            'YES=0\n'
-            'offer_desktop_entry'
-        )
-        code, output = run_sourced_pty(snippet, b'maybe\nn\n')
-        self.assertEqual(code, 0, output)
+        code, output = run_sourced_pty(
+            self.offer_snippet(self.offer_home()), b'maybe\nn\n')
+        self.assertEqual(code, 1, output)
         self.assertIn('Invalid answer. Enter y or n.', output)
         self.assertNotIn('CALLED', output)
 
     def test_missing_or_failing_helper_only_warns(self):
-        result, arguments = self.create_entry(helper=False)
+        result, arguments, _ = self.create_entry(helper=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(arguments, [])
         self.assertIn('Desktop entry helper not found', result.stderr)
 
-        result, _ = self.create_entry(helper_fails=True)
+        result, _, _ = self.create_entry(helper_fails=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Could not create the desktop entry', result.stderr)
 
@@ -897,8 +946,8 @@ class RiotInstallerOfferTests(unittest.TestCase):
 
 
 class FinishTests(unittest.TestCase):
-    def finish_snippet(self, *, riot_offer_rc):
-        with tempfile.TemporaryDirectory(prefix='install-native-finish ') as folder:
+    def finish_snippet(self, *, riot_offer_rc, desktop_offer_rc=1):
+        with tempfile.TemporaryDirectory(prefix='install-native-finish-') as folder:
             target = Path(folder) / 'repo'
             log = Path(folder) / 'install.log'
             snippet = f'''
@@ -909,7 +958,7 @@ git() {{
     *rev-parse*) printf "abc1234\\n" ;;
   esac
 }}
-offer_desktop_entry() {{ printf "DESKTOP_OFFER\\n"; }}
+offer_desktop_entry() {{ printf "DESKTOP_OFFER\\n"; return {desktop_offer_rc}; }}
 offer_riot_client_installer() {{ printf "RIOT_OFFER\\n"; return {riot_offer_rc}; }}
 TARGET_DIR="{target}"
 LOG="{log}"
@@ -935,8 +984,31 @@ finish
         self.assertLess(result.stdout.index('DESKTOP_OFFER'),
                         result.stdout.index('To start the runtime'))
 
+    def test_a_declined_shortcut_keeps_both_manual_blocks(self):
+        result = self.finish_snippet(riot_offer_rc=1, desktop_offer_rc=1)
+        self.assertIn('To start the runtime', result.stdout)
+        self.assertIn('To install Riot Client later (EUW):', result.stdout)
+        self.assertIn('./scripts/installer.sh euw', result.stdout)
+
+    def test_a_launched_riot_installer_hides_only_the_later_hint(self):
+        result = self.finish_snippet(riot_offer_rc=0, desktop_offer_rc=1)
+        self.assertIn('To start the runtime', result.stdout)
+        self.assertNotIn('To install Riot Client later', result.stdout)
+
+    def test_a_ready_shortcut_hides_both_manual_blocks(self):
+        result = self.finish_snippet(riot_offer_rc=1, desktop_offer_rc=0)
+        self.assertNotIn('To start the runtime', result.stdout)
+        self.assertNotIn('To install Riot Client later', result.stdout)
+
+    def test_a_ready_shortcut_hides_the_manual_blocks_even_after_the_riot_offer(self):
+        result = self.finish_snippet(riot_offer_rc=0, desktop_offer_rc=0)
+        self.assertLess(result.stdout.index('DESKTOP_OFFER'),
+                        result.stdout.index('RIOT_OFFER'))
+        self.assertNotIn('To start the runtime', result.stdout)
+        self.assertNotIn('To install Riot Client later', result.stdout)
+
     def test_riot_offer_sits_after_the_desktop_entry_and_hides_the_later_hint(self):
-        result = self.finish_snippet(riot_offer_rc=0)
+        result = self.finish_snippet(riot_offer_rc=0, desktop_offer_rc=1)
         self.assertLess(result.stdout.index('DESKTOP_OFFER'),
                         result.stdout.index('RIOT_OFFER'))
         self.assertLess(result.stdout.index('RIOT_OFFER'),

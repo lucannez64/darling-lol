@@ -62,6 +62,8 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertIn('Name=Darling Launcher\n', text)
         self.assertIn('Icon=darling-launcher\n', text)
         self.assertIn(f'Path={project}\n', text)
+        exec_line = next(line for line in text.splitlines() if line.startswith('Exec='))
+        self.assertIn(str(project / 'scripts/launch-shortcut.sh'), exec_line)
         for field in ('Name', 'Comment', 'GenericName', 'Keywords'):
             line = next(line for line in text.splitlines() if line.startswith(field + '='))
             for brand in ('League', 'LoL', 'Riot', 'Vanguard', 'anti-cheat'):
@@ -88,6 +90,22 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertTrue(legacy_entry.is_file())
         self.assertTrue(desktop_entry.is_file())
         self.assertEqual((icons / 'league-of-legends.png').read_text(), 'user icon')
+        self.assertTrue(self.entry().is_file())
+
+    def test_removes_legacy_artifacts_pointing_at_the_current_launcher(self):
+        project = self.project()
+        applications = self.home / '.local/share/applications'
+        applications.mkdir(parents=True)
+        owned = f'[Desktop Entry]\nExec="{project}/scripts/launch-shortcut.sh"\n'
+        legacy_entry = applications / 'league-of-legends.desktop'
+        legacy_entry.write_text(owned)
+        (self.home / 'Desktop').mkdir()
+        desktop_link = self.home / 'Desktop/league-of-legends.desktop'
+        desktop_link.symlink_to(project / 'scripts/launch-shortcut.sh')
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(legacy_entry.exists())
+        self.assertFalse(desktop_link.is_symlink())
         self.assertTrue(self.entry().is_file())
 
     def test_removes_legacy_artifacts_it_created(self):
@@ -138,7 +156,7 @@ class DesktopEntryTests(unittest.TestCase):
         text = self.entry().read_text()
         exec_line = next(line for line in text.splitlines() if line.startswith('Exec='))
         self.assertTrue(exec_line.startswith('Exec=toolbox run -c darling-lol '), exec_line)
-        self.assertIn(str(project / 'scripts/desktop-run.sh'), exec_line)
+        self.assertIn(str(project / 'scripts/launch-shortcut.sh'), exec_line)
         if shutil.which('desktop-file-validate'):
             check = subprocess.run(['desktop-file-validate', str(self.entry())],
                                    capture_output=True, text=True, check=False)

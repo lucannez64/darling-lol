@@ -10,9 +10,12 @@ PROJECT_ROOT = Path("@PROJECT_ROOT@")
 HOST_HOME = Path("@HOST_HOME@")
 
 # Marks a launcher entry created by this project.  Previous versions pointed
-# Exec at this checkout's desktop-run.sh, so an entry without that marker
-# belongs to someone else and is left alone.
+# Exec at this checkout's desktop-run.sh, so an entry without one of these
+# markers belongs to someone else and is left alone.
 LEGACY_RUN_SCRIPT = "scripts/desktop-run.sh"
+# Current Exec target: it starts the Riot Client installer automatically when
+# the client is missing, then delegates to desktop-run.sh.
+LAUNCH_SHORTCUT_SCRIPT = "scripts/launch-shortcut.sh"
 
 # Distinctive fragments of the artwork the previous helper wrote.
 LEGACY_SVG_MARKERS = ('id="goldGrad"', 'M172 108 L242 108')
@@ -43,7 +46,7 @@ def exec_command(toolbox: str | None = None) -> str:
     ``--toolbox``; the launcher must then re-enter the same container instead
     of running on the host, where Darling's dependencies are not installed.
     """
-    launcher = str(PROJECT_ROOT / LEGACY_RUN_SCRIPT)
+    launcher = str(PROJECT_ROOT / LAUNCH_SHORTCUT_SCRIPT)
     if toolbox is None:
         return quote_exec_argument(launcher)
     return " ".join(
@@ -54,7 +57,8 @@ def exec_command(toolbox: str | None = None) -> str:
 
 def legacy_entry_owned(path: Path) -> bool:
     """Return True when a launcher entry was created by this project."""
-    marker = str(PROJECT_ROOT / LEGACY_RUN_SCRIPT)
+    markers = [str(PROJECT_ROOT / script) for script in (LEGACY_RUN_SCRIPT,
+                                                         LAUNCH_SHORTCUT_SCRIPT)]
     try:
         text = path.read_text(errors="ignore")
     except OSError:
@@ -63,7 +67,8 @@ def legacy_entry_owned(path: Path) -> bool:
             text = os.readlink(path)
         except OSError:
             return False
-    return marker in text or marker.replace("%", "%%") in text
+    return any(marker in text or marker.replace("%", "%%") in text
+               for marker in markers)
 
 
 def remove_legacy_entry(path: Path) -> bool:
@@ -153,9 +158,9 @@ def main(toolbox: str | None = None):
     # WM_CLASS from -[NSProcessInfo processName], which is the basename of
     # argv[0], and the launcher starts .../RiotClientServices.  It is an
     # interoperability identifier, not a user-visible name.
-    # Terminal stays false here because this entry runs desktop-run.sh, which
-    # saves session output in build/desktop-launch.log; the packaged entry runs
-    # the session directly and therefore needs a terminal.
+    # Terminal stays false here because this entry runs launch-shortcut.sh,
+    # which saves session output in build/desktop-launch.log; the packaged
+    # entry runs the session directly and therefore needs a terminal.
     exec_cmd = exec_command(toolbox)
     project_path = escape_string(str(PROJECT_ROOT))
     desktop_content = f"""[Desktop Entry]
