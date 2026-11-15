@@ -1012,7 +1012,7 @@ class RiotInstallerOfferTests(unittest.TestCase):
                 helper = target / 'scripts' / 'installer.sh'
                 helper.write_text(
                     '#!/bin/sh\n'
-                    'printf "RIOT %s\\n" "$1" > riot.log\n'
+                    'printf "RIOT %s %s\\n" "$1" "${RCLOL_LOCALE:-unset}" > riot.log\n'
                     f'exit {installer_rc}\n'
                 )
                 helper.chmod(0o755)
@@ -1020,6 +1020,7 @@ class RiotInstallerOfferTests(unittest.TestCase):
                 'source "$INSTALLER"\n'
                 f'TARGET_DIR="{target}"\n'
                 f'REGION={region}\n'
+                'LOCALE=pt_BR\n'
                 f'YES={yes}\n'
                 'offer_riot_client_installer\n'
                 'printf "OFFER_RC=%s\\n" "$?"\n'
@@ -1034,15 +1035,16 @@ class RiotInstallerOfferTests(unittest.TestCase):
     def test_accepting_launches_the_installer_with_the_region_and_locale(self):
         code, output, log = self.run_offer(b'y\n')
         self.assertEqual(code, 0)
-        self.assertIn('▶ Launch the Riot Client installer? [Y/n]', output)
+        self.assertIn('▶ Launch the Riot Client installer now? [y/N]', output)
         self.assertNotIn('(br)', output)
         self.assertIn('OFFER_RC=0', output)
-        self.assertEqual(log.strip(), 'RIOT br')
+        self.assertEqual(log.strip(), 'RIOT br pt_BR')
 
-    def test_an_empty_answer_takes_the_default_yes(self):
+    def test_an_empty_answer_takes_the_default_no(self):
         code, output, log = self.run_offer(b'\n')
-        self.assertIn('OFFER_RC=0', output)
-        self.assertEqual(log.strip(), 'RIOT br')
+        self.assertIn('Launch the Riot Client installer now? [y/N]', output)
+        self.assertIn('OFFER_RC=1', output)
+        self.assertEqual(log, '')
 
     def test_declining_skips_the_installer(self):
         code, output, log = self.run_offer(b'n\n')
@@ -1053,13 +1055,31 @@ class RiotInstallerOfferTests(unittest.TestCase):
     def test_the_installer_exit_code_propagates(self):
         code, output, log = self.run_offer(b'y\n', installer_rc=3)
         self.assertIn('OFFER_RC=3', output)
-        self.assertEqual(log.strip(), 'RIOT br')
+        self.assertEqual(log.strip(), 'RIOT br pt_BR')
 
     def test_yes_runs_skip_the_prompt(self):
         code, output, log = self.run_offer(b'', yes=1)
         self.assertNotIn('Launch the Riot Client installer', output)
         self.assertIn('OFFER_RC=1', output)
         self.assertEqual(log, '')
+
+    def test_a_run_without_a_terminal_skips_the_prompt(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-riot ') as folder:
+            target = Path(folder) / 'repo'
+            (target / 'scripts').mkdir(parents=True)
+            helper = target / 'scripts' / 'installer.sh'
+            helper.write_text('#!/bin/sh\ntouch riot.log\n')
+            helper.chmod(0o755)
+            result = run_sourced(
+                'source "$INSTALLER"\n'
+                f'TARGET_DIR="{target}"\n'
+                'REGION=BR\nYES=0\n'
+                'offer_riot_client_installer\n'
+                'printf "OFFER_RC=%s\\n" "$?"\n'
+            )
+            self.assertNotIn('Launch the Riot Client installer', result.stdout + result.stderr)
+            self.assertIn('OFFER_RC=1', result.stdout)
+            self.assertFalse((target / 'riot.log').exists())
 
     def test_a_missing_installer_script_is_not_offered(self):
         code, output, log = self.run_offer(b'\n', installer=False)
@@ -1069,10 +1089,10 @@ class RiotInstallerOfferTests(unittest.TestCase):
 
     def test_the_region_comes_from_the_selected_region(self):
         code, output, log = self.run_offer(b'y\n', region='EUW')
-        self.assertIn('Launch the Riot Client installer? [Y/n]', output)
+        self.assertIn('Launch the Riot Client installer now? [y/N]', output)
         self.assertNotIn('(euw)', output)
         self.assertIn('OFFER_RC=0', output)
-        self.assertEqual(log.strip(), 'RIOT euw')
+        self.assertEqual(log.strip(), 'RIOT euw pt_BR')
 
 
 class FinishTests(unittest.TestCase):
@@ -1144,6 +1164,32 @@ finish
         self.assertLess(result.stdout.index('RIOT_OFFER'),
                         result.stdout.index('To start the runtime'))
         self.assertNotIn('To install Riot Client later', result.stdout)
+
+    def test_the_safety_notice_precedes_the_riot_offer(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-finish-') as folder:
+            snippet = f'''
+source "$INSTALLER"
+exec 2>&1
+git() {{ :; }}
+offer_desktop_entry() {{ return 1; }}
+offer_riot_client_installer() {{ printf "RIOT_OFFER\\n"; return 0; }}
+TARGET_DIR="{folder}"
+LOG="{folder}/install.log"
+REGION=EUW
+LOCALE=pt_BR
+SECONDS=0
+finish
+'''
+            result = run_sourced(snippet)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout.count('safety notice'), 1, result.stdout)
+        self.assertLess(result.stdout.index('safety notice'),
+                        result.stdout.index('RIOT_OFFER'))
+
+    def test_the_summary_does_not_promise_a_locale_change_on_existing_installs(self):
+        result = self.finish_snippet(riot_offer_rc=1)
+        self.assertIn('Region/locale: EUW / pt_BR (used for new installs and the first launch)',
+                      result.stdout)
 
     def test_a_skipped_riot_offer_keeps_the_manual_hint(self):
         result = self.finish_snippet(riot_offer_rc=1)

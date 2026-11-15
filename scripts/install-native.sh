@@ -1037,20 +1037,23 @@ offer_riot_client_installer() {
   fi
 
   # The runtime refuses to start before the Riot Client is installed, so
-  # offer to run the installer right away instead of leaving it to the user.
-  local region=${REGION:-$DEFAULT_REGION}
+  # offer to run the installer right away. It stays in the foreground for the
+  # whole client session, so the default answer is no.
+  local region=${REGION:-$DEFAULT_REGION} locale=${LOCALE:-$DEFAULT_LOCALE}
   printf '\n'
   local reply
-  read -r -p "${CYAN}${ICON_INFO}${RESET} Launch the Riot Client installer? [Y/n]: " reply || return 1
+  read -r -p "${CYAN}${ICON_INFO}${RESET} Launch the Riot Client installer now? [y/N]: " reply || return 1
   reply=${reply,,}
   case "$reply" in
-    ''|y|yes) ;;
+    y|yes) ;;
     *) return 1 ;;
   esac
 
+  # installer.sh takes the region as its argument and the locale from the
+  # environment (run-riot-client.sh reads RCLOL_LOCALE).
   (
     cd "$TARGET_DIR" &&
-      ./scripts/installer.sh "${region,,}"
+      RCLOL_LOCALE="$locale" ./scripts/installer.sh "${region,,}"
   )
 }
 
@@ -1070,6 +1073,14 @@ finish() {
   local shortcut_ready=0
   if offer_desktop_entry; then
     shortcut_ready=1
+  fi
+
+  # The notice comes before the offer below: an accepted offer starts Riot
+  # Client and only returns when that session ends.
+  if [[ -f $TARGET_DIR/README.md ]]; then
+    warning "Read the safety notice in $TARGET_DIR/README.md before launching Riot Client."
+  else
+    warning 'Read the project safety notice before launching Riot Client.'
   fi
 
   local riot_launched=0
@@ -1092,11 +1103,6 @@ finish() {
   if (( ! riot_launched && ! shortcut_ready )); then
     printf 'To install Riot Client later (%s):\n' "$region"
     printf '  ./scripts/installer.sh %s\n\n' "${region,,}"
-  fi
-  if [[ -f $TARGET_DIR/README.md ]]; then
-    warning "Read the safety notice in $TARGET_DIR/README.md before launching Riot Client."
-  else
-    warning 'Read the project safety notice before launching Riot Client.'
   fi
 }
 
