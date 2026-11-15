@@ -1847,6 +1847,27 @@ index b960f17..5f0e621 100644
  		int _wakeupFD;
  		int _timerFD;
  		uint64_t _currentTimerDeadline = 0;
+diff --git a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
+index 57117f2..fd55fee 100644
+--- a/internal-include/darlingserver/thread.hpp
++++ b/internal-include/darlingserver/thread.hpp
+@@ -21,6 +21,7 @@
+ #define _DARLINGSERVER_THREAD_HPP_
+ 
+ #include <memory>
++#include <atomic>
+ #include <sys/types.h>
+ #include <mutex>
+ #include <shared_mutex>
+@@ -88,6 +89,8 @@ namespace DarlingServer {
+ 		bool _terminating = false;
+ 		std::shared_ptr<Call> _activeCall = nullptr;
+ 		std::shared_ptr<Thread> _impersonating = nullptr;
++		// darling-lol: true only while `_impersonating` is set, so the current-thread hooks can skip `_rwlock`
++		std::atomic<bool> _isImpersonating = false;
+ 		bool _processingSignal = false;
+ 		bool _pendingCallOverride = false;
+ 		dtape_semaphore_t* _s2cPerformSempahore = nullptr;
 diff --git a/scripts/generate-rpc-wrappers.py b/scripts/generate-rpc-wrappers.py
 index e35221c..cb399e1 100755
 --- a/scripts/generate-rpc-wrappers.py
@@ -3561,7 +3582,7 @@ index 9cd7b81..f6b87cf 100644
  			continue;
  		}
 diff --git a/src/server.cpp b/src/server.cpp
-index e502e28..20926bc 100644
+index e502e28..c1d9b8f 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
 @@ -28,6 +28,8 @@
@@ -3751,7 +3772,18 @@ index e502e28..20926bc 100644
  	// remove the old socket (if it exists)
  	unlink(_socketPath.c_str());
  
-@@ -540,6 +650,7 @@ void DarlingServer::Server::start() {
+@@ -532,6 +642,10 @@ void DarlingServer::Server::start() {
+ 	// perform dtape initialization that requires a microthread context
+ 	Thread::kernelSync(dtape_init_in_thread);
+ 
++	// the eventfd is registered armed (EPOLLIN | EPOLLONESHOT) in the constructor
++	bool wakeupArmed = true;
++	bool wakeupFired = false;
++
+ 	while (true) {
+ 		if (_canRead) {
+ 			_canRead = _inbox.receiveMany(_listenerSocket);
+@@ -540,25 +654,40 @@ void DarlingServer::Server::start() {
  				// TODO: this could be done concurrently
  				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
  				if (call) {
@@ -3759,9 +3791,19 @@ index e502e28..20926bc 100644
  					_workQueue.push(call->thread());
  				}
  			}
-@@ -549,13 +660,15 @@ void DarlingServer::Server::start() {
- 		eventfd_t value;
- 		eventfd_read(_wakeupFD, &value);
+ 		}
+ 
+-		// reset the eventfd by reading from it
+-		eventfd_t value;
+-		eventfd_read(_wakeupFD, &value);
++		/* darling-lol: the eventfd only needs to be reset after it actually woke us.
++		 * If it is written while we skip the read, it is still armed (see below),
++		 * so the next epoll_wait returns at once and we reset it then. */
++		if (wakeupFired) {
++			wakeupFired = false;
++			eventfd_t value;
++			eventfd_read(_wakeupFD, &value);
++		}
  
 -		if (_canWrite) {
 +		if (_canWrite || !_outbox.empty()) {
@@ -3771,13 +3813,36 @@ index e502e28..20926bc 100644
  		struct epoll_event settings;
  		settings.data.ptr = &_wakeupFD;
 -		settings.events = (_canWrite) ? (EPOLLIN | EPOLLONESHOT) : 0;
+-
+-		if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
+-			throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
 +		// keep the wakeup armed while replies may still be waiting for the socket
 +		// to become writable again, so a producer's failed direct send is retried
-+		settings.events = (_canWrite || !_outbox.empty()) ? (EPOLLIN | EPOLLONESHOT) : 0;
++		bool wantWakeup = _canWrite || !_outbox.empty();
++		settings.events = wantWakeup ? (EPOLLIN | EPOLLONESHOT) : 0;
++
++		/* darling-lol: the registration is one-shot, so it only changes when the
++		 * eventfd fires (which disarms it) or when we change it here. Re-arming it
++		 * on every pass cost one epoll_ctl per message for no effect. */
++		if (wantWakeup != wakeupArmed) {
++			if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
++				throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
++			}
++			wakeupArmed = wantWakeup;
+ 		}
  
- 		if (epoll_ctl(_epollFD, EPOLL_CTL_MOD, _wakeupFD, &settings) < 0) {
- 			throw std::system_error(errno, std::generic_category(), "Failed to modify eventfd in epoll context");
-@@ -604,6 +717,25 @@ void DarlingServer::Server::start() {
+ 		struct epoll_event events[16];
+@@ -586,6 +715,9 @@ void DarlingServer::Server::start() {
+ 			} else if (event->data.ptr == &_wakeupFD) {
+ 				// we allow the loop to go back to the top and try to send some messages
+ 				// (if _canWrite is true, the eventfd will be reset; otherwise, there's no point in resetting it)
++				// the one-shot registration is now disarmed and the eventfd has a count to reset
++				wakeupArmed = false;
++				wakeupFired = true;
+ 			} else if (event->data.ptr == &_timerFD) {
+ 				std::unique_lock lock(_timerLock);
+ 				uint64_t expirations = 0;
+@@ -604,6 +736,25 @@ void DarlingServer::Server::start() {
  					continue;
  				}
  
@@ -3803,7 +3868,7 @@ index e502e28..20926bc 100644
  				// we're done handling the timerfd;
  				// we don't need to lock anymore (and the following call might need to arm the timer again)
  				lock.unlock();
-@@ -681,6 +813,7 @@ std::string DarlingServer::Server::prefix() const {
+@@ -681,6 +832,7 @@ std::string DarlingServer::Server::prefix() const {
  };
  
  void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
@@ -3811,7 +3876,7 @@ index e502e28..20926bc 100644
  	thread->doWork();
  };
  
-@@ -815,5 +948,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
+@@ -815,5 +967,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
@@ -3832,6 +3897,32 @@ index e502e28..20926bc 100644
 +		 * where unexpected send errors have always been reported; a worker
 +		 * microthread must not throw. */
 +	}
+ };
+diff --git a/src/thread.cpp b/src/thread.cpp
+index 5563ad9..c07ba94 100644
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -717,6 +717,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+ 		std::unique_lock lock(_rwlock);
+ 		oldThread = _impersonating;
+ 		_impersonating = thread;
++		_isImpersonating.store(!!thread, std::memory_order_release);
+ 	}
+ 
+ 	if (oldThread) {
+@@ -730,6 +731,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+ };
+ 
+ std::shared_ptr<DarlingServer::Thread> DarlingServer::Thread::impersonatingThread() const {
++	/* darling-lol: this runs on every current_thread()/current_task() lookup, and a
++	 * thread is almost never impersonating another one (only while a kqchan
++	 * delivers on its behalf). Skip the lock in the common case. */
++	if (!_isImpersonating.load(std::memory_order_acquire)) {
++		return nullptr;
++	}
++
+ 	std::shared_lock lock(_rwlock);
+ 	return _impersonating;
  };
 diff --git a/include/darlingserver/cs_state.h b/include/darlingserver/cs_state.h
 new file mode 100644
