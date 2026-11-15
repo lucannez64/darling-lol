@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render local paths into ignored runtime tools; never alter the source snapshot."""
-import argparse,json,os,shutil,sys
+import argparse,json,os,re,shutil,sys
 from pathlib import Path
 from common import ROOT,configuration,render
 
@@ -55,7 +55,18 @@ def stale_cache(build):
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--guest-user');p.add_argument('--prefix',type=Path);p.add_argument('--sdk',type=Path)
+p.add_argument('--region');p.add_argument('--locale')
 a=p.parse_args();c=configuration()
+if a.region:
+    region=a.region.strip().upper()
+    if not region:p.error('region must not be empty')
+    c['region']=region
+if a.locale:
+    locale=a.locale.strip().replace('-','_')
+    if not re.fullmatch('[A-Za-z]{2}_[A-Za-z]{2}',locale):p.error('locale must look like pt_BR')
+    c['locale']=locale[:2].lower()+'_'+locale[-2:].upper()
+# Keep defaults for configurations written before locale selection existed.
+c.setdefault('region','EUW');c.setdefault('locale','en_GB')
 if a.guest_user:
     if not a.guest_user.replace('_','').replace('-','').isalnum():p.error('guest user must be a simple account name')
     c['guest_user']=a.guest_user;c['guest_home']='/Users/'+a.guest_user

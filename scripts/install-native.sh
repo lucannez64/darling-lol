@@ -8,6 +8,7 @@ TOOLBOX_NAME="${DARLING_LOL_TOOLBOX_NAME:-darling-lol}"
 
 readonly MIN_FREE_GIB=50
 readonly DEFAULT_REGION='EUW'
+readonly DEFAULT_LOCALE='en_GB'
 readonly -a REGIONS=(
   'EUW|Europe West'
   'EUNE|Europe Nordic & East'
@@ -31,6 +32,7 @@ FAMILY=''
 PACKAGE_MANAGER=''
 PACKAGES=()
 REGION=''
+LOCALE=''
 BG_PID=''
 SUDO_PID=''
 
@@ -118,6 +120,56 @@ valid_region() {
   return 1
 }
 
+normalize_locale() {
+  local value=${1//-/_}
+  if [[ $value =~ ^([A-Za-z]{2})_([A-Za-z]{2})$ ]]; then
+    printf '%s_%s' "${BASH_REMATCH[1],,}" "${BASH_REMATCH[2]^^}"
+    return 0
+  fi
+  return 1
+}
+
+valid_locale() {
+  [[ $1 =~ ^[a-z]{2}_[A-Z]{2}$ ]]
+}
+
+detect_system_locale() {
+  local name value
+  for name in LC_ALL LC_MESSAGES LANG; do
+    value=${!name:-}
+    [[ -n $value ]] || continue
+    value=${value%%.*}
+    value=${value%%@*}
+    if normalize_locale "$value"; then
+      return 0
+    fi
+    # The first non-empty variable wins, even when it cannot be parsed.
+    return 1
+  done
+  return 1
+}
+
+region_for_locale() {
+  local locale=${1:-}
+  local country=''
+
+  [[ $locale == *_* ]] && country=${locale#*_}
+
+  case "$country" in
+    BR) printf 'BR' ;;
+    US|CA) printf 'NA' ;;
+    MX|GT|BZ|SV|HN|NI|CR|PA|DO|PR|CU|HT|JM|TT|BB|BS) printf 'LAN' ;;
+    AR|BO|CL|CO|EC|PE|PY|UY|VE|GY|SR|GF) printf 'LAS' ;;
+    KR) printf 'KR' ;;
+    JP) printf 'JP' ;;
+    TR) printf 'TR' ;;
+    RU|BY|KZ) printf 'RU' ;;
+    AU|NZ|FJ|PG) printf 'OCE' ;;
+    PL|CZ|SK|HU|RO|BG|HR|SI|RS|BA|MK|AL|ME|EE|LV|LT|UA|MD|SE|NO|DK|FI|IS) printf 'EUNE' ;;
+    *) printf '%s' "$DEFAULT_REGION" ;;
+  esac
+}
+
 usage() {
   cat <<EOF
 Usage: ${0##*/} [options]
@@ -129,10 +181,14 @@ Options:
   -t, --toolbox       Run inside a Fedora Toolbox container
   -y, --yes           Skip confirmations (required for non-interactive use)
       --region CODE   Riot server region: $(region_codes)
-                      (default when not interactive: ${DEFAULT_REGION})
+                      (default: derived from the system locale, or ${DEFAULT_REGION})
+      --locale CODE   Riot client locale, for example pt_BR
+                      (default: current system locale, or ${DEFAULT_LOCALE})
   -h, --help          Show this help
 
 Environment:
+  RCLOL_REGION               Override the detected Riot server region
+  RCLOL_LOCALE               Override the detected Riot client locale
   DARLING_LOL_TOOLBOX_NAME   Toolbox container name (default: darling-lol)
   DARLING_LOL_DESKTOP_ENTRY  Create the desktop entry without asking (1/0);
                              when unset, ask at the end of an interactive install
@@ -156,6 +212,16 @@ parse_args() {
       --region=*)
         REGION=${1#*=}
         REGION=${REGION^^}
+        ;;
+      --locale)
+        (( $# >= 2 )) || fail '--locale requires a value.'
+        LOCALE=$(normalize_locale "$2") ||
+          fail "Invalid locale '$2'. Expected a value like pt_BR."
+        shift
+        ;;
+      --locale=*)
+        LOCALE=$(normalize_locale "${1#*=}") ||
+          fail "Invalid locale '${1#*=}'. Expected a value like pt_BR."
         ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; fail "Unknown option: $1" ;;
@@ -234,7 +300,7 @@ init_log() {
   mkdir -p -- "$(dirname "$LOG")"
   ( umask 077; : >>"$LOG" )
   chmod 600 -- "$LOG" 2>/dev/null || true
-  printf '\n=== %s | region=%s ===\n' "$(date -Is)" "$REGION" >>"$LOG"
+  printf '\n=== %s | region=%s | locale=%s ===\n' "$(date -Is)" "$REGION" "$LOCALE" >>"$LOG"
 }
 
 detect_distribution() {
@@ -453,7 +519,7 @@ install_toolbox() {
   info "Entering Toolbox '$TOOLBOX_NAME'..."
   printf '\n'
 
-  local args=(--no-confirm --region "$REGION")
+  local args=(--no-confirm --region "$REGION" --locale "$LOCALE")
   if (( YES )); then args+=(--yes); fi
   if (( VERBOSE )); then args+=(--verbose); fi
 
@@ -463,19 +529,30 @@ install_toolbox() {
 }
 
 show_banner() {
-  local region_note
+  local region_note locale_note
   if [[ -n $REGION ]]; then
     region_note=$REGION
+  elif [[ -n ${RCLOL_REGION:-} ]]; then
+    region_note=${RCLOL_REGION^^}
+  elif [[ -n $LOCALE ]]; then
+    region_note="$(region_for_locale "$LOCALE") (from the system locale)"
   elif (( YES )); then
     region_note="$DEFAULT_REGION (default)"
   else
     region_note='selected interactively after confirmation'
   fi
 
+  if [[ -n $LOCALE ]]; then
+    locale_note=$LOCALE
+  else
+    locale_note="$DEFAULT_LOCALE (default)"
+  fi
+
   printf '\n%s%sDarling-LoL installer%s\n' "$BOLD" "$CYAN" "$RESET"
   printf '%sDistribution: %s%s\n' "$DIM" "$FAMILY" "$RESET"
   printf '%sBuild dependencies will be installed and Darling-LoL will be compiled from source.%s\n' "$DIM" "$RESET"
-  printf '%sRiot Client region: %s%s\n\n' "$DIM" "$region_note" "$RESET"
+  printf '%sRiot Client region: %s%s\n' "$DIM" "$region_note" "$RESET"
+  printf '%sRiot Client locale: %s%s\n\n' "$DIM" "$locale_note" "$RESET"
 }
 
 confirm_install() {
@@ -496,6 +573,7 @@ confirm_install() {
 }
 
 choose_region() {
+  local default_region=${1:-$DEFAULT_REGION}
   local index=1 entry choice
 
   printf '\n%s%sSelect your Riot server region:%s\n' "$BOLD" "$CYAN" "$RESET"
@@ -505,9 +583,9 @@ choose_region() {
   done
 
   while true; do
-    read -r -p "Region number or code [${DEFAULT_REGION}]: " choice ||
+    read -r -p "Region number or code [${default_region}]: " choice ||
       fail 'No input received while selecting the region.'
-    choice=${choice:-$DEFAULT_REGION}
+    choice=${choice:-$default_region}
     choice=${choice^^}
     index=1
 
@@ -523,14 +601,37 @@ choose_region() {
   done
 }
 
+resolve_locale() {
+  if [[ -n $LOCALE ]]; then
+    return 0
+  fi
+  if [[ -n ${RCLOL_LOCALE:-} ]]; then
+    LOCALE=$(normalize_locale "$RCLOL_LOCALE") ||
+      fail "Invalid RCLOL_LOCALE '$RCLOL_LOCALE'. Expected a value like pt_BR."
+    return 0
+  fi
+  if ! LOCALE=$(detect_system_locale); then
+    LOCALE=$DEFAULT_LOCALE
+  fi
+}
+
 resolve_region() {
+  local detected
   if [[ -n $REGION ]]; then
     return 0
   fi
+  if [[ -n ${RCLOL_REGION:-} ]]; then
+    REGION=${RCLOL_REGION^^}
+    valid_region "$REGION" ||
+      fail "Invalid RCLOL_REGION '$RCLOL_REGION'. Valid regions: $(region_codes)."
+    return 0
+  fi
+
+  detected=$(region_for_locale "$LOCALE")
   if (( YES )) || [[ ! -t 0 ]]; then
-    REGION=$DEFAULT_REGION
+    REGION=$detected
   else
-    choose_region
+    choose_region "$detected"
   fi
 }
 
@@ -575,7 +676,10 @@ prepare_python_env() {
 
 configure_project() {
   cd "$TARGET_DIR" &&
-    python3 scripts/configure.py --guest-user "$(id -un)"
+    python3 scripts/configure.py \
+      --guest-user "$(id -un)" \
+      --region "$REGION" \
+      --locale "$LOCALE"
 }
 
 compile_project() {
@@ -666,6 +770,7 @@ finish() {
   printf 'Repository: %s\n' "$TARGET_DIR"
   printf 'Branch: %s\n' "${branch:-detached HEAD}"
   printf 'Commit: %s\n' "${commit:-unknown}"
+  printf 'Region/locale: %s / %s\n' "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
   printf 'Log: %s\n\n' "$LOG"
   offer_desktop_entry
   printf 'To start the runtime:\n'
@@ -673,7 +778,8 @@ finish() {
     printf '  toolbox enter %s\n' "$TOOLBOX_NAME"
   fi
   printf '  cd "%s"\n' "$TARGET_DIR"
-  printf '  sh scripts/run.sh\n\n'
+  printf '  RCLOL_REGION=%s RCLOL_LOCALE=%s sh scripts/run.sh\n\n' \
+    "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
   printf 'To install Riot Client later (%s):\n' "$REGION"
   printf '  ./scripts/installer.sh %s\n\n' "${REGION,,}"
   if [[ -f $TARGET_DIR/README.md ]]; then
@@ -697,6 +803,7 @@ main() {
     check_toolbox_support
   fi
 
+  resolve_locale
   confirm_install
   resolve_region
   confirm_arch_upgrade

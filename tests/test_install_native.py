@@ -13,6 +13,12 @@ REGION_CODES = ('EUW', 'EUNE', 'NA', 'BR', 'KR', 'JP', 'OCE', 'LAN', 'LAS', 'TR'
 
 def installer_env(**extra):
     env = dict(os.environ, INSTALLER=str(SCRIPT), NO_COLOR='1')
+    env.pop('RCLOL_REGION', None)
+    env.pop('RCLOL_LOCALE', None)
+    # Keep locale detection deterministic unless a test overrides it.
+    env['LC_ALL'] = ''
+    env['LC_MESSAGES'] = ''
+    env['LANG'] = 'C.UTF-8'
     env.update(extra)
     return env
 
@@ -61,8 +67,8 @@ class CliSmokeTests(unittest.TestCase):
     def test_help_lists_install_and_desktop_options(self):
         result = run_cli('--help')
         self.assertEqual(result.returncode, 0, result.stderr)
-        for expected in ('--toolbox', '--region', 'DARLING_LOL_TOOLBOX_NAME',
-                         'DARLING_LOL_DESKTOP_ENTRY'):
+        for expected in ('--toolbox', '--region', '--locale', 'DARLING_LOL_TOOLBOX_NAME',
+                         'DARLING_LOL_DESKTOP_ENTRY', 'RCLOL_REGION', 'RCLOL_LOCALE'):
             self.assertIn(expected, result.stdout)
 
     def test_unknown_option_fails(self):
@@ -100,19 +106,164 @@ class RegionAndArgumentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, ' '.join(REGION_CODES))
 
-    def test_parse_args_normalizes_region_and_sets_flags(self):
+    def test_parse_args_normalizes_region_and_locale_and_sets_flags(self):
         result = run_sourced(
             'source "$INSTALLER"\n'
-            'parse_args --region euw --yes --toolbox --verbose --no-confirm\n'
-            'printf "%s|%s|%s|%s|%s\\n" "$REGION" "$YES" "$USE_TOOLBOX" "$VERBOSE" "$NO_CONFIRM"'
+            'parse_args --region euw --locale PT_br --yes --toolbox --verbose --no-confirm\n'
+            'printf "%s|%s|%s|%s|%s|%s\\n" "$REGION" "$LOCALE" "$YES" "$USE_TOOLBOX" "$VERBOSE" "$NO_CONFIRM"'
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), 'EUW|1|1|1|1')
+        self.assertEqual(result.stdout.strip(), 'EUW|pt_BR|1|1|1|1')
 
     def test_parse_args_rejects_an_unknown_region(self):
         result = run_sourced('source "$INSTALLER"\nparse_args --region XX')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Invalid region', result.stderr)
+
+    def test_locale_requires_a_value_and_rejects_invalid_values(self):
+        result = run_sourced('source "$INSTALLER"\nparse_args --locale')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--locale requires a value', result.stderr)
+
+        result = run_sourced('source "$INSTALLER"\nparse_args --locale portuguese')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Invalid locale', result.stderr)
+
+
+class LocaleDetectionTests(unittest.TestCase):
+    def test_detect_system_locale_uses_lc_all_then_messages_then_lang(self):
+        cases = (
+            ({'LC_ALL': 'pt_BR.UTF-8', 'LC_MESSAGES': 'fr_FR.UTF-8', 'LANG': 'en_US.UTF-8'}, 'pt_BR'),
+            ({'LC_ALL': '', 'LC_MESSAGES': 'pt_BR.UTF-8', 'LANG': 'en_US.UTF-8'}, 'pt_BR'),
+            ({'LC_ALL': '', 'LC_MESSAGES': '', 'LANG': 'pt_BR.UTF-8'}, 'pt_BR'),
+        )
+        for environment, expected in cases:
+            with self.subTest(environment=environment):
+                result = run_sourced('source "$INSTALLER"\ndetect_system_locale', **environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+
+    def test_detect_system_locale_strips_encoding_and_modifier(self):
+        result = run_sourced(
+            'source "$INSTALLER"\ndetect_system_locale',
+            LC_ALL='', LC_MESSAGES='', LANG='pt_BR.UTF-8@euro',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'pt_BR')
+
+    def test_detect_system_locale_ignores_c_and_posix(self):
+        for value in ('C', 'C.UTF-8', 'POSIX'):
+            with self.subTest(value=value):
+                result = run_sourced(
+                    'source "$INSTALLER"\ndetect_system_locale',
+                    LC_ALL='', LC_MESSAGES='', LANG=value,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_normalize_and_validate_locale(self):
+        result = run_sourced(
+            'source "$INSTALLER"\n'
+            'normalize_locale PT-br\n'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'pt_BR')
+
+        result = run_sourced('source "$INSTALLER"\nvalid_locale pt_BR && valid_locale en_US')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        result = run_sourced('source "$INSTALLER"\nvalid_locale pt-BR')
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_region_for_locale_maps_known_territories(self):
+        cases = {
+            'pt_BR': 'BR', 'en_US': 'NA', 'en_CA': 'NA', 'en_GB': 'EUW',
+            'es_MX': 'LAN', 'es_AR': 'LAS', 'ko_KR': 'KR', 'ja_JP': 'JP',
+            'tr_TR': 'TR', 'ru_RU': 'RU', 'en_AU': 'OCE', 'pl_PL': 'EUNE',
+            'de_DE': 'EUW', 'xx_ZZ': 'EUW',
+        }
+        snippet = 'source "$INSTALLER"\n' + '\n'.join(
+            f'[[ $(region_for_locale {locale}) == {expected} ]] || exit 9'
+            for locale, expected in cases.items()
+        )
+        result = run_sourced(snippet)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_resolve_locale_prefers_explicit_then_environment_then_system(self):
+        result = run_sourced(
+            'source "$INSTALLER"\n'
+            'LOCALE=fr_FR\n'
+            'resolve_locale\n'
+            'printf "%s\\n" "$LOCALE"',
+            RCLOL_LOCALE='pt_BR', LANG='en_US.UTF-8',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'fr_FR')
+
+        result = run_sourced(
+            'source "$INSTALLER"\nresolve_locale\nprintf "%s\\n" "$LOCALE"',
+            RCLOL_LOCALE='PT-br', LANG='en_US.UTF-8',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'pt_BR')
+
+        result = run_sourced(
+            'source "$INSTALLER"\nresolve_locale\nprintf "%s\\n" "$LOCALE"',
+            RCLOL_LOCALE='', LC_ALL='', LC_MESSAGES='', LANG='pt_BR.UTF-8',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'pt_BR')
+
+        result = run_sourced(
+            'source "$INSTALLER"\nresolve_locale\nprintf "%s\\n" "$LOCALE"',
+            RCLOL_LOCALE='', LC_ALL='C', LC_MESSAGES='', LANG='pt_BR.UTF-8',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'en_GB')
+
+    def test_resolve_region_prefers_explicit_then_environment_then_locale(self):
+        result = run_sourced(
+            'source "$INSTALLER"\n'
+            'REGION=EUW\n'
+            'LOCALE=pt_BR\n'
+            'YES=1\n'
+            'resolve_region\n'
+            'printf "%s\\n" "$REGION"',
+            RCLOL_REGION='NA',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'EUW')
+
+        result = run_sourced(
+            'source "$INSTALLER"\n'
+            'LOCALE=pt_BR\n'
+            'YES=1\n'
+            'resolve_region\n'
+            'printf "%s\\n" "$REGION"',
+            RCLOL_REGION='na',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'NA')
+
+        result = run_sourced(
+            'source "$INSTALLER"\n'
+            'LOCALE=pt_BR\n'
+            'YES=1\n'
+            'resolve_region\n'
+            'printf "%s\\n" "$REGION"',
+            RCLOL_REGION='',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'BR')
+
+    def test_resolve_region_rejects_an_invalid_environment_value(self):
+        result = run_sourced(
+            'source "$INSTALLER"\n'
+            'LOCALE=pt_BR\n'
+            'resolve_region',
+            RCLOL_REGION='XX',
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Invalid RCLOL_REGION', result.stderr)
 
 
 class DesktopEntryTests(unittest.TestCase):
@@ -216,7 +367,8 @@ create_desktop_entry
 
 
 class ToolboxInvocationTests(unittest.TestCase):
-    def run_install_toolbox(self, *, yes=0, verbose=0, name='darling-lol', exists=False):
+    def run_install_toolbox(self, *, yes=0, verbose=0, name='darling-lol', exists=False,
+                            locale='pt_BR'):
         with tempfile.TemporaryDirectory(prefix='install-native-toolbox ') as folder:
             log = Path(folder) / 'log'
             snippet = f'''
@@ -230,6 +382,7 @@ INSIDE_TOOLBOX=0
 YES={yes}
 VERBOSE={verbose}
 REGION=EUW
+LOCALE="{locale}"
 TOOLBOX_NAME="{name}"
 install_toolbox
 '''
@@ -243,6 +396,7 @@ install_toolbox
         command = next(line for line in lines if line.startswith('exec:'))
         self.assertIn('--no-confirm', command)
         self.assertIn('--region EUW', command)
+        self.assertIn('--locale pt_BR', command)
         self.assertNotIn(' --yes ', f' {command} ')
 
     def test_yes_and_verbose_are_forwarded_when_requested(self):
@@ -288,6 +442,7 @@ offer_desktop_entry() {{ printf "DESKTOP_OFFER\\n"; }}
 TARGET_DIR="{target}"
 LOG="{log}"
 REGION=EUW
+LOCALE=pt_BR
 INSIDE_TOOLBOX=0
 SECONDS=0
 finish
@@ -297,9 +452,37 @@ finish
             self.assertIn(f'Repository: {target}', result.stdout)
             self.assertIn('Branch: main', result.stdout)
             self.assertIn('Commit: abc1234', result.stdout)
+            self.assertIn('Region/locale: EUW / pt_BR', result.stdout)
+            self.assertIn('RCLOL_REGION=EUW RCLOL_LOCALE=pt_BR sh scripts/run.sh',
+                          result.stdout)
             self.assertIn(f'Log: {log}', result.stdout)
             self.assertLess(result.stdout.index('DESKTOP_OFFER'),
                             result.stdout.index('To start the runtime'))
+
+
+class ConfigureProjectTests(unittest.TestCase):
+    def test_configure_project_passes_the_selected_region_and_locale(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-configure ') as folder:
+            target = Path(folder) / 'repo'
+            target.mkdir()
+            args_file = Path(folder) / 'args'
+            snippet = f'''
+source "$INSTALLER"
+TARGET_DIR="{target}"
+REGION=BR
+LOCALE=pt_BR
+python3() {{ printf "%s\\n" "$@" > "{args_file}"; }}
+configure_project
+'''
+            result = run_sourced(snippet)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = args_file.read_text().splitlines()
+            self.assertEqual(arguments[0], 'scripts/configure.py')
+            self.assertEqual(arguments[1], '--guest-user')
+            self.assertIn('--region', arguments)
+            self.assertEqual(arguments[arguments.index('--region') + 1], 'BR')
+            self.assertIn('--locale', arguments)
+            self.assertEqual(arguments[arguments.index('--locale') + 1], 'pt_BR')
 
 
 if __name__ == '__main__':
