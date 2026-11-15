@@ -62,10 +62,16 @@ class LaunchShortcutTests(unittest.TestCase):
                        env=dict(os.environ, HOME=str(self.home)))
 
     def mark_installed(self, *, client=False, shared=False):
+        # Only a bundle with Contents/MacOS is an installed client.
         if client:
-            (self.prefix / 'Applications/Riot Client.app').mkdir(parents=True)
+            (self.prefix / 'Applications/Riot Client.app/Contents/MacOS').mkdir(parents=True)
         if shared:
-            (self.prefix / 'Users/Shared/Riot Games/Riot Client.app').mkdir(parents=True)
+            (self.prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS').mkdir(parents=True)
+
+    def mark_partial(self):
+        """What a crashed installer leaves: bundles without Contents/MacOS."""
+        (self.prefix / 'Applications/Riot Client.app').mkdir(parents=True)
+        (self.prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/Frameworks').mkdir(parents=True)
 
     def run_launcher(self, *, notify=False, dprefix=True):
         stub_script(self.repo / 'scripts/desktop-run.sh', 'echo "RUN $*"')
@@ -95,6 +101,13 @@ class LaunchShortcutTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('RUN', log)
         self.assertNotIn('INSTALL', log)
+
+    def test_a_partial_bundle_goes_to_the_installer(self):
+        self.mark_partial()
+        result, log = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('INSTALL euw', log)
+        self.assertNotIn('RUN', log)
 
     def test_a_client_in_the_configured_prefix_never_starts_the_installer(self):
         # `configure.py --prefix` recorded a custom prefix; DPREFIX is not

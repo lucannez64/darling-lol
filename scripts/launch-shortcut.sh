@@ -25,7 +25,11 @@ if ! python3 "$repo/scripts/configure.py" >/dev/null ||
 fi
 client="$prefix/Applications/Riot Client.app"
 shared="$prefix/Users/Shared/Riot Games/Riot Client.app"
-if [ -e "$client" ] || [ -d "$shared" ]; then
+# Only a complete installation counts: a crashed first-time installer leaves a
+# partial 'Riot Client.app' directory without Contents/MacOS, and treating it
+# as installed would route the launch to the client runner instead of the
+# installer that cleans the partial state up and retries.
+if [ -d "$client/Contents/MacOS" ] || [ -d "$shared/Contents/MacOS" ]; then
   exec "$repo/scripts/desktop-run.sh" "$@"
 fi
 

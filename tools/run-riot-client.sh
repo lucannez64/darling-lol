@@ -255,7 +255,7 @@ fi
 client="$prefix/Applications/Riot Client.app"
 shared="$prefix/Users/Shared/Riot Games/Riot Client.app"
 if [ -z "${RIOT_LAUNCHER_HOST:-}" ] && [ ! -e "$client" ]; then
- if [ ! -d "$shared" ]; then
+ if [ ! -d "$shared/Contents/MacOS" ]; then
   echo "Riot Client is not installed in $prefix; run scripts/installer.sh first" >&2
   exit 1
  fi
