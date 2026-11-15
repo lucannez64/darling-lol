@@ -1361,3 +1361,29 @@ systemctl --user restart omarchy-crash-watch.service
 as well as loader crashes. Remove the drop-in, then `daemon-reload` and restart
 the unit, to announce them again. Do not use `omarchy-toggle-crash-capture` for
 this: it disables crash notifications for the whole session.
+
+## Riot Client appears to ignore clicks or stops scrolling (#203)
+
+CoreVideo previously kept one display-link callback and running state for the
+entire process. Chromium 150 creates separate display links on its GPU and Viz
+threads, even for one monitor. The second registration replaced the first, so
+rendering ticks continued while presentation callbacks stopped. Chromium then
+reached its two-pending-swap limit and stopped updating the window. Input could
+still reach the page while the displayed controls stayed unchanged.
+
+Display links now keep independent callback, retain and running state. Native
+regression checks cover two links to the same display, independent stop/release,
+slot reuse and callback-side stop. The offline Electron 43 terms fixture
+previously stopped scrolling before Accept enabled; it reaches the bottom and
+accepts with the corrected CoreVideo, with hardware acceleration enabled and
+without disabling frame-rate limiting. In the actual signed-out Riot Client 143,
+the previously frozen language list now scrolls to the end and the dialog closes
+visibly with hardware acceleration enabled. This addresses the reproduced frame
+stall; the reporter's exact authenticated ToS case and normal window-close
+event still need confirmation.
+
+After the normal runtime build, the native regression is available as
+`riot-display-link-isolation-check` in the runtime build directory and can be
+run through the configured `tools/run-riot-native-check.py` helper with
+`riot-display-link-isolation-check` as its argument. As with
+other native probes, use an idle test prefix; it does not launch Riot or League.
