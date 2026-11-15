@@ -1,6 +1,7 @@
 """Unit and CLI coverage for scripts/install-native.sh."""
 import os
 import pty
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -63,6 +64,18 @@ def run_sourced_pty(snippet, reply, **extra_env):
         chunks.append(data)
     os.close(master)
     return process.wait(), b''.join(chunks).decode(errors='replace')
+
+
+def bin_sandbox(folder, *names):
+    """Return a PATH-restricted bin dir exposing only the given system tools."""
+    bindir = Path(folder) / 'bin'
+    bindir.mkdir()
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved is None:
+            raise unittest.SkipTest(f'{name} is unavailable')
+        os.symlink(resolved, bindir / name)
+    return bindir
 
 
 class CliSmokeTests(unittest.TestCase):
@@ -190,6 +203,21 @@ class LocaleDetectionTests(unittest.TestCase):
         result = run_sourced(snippet)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_region_for_country_only_matches_real_servers(self):
+        snippet = (
+            'source "$INSTALLER"\n'
+            '[[ $(region_for_country BR) == BR ]] || exit 9\n'
+            '[[ $(region_for_country CA) == NA ]] || exit 9\n'
+            '[[ $(region_for_country PL) == EUNE ]] || exit 9\n'
+        )
+        result = run_sourced(snippet)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        for country in ('DE', 'GB', ''):
+            result = run_sourced(f'source "$INSTALLER"\nregion_for_country {country!r}')
+            self.assertNotEqual(result.returncode, 0, country)
+            self.assertEqual(result.stdout, '', country)
+
     def test_resolve_locale_prefers_explicit_then_environment_then_system(self):
         result = run_sourced(
             'source "$INSTALLER"\n'
@@ -266,6 +294,298 @@ class LocaleDetectionTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Invalid RCLOL_REGION', result.stderr)
+
+
+class RegionPromptTests(unittest.TestCase):
+    """Interactive shortcut when the system locale maps to a server."""
+
+    def run_prompt(self, locale, reply, *, yes=0):
+        snippet = (
+            'source "$INSTALLER"\n'
+            f'LOCALE={locale}\n'
+            f'YES={yes}\n'
+            'resolve_region\n'
+            'printf "REGION=%s\\n" "$REGION"\n'
+        )
+        return run_sourced_pty(snippet, reply)
+
+    def test_accepting_the_shortcut_skips_the_region_list(self):
+        code, output = self.run_prompt('pt_BR', b'y\n')
+        self.assertEqual(code, 0, output)
+        # The arrow marks an input prompt, and no region code leaks from
+        # region_for_country's stdout before it.
+        self.assertIn('▶ Use the region server for your system locale (BR)? [Y/n]', output)
+        self.assertNotIn('BRUse', output)
+        self.assertNotIn('Region number or code', output)
+        self.assertIn('REGION=BR', output)
+
+    def test_an_empty_answer_takes_the_default_yes(self):
+        code, output = self.run_prompt('pt_BR', b'\n')
+        self.assertEqual(code, 0, output)
+        self.assertNotIn('Region number or code', output)
+        self.assertIn('REGION=BR', output)
+
+    def test_declining_the_shortcut_falls_back_to_the_region_list(self):
+        code, output = self.run_prompt('pt_BR', b'n\n4\n')
+        self.assertEqual(code, 0, output)
+        self.assertIn('▶ Use the region server for your system locale (BR)? [Y/n]', output)
+        self.assertIn('▶ Region number or code [BR]', output)
+        self.assertIn('REGION=BR', output)
+
+    def test_an_invalid_answer_asks_again(self):
+        code, output = self.run_prompt('pt_BR', b'x\ny\n')
+        self.assertEqual(code, 0, output)
+        self.assertIn('Invalid answer. Enter y or n.', output)
+        self.assertIn('REGION=BR', output)
+
+    def test_an_unmapped_locale_goes_straight_to_the_region_list(self):
+        code, output = self.run_prompt('de_DE', b'3\n')
+        self.assertEqual(code, 0, output)
+        self.assertNotIn('Use the region server', output)
+        self.assertIn('▶ Region number or code [EUW]', output)
+        self.assertIn('REGION=NA', output)
+
+    def test_non_interactive_and_yes_runs_keep_the_auto_region(self):
+        snippet = (
+            'source "$INSTALLER"\n'
+            'LOCALE=pt_BR\n'
+            'YES=0\n'
+            'resolve_region\n'
+            'printf "REGION=%s\\n" "$REGION"\n'
+        )
+        result = run_sourced(snippet)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'REGION=BR')
+
+
+class DetectDistributionTests(unittest.TestCase):
+    FEDORA_40 = 'ID=fedora\nID_LIKE="rhel fedora"\nVERSION_ID="40"\n'
+    FEDORA_44 = 'ID=fedora\nID_LIKE="rhel fedora"\nVERSION_ID="44"\n'
+    UBUNTU_2404 = 'ID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n'
+    ZORIN_17 = 'ID=zorin\nID_LIKE="ubuntu debian"\nVERSION_ID="17"\n'
+    OPENSUSE_LEAP = 'ID=opensuse-leap\nID_LIKE="suse opensuse"\nVERSION_ID="16.0"\n'
+
+    def detect(self, os_release, *, container=0):
+        with tempfile.TemporaryDirectory(prefix='install-native-distro ') as folder:
+            release = Path(folder) / 'os-release'
+            release.write_text(os_release)
+            snippet = (
+                'source "$INSTALLER"\n'
+                f'CONTAINER_INSTALL={container}\n'
+                'detect_distribution\n'
+                'printf "FAMILY=%s\\n" "$FAMILY"\n'
+            )
+            return run_sourced(snippet, DARLING_OS_RELEASE=str(release))
+
+    def test_container_mode_skips_host_version_gates(self):
+        result = self.detect(self.UBUNTU_2404, container=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('26.04', result.stderr)
+        self.assertNotIn('only launches the container', result.stdout)
+        self.assertIn('FAMILY=debian', result.stdout)
+
+    def test_native_mode_still_requires_new_ubuntu(self):
+        result = self.detect(self.UBUNTU_2404)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Ubuntu 26.04', result.stderr)
+
+    def test_container_mode_accepts_an_old_fedora_host(self):
+        result = self.detect(self.FEDORA_40, container=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Fedora 44', result.stderr)
+        self.assertIn('FAMILY=fedora', result.stdout)
+
+        result = self.detect(self.FEDORA_40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Fedora 44 or newer', result.stderr)
+
+    def test_a_current_fedora_host_still_passes_natively(self):
+        result = self.detect(self.FEDORA_44)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FAMILY=fedora', result.stdout)
+
+    def test_an_unknown_host_distro_never_fails_in_container_mode(self):
+        result = self.detect(self.OPENSUSE_LEAP, container=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FAMILY=other', result.stdout)
+
+        result = self.detect(self.OPENSUSE_LEAP)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Supported distributions', result.stderr)
+
+    def test_a_derivative_keeps_its_debian_family(self):
+        result = self.detect(self.ZORIN_17, container=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FAMILY=debian', result.stdout)
+
+        result = self.detect(self.ZORIN_17)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Derivative 'zorin' detected", result.stderr)
+        self.assertIn('FAMILY=debian', result.stdout)
+
+
+class ToolboxSupportTests(unittest.TestCase):
+    """check_toolbox_support must not depend on the host distribution."""
+
+    PLENTY_KIB = 200 * 1024 * 1024  # 200 GiB
+
+    def run_support(self, *, toolbox=True, podman=True, podman_info='ok',
+                    free_kib=PLENTY_KIB, family=''):
+        with tempfile.TemporaryDirectory(prefix='install-native-toolbox-support ') as folder:
+            # Restrict PATH so the real toolbox/podman binaries cannot leak in.
+            bindir = bin_sandbox(folder, 'bash', 'awk', 'dirname', 'basename')
+            stubs = []
+            if toolbox:
+                stubs.append('toolbox() { :; }')
+            if podman:
+                if podman_info == 'ok':
+                    stubs.append('podman() { printf "%s\\n" "/mock-toolbox-test/containers"; }')
+                elif podman_info == 'fail':
+                    stubs.append('podman() { return 1; }')
+            stubs.append(
+                'df() { printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n'
+                'mock 1 1 %s 1%% /\\n" "$DF_FREE"; }'
+            )
+            snippet = '\n'.join([
+                'source "$INSTALLER"',
+                *stubs,
+                f'FAMILY={family}',
+                f'DF_FREE={free_kib}',
+                'check_toolbox_support',
+            ])
+            return run_sourced(snippet, PATH=str(bindir))
+
+    def test_toolbox_and_podman_with_plenty_of_storage_pass_on_any_host(self):
+        result = self.run_support()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_toolbox_fails_without_a_fedora_requirement(self):
+        result = self.run_support(toolbox=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Toolbox is not installed', result.stderr)
+        self.assertNotIn('Fedora hosts', result.stderr)
+
+    def test_missing_podman_fails(self):
+        result = self.run_support(podman=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Podman is not installed', result.stderr)
+
+    def test_missing_packages_hint_the_host_package_manager(self):
+        result = self.run_support(toolbox=False, family='debian')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Install it with 'sudo apt install podman toolbox'", result.stderr)
+
+        result = self.run_support(podman=False, family='fedora')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Install it with 'sudo dnf install toolbox podman'", result.stderr)
+
+    def test_an_unknown_host_falls_back_to_a_generic_hint(self):
+        result = self.run_support(podman=False, family='other')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('packages from your distribution', result.stderr)
+
+    def test_little_space_on_the_podman_storage_partition_fails(self):
+        result = self.run_support(free_kib=1024)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('GiB free', result.stderr)
+        self.assertIn('/mock-toolbox-test/containers', result.stderr)
+
+    def test_a_podman_info_failure_falls_back_to_the_default_storage(self):
+        result = self.run_support(podman_info='fail')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class PreflightTests(unittest.TestCase):
+    """preflight relaxes host-only requirements in container mode."""
+
+    def run_preflight(self, *, container=0):
+        with tempfile.TemporaryDirectory(prefix='install-native-preflight ') as folder:
+            # Restrict PATH: sudo, git, uname and df must not resolve, so their
+            # behaviour has to come from the stubs (git is stubbed in both
+            # modes; sudo absence is exactly what the test exercises).
+            bindir = bin_sandbox(folder, 'bash', 'awk', 'dirname', 'basename')
+            stubs = (
+                'uname() { case $1 in -r) printf "6.6.0-generic" ;; *) printf "x86_64" ;; esac; }\n'
+                'df() { printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n'
+                'mock 1 1 62914560 1%% /\\n"; }\n'
+                'git() { :; }\n'
+            )
+            snippet = (
+                'source "$INSTALLER"\n'
+                f'{stubs}\n'
+                f'CONTAINER_INSTALL={container}\n'
+                'preflight\n'
+            )
+            return run_sourced(snippet, PATH=str(bindir))
+
+    def test_container_mode_does_not_require_sudo_on_the_host(self):
+        result = self.run_preflight(container=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_mode_still_requires_sudo(self):
+        result = self.run_preflight(container=0)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('sudo is required', result.stderr)
+
+
+class ShowBannerTests(unittest.TestCase):
+    def run_banner(self, *, container=0, family='debian', region='EUW', locale='pt_BR',
+                   toolbox_release=''):
+        release_line = f'\nTOOLBOX_RELEASE="{toolbox_release}"' if toolbox_release else ''
+        snippet = (
+            'source "$INSTALLER"\n'
+            f'CONTAINER_INSTALL={container}\n'
+            f'FAMILY={family}\n'
+            f'REGION={region}\n'
+            f'LOCALE={locale}\n'
+            'TOOLBOX_NAME="my-box"\n'
+            f'{release_line}\n'
+            'show_banner\n'
+        )
+        return run_sourced(snippet)
+
+    def test_container_mode_shows_the_toolbox_fedora_release(self):
+        result = self.run_banner(container=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Toolbox Distribution: Fedora 44', result.stdout)
+        self.assertNotIn('Toolbox container', result.stdout)
+
+        result = self.run_banner(container=1, toolbox_release='45')
+        self.assertIn('Toolbox Distribution: Fedora 45', result.stdout)
+
+    def test_native_mode_shows_only_the_family(self):
+        result = self.run_banner(container=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Distribution: debian', result.stdout)
+        self.assertNotIn('Toolbox Distribution', result.stdout)
+
+    def test_locale_derived_region_has_no_source_suffix(self):
+        result = self.run_banner(container=0, region='', locale='pt_BR')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Riot Client region: BR', result.stdout)
+        self.assertNotIn('(from the system locale)', result.stdout)
+
+
+class ArchUpgradeTests(unittest.TestCase):
+    PROMPT_SNIPPET = (
+        'source "$INSTALLER"\n'
+        'CONTAINER_INSTALL={container}\n'
+        'FAMILY=arch\n'
+        'confirm_arch_upgrade\n'
+        'printf "DONE\\n"\n'
+    )
+
+    def test_container_mode_skips_the_upgrade_warning(self):
+        result = run_sourced(self.PROMPT_SNIPPET.format(container=1))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('DONE', result.stdout)
+        self.assertNotIn('full system upgrade', result.stdout)
+
+    def test_native_mode_still_asks_on_arch(self):
+        result = run_sourced(self.PROMPT_SNIPPET.format(container=0))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('pacman -Syu', result.stderr)
+        self.assertIn('Installation cancelled', result.stderr)
 
 
 class DesktopEntryTests(unittest.TestCase):
@@ -357,6 +677,30 @@ create_desktop_entry
         self.assertEqual(code, 0, output)
         self.assertNotIn('CALLED', output)
 
+    def test_an_empty_answer_defaults_to_yes(self):
+        snippet = (
+            'source "$INSTALLER"\n'
+            'create_desktop_entry() { printf "CALLED\\n"; }\n'
+            'YES=0\n'
+            'offer_desktop_entry'
+        )
+        code, output = run_sourced_pty(snippet, b'\n')
+        self.assertEqual(code, 0, output)
+        self.assertIn('Create a desktop entry automatically? [Y/n]', output)
+        self.assertIn('CALLED', output)
+
+    def test_an_invalid_answer_asks_again(self):
+        snippet = (
+            'source "$INSTALLER"\n'
+            'create_desktop_entry() { printf "CALLED\\n"; }\n'
+            'YES=0\n'
+            'offer_desktop_entry'
+        )
+        code, output = run_sourced_pty(snippet, b'maybe\nn\n')
+        self.assertEqual(code, 0, output)
+        self.assertIn('Invalid answer. Enter y or n.', output)
+        self.assertNotIn('CALLED', output)
+
     def test_missing_or_failing_helper_only_warns(self):
         result, arguments = self.create_entry(helper=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -370,7 +714,7 @@ create_desktop_entry
 
 class ToolboxInvocationTests(unittest.TestCase):
     def run_install_toolbox(self, *, yes=0, verbose=0, name='darling-lol', exists=False,
-                            locale='pt_BR'):
+                            locale='pt_BR', family='', release=''):
         with tempfile.TemporaryDirectory(prefix='install-native-toolbox ') as folder:
             log = Path(folder) / 'log'
             snippet = f'''
@@ -385,10 +729,14 @@ YES={yes}
 VERBOSE={verbose}
 REGION=EUW
 LOCALE="{locale}"
+FAMILY="{family}"
 TOOLBOX_NAME="{name}"
 install_toolbox
 '''
-            result = run_sourced(snippet, PODMAN_RC='0' if exists else '1')
+            env = {'PODMAN_RC': '0' if exists else '1'}
+            if release:
+                env['DARLING_LOL_TOOLBOX_RELEASE'] = release
+            result = run_sourced(snippet, **env)
             lines = log.read_text().splitlines() if log.exists() else []
             return result, lines
 
@@ -426,9 +774,107 @@ install_toolbox
         self.assertIn('--container my-box', command)
         self.assertIn('DARLING_LOL_TOOLBOX_NAME=my-box', command)
 
+    def test_fedora_hosts_use_the_toolbox_default_image(self):
+        result, lines = self.run_install_toolbox(family='fedora')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = next(line for line in lines if 'toolbox create' in line)
+        self.assertIn('--distro fedora', create)
+        self.assertNotIn('--release', create)
+
+    def test_non_fedora_hosts_pin_the_minimum_fedora_release(self):
+        result, lines = self.run_install_toolbox(family='debian')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = next(line for line in lines if 'toolbox create' in line)
+        self.assertIn('--distro fedora', create)
+        self.assertIn('--release 44', create)
+
+        result, lines = self.run_install_toolbox(family='other')
+        create = next(line for line in lines if 'toolbox create' in line)
+        self.assertIn('--release 44', create)
+
+    def test_release_override_is_forwarded_on_any_host(self):
+        result, lines = self.run_install_toolbox(family='debian', release='45')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = next(line for line in lines if 'toolbox create' in line)
+        self.assertIn('--release 45', create)
+
+        result, lines = self.run_install_toolbox(family='fedora', release='45')
+        create = next(line for line in lines if 'toolbox create' in line)
+        self.assertIn('--release 45', create)
+
+
+class RiotInstallerOfferTests(unittest.TestCase):
+    def run_offer(self, reply, *, region='BR', yes=0, installer=True, installer_rc=0):
+        with tempfile.TemporaryDirectory(prefix='install-native-riot ') as folder:
+            target = Path(folder) / 'repo'
+            (target / 'scripts').mkdir(parents=True)
+            if installer:
+                helper = target / 'scripts' / 'installer.sh'
+                helper.write_text(
+                    '#!/bin/sh\n'
+                    'printf "RIOT %s\\n" "$1" > riot.log\n'
+                    f'exit {installer_rc}\n'
+                )
+                helper.chmod(0o755)
+            snippet = (
+                'source "$INSTALLER"\n'
+                f'TARGET_DIR="{target}"\n'
+                f'REGION={region}\n'
+                f'YES={yes}\n'
+                'offer_riot_client_installer\n'
+                'printf "OFFER_RC=%s\\n" "$?"\n'
+            )
+            code, output = run_sourced_pty(snippet, reply)
+            log = ''
+            log_file = target / 'riot.log'
+            if log_file.exists():
+                log = log_file.read_text()
+            return code, output, log
+
+    def test_accepting_launches_the_installer_with_the_region(self):
+        code, output, log = self.run_offer(b'y\n')
+        self.assertEqual(code, 0)
+        self.assertIn('▶ Launch the Riot Client installer (br)? [Y/n]', output)
+        self.assertIn('OFFER_RC=0', output)
+        self.assertEqual(log.strip(), 'RIOT br')
+
+    def test_an_empty_answer_takes_the_default_yes(self):
+        code, output, log = self.run_offer(b'\n')
+        self.assertIn('OFFER_RC=0', output)
+        self.assertEqual(log.strip(), 'RIOT br')
+
+    def test_declining_skips_the_installer(self):
+        code, output, log = self.run_offer(b'n\n')
+        self.assertIn('Launch the Riot Client installer', output)
+        self.assertIn('OFFER_RC=1', output)
+        self.assertEqual(log, '')
+
+    def test_the_installer_exit_code_propagates(self):
+        code, output, log = self.run_offer(b'y\n', installer_rc=3)
+        self.assertIn('OFFER_RC=3', output)
+        self.assertEqual(log.strip(), 'RIOT br')
+
+    def test_yes_runs_skip_the_prompt(self):
+        code, output, log = self.run_offer(b'', yes=1)
+        self.assertNotIn('Launch the Riot Client installer', output)
+        self.assertIn('OFFER_RC=1', output)
+        self.assertEqual(log, '')
+
+    def test_a_missing_installer_script_is_not_offered(self):
+        code, output, log = self.run_offer(b'\n', installer=False)
+        self.assertNotIn('Launch the Riot Client installer', output)
+        self.assertIn('OFFER_RC=1', output)
+        self.assertEqual(log, '')
+
+    def test_the_region_comes_from_the_selected_region(self):
+        code, output, log = self.run_offer(b'y\n', region='EUW')
+        self.assertIn('(euw)? [Y/n]', output)
+        self.assertIn('OFFER_RC=0', output)
+        self.assertEqual(log.strip(), 'RIOT euw')
+
 
 class FinishTests(unittest.TestCase):
-    def test_desktop_offer_precedes_launch_instructions(self):
+    def finish_snippet(self, *, riot_offer_rc):
         with tempfile.TemporaryDirectory(prefix='install-native-finish ') as folder:
             target = Path(folder) / 'repo'
             log = Path(folder) / 'install.log'
@@ -441,6 +887,7 @@ git() {{
   esac
 }}
 offer_desktop_entry() {{ printf "DESKTOP_OFFER\\n"; }}
+offer_riot_client_installer() {{ printf "RIOT_OFFER\\n"; return {riot_offer_rc}; }}
 TARGET_DIR="{target}"
 LOG="{log}"
 REGION=EUW
@@ -451,15 +898,33 @@ finish
 '''
             result = run_sourced(snippet)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(f'Repository: {target}', result.stdout)
-            self.assertIn('Branch: main', result.stdout)
-            self.assertIn('Commit: abc1234', result.stdout)
-            self.assertIn('Region/locale: EUW / pt_BR', result.stdout)
-            self.assertIn('RCLOL_REGION=EUW RCLOL_LOCALE=pt_BR sh scripts/run.sh',
-                          result.stdout)
-            self.assertIn(f'Log: {log}', result.stdout)
-            self.assertLess(result.stdout.index('DESKTOP_OFFER'),
-                            result.stdout.index('To start the runtime'))
+            return result
+
+    def test_desktop_offer_precedes_launch_instructions(self):
+        result = self.finish_snippet(riot_offer_rc=1)
+        self.assertIn('Repository: ', result.stdout)
+        self.assertIn('Branch: main', result.stdout)
+        self.assertIn('Commit: abc1234', result.stdout)
+        self.assertIn('Region/locale: EUW / pt_BR', result.stdout)
+        self.assertIn('Log: ', result.stdout)
+        self.assertIn('RCLOL_REGION=EUW RCLOL_LOCALE=pt_BR sh scripts/run.sh',
+                      result.stdout)
+        self.assertLess(result.stdout.index('DESKTOP_OFFER'),
+                        result.stdout.index('To start the runtime'))
+
+    def test_riot_offer_sits_after_the_desktop_entry_and_hides_the_later_hint(self):
+        result = self.finish_snippet(riot_offer_rc=0)
+        self.assertLess(result.stdout.index('DESKTOP_OFFER'),
+                        result.stdout.index('RIOT_OFFER'))
+        self.assertLess(result.stdout.index('RIOT_OFFER'),
+                        result.stdout.index('To start the runtime'))
+        self.assertNotIn('To install Riot Client later', result.stdout)
+
+    def test_a_skipped_riot_offer_keeps_the_manual_hint(self):
+        result = self.finish_snippet(riot_offer_rc=1)
+        self.assertIn('RIOT_OFFER', result.stdout)
+        self.assertIn('To install Riot Client later (EUW):', result.stdout)
+        self.assertIn('./scripts/installer.sh euw', result.stdout)
 
 
 class ConfigureProjectTests(unittest.TestCase):

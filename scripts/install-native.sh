@@ -6,6 +6,11 @@ LOG="${XDG_CACHE_HOME:-$HOME/.cache}/darling-lol-install.log"
 TOOLBOX_NAME="${DARLING_LOL_TOOLBOX_NAME:-darling-lol}"
 
 readonly MIN_FREE_GIB=50
+readonly MIN_FREE_GIB_CONTAINER=5
+# Minimum supported Fedora, also used as the toolbox image release on hosts
+# that cannot infer one (toolbox errors with "option '--release' is needed"
+# when the requested distribution does not match the host).
+readonly DEFAULT_FEDORA_RELEASE=44
 readonly DEFAULT_REGION='EUW'
 readonly DEFAULT_LOCALE='en_GB'
 readonly -a REGIONS=(
@@ -24,7 +29,9 @@ readonly -a REGIONS=(
 
 VERBOSE=0
 USE_TOOLBOX=0
+CONTAINER_INSTALL=0
 INSIDE_TOOLBOX=0
+TOOLBOX_RELEASE=''
 YES=0
 NO_CONFIRM=0
 FAMILY=''
@@ -143,11 +150,10 @@ detect_system_locale() {
   return 1
 }
 
-region_for_locale() {
-  local locale=${1:-}
-  local country=''
-
-  [[ $locale == *_* ]] && country=${locale#*_}
+region_for_country() {
+  # Map a locale's country part to a Riot region; unknown countries fail, so
+  # callers can tell a real match apart from the generic default.
+  local country=${1:-}
 
   case "$country" in
     BR) printf 'BR' ;;
@@ -160,8 +166,21 @@ region_for_locale() {
     RU|BY|KZ) printf 'RU' ;;
     AU|NZ|FJ|PG) printf 'OCE' ;;
     PL|CZ|SK|HU|RO|BG|HR|SI|RS|BA|MK|AL|ME|EE|LV|LT|UA|MD|SE|NO|DK|FI|IS) printf 'EUNE' ;;
-    *) printf '%s' "$DEFAULT_REGION" ;;
+    *) return 1 ;;
   esac
+}
+
+region_for_locale() {
+  local locale=${1:-}
+  local country='' region
+
+  [[ $locale == *_* ]] && country=${locale#*_}
+
+  if region=$(region_for_country "$country"); then
+    printf '%s' "$region"
+    return 0
+  fi
+  printf '%s' "$DEFAULT_REGION"
 }
 
 usage() {
@@ -172,7 +191,7 @@ Install Darling-LoL build dependencies, compile the project and install its runt
 
 Options:
   -v, --verbose       Show all command output
-  -t, --toolbox       Run inside a Fedora Toolbox container
+  -t, --toolbox       Build inside a Fedora Toolbox container (any host with toolbox and podman)
   -y, --yes           Skip confirmations (required for non-interactive use)
       --no-confirm     Skip the INSTALL confirmation only (used by the Toolbox re-exec; does not imply --yes)
       --region CODE   Riot server region: $(region_codes)
@@ -185,6 +204,8 @@ Environment:
   RCLOL_REGION               Override the detected Riot server region
   RCLOL_LOCALE               Override the detected Riot client locale
   DARLING_LOL_TOOLBOX_NAME   Toolbox container name (default: darling-lol)
+  DARLING_LOL_TOOLBOX_RELEASE  Fedora release for 'toolbox create' on non-Fedora
+                             hosts (default: ${DEFAULT_FEDORA_RELEASE})
   DARLING_LOL_DESKTOP_ENTRY  Create the desktop entry without asking (1/0);
                              when unset, ask at the end of an interactive install
   NO_COLOR                   Disable colored output
@@ -299,16 +320,38 @@ init_log() {
 }
 
 detect_distribution() {
-  [[ -r /etc/os-release ]] || fail 'Cannot identify the Linux distribution.'
+  # DARLING_OS_RELEASE is a test seam; production always reads /etc/os-release.
+  local os_release=${DARLING_OS_RELEASE:-/etc/os-release}
+  [[ -r $os_release ]] || fail 'Cannot identify the Linux distribution.'
 
   local os_id os_like os_version os_codename
   IFS='|' read -r os_id os_like os_version os_codename < <(
-    . /etc/os-release
+    . "$os_release"
     printf '%s|%s|%s|%s\n' "${ID:-}" "${ID_LIKE:-}" "${VERSION_ID:-}" "${VERSION_CODENAME:-}"
   ) || fail 'Could not read /etc/os-release.'
 
   local ids=" ${os_id} ${os_like} "
   local ver_major=${os_version%%.*}
+
+  if (( CONTAINER_INSTALL )); then
+    # The host only launches the Toolbox container: the distribution and
+    # FFmpeg requirements are enforced inside the container, so the host
+    # identity is informational and never gates the install.
+    case "$ids" in
+      *' fedora '*) FAMILY=fedora ;;
+      *' arch '*) FAMILY=arch ;;
+      *' debian '*|*' ubuntu '*) FAMILY=debian ;;
+      *) FAMILY=other ;;
+    esac
+    # The release the Toolbox image will use: explicit override, otherwise the
+    # host's own Fedora release, otherwise the minimum supported one.
+    TOOLBOX_RELEASE=${DARLING_LOL_TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}
+    if [[ -z ${DARLING_LOL_TOOLBOX_RELEASE:-} && $FAMILY == fedora &&
+          $ver_major =~ ^[0-9]+$ ]]; then
+      TOOLBOX_RELEASE=$ver_major
+    fi
+    return 0
+  fi
 
   case "$ids" in
     *' fedora '*)
@@ -404,7 +447,11 @@ detect_distribution() {
 preflight() {
   [[ $EUID -ne 0 ]] || fail 'Run as a regular user, not root.'
   [[ $(uname -m) == x86_64 ]] || fail 'Only x86_64 is supported.'
-  command -v sudo >/dev/null 2>&1 || fail 'sudo is required.'
+  # Container installs never run a package manager on the host; sudo is only
+  # needed inside the Toolbox, where it is passwordless.
+  if [[ $CONTAINER_INSTALL == 0 ]]; then
+    command -v sudo >/dev/null 2>&1 || fail 'sudo is required.'
+  fi
   command -v git >/dev/null 2>&1 || fail 'Git is required.'
 
   local kernel_major kernel_minor free_kib
@@ -432,10 +479,40 @@ preflight() {
   done
 }
 
+check_podman_storage_space() {
+  local graph_root probe free_kib
+  if ! graph_root=$(podman info --format '{{.Store.GraphRoot}}' 2>/dev/null) || [[ -z $graph_root ]]; then
+    graph_root="${XDG_DATA_HOME:-$HOME/.local/share}/containers"
+  fi
+
+  # df needs an existing path; walk up to the nearest existing ancestor.
+  probe=$graph_root
+  until [[ -d $probe || $probe == / ]]; do
+    probe=$(dirname -- "$probe")
+  done
+
+  free_kib=$(df -Pk "$probe" 2>/dev/null | awk 'NR == 2 {print $4}')
+  [[ $free_kib =~ ^[0-9]+$ ]] ||
+    fail "Could not determine available disk space for Podman storage '$graph_root'."
+  (( free_kib >= MIN_FREE_GIB_CONTAINER * 1024 * 1024 )) ||
+    fail "Podman storage '$graph_root' is on a filesystem with less than ${MIN_FREE_GIB_CONTAINER} GiB free. Container images live outside the repository checkout; free space there before installing."
+}
+
 check_toolbox_support() {
-  [[ $FAMILY == fedora ]] || fail '--toolbox is currently supported only on Fedora hosts.'
-  command -v toolbox >/dev/null 2>&1 || fail 'Toolbox is not installed.'
-  command -v podman >/dev/null 2>&1 || fail 'Podman is not installed.'
+  # Package-manager hint follows the host distribution identified by
+  # detect_distribution; unset/unknown families get a generic fallback.
+  local hint
+  case "$FAMILY" in
+    fedora) hint='sudo dnf install toolbox podman' ;;
+    arch) hint='sudo pacman -S podman toolbox' ;;
+    debian) hint='sudo apt install podman toolbox' ;;
+    *) hint='the toolbox and podman packages from your distribution' ;;
+  esac
+  command -v toolbox >/dev/null 2>&1 ||
+    fail "Toolbox is not installed. Install it with '${hint}'."
+  command -v podman >/dev/null 2>&1 ||
+    fail "Podman is not installed. Install it with '${hint}'."
+  check_podman_storage_space
 }
 
 check_repo_ffmpeg() {
@@ -504,9 +581,20 @@ verify_ffmpeg() {
 }
 
 install_toolbox() {
+  local create_args=(--assumeyes --distro fedora)
+  local release=${DARLING_LOL_TOOLBOX_RELEASE:-}
+
+  if [[ -n $release ]]; then
+    create_args+=(--release "$release")
+  elif [[ $FAMILY != fedora ]]; then
+    # Non-Fedora hosts cannot infer a default Fedora release; older toolbox
+    # builds refuse to create the container without an explicit one.
+    create_args+=(--release "$DEFAULT_FEDORA_RELEASE")
+  fi
+
   if ! podman container exists "$TOOLBOX_NAME"; then
     run "Creating Toolbox container '$TOOLBOX_NAME'" \
-      toolbox create --assumeyes --distro fedora "$TOOLBOX_NAME"
+      toolbox create "${create_args[@]}" "$TOOLBOX_NAME"
   else
     info "Toolbox '$TOOLBOX_NAME' already exists."
   fi
@@ -530,13 +618,13 @@ install_toolbox() {
 }
 
 show_banner() {
-  local region_note locale_note
+  local region_note locale_note distribution
   if [[ -n $REGION ]]; then
     region_note=$REGION
   elif [[ -n ${RCLOL_REGION:-} ]]; then
     region_note=${RCLOL_REGION^^}
   elif [[ -n $LOCALE ]]; then
-    region_note="$(region_for_locale "$LOCALE") (from the system locale)"
+    region_note="$(region_for_locale "$LOCALE")"
   elif (( YES )); then
     region_note="$DEFAULT_REGION (default)"
   else
@@ -549,11 +637,16 @@ show_banner() {
     locale_note="$DEFAULT_LOCALE (default)"
   fi
 
+  distribution="Distribution: $FAMILY"
+  if (( CONTAINER_INSTALL )); then
+    distribution="Toolbox Distribution: Fedora ${TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}"
+  fi
+
   printf '\n%s%sDarling-LoL installer%s\n' "$BOLD" "$CYAN" "$RESET"
-  printf '%sDistribution: %s%s\n' "$DIM" "$FAMILY" "$RESET"
-  printf '%sBuild dependencies will be installed and Darling-LoL will be compiled from source.%s\n' "$DIM" "$RESET"
+  printf '%s%s%s\n' "$DIM" "$distribution" "$RESET"
   printf '%sRiot Client region: %s%s\n' "$DIM" "$region_note" "$RESET"
   printf '%sRiot Client locale: %s%s\n\n' "$DIM" "$locale_note" "$RESET"
+  printf '%sBuild dependencies will be installed and Darling-LoL will be compiled from source.%s\n\n' "$DIM" "$RESET"
 }
 
 confirm_install() {
@@ -568,7 +661,7 @@ confirm_install() {
   [[ -t 0 ]] || fail 'No interactive terminal available. Re-run with --yes to confirm non-interactively.'
 
   local confirmation
-  read -r -p "Type ${BOLD}INSTALL${RESET} to continue: " confirmation ||
+  read -r -p "${CYAN}${ICON_INFO}${RESET} Type ${BOLD}INSTALL${RESET} to continue: " confirmation ||
     fail 'Installation cancelled.'
   [[ $confirmation == INSTALL ]] || fail 'Installation cancelled.'
 }
@@ -584,7 +677,7 @@ choose_region() {
   done
 
   while true; do
-    read -r -p "Region number or code [${default_region}]: " choice ||
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Region number or code [${default_region}]: " choice ||
       fail 'No input received while selecting the region.'
     choice=${choice:-$default_region}
     choice=${choice^^}
@@ -617,7 +710,7 @@ resolve_locale() {
 }
 
 resolve_region() {
-  local detected
+  local detected reply
   if [[ -n $REGION ]]; then
     return 0
   fi
@@ -631,12 +724,39 @@ resolve_region() {
   detected=$(region_for_locale "$LOCALE")
   if (( YES )) || [[ ! -t 0 ]]; then
     REGION=$detected
-  else
-    choose_region "$detected"
+    return 0
   fi
+
+  # When the system locale maps to a server, offer it as a one-key shortcut
+  # before falling back to the manual region list. The redirect keeps
+  # region_for_country's stdout out of the terminal (it runs outside $(...)).
+  if [[ $LOCALE == *_* ]] && region_for_country "${LOCALE#*_}" >/dev/null; then
+    while true; do
+      read -r -p "${CYAN}${ICON_INFO}${RESET} Use the region server for your system locale (${detected})? [Y/n]: " reply ||
+        fail 'No input received while selecting the region.'
+      reply=${reply,,}
+      case "$reply" in
+        ''|y|yes)
+          REGION=$detected
+          return 0
+          ;;
+        n|no)
+          break
+          ;;
+        *)
+          warning 'Invalid answer. Enter y or n.'
+          ;;
+      esac
+    done
+  fi
+
+  choose_region "$detected"
 }
 
 confirm_arch_upgrade() {
+  # Nothing is installed on the host in container mode; the pacman upgrade
+  # warning only applies when the host itself runs the build.
+  [[ $CONTAINER_INSTALL == 0 ]] || return 0
   [[ $FAMILY == arch ]] || return 0
   if (( YES )); then
     return 0
@@ -646,7 +766,7 @@ confirm_arch_upgrade() {
   warning 'Arch Linux dependency installation runs a full system upgrade (pacman -Syu).'
   printf 'This may upgrade all installed Arch packages and require manual intervention.\n'
   local reply
-  read -r -p 'Proceed with full system upgrade? [y/N]: ' reply ||
+  read -r -p "${CYAN}${ICON_INFO}${RESET} Proceed with full system upgrade? [y/N]: " reply ||
     fail 'Installation cancelled.'
   [[ ${reply^^} == Y || ${reply^^} == YES ]] || fail 'Installation cancelled.'
 }
@@ -762,9 +882,47 @@ offer_desktop_entry() {
 
   printf '\n'
   local reply
-  read -r -p 'Create a desktop entry automatically? [y/N]: ' reply || return 0
-  [[ ${reply^^} == Y || ${reply^^} == YES ]] || return 0
-  create_desktop_entry
+  while true; do
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Create a desktop entry automatically? [Y/n]: " reply || return 0
+    case "${reply,,}" in
+      ''|y|yes)
+        create_desktop_entry
+        return 0
+        ;;
+      n|no)
+        return 0
+        ;;
+      *)
+        warning 'Invalid answer. Enter y or n.'
+        ;;
+    esac
+  done
+}
+
+offer_riot_client_installer() {
+  if (( YES )) || [[ ! -t 0 ]]; then
+    return 1
+  fi
+  if [[ ! -f $TARGET_DIR/scripts/installer.sh ]]; then
+    return 1
+  fi
+
+  # The runtime refuses to start before the Riot Client is installed, so
+  # offer to run the installer right away instead of leaving it to the user.
+  local region=${REGION:-$DEFAULT_REGION}
+  printf '\n'
+  local reply
+  read -r -p "${CYAN}${ICON_INFO}${RESET} Launch the Riot Client installer (${region,,})? [Y/n]: " reply || return 1
+  reply=${reply,,}
+  case "$reply" in
+    ''|y|yes) ;;
+    *) return 1 ;;
+  esac
+
+  (
+    cd "$TARGET_DIR" &&
+      ./scripts/installer.sh "${region,,}"
+  )
 }
 
 finish() {
@@ -780,6 +938,12 @@ finish() {
   printf 'Region/locale: %s / %s\n' "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
   printf 'Log: %s\n\n' "$LOG"
   offer_desktop_entry
+
+  local riot_launched=0
+  if offer_riot_client_installer; then
+    riot_launched=1
+  fi
+
   printf 'To start the runtime:\n'
   if (( INSIDE_TOOLBOX )); then
     printf '  toolbox enter %s\n' "$TOOLBOX_NAME"
@@ -787,8 +951,10 @@ finish() {
   printf '  cd "%s"\n' "$TARGET_DIR"
   printf '  RCLOL_REGION=%s RCLOL_LOCALE=%s sh scripts/run.sh\n\n' \
     "${REGION:-$DEFAULT_REGION}" "${LOCALE:-$DEFAULT_LOCALE}"
-  printf 'To install Riot Client later (%s):\n' "$region"
-  printf '  ./scripts/installer.sh %s\n\n' "${region,,}"
+  if (( ! riot_launched )); then
+    printf 'To install Riot Client later (%s):\n' "$region"
+    printf '  ./scripts/installer.sh %s\n\n' "${region,,}"
+  fi
   if [[ -f $TARGET_DIR/README.md ]]; then
     warning "Read the safety notice in $TARGET_DIR/README.md before launching Riot Client."
   else
@@ -805,16 +971,20 @@ main() {
 
   parse_args "$@"
 
+  CONTAINER_INSTALL=0
+  if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
+    CONTAINER_INSTALL=1
+  fi
+
   if (( INSIDE_TOOLBOX )); then
     info "Running inside Toolbox '$TOOLBOX_NAME'."
   fi
 
   detect_distribution
-  preflight
-
-  if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
+  if (( CONTAINER_INSTALL )); then
     check_toolbox_support
   fi
+  preflight
 
   resolve_locale
   confirm_install
@@ -822,7 +992,7 @@ main() {
   confirm_arch_upgrade
   init_log
 
-  if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
+  if (( CONTAINER_INSTALL )); then
     install_toolbox
   fi
 

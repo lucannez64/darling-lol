@@ -65,7 +65,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 
 Installs dependencies, configures the build environment and compiles Darling-LoL. Requires at least **50 GiB** free.
 
-Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+.
+Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+. Hosts outside this list (for example Ubuntu 24.04 and its derivatives) can still install through a Fedora Toolbox container with `--toolbox`.
 
 ```bash
 git clone https://github.com/lucannez64/darling-lol
@@ -75,12 +75,12 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container (Fedora hosts only), keeping build dependencies off the host. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout then follow the Riot Client installation and launch steps below and run update commands inside the container.
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed (for example `sudo dnf install toolbox` or `sudo apt install podman toolbox`); the host distribution is only used to launch the container, and the distribution/FFmpeg requirements (Fedora 44+) are validated inside it. On hosts that are not Fedora, the container is created with `--release 44` (the minimum supported Fedora); set `DARLING_LOL_TOOLBOX_RELEASE` to pick a different release. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout then follow the Riot Client installation and launch steps below and run update commands inside the container.
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, the installer runs a full `pacman -Syu` and asks first unless this is given.
-- `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`).
+- `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`). Without it, the region is derived from the system locale; an interactive install offers that server as a `Y/n` shortcut before the full list.
 
-At the end of an interactive install, the script offers to create a menu/desktop launcher. It is written for the current install mode: a plain entry for a native install, or a `toolbox run -c <container>` entry when installed with `--toolbox`. Set `DARLING_LOL_DESKTOP_ENTRY=1` to create it without asking, or `0` to skip the prompt.
+At the end of an interactive install, the script offers to create a menu/desktop launcher (`[Y/n]`, empty answer accepts). It is written for the current install mode: a plain entry for a native install, or a `toolbox run -c <container>` entry when installed with `--toolbox`. Set `DARLING_LOL_DESKTOP_ENTRY=1` to create it without asking, or `0` to skip the prompt. Right after that, it offers to launch the Riot Client installer (`Launch the Riot Client installer (br)? [Y/n]`); declining it — or any non-interactive run — keeps the manual command in the final summary.
 
 Options can be combined: `bash scripts/install-native.sh --toolbox --verbose`
 
