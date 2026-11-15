@@ -116,6 +116,9 @@ The menu/desktop shortcut runs `scripts/launch-shortcut.sh` (or `toolbox run -c 
   three times in total; a complete installation is never removed. Desktop
   notifications report each retry, the final failure, and the install success
   before the client starts.
+- Ctrl-C (or a `SIGTERM` to `installer.sh`) stops the installer without a
+  retry and without removing what the interrupted attempt wrote; the next run
+  cleans it up.
 
 ## Memory installer: permission denied
 

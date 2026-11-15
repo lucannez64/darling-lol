@@ -29,9 +29,11 @@ client_installed() {
 # A crashed installer attempt leaves a partial client bundle (some Frameworks
 # subdirectories, but no Contents/MacOS) and its 'Riot Client' metadata
 # database behind. Remove both so the next attempt starts clean. A complete
-# installation is never touched, and the game metadata is kept.
+# installation is never touched: its 'Riot Client' metadata is the release
+# record riot-client-pin.py reads. The game metadata is always kept.
 clean_partial_install() {
-  if [ -e "$client_app" ] && ! client_installed; then
+  if client_installed; then return 0; fi
+  if [ -e "$client_app" ] || [ -L "$client_app" ]; then
     rm -rf "$client_app"
     echo "Removed partial $client_app"
   fi
@@ -58,6 +60,16 @@ notify() {
   notify-send -a 'Darling-LoL' "$@" 2>/dev/null || true
 }
 
+# An interrupt stops the installer at once: no retry, and nothing more is
+# removed. The shell runs these traps when the foreground run.sh returns.
+interrupted() {
+  echo 'Riot Client install interrupted; not retrying.' >&2
+  exit "$1"
+}
+trap 'interrupted 129' HUP
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM
+
 bash build/runtime/tools/fetch-installer.sh "$region" build/installer
 unzip -q -o "build/installer/live.$region.zip" -d build/installer
 RIOT_LAUNCHER_HOST="$repo/build/installer/Install League of Legends $region.app/Contents/MacOS/RiotClientServices"
@@ -74,7 +86,12 @@ clean_partial_install
 attempt=1
 max_attempts=3
 while :; do
-  sh scripts/run.sh || true
+  status=0
+  sh scripts/run.sh || status=$?
+  # run.sh ended by an interrupt (Ctrl-C reaches the whole foreground group,
+  # and the session supervisor reports 128 + signal). A crash (sig 11) is not
+  # an interrupt and stays eligible for a retry.
+  case "$status" in 129|130|143) interrupted "$status" ;; esac
   client_installed && break
   [ "$attempt" -ge "$max_attempts" ] && break
   attempt=$((attempt + 1))
@@ -92,4 +109,5 @@ if ! client_installed; then
 fi
 
 notify 'Riot Client installed' 'Starting it.'
+trap - HUP INT TERM
 exec sh scripts/run.sh
