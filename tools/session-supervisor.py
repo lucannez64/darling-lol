@@ -36,7 +36,7 @@ this off.
 League splash: the same early link drop can also lose the UX's "loaded" report,
 and LeagueClient then keeps its 512x216 splash on screen. When the LeagueClient
 log shows UX_PROCESS_BOOTSTRAP_COMPLETE without "Ux reports successful load"
-10 seconds later, the supervisor delivers that report over the local API
+3 seconds later, the supervisor delivers that report over the local API
 (PUT /riotclient/ux-load-complete), and LeagueClient hides the splash itself.
 RCLOL_FINISH_LEAGUE_LOAD=0 turns this off.
 
@@ -504,7 +504,7 @@ class LeagueExitWatch(LeagueLogTail):
 
 BOOTSTRAP_MARKER = b'UX_PROCESS_BOOTSTRAP_COMPLETE'
 LOADED_MARKER = b'Ux reports successful load'
-LEAGUE_LOAD_GRACE = 10.0
+LEAGUE_LOAD_GRACE = 3.0
 
 
 class LeagueLoadWatch(LeagueLogTail):
