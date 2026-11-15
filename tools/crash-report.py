@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
+CHECKOUT = TOOLS.parent
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
@@ -245,9 +246,8 @@ def default_launch_log(env):
     workspace = env.get('DARLING_WORKSPACE')
     if workspace:
         candidates.append(Path(workspace) / 'build/desktop-launch.log')
-    root = Path(__file__).resolve().parents[1]
-    candidates.append(root / 'build/desktop-launch.log')
-    candidates.append(root / 'build/lol-launch.log')
+    candidates.append(CHECKOUT / 'build/desktop-launch.log')
+    candidates.append(CHECKOUT / 'build/lol-launch.log')
     return next((path for path in candidates if path.is_file()), candidates[0])
 
 
