@@ -1,4 +1,4 @@
-"""Compile shipped clock guard/start code with lock and thread failure injection."""
+"""Compile shipped display-link code with descriptor, I/O and pump failures."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,6 +17,12 @@ class DisplayLinkFailureChecks(unittest.TestCase):
         guard_start = source.index('struct CVStateGuard {')
         guard_end = source.index('\n};', guard_start) + 3
         bodies = source[guard_start:guard_end]
+        for name in ('readHeader', 'slotOffset', 'readState', 'writeState'):
+            bodies += runtime.function(source, name)
+        bodies += runtime.function(source, 'CVDisplayLinkStop')
+        release = runtime.function(source, 'CVDisplayLinkRelease')
+        bodies += release.replace('[(NSMutableDictionary*) displayLink release];',
+                                  'releaseObject(displayLink);')
         bodies += runtime.function(source, 'InstallDispatchPump')
         bodies += runtime.function(source, 'CVDisplayLinkStart')
         harness = r'''
@@ -24,18 +30,36 @@ class DisplayLinkFailureChecks(unittest.TestCase):
 #include <stddef.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <sys/types.h>
+#include <string.h>
 using CVDisplayLinkRef = void *;
 using CVReturn = int;
 constexpr int kCVReturnSuccess = 0, kCVReturnError = -1;
 constexpr int kCVReturnInvalidArgument = -2, LOCK_EX = 2, LOCK_UN = 8;
-struct CVLinkStateRec { uint64_t reserved; int running; };
-static CVLinkStateRec state = {};
+// RECORD_DEFINITION
+static CVLinkStateRec records[2];
+static CVLinkStateRec &state = records[1];
+static const uint32_t kStateMagic = 0xc81dfa10;
+static int open_fds, fd_limit=100, releases;
+static bool read_failure, write_failure;
+static void releaseObject(CVDisplayLinkRef) { ++releases; }
+
 static int lock_calls, unlock_calls, closes, lock_mode, creates;
 static uint64_t owner;
-static int clockOpen() { return 42; }
-static void clockClose(int) { ++closes; }
-static long clockRead(int, void *out, size_t, size_t) {
-    *(uint64_t *)out = owner; return sizeof(owner);
+static int clockOpen() { if(open_fds>=fd_limit)return -1; ++open_fds; return 42; }
+static void clockClose(int) { ++closes; --open_fds; }
+static long clockRead(int, void *out, size_t size, off_t offset) {
+    if (offset == offsetof(CVLinkStateRec, reserved) && size == sizeof(owner)) {
+        *(uint64_t *)out = owner; return sizeof(owner);
+    }
+    if (read_failure) return -5;
+    assert(offset >= 0 && offset + size <= sizeof(records));
+    memcpy(out, (char *)records + offset, size); return size;
+}
+static long clockWrite(int, const void *in, size_t size, off_t offset) {
+    if (write_failure) return -5;
+    assert(offset >= 0 && offset + size <= sizeof(records));
+    memcpy((char *)records + offset, in, size); return size;
 }
 static int clockFlock(int, int operation) {
     if (operation == LOCK_UN) { ++unlock_calls; return 0; }
@@ -53,14 +77,14 @@ static int fake_create(pthread_t *thread, const pthread_attr_t *,
 static int fake_detach(pthread_t) { return 0; }
 static void *displayClockThread(void *) { return nullptr; }
 static void installFrameSinkBridge() {}
-static bool readState(CVLinkStateRec *out, CVDisplayLinkRef) { *out=state; return true; }
-static bool writeState(const CVLinkStateRec *rec) { state=*rec; return true; }
 #define pthread_self fake_self
 #define pthread_create fake_create
 #define pthread_detach fake_detach
 '''
         main = r'''
 int main() {
+    records[0].magic=kStateMagic; records[0].version=2; records[0].refs=1;
+    state.link=(void *)1; state.alive=1; state.refs=1;
     lock_mode=1;
     { CVStateGuard guard; assert(guard.fd == 42 && guard.locked); }
     assert(lock_calls == 2 && unlock_calls == 1 && closes == 1);
@@ -80,8 +104,25 @@ int main() {
     assert(state.running == 1 && creates == 2);
     assert(CVDisplayLinkStart((void *)1) == kCVReturnSuccess);
     assert(creates == 2);
+    fd_limit=1; // The guard owns the only available descriptor.
+    assert(CVDisplayLinkStop((void *)1) == kCVReturnSuccess);
+    assert(state.running == 0 && open_fds == 0);
+    state.running=1; read_failure=true;
+    assert(CVDisplayLinkStop((void *)1) == kCVReturnError);
+    CVDisplayLinkRelease((void *)1);
+    assert(releases == 0 && state.refs == 1 && state.alive && state.running);
+    read_failure=false; write_failure=true;
+    assert(CVDisplayLinkStop((void *)1) == kCVReturnError);
+    CVDisplayLinkRelease((void *)1);
+    assert(releases == 0 && state.refs == 1 && state.alive && state.running);
+    write_failure=false;
+    CVDisplayLinkRelease((void *)1);
+    assert(releases == 1 && state.refs == 0 && !state.alive && open_fds == 0);
 }
 '''
+        record_start = source.index('struct CVLinkStateRec {')
+        record_end = source.index('\n};', record_start) + 3
+        harness = harness.replace('// RECORD_DEFINITION', source[record_start:record_end])
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
             (path / 'probe.cc').write_text(harness + bodies + main)
