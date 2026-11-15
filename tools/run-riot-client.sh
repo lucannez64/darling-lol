@@ -79,9 +79,32 @@ export RCLOL_PLATFORM_PROFILE="$profile"
 case "$memory_bytes" in ''|*[!0-9]*) ;; *) export RCLOL_MEMORY_BYTES="$memory_bytes";; esac
 export RCLOL_GPU_NAME="$gpu_name"
 export RCLOL_GPU_VRAM_MB="$gpu_vram"
-# The profiler applies this one scalar to NVIDIA cards, so export it only for exactly one NVIDIA GPU.
-if [ -z "${RCLOL_HOST_GPU_VRAM_MB:-}" ] && command -v nvidia-smi >/dev/null 2>&1; then
- nv_vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | awk '{ n++; v = $1 } END { if (n == 1 && v ~ /^[0-9]+$/) print v }' || true)
+# True when the host has a DRM card and every card is NVIDIA (vendor 0x10de), so not on
+# a hybrid laptop. $1 replaces /sys/class/drm in tests.
+host_gpus_all_nvidia() {
+ drm_vendors=
+ for vfile in "${1:-/sys/class/drm}"/card[0-9]/device/vendor "${1:-/sys/class/drm}"/card[0-9][0-9]/device/vendor; do
+  [ -r "$vfile" ] || continue
+  v=$(sed 's/^0x//' "$vfile" 2>/dev/null || true)
+  case " $drm_vendors " in *" $v "*) ;; *) drm_vendors="${drm_vendors:+$drm_vendors }$v";; esac
+ done
+ [ "$drm_vendors" = 10de ]
+}
+# Prints the VRAM in MB of the only NVIDIA GPU. The profiler applies this one scalar to
+# NVIDIA cards, so nothing is printed unless nvidia-smi reports exactly one GPU. Other
+# hosts never run nvidia-smi; it gets a time limit because it can hang on a broken driver.
+host_nvidia_vram_mb() {
+ host_gpus_all_nvidia "${1:-/sys/class/drm}" || return 0
+ command -v nvidia-smi >/dev/null 2>&1 || return 0
+ if command -v timeout >/dev/null 2>&1; then
+  nv_out=$(timeout -k 2 5 nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null) || return 0
+ else
+  nv_out=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null) || return 0
+ fi
+ printf '%s\n' "$nv_out" | awk 'NF { n++; v = $1 } END { if (n == 1 && v ~ /^[0-9]+$/) print v }'
+}
+if [ -z "${RCLOL_HOST_GPU_VRAM_MB:-}" ]; then
+ nv_vram=$(host_nvidia_vram_mb)
  [ -z "$nv_vram" ] || export RCLOL_HOST_GPU_VRAM_MB="$nv_vram"
 fi
 if [ "$profile" = compat ]; then
@@ -125,13 +148,7 @@ export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
 # installed alongside nvidia_icd.json, pin the NVIDIA Vulkan ICD so the loader
 # cannot enumerate llvmpipe ahead of the presenting GPU (issue #127).
 if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
- drm_vendors=
- for vfile in /sys/class/drm/card[0-9]/device/vendor /sys/class/drm/card[0-9][0-9]/device/vendor; do
-  [ -r "$vfile" ] || continue
-  v=$(sed 's/^0x//' "$vfile" 2>/dev/null || true)
-  case " $drm_vendors " in *" $v "*) ;; *) drm_vendors="${drm_vendors:+$drm_vendors }$v";; esac
- done
- if [ "$drm_vendors" = "10de" ]; then
+ if host_gpus_all_nvidia; then
   has_sw_icd=0
   for sw in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
    [ -r "$sw" ] && { has_sw_icd=1; break; }

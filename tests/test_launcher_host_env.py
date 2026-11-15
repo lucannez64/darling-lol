@@ -1,4 +1,4 @@
-"""The launcher's host display setup, run from its own text with fake cookie files."""
+"""The launcher's host display and GPU setup, run from its own text with fake cookies and a fake DRM tree."""
 import importlib.util
 import os
 from pathlib import Path
@@ -45,13 +45,13 @@ class HostEnvFixture(unittest.TestCase):
         path.write_text('#!/bin/sh\n' + body + '\n')
         path.chmod(0o755)
 
-    def run_block(self, block, tail, **extra):
+    def run_block(self, block, tail, *arguments, **extra):
         script = Path(self.tmp.name) / 'block.sh'
         script.write_text(block)
         env = {'PATH': str(self.bin), 'HOME': str(self.home)}
         env.update(extra)
-        result = subprocess.run([SH, '-euc', '. "$1"; ' + tail, 'sh', str(script)], env=env,
-                                capture_output=True, text=True, timeout=30)
+        result = subprocess.run([SH, '-euc', '. "$1"; ' + tail, 'sh', str(script), *arguments],
+                                env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
@@ -107,6 +107,69 @@ class XwaylandCookie(HostEnvFixture):
         self.exported()
         self.assertEqual(list(self.home.iterdir()), [])
         self.assertNotIn('.Xauthority', LAUNCHER.read_text().replace('~/.Xauthority', ''))
+
+
+class NvidiaVram(HostEnvFixture):
+    BLOCK = launcher_text('host_gpus_all_nvidia() {', 'if [ "$profile" = compat ]; then')
+    FUNCTIONS = launcher_text('host_gpus_all_nvidia() {', 'if [ -z "${RCLOL_HOST_GPU_VRAM_MB:-}" ]; then')
+
+    def setUp(self):
+        super().setUp()
+        self.calls = Path(self.tmp.name) / 'nvidia-smi calls'
+        self.smi('echo 8192')
+
+    def smi(self, body):
+        self.stub('nvidia-smi', f'echo "$*" >> "{self.calls}"\n{body}')
+
+    def drm(self, *vendors):
+        root = Path(tempfile.mkdtemp(dir=self.tmp.name)) / 'drm'
+        for index, vendor in enumerate(vendors):
+            device = root / f'card{index}' / 'device'
+            device.mkdir(parents=True)
+            (device / 'vendor').write_text(vendor + '\n')
+        (root / 'card0-DP-1').mkdir(parents=True)
+        return str(root)
+
+    def vram(self, *vendors):
+        return self.run_block(self.FUNCTIONS, 'host_nvidia_vram_mb "$2"', self.drm(*vendors))
+
+    def test_only_an_all_nvidia_host_runs_nvidia_smi(self):
+        for vendors in ((), ('0x1002',), ('0x8086', '0x10de'), ('0x10de', '0x1002')):
+            self.assertEqual(self.vram(*vendors), '', vendors)
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.vram('0x10de'), '8192')
+        self.assertEqual(self.calls.read_text().count('memory.total'), 1)
+
+    def test_several_gpus_a_failure_or_garbage_export_nothing(self):
+        self.smi('echo 8192; echo 8192')
+        self.assertEqual(self.vram('0x10de', '0x10de'), '')
+        self.smi('echo 8192; exit 9')
+        self.assertEqual(self.vram('0x10de'), '')
+        self.smi('echo "[N/A]"')
+        self.assertEqual(self.vram('0x10de'), '')
+
+    def test_nvidia_smi_runs_under_a_time_limit_when_timeout_exists(self):
+        limits = Path(self.tmp.name) / 'timeout calls'
+        self.stub('timeout', f'echo "$*" >> "{limits}"\nwhile [ "$1" != nvidia-smi ]; do shift; done\n"$@"')
+        self.assertEqual(self.vram('0x10de'), '8192')
+        self.assertIn('5 nvidia-smi', limits.read_text())
+        # A run that hit the limit ends with status 124 whatever it printed before.
+        self.stub('timeout', 'echo 8192; exit 124')
+        self.assertEqual(self.vram('0x10de'), '')
+
+    def test_a_user_value_wins_and_this_host_decides_the_export(self):
+        tail = 'printf "%s\\n" "${RCLOL_HOST_GPU_VRAM_MB-unset}"'
+        self.assertEqual(self.run_block(self.BLOCK, tail, RCLOL_HOST_GPU_VRAM_MB='4096'), '4096')
+        self.assertFalse(self.calls.exists())
+        vendors = {path.read_text().strip() for path in Path('/sys/class/drm').glob('card*/device/vendor')}
+        expected = '8192' if vendors == {'0x10de'} else 'unset'
+        self.assertEqual(self.run_block(self.BLOCK, tail), expected)
+
+    def test_the_icd_pin_uses_the_same_condition(self):
+        source = LAUNCHER.read_text()
+        self.assertEqual(source.count('/device/vendor'), 2)
+        pin = source[source.index('NVIDIA Vulkan ICD pin'):source.index('newest_xwayland_cookie() {')]
+        self.assertIn('if host_gpus_all_nvidia; then', pin)
 
 
 if __name__ == '__main__':
