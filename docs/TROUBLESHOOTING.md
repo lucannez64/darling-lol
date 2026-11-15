@@ -108,6 +108,14 @@ The menu/desktop shortcut runs `scripts/launch-shortcut.sh` (or `toolbox run -c 
 
 - `Riot Client is not installed in ...; launching scripts/installer.sh <region>` followed by installer output means the auto-install started; it can take several minutes without any on-screen progress.
 - Without `notify-send` (or a session DBus) the notification is skipped silently; the log is the only feedback channel.
+- The installer is retried when it fails to install the client. Its native UI
+  has crashed mid-install under Darling (`LOLSIGFAIL`, `sig=11`, right after
+  `CGLCreateContext`), leaving a partial `Riot Client.app` (no
+  `Contents/MacOS`) and a partial `Metadata/Riot Client` database.
+  `installer.sh` removes that partial state and reruns the installer up to
+  three times in total; a complete installation is never removed. Desktop
+  notifications report each retry, the final failure, and the install success
+  before the client starts.
 
 ## Memory installer: permission denied
 
@@ -307,7 +315,7 @@ driver update recompiles once and caches again.
 
 Use `sh scripts/installer.sh euw` (or your supported region). The first-time launcher must omit the installed client's `--app-root` and pass `--skip-to-install`; the normal wrapper now does this. It also selects `league_of_legends` so the product installation UI appears after login.
 
-The installer window closing on its own, followed by `subprocess exit`, is usually a successful install: Riot's installer puts the client in `/Users/Shared/Riot Games/Riot Client.app` and exits, and its LaunchServices hand-off to that client does not start it under Darling. `scripts/installer.sh` now launches the installed client itself, and the runner links it to `/Applications/Riot Client.app` when that link is missing. If the client was not installed, the wrapper prints the installer's log directory; check the end of the newest `Launcher` log there.
+The installer window closing on its own, followed by `subprocess exit`, is usually a successful install: Riot's installer puts the client in `/Users/Shared/Riot Games/Riot Client.app` and exits, and its LaunchServices hand-off to that client does not start it under Darling. `scripts/installer.sh` now launches the installed client itself, and the runner links it to `/Applications/Riot Client.app` when that link is missing. If the client was not installed, the wrapper prints the installer's log directory; check the end of the newest `Launcher` log there. A bundle without `Contents/MacOS` is a partial install left by a crashed attempt, not an installed client: the shortcut and the runner only treat the installation as present when that directory exists, and `installer.sh` removes the partial bundle before retrying.
 
 If logs report guest `/private/tmp` permission errors, the default prefix needs its own temporary directory. The corrected full runtime installer creates it. To repair just this default-prefix directory as your ordinary user:
 
