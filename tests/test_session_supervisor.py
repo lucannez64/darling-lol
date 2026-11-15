@@ -646,6 +646,65 @@ class LeagueExitTests(unittest.TestCase):
         self.assertEqual(supervisor.league_client_processes(
             self.prefix, self.ns, self.proc_root, own_namespace=self.ns), [])
 
+    BOOT = b'000015.290| ALWAYS| critical-flow| CF.STARTUP_FRONTEND.CEF.UX_PROCESS_BOOTSTRAP_COMPLETE 6/7\n'
+    LOADED = b'000016.000|   OKAY| Ux reports successful load.\n'
+
+    def client_log(self, name='2026-11-15T23-39-46_731_LeagueClient.log'):
+        return self.logs / name
+
+    def load_watch(self):
+        now = [0.0]
+        return supervisor.LeagueLoadWatch(self.prefix, clock=lambda: now[0]), now
+
+    def test_lost_load_report_is_delivered_once(self):
+        watch, now = self.load_watch()
+        self.ux_log().write_bytes(self.BOOT)  # the UX log never counts
+        self.client_log().write_bytes(self.BOOT)
+        self.assertFalse(watch.poll())
+        now[0] = supervisor.LEAGUE_LOAD_GRACE - 1
+        self.assertFalse(watch.poll())
+        now[0] = supervisor.LEAGUE_LOAD_GRACE
+        self.assertTrue(watch.poll())
+        now[0] += 100
+        self.assertFalse(watch.poll())
+
+    def test_normal_load_report_needs_nothing(self):
+        watch, now = self.load_watch()
+        self.client_log().write_bytes(self.BOOT + self.LOADED)
+        now[0] = 100
+        self.assertFalse(watch.poll())
+
+    def test_load_report_arriving_late_cancels(self):
+        watch, now = self.load_watch()
+        log = self.client_log()
+        log.write_bytes(self.BOOT)
+        self.assertFalse(watch.poll())
+        with open(log, 'ab') as handle:
+            handle.write(self.LOADED)
+        now[0] = 100
+        self.assertFalse(watch.poll())
+
+    def test_load_history_does_not_count(self):
+        self.client_log().write_bytes(self.BOOT)
+        watch, now = self.load_watch()
+        now[0] = 100
+        self.assertFalse(watch.poll())
+
+    def test_load_report_uses_the_local_api(self):
+        (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:https')
+        requests = []
+
+        def urlopen(request, timeout, context):
+            requests.append(request)
+            return mock.Mock()
+
+        out = io.StringIO()
+        self.assertTrue(supervisor.report_league_load(self.prefix, out=out, urlopen=urlopen))
+        self.assertEqual(requests[0].full_url,
+                         'https://127.0.0.1:44247/riotclient/ux-load-complete')
+        self.assertEqual(requests[0].get_method(), 'PUT')
+        self.assertIn('delivered it', out.getvalue())
+
     def test_malformed_lockfile_scheme_is_a_failed_request(self):
         (self.lol / 'lockfile').write_text('LeagueClient:20:44247:secret:')
         self.assertFalse(supervisor.request_league_quit(self.prefix, urlopen=mock.Mock()))

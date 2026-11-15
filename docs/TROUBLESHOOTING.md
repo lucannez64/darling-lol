@@ -586,7 +586,16 @@ splash overlay. It is not managed by the window manager, does not appear in
 main client window and should not be presented. See the observed properties in
 [the splash window note](notes/league-splash-window-512x216.md).
 
-An opt-in helper polls the X11 tree every five seconds and unmaps only windows
+A splash that stays after startup usually means LeagueClient never received
+the UX's load report: its `LeagueClient.log` stops at
+`UX_PROCESS_BOOTSTRAP_COMPLETE 6/7` and has no `Ux reports successful load`,
+because LeagueClientUx dropped its link (close code 1003, "Unsupported Data
+Type") first. The launcher's session supervisor delivers that report over the
+client's local API (`PUT /riotclient/ux-load-complete`) after 3 seconds, and
+LeagueClient hides the splash itself. It is on by default;
+`RCLOL_FINISH_LEAGUE_LOAD=0` turns it off.
+
+If the splash still comes back, an opt-in helper polls the X11 tree every five seconds and unmaps only windows
 that match the class, the fixed `512x216` size and the override-redirect flag.
 
 Use the standalone wrapper from a terminal (Ctrl+C stops it):
