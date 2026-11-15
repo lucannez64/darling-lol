@@ -98,6 +98,8 @@ class IridiumLifetimeMarkersTest(unittest.TestCase):
             translator = work / 'translate'
             subprocess.run(['clang++', '-O0', '-std=c++17', '-w',
                             f'-DHOST_LLVM_LIBNAME="{library}"',
+                            # Iridium with the translation cache (#211) refuses to build without an identity.
+                            '-DIRIDIUM_SOURCE_HASH="host-test-translator-identity"',
                             '-I' + llvm_tools.config('--includedir'),
                             '-I' + str(tree / 'include'), '-I' + str(tree / 'private-include'),
                             str(ROOT / 'tools/riot-air-translate-check.cpp'),
