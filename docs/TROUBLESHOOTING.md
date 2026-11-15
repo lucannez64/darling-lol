@@ -335,6 +335,25 @@ The installer fetcher no longer treats a missing archive `Info.plist` or the inf
 
 There is also a separate known compatibility gap: native LaunchAgent watch registration can return HTTP 409 after the League install path is accepted, leaving the download idle. A historical inspector hook handles this and interrupted `pending_verify` states in 28 mock cases, but that hook is disabled in normal launches and excluded from the manual workflow. There is no verified runtime-only replacement for that handoff in this snapshot. Do not assume the native permission and launcher fixes resolve every idle Install case, or enable debugger/API automation to work around it.
 
+### Fresh install of the Riot software
+
+To remove every trace of the Riot Client (and by default the game) from the
+prefix so `scripts/installer.sh <region>` can reinstall from scratch, run:
+
+```sh
+sh scripts/uninstall.sh
+```
+
+Close the game and both clients first: the script refuses to run while a Riot
+Client or League process is running. It lists what it will remove and keep and
+asks for confirmation (`--yes` skips the question, and is required when there
+is no terminal), then stops the runtime, saves the Riot logs under
+`build/uninstall-log-backups/`, removes the client, its metadata and settings,
+and keeps the Darling runtime (overlays, certificate store) and the Mesa shader
+cache. `--keep-game` keeps the game and its product metadata instead of
+removing it, and `--all` removes the whole prefix. Only a Darling prefix is
+accepted; any other directory is refused.
+
 ## Riot exits and League reports that it lost its connection
 
 Check the launcher stderr or `build/desktop-launch.log` when launched through
