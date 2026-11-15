@@ -75,14 +75,10 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed (for example `sudo dnf install toolbox` or `sudo apt install podman toolbox`); the host distribution is only used to launch the container, and the distribution/FFmpeg requirements (Fedora 44+) are validated inside it. On hosts that are not Fedora, the container is created with `--release 44` (the minimum supported Fedora); set `DARLING_LOL_TOOLBOX_RELEASE` to pick a different release. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). Afterwards, enter it with `toolbox enter darling-lol` (or your custom name), `cd` to the checkout then follow the Riot Client installation and launch steps below and run update commands inside the container.
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed.
 - `--verbose`, `-v`: Full command output.
-- `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, the installer runs a full `pacman -Syu` and asks first unless this is given.
-- `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`). Without it, the region is derived from the system locale; an interactive install offers that server as a `Y/n` shortcut before the full list.
-
-At the end of an interactive install, the script offers to create a menu/desktop launcher (`[Y/n]`, empty answer accepts) and then to launch the Riot Client installer right away (`Launch the Riot Client installer? [Y/n]`). Set `DARLING_LOL_DESKTOP_ENTRY=1` or `0` to skip either prompt non-interactively.
-
-The launcher is written for the current install mode: a plain entry, or a `toolbox run -c <container>` entry with `--toolbox`. It keeps an installed shortcut up to date, and auto-installs the Riot Client on the first click when it is missing (region from `build/config.json`); launch diagnostics land in `build/desktop-launch.log`. With the shortcut in place, the final summary skips the manual launch/install commands.
+- `--yes`, `-y`: Skip confirmations;
+- `--region CODE`: Riot region printed for the Riot Client install step (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`). Without it, the region is derived from the system locale.
 
 Options can be combined: `bash scripts/install-native.sh --toolbox --verbose`
 

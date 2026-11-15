@@ -510,7 +510,7 @@ check_toolbox_support() {
   case "$FAMILY" in
     fedora) hint='sudo dnf install toolbox podman' ;;
     arch) hint='sudo pacman -S podman toolbox' ;;
-    debian) hint='sudo apt install podman toolbox' ;;
+    debian) hint='sudo apt install podman-toolbox' ;;
     *) hint='the toolbox and podman packages from your distribution' ;;
   esac
   command -v toolbox >/dev/null 2>&1 ||

@@ -493,7 +493,7 @@ class ToolboxSupportTests(unittest.TestCase):
     def test_missing_packages_hint_the_host_package_manager(self):
         result = self.run_support(toolbox=False, family='debian')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Install it with 'sudo apt install podman toolbox'", result.stderr)
+        self.assertIn("Install it with 'sudo apt install podman-toolbox'", result.stderr)
 
         result = self.run_support(podman=False, family='fedora')
         self.assertNotEqual(result.returncode, 0)
