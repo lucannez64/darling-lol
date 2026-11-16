@@ -84,11 +84,11 @@ def pointers(repo):
             continue
         if head.startswith(LFS_POINTER) and b'\nsize ' in head:found.append(name)
     return found
-def repair(checkout):
+def repair(checkout,repos=None):
     """An interrupted fetch leaves a submodule with a wiped index or pointer text and 'submodule update'
     treats both as up to date, so check every worktree before this checkout becomes the source tree."""
     from concurrent.futures import ThreadPoolExecutor
-    repos=[checkout,*submodules(checkout)]
+    if repos is None:repos=[checkout,*submodules(checkout)]
     def fix(repo):
         name=repo.relative_to(checkout) or '.'
         if repo!=checkout and git_run(['git','-C',str(repo),'status','--porcelain'],text=True,
@@ -211,11 +211,24 @@ else:
     # arithmetic) can lack a required submodule; fetch only the missing ones and
     # never touch the submodules already checked out.
     if not a.check_only:
-        missing=[path for path in fetch_pathspecs(source) if not (source/path/'.git').exists()]
-        if missing:
-            print('Fetching missing submodules:',', '.join(missing),flush=True)
+        pending=ROOT/'build/pending-submodules'
+        marked=set(pending.read_text().split()) if pending.exists() else set()
+        paths=fetch_pathspecs(source)
+        missing=[path for path in paths if not (source/path/'.git').exists()]
+        # A previous run interrupted mid-initialization left the marker behind;
+        # those submodules need their fetch retried (and repaired) even when a
+        # partial .git already exists.
+        todo=sorted(set(missing)|(marked&set(paths)))
+        if todo:
+            print('Fetching missing submodules:',', '.join(todo),flush=True)
+            pending.parent.mkdir(parents=True,exist_ok=True)
+            pending.write_text('\n'.join(todo)+'\n')
             run(['git','-C',str(source),'-c',LFS_URL,*LFS_FILTERS,'submodule','update','--init','--recursive',
-                 '--depth','1','--jobs',str(a.jobs),*missing])
+                 '--depth','1','--jobs',str(a.jobs),*todo])
+            # Only the submodules this run touched; already initialized or
+            # patched ones keep their state and are not inspected.
+            repair(source,repos=[source/path for path in todo if (source/path/'.git').exists()])
+            pending.unlink()
 
 # Never reset someone else's checkout to make a patch apply.
 for component in manifest['components']:

@@ -44,6 +44,39 @@ def fingerprint(chunks):
     return hashlib.sha256("\0".join(chunks).encode()).hexdigest()
 
 
+def dependency_paths(dep_file):
+    """Paths listed in a clang -MD dependency file, or None when unreadable."""
+    try:
+        text = Path(dep_file).read_text()
+    except OSError:
+        return None
+    body = text.split(":", 1)[1] if ":" in text else text
+    return [token for token in body.replace("\\\n", " \n").split()]
+
+
+def dependency_chunk(dep_files):
+    """Fingerprint chunk over the dependencies the previous build recorded.
+
+    The .d files written next to the objects list every included header; their
+    contents are hashed so a header edit invalidates the library even though no
+    compiled source changed. A missing or unreadable dependency file — and any
+    listed dependency that can no longer be read — acts as a cache miss.
+    """
+    try:
+        digests = {}
+        for dep_file in dep_files:
+            entries = dependency_paths(dep_file)
+            if entries is None:
+                return "unreadable-dependency-files"
+            for path in entries:
+                if path not in digests:
+                    digests[path] = digest_file(path)
+    except OSError:
+        return "unreadable-dependencies"
+    return "dependencies:" + ",".join(
+        sorted(path + "\0" + value for path, value in digests.items()))
+
+
 def up_to_date(stamp_path, digest, outputs):
     """True when the recorded digest matches and every output is still there."""
     try:

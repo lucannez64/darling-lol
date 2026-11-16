@@ -146,24 +146,40 @@ def build():
             objects.append(entry)
             kept.append(entry)
             continue
+        # Also record the dependencies, so header edits invalidate the cache.
+        command.extend(["-MD", "-MF", str(obj) + ".d"])
         jobs.append((target_folder, command, obj, source))
         objects.append(str(obj))
     print("recompiling", len(jobs), "of", len(entries), "objects at -O2", flush=True)
 
-    # Everything that can change the result: this script, the link line, each
-    # recompiled source's content and compile command, and the stat of every
-    # configured object kept as-is (the cmake build refreshes those itself).
-    chunks = [riot_build_cache.digest_text(Path(__file__).read_text()),
-              riot_build_cache.digest_text(link_text)]
-    for target_folder, command, obj, source in jobs:
-        chunks.append(" ".join(command) + "\0" + riot_build_cache.digest_file(source))
-    for entry in kept:
-        chunks.append(entry + "\0" + riot_build_cache.stat_entry(folder / entry))
+    # Wait for a quiet machine before hashing (and later compiling): nothing
+    # below burns CPU a running match would notice.
+    riot_build_gate.wait_until_free()
+
+    def compute_chunks():
+        # Everything that can change the result: this script, the link line,
+        # each recompiled source's content and compile command, the stat of
+        # every configured object kept as-is (the cmake build refreshes those
+        # itself), and the headers recorded by the previous dependency files.
+        chunks = [riot_build_cache.digest_text(Path(__file__).read_text()),
+                  riot_build_cache.digest_text(link_text)]
+        for target_folder, command, obj, source in jobs:
+            chunks.append(" ".join(command) + "\0" + riot_build_cache.digest_file(source))
+        for entry in kept:
+            chunks.append(entry + "\0" + riot_build_cache.stat_entry(folder / entry))
+        chunks.append(riot_build_cache.dependency_chunk(
+            [Path(str(obj) + ".d") for _, _, obj, _ in jobs]))
+        return chunks
+
     stamp = root / "build/riot-libc-build.json"
+    had_stamp = stamp.exists()
+    chunks = compute_chunks()
     digest = riot_build_cache.fingerprint(chunks)
     if riot_build_cache.up_to_date(stamp, digest, [root / "build/riot-libsystem_c.dylib"]):
         print("libsystem_c up to date; skipping rebuild", flush=True)
         return
+    # A failed build must not leave the old stamp validating its outputs.
+    stamp.unlink(missing_ok=True)
 
     def compile_one(job):
         working_directory, command, obj, source = job
@@ -175,7 +191,6 @@ def build():
         if not obj.is_file():
             raise SystemExit("no object produced for " + str(obj))
 
-    riot_build_gate.wait_until_free()
     with ThreadPoolExecutor(max_workers=6) as pool:
         list(pool.map(compile_one, jobs))
 
@@ -185,7 +200,13 @@ def build():
     link[link.index("-o") + 1] = str(root / "build/riot-libsystem_c.dylib")
     subprocess.run(link, cwd=folder, check=True)
     print("built build/riot-libsystem_c.dylib with", len(jobs), "objects at -O2", flush=True)
-    riot_build_cache.record(stamp, digest, "libsystem_c -O3 -march=native")
+    post = compute_chunks()
+    if had_stamp and post[:-1] != chunks[:-1]:
+        # Inputs changed while compiling; record nothing so the next run
+        # rebuilds instead of stamping objects compiled from mixed inputs.
+        print("inputs changed while building; not recording the stamp", flush=True)
+        return
+    riot_build_cache.record(stamp, riot_build_cache.fingerprint(post), "libsystem_c -O3 -march=native")
 
 
 if __name__ == "__main__":

@@ -120,36 +120,49 @@ for source,settings,base in repairs:
     replaced.add(matches[0])
 # Everything that can change the result: this script, the clang resource dir,
 # the configured object list and link line, every flags.make consumed, the
-# content of each (re)compiled source, the probe sources, and the stat of the
-# configured objects linked as-is (the cmake build refreshes those itself).
-chunks=[riot_build_cache.digest_text(Path(__file__).read_text()),resource_dir,
-        riot_build_cache.digest_text(rsp_text),riot_build_cache.digest_text(link_text),
-        riot_build_cache.digest_text(corevideo_text)]
-for text in flag_texts:
-    chunks.append(riot_build_cache.digest_text(text))
-for source,obj,defines in mig_jobs:
-    chunks.append(source+'\0'+riot_build_cache.digest_file(kernel/'libsyscall'/source))
-for source,settings,base in repairs:
-    chunks.append(source+'\0'+riot_build_cache.digest_file(base/source))
-for probe in PROBES:
-    chunks.append(probe+'\0'+riot_build_cache.digest_file(project/('tools/%s.c'%probe)))
-for index,value in enumerate(objects):
-    if index not in replaced:
-        chunks.append(value+'\0'+riot_build_cache.stat_entry(kernel/value))
+# content of each (re)compiled source, the probe sources, the stat of the
+# configured objects linked as-is (the cmake build refreshes those itself), and
+# the headers recorded by the previous dependency files.
+dep_files=[Path(str(obj)+'.d') for _,obj,_ in mig_jobs]
+dep_files+=[Path(str(project/('build/riot-kernel-'+source.replace('/','-')+'.o'))+'.d') for source,settings,base in repairs]
+dep_files+=[Path(str(project/('build/%s.o'%probe))+'.d') for probe in PROBES]
+# The compiled objects list is mutated below; the fingerprint reads the original.
+original_objects=list(objects)
+def compute_chunks():
+    chunks=[riot_build_cache.digest_text(Path(__file__).read_text()),resource_dir,
+            riot_build_cache.digest_text(rsp_text),riot_build_cache.digest_text(link_text),
+            riot_build_cache.digest_text(corevideo_text)]
+    for text in flag_texts:
+        chunks.append(riot_build_cache.digest_text(text))
+    for source,obj,defines in mig_jobs:
+        chunks.append(source+'\0'+riot_build_cache.digest_file(kernel/'libsyscall'/source))
+    for source,settings,base in repairs:
+        chunks.append(source+'\0'+riot_build_cache.digest_file(base/source))
+    for probe in PROBES:
+        chunks.append(probe+'\0'+riot_build_cache.digest_file(project/('tools/%s.c'%probe)))
+    for index,value in enumerate(original_objects):
+        if index not in replaced:
+            chunks.append(value+'\0'+riot_build_cache.stat_entry(kernel/value))
+    chunks.append(riot_build_cache.dependency_chunk(dep_files))
+    return chunks
 stamp=project/'build/riot-kqueue-build.json'
+had_stamp=stamp.exists()
+chunks=compute_chunks()
 digest=riot_build_cache.fingerprint(chunks)
 outputs=[project/'build/riot-libsystem_kernel.dylib']+[project/('build/%s'%probe) for probe in PROBES]
 if riot_build_cache.up_to_date(stamp,digest,outputs):
     print('libsystem_kernel up to date; skipping rebuild',flush=True)
     sys.exit(0)
+# A failed build must not leave the old stamp validating its outputs.
+stamp.unlink(missing_ok=True)
 
 for source,obj,defines in mig_jobs:
     subprocess.run(['clang',*mig_flags['C_DEFINES'],*mig_flags['C_INCLUDES'],*mig_flags['C_FLAGS'],
-        *defines,'-c',str(kernel/'libsyscall'/source),'-o',str(obj)],check=True,cwd=kernel/'libsyscall')
+        *defines,'-MD','-MF',str(obj)+'.d','-c',str(kernel/'libsyscall'/source),'-o',str(obj)],check=True,cwd=kernel/'libsyscall')
 for source,settings,base in repairs:
     obj=project/('build/riot-kernel-'+source.replace('/','-')+'.o')
     subprocess.run(['clang',*settings['C_DEFINES'],*settings['C_INCLUDES'],*settings['C_FLAGS'],
-        '-c',str(base/source),'-o',str(obj)],check=True)
+        '-MD','-MF',str(obj)+'.d','-c',str(base/source),'-o',str(obj)],check=True)
 rsp=project/'build/riot-kernel-objects.rsp'
 for source,obj,defines in mig_jobs:
     match=next(i for i,value in enumerate(objects) if value.endswith('/'+source+'.o'))
@@ -171,8 +184,15 @@ for line in corevideo_text.splitlines():
 for probe in PROBES:
     obj = project / f'build/{probe}.o'
     subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
-                    '-O2', '-c', str(project / f'tools/{probe}.c'), '-o', str(obj)], check=True)
+                    '-O2', '-MD', '-MF', str(obj)+'.d', '-c', str(project / f'tools/{probe}.c'),
+                    '-o', str(obj)], check=True)
     subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-nostdlib',
                     '-isysroot', '@DARLING_SDK@', str(obj), '-lSystem', '-o',
                     str(project / f'build/{probe}')], check=True)
-riot_build_cache.record(stamp,digest,'libsystem_kernel queue-lifetime repair + probes')
+post=compute_chunks()
+if had_stamp and post[:-1]!=chunks[:-1]:
+    # Inputs changed while compiling; record nothing so the next run rebuilds
+    # instead of stamping objects compiled from mixed inputs.
+    print('inputs changed while building; not recording the stamp',flush=True)
+    sys.exit(0)
+riot_build_cache.record(stamp,riot_build_cache.fingerprint(post),'libsystem_kernel queue-lifetime repair + probes')
