@@ -571,6 +571,23 @@ With client optimizations enabled and close-during-game enabled, the close
 helper remains the more aggressive option when in-client chat during the match
 is not needed.
 
+The close helper ends only the `LeagueClientUx` UI; the Riot Client window stays
+mapped, and its Chromium keeps painting (and playing the home-screen video)
+behind the game. Under GNOME Wayland, Xwayland reports every window as
+unobscured whatever covers it, so an unmapped window is the only occlusion
+signal an X11 client gets; AppKit turns it into an occlusion change and
+Chromium stops painting. To hide the Riot Client window as well while a match
+runs:
+
+```sh
+RCLOL_CLIENT_IN_GAME_TRICKS=1 RCLOL_HIDE_RIOT_CLIENT_IN_GAME=1 ./scripts/run.sh
+```
+
+This starts the hide helper with `--riot-client-only` next to the close helper.
+The window is shown again when the match ends. In a 5-minute uncapped match on
+an Alienware m16 R2 (Core Ultra 9 185H, RTX 4070 Laptop) the whole Riot Client
+tree then used about 12% of one core.
+
 Diagnose the match detector without changing any window:
 
 ```sh
@@ -890,6 +907,34 @@ On the NVIDIA proprietary driver, check the submit worker's kernel time: a threa
 
 The NVIDIA performance figures above were reported on an earlier runtime base;
 they have not been remeasured after integration with current `main`. On `bcb3245` an RTX 5060 Laptop reported ~200–215 FPS in Practice Tool ([#53](https://github.com/lucannez64/darling-lol/issues/53)).
+
+## darlingserver message loop and idle-wait switches
+
+darlingserver runs its message loop on io_uring when the build target's kernel
+headers provide what it uses (checked by CMake; no liburing needed) and the
+running kernel allows it. One thread receives every call, runs the microthreads
+and sends every reply, with one `io_uring_enter` per pass; replies go out as a
+linked chain, and a full socket sends the rest of the chain again in order. The
+server prints `darlingserver: using the io_uring message loop` at start, or why
+it uses the epoll loop instead.
+
+| Variable | Effect |
+|---|---|
+| `DSERVER_IO_URING=0` | use the previous epoll loop and worker thread |
+| `DSERVER_PCORE_AFFINITY=1` | keep the server's threads on the performance cores of a hybrid Intel CPU |
+| `DSERVER_CALL_STATS=<file>` | every 5 s, append request counts per call, per thread, and (`kinds:` blocks) per message id, wait type, timer distance and busiest object; costs a few percent of one core and a short stall of the loop per flush, so not for normal play |
+
+AppKit's X11 event wait sleeps in one `kevent` on the X11 connection, the
+run-loop mode's Mach port set and the main dispatch queue's port, instead of
+polling the run loop every 2 ms. After 100 ms without work the slice grows to
+16 ms; work ends the wait at once. An idle AppKit app drops from about 930 to
+120 run-loop passes per second (`riot-runloop-idle-check`, see
+[testing](TESTING.md)).
+
+| Variable | Effect |
+|---|---|
+| `RCLOL_RUNLOOP_KEVENT=0` | keep the previous 2 ms `ppoll` |
+| `RCLOL_RUNLOOP_KEVENT_TRACE=1` | report once why the wait falls back, and every 5 s how the waits ended |
 
 ## NVIDIA
 

@@ -279,6 +279,12 @@ if [ -z "${RIOT_LAUNCHER_HOST:-}" ]; then
    close)
     echo 'client-in-game-tricks: closeLeagueClientDuringGame=true -> close helper' >&2
     python3 "$runner_dir/close-league-client-in-game.py" --detach &
+    # Opt-in: the close helper leaves the Riot Client window up, and its Chromium keeps painting (and playing the home
+    # screen video) behind the game. Hiding the window is what tells it to stop under Wayland.
+    if [ "${RCLOL_HIDE_RIOT_CLIENT_IN_GAME:-0}" = 1 ]; then
+     echo 'client-in-game-tricks: RCLOL_HIDE_RIOT_CLIENT_IN_GAME=1 -> also hide the Riot Client window' >&2
+     python3 "$runner_dir/hide-league-client-in-game.py" --detach --riot-client-only &
+    fi
     ;;
    hide)
     echo 'client-in-game-tricks: closeLeagueClientDuringGame=false -> hide helper' >&2

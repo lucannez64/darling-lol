@@ -4684,7 +4684,7 @@ index 1818940..12cde42 100644
 +- (NSRect) frameForRootRect: (NSRect) rect;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf..c42adf2 100644
+index 5ae29bf..8ffbab2 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -48,12 +48,271 @@
@@ -5497,7 +5497,158 @@ index 5ae29bf..c42adf2 100644
      }
  }
  
-@@ -962,20 +1528,86 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -955,6 +1521,150 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+     return [_windowsByID objectForKey: [NSNumber numberWithUnsignedLong: i]];
+ }
+ 
++#ifdef DARLING
++#include <sys/event.h>
++#include <mach/mach.h>
++
++/* darling-lol: the idle wait below used to be a ppoll on the X11 connection alone, so it could only end early for
++ * input. Run-loop work (CFRunLoopWakeUp, timers, main-queue blocks) waited for the slice to run out, which is why
++ * the slice had to be 2 ms, and why an idle Electron client made about a thousand run-loop passes per second, each
++ * a few darlingserver round trips. Wait in one kevent on the X11 connection, the run-loop mode's Mach port set and
++ * the main dispatch queue's port instead, so work ends the wait as soon as it arrives. A mode's port set is the one
++ * CFRunLoop itself waits on (its wake-up port, timer ports and source ports); EVFILT_MACHPORT on it only reports
++ * that a message is waiting, it never receives it. Main thread only; RCLOL_RUNLOOP_KEVENT=0 keeps the ppoll. */
++extern mach_port_t _CFRunLoopDarlingModePortSet(CFRunLoopRef rl, CFStringRef modeName);
++extern mach_port_t _dispatch_get_main_queue_port_4CF(void);
++
++enum {
++    RCLOLWaitUnavailable = -1,
++    RCLOLWaitTimedOut = 0,
++    RCLOLWaitRunLoop = 1, /* a run-loop port: a timer, a wake-up or a source; the pass decides whether it was work */
++    RCLOLWaitWork = 2,    /* X11 input or main-queue work */
++};
++
++static int rclolWaitQueue = -1;
++static BOOL rclolWaitFailed;
++static mach_port_t rclolWaitDispatchPort = MACH_PORT_NULL;
++static mach_port_t rclolWaitSets[8];
++static unsigned rclolWaitSetCount;
++
++static BOOL rclolWatchPort(mach_port_t port) {
++    if (port == MACH_PORT_NULL)
++        return YES;
++    for (unsigned i = 0; i < rclolWaitSetCount; ++i)
++        if (rclolWaitSets[i] == port)
++            return YES;
++    if (rclolWaitSetCount == sizeof(rclolWaitSets) / sizeof(*rclolWaitSets))
++        return YES; /* more modes than expected: the ones already watched keep working, the slice bounds the rest */
++    struct kevent change;
++    EV_SET(&change, port, EVFILT_MACHPORT, EV_ADD | EV_ENABLE, 0, 0, NULL);
++    if (kevent(rclolWaitQueue, &change, 1, NULL, 0, NULL) < 0)
++        return NO;
++    rclolWaitSets[rclolWaitSetCount++] = port;
++    return YES;
++}
++
++/* RCLOL_RUNLOOP_KEVENT_TRACE=1 reports, once, why the kevent wait is not used, and every 5 s how the idle waits of
++ * the main thread ended: [0] timed out, [1] a run-loop port, [2] X11 input or the main queue, [3] ppoll fallback. */
++static int rclolWaitTraceSetting = -1;
++static unsigned long rclolWaitEnds[4];
++static CFAbsoluteTime rclolWaitTraceLast;
++
++static BOOL rclolWaitTracing(void) {
++    if (rclolWaitTraceSetting < 0) {
++        const char *trace = getenv("RCLOL_RUNLOOP_KEVENT_TRACE");
++        rclolWaitTraceSetting = trace && trace[0] == '1';
++    }
++    return rclolWaitTraceSetting;
++}
++
++static void rclolWaitCount(int end) {
++    if (!rclolWaitTracing())
++        return;
++    ++rclolWaitEnds[end];
++    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
++    if (rclolWaitTraceLast == 0)
++        rclolWaitTraceLast = now;
++    if (now - rclolWaitTraceLast >= 5.0) {
++        double seconds = now - rclolWaitTraceLast;
++        fprintf(stderr, "rclol run-loop wait [%d]: per second timed_out=%.0f run_loop=%.0f input_or_main_queue=%.0f ppoll=%.0f\n",
++            getpid(), rclolWaitEnds[0] / seconds, rclolWaitEnds[1] / seconds, rclolWaitEnds[2] / seconds, rclolWaitEnds[3] / seconds);
++        memset(rclolWaitEnds, 0, sizeof(rclolWaitEnds));
++        rclolWaitTraceLast = now;
++    }
++}
++
++static void rclolWaitGiveUp(const char *why, mach_port_t port) {
++    int error = errno;
++    rclolWaitFailed = YES;
++    if (rclolWaitTracing())
++        fprintf(stderr, "rclol run-loop wait [%d]: falling back to polling (%s, port 0x%x, errno %d)\n", getpid(), why, port, error);
++}
++
++static int rclolWaitForWork(Display *display, CFStringRef cfMode, CFStringRef cocoaMode, NSTimeInterval slice) {
++    if (rclolWaitFailed || !pthread_main_np())
++        return RCLOLWaitUnavailable;
++    if (rclolWaitQueue < 0) {
++        const char *setting = getenv("RCLOL_RUNLOOP_KEVENT");
++        if (setting && setting[0] == '0') {
++            rclolWaitGiveUp("RCLOL_RUNLOOP_KEVENT=0", MACH_PORT_NULL);
++            return RCLOLWaitUnavailable;
++        }
++        if ((rclolWaitQueue = kqueue()) < 0) {
++            rclolWaitGiveUp("kqueue", MACH_PORT_NULL);
++            return RCLOLWaitUnavailable;
++        }
++        struct kevent change;
++        EV_SET(&change, ConnectionNumber(display), EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
++        rclolWaitDispatchPort = _dispatch_get_main_queue_port_4CF();
++        if (kevent(rclolWaitQueue, &change, 1, NULL, 0, NULL) < 0) {
++            rclolWaitGiveUp("X11 connection", MACH_PORT_NULL);
++            close(rclolWaitQueue);
++            rclolWaitQueue = -1;
++            return RCLOLWaitUnavailable;
++        }
++        if (!rclolWatchPort(rclolWaitDispatchPort)) {
++            rclolWaitGiveUp("main queue port", rclolWaitDispatchPort);
++            close(rclolWaitQueue);
++            rclolWaitQueue = -1;
++            return RCLOLWaitUnavailable;
++        }
++    }
++    CFRunLoopRef loop = CFRunLoopGetCurrent();
++    mach_port_t modeSet = _CFRunLoopDarlingModePortSet(loop, cfMode);
++    if (!rclolWatchPort(modeSet)) {
++        rclolWaitGiveUp("run-loop mode port set", modeSet);
++        return RCLOLWaitUnavailable;
++    }
++    if (cocoaMode && !CFEqual(cocoaMode, cfMode)) {
++        modeSet = _CFRunLoopDarlingModePortSet(loop, cocoaMode);
++        if (!rclolWatchPort(modeSet)) {
++            rclolWaitGiveUp("Cocoa mode port set", modeSet);
++            return RCLOLWaitUnavailable;
++        }
++    }
++
++    struct timespec timeout = { (time_t)slice, (long)((slice - (time_t)slice) * 1000000000.0) };
++    struct kevent events[4];
++    int count = kevent(rclolWaitQueue, NULL, 0, events, 4, &timeout);
++    if (count < 0) {
++        if (errno == EINTR)
++            return RCLOLWaitRunLoop;
++        rclolWaitGiveUp("kevent wait", MACH_PORT_NULL);
++        return RCLOLWaitUnavailable;
++    }
++    int woke = RCLOLWaitTimedOut;
++    for (int i = 0; i < count; ++i) {
++        BOOL work = events[i].filter == EVFILT_READ || (mach_port_t)events[i].ident == rclolWaitDispatchPort;
++        if (work)
++            woke = RCLOLWaitWork;
++        else if (woke == RCLOLWaitTimedOut)
++            woke = RCLOLWaitRunLoop;
++    }
++    return woke;
++}
++#endif
++
+ - (NSEvent *) nextEventMatchingMask: (NSEventMask) mask
+                           untilDate: (NSDate *) untilDate
+                              inMode: (NSRunLoopMode) mode
+@@ -962,20 +1672,116 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -5528,11 +5679,19 @@ index 5ae29bf..c42adf2 100644
 +    if (result != nil && [result type] == NSAppKitSystem)
 +        result = nil;
 +    NSTimeInterval remaining;
++    /* darling-lol: state of the kevent wait (rclolWaitForWork): when real work was last seen, and how many wakes
++     * in a row found none, which would mean a port that stays ready without the run loop consuming it. */
++    static CFAbsoluteTime rclolLastWork;
++    static unsigned rclolEmptyWakes;
++    int rclolLastWake = RCLOLWaitTimedOut;
 +    while (result == nil && (remaining = [untilDate timeIntervalSinceNow]) > 0) {
 +        /* Display-link and input sources have no CF timer deadline. Bound the
 +         * idle-poll latency below half a 144Hz frame (~3.5ms) so input events
-+         * are dispatched promptly at high refresh rates. */
-+        NSTimeInterval slice = remaining < 0.002 ? remaining : 0.002;
++         * are dispatched promptly at high refresh rates.
++         * darling-lol: with the kevent wait, run-loop work also ends the wait, so once nothing has happened for
++         * 100 ms the slice grows to 16 ms; the first sign of work brings it back to 2 ms. */
++        NSTimeInterval cap = (!rclolWaitFailed && CFAbsoluteTimeGetCurrent() - rclolLastWork > 0.1) ? 0.016 : 0.002;
++        NSTimeInterval slice = remaining < cap ? remaining : cap;
 +        /* A quiet X connection must not prevent main-queue callbacks or
 +         * CF timers from running while AppKit waits for its next event. */
 +        CFStringRef cfMode = (mode == nil || [mode isEqual:NSDefaultRunLoopMode])
@@ -5556,6 +5715,14 @@ index 5ae29bf..c42adf2 100644
 +        /* A handled source can immediately queue more work (Chromium and
 +         * libuv do this). Drain it before the idle poll delay; sleeping after
 +         * every callback caps a busy source at 50 callbacks per second. */
++        BOOL rclolWork = result != nil || runResult == kCFRunLoopRunHandledSource || rclolLastWake == RCLOLWaitWork;
++        if (rclolWork) {
++            rclolLastWork = CFAbsoluteTimeGetCurrent();
++            rclolEmptyWakes = 0;
++        } else if (rclolLastWake == RCLOLWaitRunLoop) {
++            ++rclolEmptyWakes;
++        }
++        rclolLastWake = RCLOLWaitTimedOut;
 +        if (result == nil && runResult == kCFRunLoopRunHandledSource)
 +            continue;
 +        if (result == nil) {
@@ -5571,6 +5738,19 @@ index 5ae29bf..c42adf2 100644
 +            if (next > 0 && next - now < slice)
 +                slice = next > now ? next - now : 0;
 +        }
++        /* A run-loop wake that leads to no work is normal for a timer; twenty in a row means a port stays ready
++         * without being consumed, so sleep through one slice the old way instead of returning at once again. */
++        if (result == nil && slice > 0 && rclolEmptyWakes < 20) {
++            rclolLastWake = rclolWaitForWork(_display, cfMode, (CFStringRef)mode, slice);
++            if (rclolLastWake != RCLOLWaitUnavailable) {
++                rclolWaitCount(rclolLastWake);
++                continue;
++            }
++            rclolLastWake = RCLOLWaitTimedOut;
++        }
++        rclolEmptyWakes = 0;
++        if (slice > 0.002)
++            slice = 0.002;
 +        if (result == nil && slice > 0) {
 +            /* darling-lol perf: wait on the X11 connection fd instead of a blind
 +             * sleep, so an input event arriving on the socket ends the wait early.
@@ -5582,6 +5762,7 @@ index 5ae29bf..c42adf2 100644
 +            };
 +            extern long __lolsys_syscall(long, long, long, long, long, long, int);
 +            __lolsys_syscall((long)&pfd, 1, (long)&delay, 0, 8, 0, 271 /* Linux ppoll */);
++            rclolWaitCount(3);
 +        }
 +    }
 +    return result;
@@ -5589,7 +5770,7 @@ index 5ae29bf..c42adf2 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1005,22 +1637,160 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1005,22 +1811,160 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          [result addObject: @([win windowNumber])];
      }
  
@@ -5752,7 +5933,7 @@ index 5ae29bf..c42adf2 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1030,7 +1800,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +1974,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              break;
  
          if (ev->type == KeyPress) {
@@ -5765,7 +5946,7 @@ index 5ae29bf..c42adf2 100644
              buf[strLen] = 0;
          } else {
              // Xutf8LookupString() may not be used with KeyRelease
-@@ -1038,6 +1812,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,6 +1986,18 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -5784,7 +5965,7 @@ index 5ae29bf..c42adf2 100644
          id str = [[NSString alloc] initWithCString: buf
                                            encoding: NSUTF8StringEncoding];
          NSPoint pos =
-@@ -1077,6 +1863,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1077,6 +2037,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ButtonPress:;
@@ -5817,7 +5998,7 @@ index 5ae29bf..c42adf2 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +1898,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +2072,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -5828,7 +6009,7 @@ index 5ae29bf..c42adf2 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +1908,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +2082,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -5839,7 +6020,7 @@ index 5ae29bf..c42adf2 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +1921,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +2095,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -5866,7 +6047,7 @@ index 5ae29bf..c42adf2 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +1946,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +2120,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -5881,7 +6062,7 @@ index 5ae29bf..c42adf2 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +1959,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +2133,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -5892,7 +6073,7 @@ index 5ae29bf..c42adf2 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +1970,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +2144,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -6014,7 +6195,7 @@ index 5ae29bf..c42adf2 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +2067,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +2241,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -6075,7 +6256,7 @@ index 5ae29bf..c42adf2 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2129,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2303,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -6140,7 +6321,7 @@ index 5ae29bf..c42adf2 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2221,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2395,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -6168,7 +6349,7 @@ index 5ae29bf..c42adf2 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2249,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2423,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -6190,7 +6371,7 @@ index 5ae29bf..c42adf2 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2287,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +2461,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -6199,7 +6380,7 @@ index 5ae29bf..c42adf2 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1392,6 +2337,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1392,6 +2511,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
      case MappingNotify:
          NSLog(@"MappingNotify");
@@ -6209,7 +6390,7 @@ index 5ae29bf..c42adf2 100644
          break;
  
      case GenericEvent:
-@@ -1399,7 +2347,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +2521,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -6220,7 +6401,7 @@ index 5ae29bf..c42adf2 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1433,6 +2383,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +2557,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -6231,7 +6412,7 @@ index 5ae29bf..c42adf2 100644
      return 0;
  }
  
-@@ -1476,54 +2430,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +2604,279 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -6284,8 +6465,8 @@ index 5ae29bf..c42adf2 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
- }
- 
++}
++
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -6472,8 +6653,8 @@ index 5ae29bf..c42adf2 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
-+}
-+
+ }
+ 
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    BOOL rclolRelativeBefore = _relativeMouse.active;

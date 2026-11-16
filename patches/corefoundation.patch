@@ -189,7 +189,7 @@ index a399c43..7f01ce8 100644
      movq   %rbp, %rsp
      pop    %rbp
 diff --git a/CFRunLoop.c b/CFRunLoop.c
-index e932ea5..522bc72 100644
+index e932ea5..9349367 100644
 --- a/CFRunLoop.c
 +++ b/CFRunLoop.c
 @@ -27,6 +27,7 @@
@@ -224,19 +224,22 @@ index e932ea5..522bc72 100644
      Boolean originalBuffer = true;
      kern_return_t ret = KERN_SUCCESS;
      for (;;) {		/* In that sleep of death what nightmares may come ... */
-@@ -2417,6 +2428,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+@@ -2417,6 +2428,14 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
  
          Boolean poll = sourceHandledThisLoop || (0ULL == timeout_context->termTSR);
  
 +        // darling-lol: every Mach port-set change and receive is a synchronous round trip to darlingserver here.
-+        // A zero-timeout pass that has just polled the dispatch port on its own does not need to put that same
-+        // port into the wait set (insert) and take it out again (extract) around the non-blocking set poll: a
-+        // message that lands in between is picked up by the very next pass.
-+        Boolean darlingSkipDispatchSet = poll && (MACH_PORT_NULL != dispatchPort) && !didDispatchPortLastTime;
++        // A zero-timeout pass never puts the dispatch port into the wait set (insert) and takes it out again
++        // (extract) around the non-blocking set poll. If it polled the dispatch port on its own just below, a
++        // message that lands in between is picked up by the very next pass; otherwise (the first pass of every
++        // call, where didDispatchPortLastTime starts out true) the dispatch port is polled on its own after an
++        // empty set poll, so this pass still services it: two calls instead of three.
++        Boolean darlingSkipDispatchSet = poll && (MACH_PORT_NULL != dispatchPort);
++        Boolean darlingDispatchPolledFirst = (MACH_PORT_NULL != dispatchPort) && !didDispatchPortLastTime;
          if (MACH_PORT_NULL != dispatchPort && !didDispatchPortLastTime) {
  #if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
              msg = (mach_msg_header_t *)msg_buffer;
-@@ -2440,7 +2456,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+@@ -2440,7 +2459,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
          // iteration, as this mode could be run re-entrantly and we don't
          // want these ports to get serviced.
  
@@ -245,16 +248,23 @@ index e932ea5..522bc72 100644
          
  	__CFRunLoopModeUnlock(rlm);
  	__CFRunLoopUnlock(rl);
-@@ -2500,7 +2516,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+@@ -2500,7 +2519,14 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
          // want these ports to get serviced. Also, we don't want them left
          // in there if this function returns.
  
 -        __CFPortSetRemove(dispatchPort, waitSet);
 +        if (!darlingSkipDispatchSet) __CFPortSetRemove(dispatchPort, waitSet);
++#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
++        if (darlingSkipDispatchSet && !darlingDispatchPolledFirst && MACH_PORT_NULL == livePort) {
++            // the set poll did not include the dispatch port; check it on its own, as the top of the loop does
++            msg = (mach_msg_header_t *)msg_buffer;
++            __CFRunLoopServiceMachPort(dispatchPort, &msg, sizeof(msg_buffer), &livePort, 0, &voucherState, NULL);
++        }
++#endif
          
          __CFRunLoopSetIgnoreWakeUps(rl);
  
-@@ -2550,7 +2566,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
+@@ -2550,7 +2576,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
  #endif
          if (MACH_PORT_NULL == livePort) {
              CFRUNLOOP_WAKEUP_FOR_NOTHING();
@@ -267,7 +277,33 @@ index e932ea5..522bc72 100644
          } else if (livePort == rl->_wakeUpPort) {
              CFRUNLOOP_WAKEUP_FOR_WAKEUP();
              // do nothing on Mac OS
-@@ -2719,21 +2739,46 @@ void CFRunLoopWakeUp(CFRunLoopRef rl) {
+@@ -2710,6 +2740,25 @@ CFAbsoluteTime CFRunLoopGetNextTimerFireDate(CFRunLoopRef rl, CFStringRef modeNa
+     return at;
+ }
+ 
++#if DEPLOYMENT_TARGET_MACOSX
++/* darling-lol: the port set a run loop mode waits on (its wake-up port, timer ports and source ports), or
++ * MACH_PORT_NULL when the mode does not exist yet. AppKit's X11 event wait watches it with EVFILT_MACHPORT, so an
++ * idle app sleeps until the run loop has work instead of polling it. The set stays valid while the mode exists,
++ * and a run loop never removes its modes. */
++CF_EXPORT mach_port_t _CFRunLoopDarlingModePortSet(CFRunLoopRef rl, CFStringRef modeName) {
++    CHECK_FOR_FORK();
++    __CFRunLoopLock(rl);
++    CFRunLoopModeRef rlm = __CFRunLoopFindMode(rl, modeName, false);
++    mach_port_t portSet = MACH_PORT_NULL;
++    if (rlm) {
++        portSet = rlm->_portSet;
++        __CFRunLoopModeUnlock(rlm);
++    }
++    __CFRunLoopUnlock(rl);
++    return portSet;
++}
++#endif
++
+ Boolean CFRunLoopIsWaiting(CFRunLoopRef rl) {
+     CHECK_FOR_FORK();
+     return __CFRunLoopIsSleeping(rl);
+@@ -2719,21 +2768,46 @@ void CFRunLoopWakeUp(CFRunLoopRef rl) {
      CHECK_FOR_FORK();
      // This lock is crucial to ignorable wakeups, do not remove it.
      __CFRunLoopLock(rl);
@@ -316,7 +352,7 @@ index e932ea5..522bc72 100644
  }
  
  void CFRunLoopStop(CFRunLoopRef rl) {
-@@ -2828,6 +2873,10 @@ void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^block)(void))
+@@ -2828,6 +2902,10 @@ void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^block)(void))
  
  Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {
      CHECK_FOR_FORK();
@@ -327,7 +363,7 @@ index e932ea5..522bc72 100644
      CFRunLoopModeRef rlm;
      Boolean hasValue = false;
      __CFRunLoopLock(rl);
-@@ -2849,6 +2898,13 @@ Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStrin
+@@ -2849,6 +2927,13 @@ Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStrin
  void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {	/* DOES CALLOUT */
      CHECK_FOR_FORK();
      if (__CFRunLoopIsDeallocating(rl)) return;
@@ -341,7 +377,7 @@ index e932ea5..522bc72 100644
      if (!__CFIsValid(rls)) return;
      Boolean doVer0Callout = false;
      __CFRunLoopLock(rl);
-@@ -2910,6 +2966,10 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
+@@ -2910,6 +2995,10 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
  
  void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {	/* DOES CALLOUT */
      CHECK_FOR_FORK();
@@ -352,7 +388,7 @@ index e932ea5..522bc72 100644
      Boolean doVer0Callout = false, doRLSRelease = false;
      __CFRunLoopLock(rl);
      if (modeName == kCFRunLoopCommonModes) {
-@@ -3432,6 +3492,12 @@ void CFRunLoopSourceSignal(CFRunLoopSourceRef rls) {
+@@ -3432,6 +3521,12 @@ void CFRunLoopSourceSignal(CFRunLoopSourceRef rls) {
  	__CFRunLoopSourceSetSignaled(rls);
      }
      __CFRunLoopSourceUnlock(rls);
@@ -365,7 +401,7 @@ index e932ea5..522bc72 100644
  }
  
  Boolean CFRunLoopSourceIsSignalled(CFRunLoopSourceRef rls) {
-@@ -3966,4 +4032,3 @@ void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef rlt, CFTimeInterval tolerance)
+@@ -3966,4 +4061,3 @@ void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef rlt, CFTimeInterval tolerance)
      }
  #endif
  }
