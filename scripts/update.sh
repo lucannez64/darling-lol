@@ -32,6 +32,35 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
   echo 'Rootless update installed. In this shell use scripts/run.sh; otherwise exit this shell and start darling-lol.'
   exit 0
 fi
+
+# A Toolbox install builds against the container's libraries and installs the base
+# runtime into the container's /usr/local, so the update must run in there too.
+# Re-exec when running on the host; the container name comes from the marker
+# written by install-native.sh, from the installed desktop entry, or from the
+# installer default confirmed by finding Darling inside that container.
+if [ ! -f /run/.toolboxenv ]; then
+  if [ -f build/toolbox-container ]; then
+    name=$(cat build/toolbox-container)
+  else
+    name=$(sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' \
+      "${HOME:-}/.local/share/applications/darling-launcher.desktop" 2>/dev/null | head -n 1)
+  fi
+  if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 && \
+     toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+    # No explicit record, but the installer's default container holds Darling.
+    name=darling-lol
+  fi
+  if [ -n "$name" ]; then
+    if ! command -v toolbox >/dev/null 2>&1 || ! toolbox run -c "$name" true 2>/dev/null; then
+      echo "This checkout was installed via Toolbox container '$name', but that container is not" >&2
+      echo 'reachable. Start it and run the update inside it: toolbox enter '"$name" >&2
+      exit 1
+    fi
+    echo "Toolbox install detected; running the update inside container '$name'..."
+    exec toolbox run --container "$name" sh "$repo/scripts/update.sh"
+  fi
+fi
+
 if [ ! -d build/darling-src/build ]; then
 	echo 'No existing build; follow the first-time setup in README.md instead.' >&2
 	exit 1

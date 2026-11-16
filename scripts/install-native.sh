@@ -645,6 +645,11 @@ install_toolbox() {
     info "Toolbox '$TOOLBOX_NAME' already exists."
   fi
 
+  # Record the container so scripts/update.sh can re-exec itself inside it:
+  # the build cache and the installed runtime belong to this container.
+  mkdir -p "$TARGET_DIR/build"
+  printf '%s\n' "$TOOLBOX_NAME" > "$TARGET_DIR/build/toolbox-container"
+
   info "Entering Toolbox '$TOOLBOX_NAME'..."
   printf '\n'
 
@@ -1118,6 +1123,12 @@ main() {
   CONTAINER_INSTALL=0
   if (( USE_TOOLBOX && ! INSIDE_TOOLBOX )); then
     CONTAINER_INSTALL=1
+  elif (( ! INSIDE_TOOLBOX )); then
+    # A genuinely native install (not the inner Toolbox run, which exits before
+    # reaching anything else with CONTAINER_INSTALL=0) is no longer a Toolbox
+    # install; drop a stale marker so scripts/update.sh does not re-exec into
+    # a removed container.
+    rm -f "$TARGET_DIR/build/toolbox-container"
   fi
 
   if (( INSIDE_TOOLBOX )); then
