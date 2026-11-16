@@ -4635,7 +4635,7 @@ index b27ffe5..4210d15 100644
  		auto clearColor = color.clearColor;
  		VkClearValue clearValue {};
  		clearValue.color.float32[0] = clearColor.red;
-@@ -65,36 +157,59 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+@@ -65,36 +157,63 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
  	std::vector<VkSubpassDependency> dependencies;
  
  	for (const auto& color: descriptor.colorAttachments) {
@@ -4703,18 +4703,22 @@ index b27ffe5..4210d15 100644
 +        _depthRoot = texture;
 +        while (auto parent = std::dynamic_pointer_cast<PrivateTexture>(_depthRoot->parentTexture())) _depthRoot = parent;
 +    }
-+    // League uses fragment-to-fragment barriers for texture/render-target scope.
++    // League uses fragment-to-fragment barriers for texture/render-target scope. The render-target scope covers the
++    // depth attachment too (see memoryBarrier), and a barrier inside the pass must fit this self-dependency, so the
++    // depth-test stages and depth access belong here as well.
 +    VkSubpassDependency dependency {};
 +    dependency.srcSubpass = dependency.dstSubpass = 0;
-+    dependency.srcStageMask = dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    dependency.srcStageMask = dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
++        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 +    dependency.srcAccessMask = dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-+        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
++        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 +    dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 +    dependencies.push_back(dependency);
  
  	std::vector<VkAttachmentReference> colorAttachments;
  	VkAttachmentReference depthStencilAttachment {};
-@@ -102,13 +217,15 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+@@ -102,13 +221,15 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
  	size_t index = 0;
  	for (const auto& color: descriptor.colorAttachments) {
  		VkAttachmentReference ref {};
@@ -4734,7 +4738,7 @@ index b27ffe5..4210d15 100644
  		depthStencilAttachment.attachment = index;
  		depthStencilAttachment.layout = VK_IMAGE_LAYOUT_GENERAL;
  		++index;
-@@ -129,19 +246,19 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+@@ -129,19 +250,19 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
  	renderPassInfo.dependencyCount = dependencies.size();
  	renderPassInfo.pDependencies = dependencies.data();
  
@@ -4760,7 +4764,7 @@ index b27ffe5..4210d15 100644
  	}
  
  	VkFramebufferCreateInfo framebufferInfo {};
-@@ -165,7 +282,51 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+@@ -165,7 +286,51 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
  	renderPassBeginInfo.renderArea.extent.height = firstTexture->height();
  	renderPassBeginInfo.clearValueCount = clearValues.size();
  	renderPassBeginInfo.pClearValues = clearValues.data();
@@ -4813,7 +4817,7 @@ index b27ffe5..4210d15 100644
  
  	// set default values
  
-@@ -190,16 +351,26 @@ Indium::PrivateRenderCommandEncoder::~PrivateRenderCommandEncoder() {
+@@ -190,16 +355,26 @@ Indium::PrivateRenderCommandEncoder::~PrivateRenderCommandEncoder() {
  	if (_framebuffer) {
  		DynamicVK::vkDestroyFramebuffer(_privateDevice->device(), _framebuffer, nullptr);
  	}
@@ -4846,7 +4850,7 @@ index b27ffe5..4210d15 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::setFrontFacingWinding(Winding frontFaceWinding) {
-@@ -225,6 +396,7 @@ void Indium::PrivateRenderCommandEncoder::setDepthClipMode(DepthClipMode depthCl
+@@ -225,6 +400,7 @@ void Indium::PrivateRenderCommandEncoder::setDepthClipMode(DepthClipMode depthCl
  	}
  };
  
@@ -4854,7 +4858,7 @@ index b27ffe5..4210d15 100644
  void Indium::PrivateRenderCommandEncoder::setViewport(const Viewport& viewport) {
  	setViewports(&viewport, 1);
  };
-@@ -239,7 +411,7 @@ void Indium::PrivateRenderCommandEncoder::setViewports(const Viewport* viewports
+@@ -239,7 +415,7 @@ void Indium::PrivateRenderCommandEncoder::setViewports(const Viewport* viewports
  		//       so we use a Vulkan 1.1 feature here and just flip the Y-axis of the viewport
  		//       (with a corresponding change in the origin).
  		vkViewport.x = viewport.originX;
@@ -4863,7 +4867,7 @@ index b27ffe5..4210d15 100644
  		vkViewport.width = viewport.width;
  		vkViewport.height = -viewport.height;
  		// the documentation for setViewport and setViewports states that znear and zfar must be between
-@@ -251,6 +423,7 @@ void Indium::PrivateRenderCommandEncoder::setViewports(const Viewport* viewports
+@@ -251,6 +427,7 @@ void Indium::PrivateRenderCommandEncoder::setViewports(const Viewport* viewports
  		vkViewport.maxDepth = std::clamp(viewport.zfar, 0., 1.);
  		tmp.push_back(vkViewport);
  	}
@@ -4871,7 +4875,7 @@ index b27ffe5..4210d15 100644
  	DynamicVK::vkCmdSetViewportWithCount(buf->commandBuffer(), tmp.size(), tmp.data());
  };
  
-@@ -274,6 +447,7 @@ void Indium::PrivateRenderCommandEncoder::setScissorRects(const ScissorRect* sci
+@@ -274,6 +451,7 @@ void Indium::PrivateRenderCommandEncoder::setScissorRects(const ScissorRect* sci
  		vkRect.extent.height = scissorRect.height;
  		tmp.push_back(vkRect);
  	}
@@ -4879,7 +4883,7 @@ index b27ffe5..4210d15 100644
  	DynamicVK::vkCmdSetScissorWithCount(buf->commandBuffer(), tmp.size(), tmp.data());
  };
  
-@@ -287,76 +461,359 @@ void Indium::PrivateRenderCommandEncoder::setBlendColor(float red, float green,
+@@ -287,76 +465,359 @@ void Indium::PrivateRenderCommandEncoder::setBlendColor(float red, float green,
  	DynamicVK::vkCmdSetBlendConstants(buf->commandBuffer(), tmp);
  };
  
@@ -5267,7 +5271,7 @@ index b27ffe5..4210d15 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount) {
-@@ -368,22 +825,45 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
+@@ -368,22 +829,45 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
  };
  
  void Indium::PrivateRenderCommandEncoder::setVertexBytes(const void* bytes, size_t length, size_t index) {
@@ -5316,7 +5320,7 @@ index b27ffe5..4210d15 100644
  	}
  };
  
-@@ -391,12 +871,14 @@ void Indium::PrivateRenderCommandEncoder::setVertexBufferOffset(size_t offset, s
+@@ -391,12 +875,14 @@ void Indium::PrivateRenderCommandEncoder::setVertexBufferOffset(size_t offset, s
  	_functionResources[0].setBufferOffset(offset, index);
  };
  
@@ -5333,7 +5337,7 @@ index b27ffe5..4210d15 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) {
-@@ -411,28 +893,34 @@ void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vect
+@@ -411,28 +897,34 @@ void Indium::PrivateRenderCommandEncoder::setVertexSamplerStates(const std::vect
  	}
  };
  
@@ -5372,7 +5376,7 @@ index b27ffe5..4210d15 100644
  	}
  };
  
-@@ -440,12 +928,14 @@ void Indium::PrivateRenderCommandEncoder::setFragmentBufferOffset(size_t offset,
+@@ -440,12 +932,14 @@ void Indium::PrivateRenderCommandEncoder::setFragmentBufferOffset(size_t offset,
  	_functionResources[1].setBufferOffset(offset, index);
  };
  
@@ -5389,7 +5393,7 @@ index b27ffe5..4210d15 100644
  };
  
  void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::vector<std::shared_ptr<SamplerState>>& states, Range<size_t> range) {
-@@ -460,69 +950,102 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
+@@ -460,69 +954,102 @@ void Indium::PrivateRenderCommandEncoder::setFragmentSamplerStates(const std::ve
  	}
  };
  
@@ -5516,7 +5520,7 @@ index b27ffe5..4210d15 100644
  	DynamicVK::vkCmdSetDepthWriteEnable(buf->commandBuffer(), desc.depthWriteEnabled ? VK_TRUE : VK_FALSE);
  	DynamicVK::vkCmdSetDepthCompareOp(buf->commandBuffer(), compareFunctionToVkCompareOp(desc.depthCompareFunction));
  	DynamicVK::vkCmdSetDepthTestEnable(buf->commandBuffer(), VK_TRUE);
-@@ -694,3 +1217,18 @@ void Indium::PrivateRenderCommandEncoder::useResources(const std::vector<std::sh
+@@ -694,3 +1221,25 @@ void Indium::PrivateRenderCommandEncoder::useResources(const std::vector<std::sh
  	// TODO: check what Metal does in this case. this is just an educated guess
  	useResources(resources, usage, RenderStages::Vertex | RenderStages::Fragment | RenderStages::Tile | RenderStages::Object | RenderStages::Mesh);
  };
@@ -5528,11 +5532,18 @@ index b27ffe5..4210d15 100644
 +    auto buf = _privateCommandBuffer.lock();
 +    VkMemoryBarrier barrier {};
 +    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++    // Metal's render-target scope covers every attachment, depth included. Soft-particle effects (the light beams on
++    // Howling Abyss) sample the depth that earlier draws in this pass wrote; without flushing depth writes the sampler
++    // reads stale 8x8 depth tiles and the effect drops out in squares (issue #213).
 +    if (scope & 3) barrier.srcAccessMask |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-+    if (scope & 4) barrier.srcAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++    if (scope & 4) barrier.srcAccessMask |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
++        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 +    barrier.dstAccessMask = barrier.srcAccessMask;
++    // attachment writes are read back through textures
++    if (scope & 4) barrier.dstAccessMask |= VK_ACCESS_SHADER_READ_BIT;
 +    VkPipelineStageFlags stages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-+    if (scope & 4) stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    if (scope & 4) stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
++        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 +    DynamicVK::vkCmdPipelineBarrier(buf->commandBuffer(), stages, stages, VK_DEPENDENCY_BY_REGION_BIT, 1, &barrier, 0, nullptr, 0, nullptr);
 +}
 diff --git a/src/indium/render-pipeline.cpp b/src/indium/render-pipeline.cpp
