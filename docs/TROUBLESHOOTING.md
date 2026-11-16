@@ -102,6 +102,44 @@ bash scripts/install-native.sh --toolbox
 
 If `toolbox` keeps pulling an old image, create the container from an explicit registry tag (for example `toolbox create --image registry.fedoraproject.org/fedora-toolbox:44 darling-lol`). The same requirements apply when you enter the container manually later (Distrobox included): run `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh` from the checkout inside the container.
 
+## Darling does not start: `Failed to bind socket: Read-only file system`
+
+The installer or launcher prints a chain of errors that look unrelated:
+
+```
+Darling system root certificates were not installed: guest keychain build failed (exit 1)
+terminate called after throwing an instance of 'std::system_error'
+  what():  Failed to bind socket: Read-only file system
+*** 1:1: dserver_rpc_explicit_checkin: BAD SEND STATUS: -2 ***
+Failed to checkin with darlingserver
+Cannot open mnt namespace file: No such file or directory
+```
+
+They all follow from the first server failure. `darlingserver` mounts an overlay
+on the prefix (upper layer: the prefix, work directory: `<prefix>.workdir`, for
+example `~/.darling.workdir`) and only then creates `<prefix>/.darlingserver.sock`.
+When the kernel cannot create the work directory it does not fail the mount; it
+mounts the overlay **read-only** and only logs a warning, so the socket `bind()`
+fails with `EROFS`. The certificate and `mnt namespace` messages are
+consequences of the dead server, and retrying never helps.
+
+A work directory left by an earlier run under a different user mapping (the host,
+another container, `sudo`) is the usual cause. With no Darling running
+(`pgrep -a darlingserver` prints nothing), move it aside and start again:
+
+```sh
+mv ~/.darling.workdir ~/.darling.workdir.bak   # add sudo if this is denied
+```
+
+Only the work directory next to the prefix is scratch space; do not touch the
+prefix itself. Delete the `.bak` once Darling starts. The kernel names the reason
+in its log (`journalctl -k -b | grep -i overlay` on the host).
+
+If there is no `<prefix>.workdir`, check the filesystem that holds the prefix: it
+must be writable, support extended attributes and report `d_type`. NFS, ZFS and
+eCryptfs do not work; set `DPREFIX` to a directory on a supported filesystem.
+`scripts/installer.sh` recognises this error, stops retrying and prints these steps.
+
 ## The Darling Launcher shortcut does nothing
 
 The menu/desktop shortcut runs `scripts/launch-shortcut.sh` (or `toolbox run -c <container> .../scripts/launch-shortcut.sh` in Toolbox mode). It checks for the Riot Client and, when it is missing, sends a desktop notification and runs `scripts/installer.sh` with the region recorded in `build/config.json`. Both outcomes write to `build/desktop-launch.log`, so read that file when a launch appears to do nothing:
