@@ -42,9 +42,10 @@ LFS_FILTERS=['-c','filter.lfs.required=true','-c','filter.lfs.smudge=git-lfs smu
 LFS_POINTER=b'version https://git-lfs.github.com/spec/v1\n'
 # Submodules no CMake target ever references (every add_subdirectory that would
 # use them is commented out upstream): fetching them costs download time and a
-# multi-GB checkout for nothing. Set RCLOL_FETCH_ALL_SUBMODULES=1 to restore a
-# full fetch.
-SUBMODULE_SKIP_FETCH=('src/external/WebCore','src/external/xcbuild','src/external/mDNSResponder',
+# multi-GB checkout for nothing. mDNSResponder stays in the fetch because the
+# generated SDK symlinks usr/include/dns_sd.h into it for libresolv. Set
+# RCLOL_FETCH_ALL_SUBMODULES=1 to restore a full fetch.
+SUBMODULE_SKIP_FETCH=('src/external/WebCore','src/external/xcbuild',
                       'src/external/OpenAL','src/external/TextEdit','src/external/glut')
 def fetch_pathspecs(checkout):
     """Positive pathspecs limiting `submodule update --init` to used submodules."""
@@ -205,6 +206,16 @@ if not (source/'.git').exists():
                 print(f'Submodule fetch interrupted (attempt {attempt}/3). Retrying...',flush=True)
         repair(checkout)
         checkout.rename(source)
+else:
+    # A checkout fetched by an older version (or by RCLOL_FETCH_ALL_SUBMODULES
+    # arithmetic) can lack a required submodule; fetch only the missing ones and
+    # never touch the submodules already checked out.
+    if not a.check_only:
+        missing=[path for path in fetch_pathspecs(source) if not (source/path/'.git').exists()]
+        if missing:
+            print('Fetching missing submodules:',', '.join(missing),flush=True)
+            run(['git','-C',str(source),'-c',LFS_URL,*LFS_FILTERS,'submodule','update','--init','--recursive',
+                 '--depth','1','--jobs',str(a.jobs),*missing])
 
 # Never reset someone else's checkout to make a patch apply.
 for component in manifest['components']:
