@@ -21,7 +21,11 @@ python3 build/runtime/tools/ensure-darling-runtime.py
 # Darling treats a missing prefix directory as new; only then is an identity generated below.
 new_prefix=
 [ -e "$prefix_dir" ] || new_prefix=1
-darling shell /usr/bin/true
+# A boot is only needed to create the prefix: an initialized prefix leaves its
+# system.prop behind as proof, so skip the full guest boot on re-installs.
+if [ -n "$new_prefix" ] || [ ! -e "$prefix_dir/private/etc/darling-system.prop" ]; then
+  darling shell /usr/bin/true
+fi
 # The prefix has no /private/tmp of its own, so the guest falls through to the root-owned
 # installed layer and every write there (the Riot installer's temp files) fails with EACCES.
 prefix=$prefix_dir

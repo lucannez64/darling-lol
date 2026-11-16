@@ -22,9 +22,12 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import riot_build_cache
 import riot_build_gate
 
-root = Path(__file__).resolve().parent.parent
+# build/runtime/build is a symlink to this checkout's build/; resolve it so
+# path strings match the real repository root no matter which copy runs.
+root = (Path(__file__).resolve().parent.parent / "build").resolve().parent
 resource_dir = subprocess.check_output(["clang", "-print-resource-dir"], text=True).strip()
 
 
@@ -35,12 +38,14 @@ def current_clang(values):
 def build(library, object_dir, link_dir, output):
     folder = root / "build/darling-src/build/src/external" / library
     source = root / "build/darling-src/src/external" / library
+    flags_text = (folder / ("CMakeFiles/%s/flags.make" % object_dir)).read_text()
     flags = {}
-    for line in (folder / ("CMakeFiles/%s/flags.make" % object_dir)).read_text().splitlines():
+    for line in flags_text.splitlines():
         if line.startswith("CXX_") and " = " in line:
             key, value = line.split(" = ", 1)
             flags[key] = current_clang(shlex.split(value))
-    link = shlex.split((folder / ("CMakeFiles/%s/link.txt" % link_dir)).read_text())
+    link_text = (folder / ("CMakeFiles/%s/link.txt" % link_dir)).read_text()
+    link = shlex.split(link_text)
     jobs = []
     for index, argument in enumerate(link):
         if argument.startswith("CMakeFiles/%s/" % object_dir) and argument.endswith(".o"):
@@ -48,6 +53,18 @@ def build(library, object_dir, link_dir, output):
             obj = root / ("build/riot-opt-%s-%s.o" % (library, relative.replace("/", "_")))
             jobs.append((relative, obj))
             link[index] = str(obj)
+    # Script + flags + link line + every recompiled source's content decide the
+    # output; a change in any of them forces the rebuild again.
+    chunks = [riot_build_cache.digest_text(Path(__file__).read_text()),
+              riot_build_cache.digest_text(flags_text),
+              riot_build_cache.digest_text(link_text)]
+    for relative, obj in jobs:
+        chunks.append(relative + "\0" + riot_build_cache.digest_file(source / relative))
+    stamp = root / ("build/riot-cxx-%s-build.json" % library)
+    digest = riot_build_cache.fingerprint(chunks)
+    if riot_build_cache.up_to_date(stamp, digest, [root / "build" / output]):
+        print(library, "up to date; skipping rebuild", flush=True)
+        return
     print(library, "recompiling", len(jobs), "objects at -O3", flush=True)
 
     def compile_one(job):
@@ -64,6 +81,7 @@ def build(library, object_dir, link_dir, output):
     link[link.index("-o") + 1] = str(root / "build" / output)
     subprocess.run(link, cwd=folder, check=True)
     print("built build/" + output, len(jobs), "objects at -O3", flush=True)
+    riot_build_cache.record(stamp, digest, output + " -O3 -march=native")
 
 
 if __name__ == "__main__":
