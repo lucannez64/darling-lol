@@ -1223,5 +1223,139 @@ configure_project
             self.assertEqual(arguments[arguments.index('--locale') + 1], 'pt_BR')
 
 
+class InstallMarkerTests(unittest.TestCase):
+    """Install-mode markers are written only after every install step succeeded."""
+
+    def run_main(self, target, *, toolbox_env=None, preexisting=None, inside_toolbox=0,
+                 confirm_rc=0, preflight_rc=0, compile_rc=0):
+        """Run main() in a sourced shell with every install step stubbed out.
+
+        compile_project reports compile_rc through the run stub so a build
+        failure aborts main() the way the real run() would. inside_toolbox
+        emulates a manual run inside a container when the env vars do not.
+        """
+        build = Path(target) / 'build'
+        build.mkdir(parents=True, exist_ok=True)
+        if preexisting is not None:
+            (build / 'toolbox-container').write_text(preexisting + '\n')
+        snippet = f'''
+source "$INSTALLER"
+TARGET_DIR="{target}"
+INSIDE_TOOLBOX={inside_toolbox}
+parse_args() {{ :; }}
+detect_distribution() {{ :; }}
+check_toolbox_support() {{ :; }}
+preflight() {{ return {preflight_rc}; }}
+resolve_locale() {{ :; }}
+confirm_install() {{ return {confirm_rc}; }}
+select_locale() {{ :; }}
+resolve_region() {{ :; }}
+confirm_arch_upgrade() {{ :; }}
+init_log() {{ :; }}
+keep_sudo_alive() {{ :; }}
+check_repo_ffmpeg() {{ :; }}
+install_packages() {{ :; }}
+install_packages_tee() {{ :; }}
+ensure_no_active_session() {{ :; }}
+verify_ffmpeg() {{ :; }}
+prepare_python_env() {{ :; }}
+configure_project() {{ :; }}
+compile_project() {{ return {compile_rc}; }}
+install_system_components() {{ :; }}
+install_user_runtime() {{ :; }}
+finish() {{ :; }}
+run() {{ shift; "$@"; }}
+info() {{ :; }}
+python3() {{ :; }}
+main
+'''
+        env = installer_env()
+        env.pop('DARLING_LOL_TOOLBOX', None)
+        env.pop('DARLING_LOL_TOOLBOX_NAME', None)
+        env.update(toolbox_env or {})
+        return subprocess.run(
+            ['bash', '-c', snippet],
+            capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+            env=env,
+        )
+
+    def test_install_toolbox_does_not_write_marker_before_exec(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            marker.parent.mkdir(parents=True)
+            marker.write_text('old\n')
+            snippet = f'''
+source "$INSTALLER"
+TARGET_DIR="{folder}"
+run() {{ printf "run:%s\\n" "$*" >> "{folder}/log"; }}
+info() {{ :; }}
+exec() {{ printf "exec:%s\\n" "$*" >> "{folder}/log"; }}
+podman() {{ return 1; }}
+USE_TOOLBOX=1
+INSIDE_TOOLBOX=0
+REGION=EUW
+LOCALE=pt_BR
+TOOLBOX_NAME=my-box
+install_toolbox
+'''
+            result = run_sourced(snippet)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            log = (Path(folder) / 'log').read_text()
+            self.assertIn('exec:toolbox run --container my-box', log)
+            self.assertIn('env DARLING_LOL_TOOLBOX=1', log)
+            self.assertEqual(marker.read_text(), 'old\n')
+
+    def test_inner_run_success_writes_marker(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, toolbox_env={
+                'DARLING_LOL_TOOLBOX': '1', 'DARLING_LOL_TOOLBOX_NAME': 'newname'},
+                inside_toolbox=1)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'newname\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_inner_run_failure_preserves_existing_marker(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, toolbox_env={
+                'DARLING_LOL_TOOLBOX': '1', 'DARLING_LOL_TOOLBOX_NAME': 'newname'},
+                inside_toolbox=1, compile_rc=1, preexisting='old')
+            self.assertNotEqual(result.returncode, 0)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_manual_run_inside_container_writes_no_marker(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, inside_toolbox=1, preexisting='old')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_native_cancel_keeps_markers(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, confirm_rc=1, preexisting='old')
+            self.assertNotEqual(result.returncode, 0)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, preflight_rc=1, preexisting='old')
+            self.assertNotEqual(result.returncode, 0)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_native_success_records_native_mode(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, preexisting='old')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            build = Path(folder) / 'build'
+            self.assertTrue((build / 'native-install').exists())
+            self.assertFalse((build / 'toolbox-container').exists())
+
+
 if __name__ == '__main__':
     unittest.main()
