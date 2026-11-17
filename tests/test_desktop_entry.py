@@ -201,6 +201,90 @@ class DesktopEntryTests(unittest.TestCase):
             self.assertIn(key, packaged)
             self.assertEqual(rendered.get(key), packaged[key], key)
 
+    def window_entry(self, name):
+        return self.home / '.local/share/applications' / name
+
+    def test_window_entries_are_not_created_by_default(self):
+        project = self.project()
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertFalse(self.window_entry('darling-riot-client.desktop').exists())
+
+    def test_window_entries_name_and_icon_the_client_windows(self):
+        project = self.project()
+        (self.home / 'Desktop').mkdir()
+        result = self.install(project, '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launcher = parse_entry(self.entry().read_text())
+        expected = {
+            'darling-league-client.desktop': ('League of Legends', 'LeagueClientUx'),
+            'darling-riot-client.desktop': ('Riot Client', 'Riot Client'),
+        }
+        for file_name, (name, wm_class) in expected.items():
+            path = self.window_entry(file_name)
+            entry = parse_entry(path.read_text())
+            self.assertEqual(entry['Name'], name)
+            self.assertEqual(entry['StartupWMClass'], wm_class)
+            self.assertEqual(entry['Icon'], 'darling-launcher')
+            self.assertEqual(entry['NoDisplay'], 'true')
+            self.assertEqual(entry['Exec'], launcher['Exec'])
+            self.assertEqual(entry['Path'], launcher['Path'])
+            self.assertTrue(os.access(path, os.X_OK))
+            if shutil.which('desktop-file-validate'):
+                check = subprocess.run(['desktop-file-validate', str(path)],
+                                       capture_output=True, text=True, check=False)
+                self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        # Window entries are hidden helpers: never placed on the desktop.
+        self.assertEqual(sorted(path.name for path in (self.home / 'Desktop').iterdir()),
+                         ['darling-launcher.desktop'])
+
+    def test_window_entries_add_search_aliases_to_the_launcher_only(self):
+        project = self.project()
+        result = self.install(project, '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launcher = parse_entry(self.entry().read_text())
+        self.assertEqual(launcher['Keywords'],
+                         'Darling;Launcher;Compatibility;LoL;League;League of Legends;Riot;')
+        for field in ('Name', 'Comment', 'GenericName'):
+            for brand in ('League', 'LoL', 'Riot'):
+                self.assertNotIn(brand.lower(), launcher[field].lower())
+        self.assertEqual(launcher['StartupWMClass'], 'RiotClientServices')
+
+    def test_window_entries_environment_variable_enables_them(self):
+        project = self.project()
+        script = project / 'desktop-entry.py'
+        script.write_text(HELPER.read_text()
+                          .replace('@PROJECT_ROOT@', str(project))
+                          .replace('@HOST_HOME@', str(self.home)))
+        result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                                env=dict(os.environ, HOME=str(self.home),
+                                         DARLING_LOL_WINDOW_ENTRIES='1'), check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.window_entry('darling-league-client.desktop').is_file())
+        self.assertTrue(self.window_entry('darling-riot-client.desktop').is_file())
+
+    def test_window_entries_launch_through_the_container(self):
+        project = self.project()
+        result = self.install(project, '--toolbox', 'my-box', '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for file_name in ('darling-league-client.desktop', 'darling-riot-client.desktop'):
+            exec_line = next(line for line in self.window_entry(file_name).read_text().splitlines()
+                             if line.startswith('Exec='))
+            self.assertTrue(exec_line.startswith('Exec=toolbox run -c my-box '), exec_line)
+            self.assertIn(str(project / 'scripts/launch-shortcut.sh'), exec_line)
+
+    def test_dropping_the_option_removes_only_our_window_entries(self):
+        project = self.project()
+        self.assertEqual(self.install(project, '--window-entries').returncode, 0)
+        foreign = self.window_entry('darling-riot-client.desktop')
+        foreign.write_text('[Desktop Entry]\nName=Mine\nExec=/usr/bin/other\n')
+        result = self.install(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertTrue(foreign.is_file())
+        self.assertIn('Name=Mine', foreign.read_text())
+
     def test_missing_icon_fails(self):
         project = self.project()
         (project / 'darling-lol.png').unlink()

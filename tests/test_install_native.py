@@ -132,6 +132,15 @@ class RegionAndArgumentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'EUW|pt_BR|1|1|1|1')
 
+    def test_window_entries_flag_and_environment(self):
+        flag = run_sourced('source "$INSTALLER"\nparse_args --window-entries\necho "$WINDOW_ENTRIES"')
+        self.assertEqual(flag.returncode, 0, flag.stderr)
+        self.assertEqual(flag.stdout.strip(), '1')
+        env = run_sourced('source "$INSTALLER"\necho "$WINDOW_ENTRIES"', DARLING_LOL_WINDOW_ENTRIES='1')
+        self.assertEqual(env.stdout.strip(), '1')
+        default = run_sourced('source "$INSTALLER"\nparse_args --yes\necho "$WINDOW_ENTRIES"')
+        self.assertEqual(default.stdout.strip(), '0')
+
     def test_parse_args_rejects_an_unknown_region(self):
         result = run_sourced('source "$INSTALLER"\nparse_args --region XX')
         self.assertNotEqual(result.returncode, 0)
@@ -740,7 +749,7 @@ class ArchUpgradeTests(unittest.TestCase):
 
 class DesktopEntryTests(unittest.TestCase):
     def create_entry(self, *, inside_toolbox=0, name='darling-lol', helper=True,
-                     helper_fails=False, entry=None):
+                     helper_fails=False, entry=None, window_entries=0):
         with tempfile.TemporaryDirectory(prefix='install-native-desktop-') as folder:
             repo = Path(folder) / 'repo'
             home = Path(folder) / 'home'
@@ -779,6 +788,7 @@ source "$INSTALLER"
 TARGET_DIR="{repo}"
 TOOLBOX_NAME="{name}"
 INSIDE_TOOLBOX={inside_toolbox}
+WINDOW_ENTRIES={window_entries}
 HOME="{home}"
 {fake_python}
 create_desktop_entry
@@ -801,6 +811,21 @@ create_desktop_entry
         self.assertEqual(len(arguments), 3)
         self.assertEqual(arguments[1:], ['--toolbox', 'my-box'])
         self.assertTrue(arguments[0].endswith('build/runtime/tools/desktop-entry.py'))
+
+    def test_window_entries_are_not_requested_by_default(self):
+        result, arguments, _ = self.create_entry()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--window-entries', arguments)
+
+    def test_native_install_forwards_window_entries(self):
+        result, arguments, _ = self.create_entry(window_entries=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments[1:], ['--window-entries'])
+
+    def test_toolbox_install_forwards_container_and_window_entries(self):
+        result, arguments, _ = self.create_entry(inside_toolbox=1, name='my-box', window_entries=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments[1:], ['--toolbox', 'my-box', '--window-entries'])
 
     def test_an_outdated_shortcut_is_flagged_and_refreshed(self):
         result, _, entry_text = self.create_entry(entry='old')

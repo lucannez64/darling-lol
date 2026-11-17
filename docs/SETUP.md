@@ -97,6 +97,31 @@ the basename of `argv[0]`, so that is the window class of the client the entry
 starts, while `Riot Client` is only its bundle display name.
 Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
 
+### Named windows in the GNOME overview (opt-in)
+
+GNOME names and icons a window from the desktop entry whose `StartupWMClass`
+matches the window's `WM_CLASS`. Only the Riot Client startup window
+(`RiotClientServices`) matches the launcher, so the League client
+(`LeagueClientUx`) and the main Riot Client window (`Riot Client`) show up under
+their raw class names. `--window-entries` (or `DARLING_LOL_WINDOW_ENTRIES=1`)
+adds two hidden entries (`NoDisplay=true`, `darling-league-client.desktop` and
+`darling-riot-client.desktop`) that name those windows `League of Legends` and
+`Riot Client` and give them the launcher icon, and adds `LoL`, `League` and
+`Riot` as search keywords of the launcher:
+
+```sh
+scripts/create-desktop-entry.sh --window-entries
+./scripts/install-native.sh --window-entries   # same option at install time
+```
+
+The option is off by default because those fields carry third-party product
+names while the shipped launcher stays neutral (see `docs/COMPLIANCE.md`; the
+Nix package and its checks are unchanged). Running the helper again without the
+option removes the two entries it created and leaves any other file alone. The
+icon is the project's own `darling-launcher`; the helper never extracts one from
+the game. Reopen the client after creating the entries: the shell matches a
+window to its entry when the window is created.
+
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
 to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`
 opts in to Hyprland-only recovery of a default-prefix Riot session with no
