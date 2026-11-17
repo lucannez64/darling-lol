@@ -128,6 +128,10 @@ def client_running(prefix, proc_root=Path('/proc')):
             if proc.exists():
                 return None
             continue
+        except PermissionError:
+            # The setuid host `darling` wrapper carries RiotClientServices in
+            # its argv but its environ is unreadable; it is never a guest.
+            continue
         except (OSError, ValueError):
             return None
     return False

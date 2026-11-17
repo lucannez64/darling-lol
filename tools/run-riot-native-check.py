@@ -9,6 +9,7 @@ import tempfile
 
 root = Path(__file__).resolve().parent.parent
 checks = {
+    "riot-display-link-isolation-check": "DISPLAY_LINK_ISOLATION PASS",
     "riot-registry-compatibility-check": "REGISTRY_COMPAT",
     "riot-cfhost-cancel-check": "CFHOST_CANCEL_CHECK",
     "riot-launchservices-null-error-check": "LAUNCHSERVICES_NULL_ERROR",
@@ -29,6 +30,7 @@ checks = {
     "riot-kqueue-stack-check": "KQUEUE_SMALL_STACK",
     "riot-kqueue-dispatch2-check": "DISPATCH2",
     "riot-dispatch-fd-check": "DISPATCH_FD",
+    "riot-runloop-wake-check": "RUNLOOP_WAKE",
 }
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("check", choices=checks)

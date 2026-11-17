@@ -189,7 +189,7 @@ index a399c43..7f01ce8 100644
      movq   %rbp, %rsp
      pop    %rbp
 diff --git a/CFRunLoop.c b/CFRunLoop.c
-index e932ea5..522bc72 100644
+index e932ea5..4cebd91 100644
 --- a/CFRunLoop.c
 +++ b/CFRunLoop.c
 @@ -27,6 +27,7 @@
@@ -267,7 +267,32 @@ index e932ea5..522bc72 100644
          } else if (livePort == rl->_wakeUpPort) {
              CFRUNLOOP_WAKEUP_FOR_WAKEUP();
              // do nothing on Mac OS
-@@ -2719,21 +2739,46 @@ void CFRunLoopWakeUp(CFRunLoopRef rl) {
+@@ -2710,6 +2730,24 @@ CFAbsoluteTime CFRunLoopGetNextTimerFireDate(CFRunLoopRef rl, CFStringRef modeNa
+     return at;
+ }
+ 
++#if DEPLOYMENT_TARGET_MACOSX
++/* darling-lol: the Mach port set a blocking pass in this mode waits on (wake-up port, timer port and
++ * version 1 sources), or MACH_PORT_NULL if the mode does not exist yet. AppKit's X11 event wait watches
++ * it with a kqueue so it can block on X11 input and run loop messages at once instead of polling. */
++CF_EXPORT mach_port_t _CFRunLoopGetModePortSet_darling(CFRunLoopRef rl, CFStringRef modeName) {
++    CHECK_FOR_FORK();
++    mach_port_t portSet = MACH_PORT_NULL;
++    __CFRunLoopLock(rl);
++    CFRunLoopModeRef rlm = __CFRunLoopFindMode(rl, modeName, false);
++    if (rlm) {
++        portSet = rlm->_portSet;
++        __CFRunLoopModeUnlock(rlm);
++    }
++    __CFRunLoopUnlock(rl);
++    return portSet;
++}
++#endif
++
+ Boolean CFRunLoopIsWaiting(CFRunLoopRef rl) {
+     CHECK_FOR_FORK();
+     return __CFRunLoopIsSleeping(rl);
+@@ -2719,21 +2757,46 @@ void CFRunLoopWakeUp(CFRunLoopRef rl) {
      CHECK_FOR_FORK();
      // This lock is crucial to ignorable wakeups, do not remove it.
      __CFRunLoopLock(rl);
@@ -316,7 +341,7 @@ index e932ea5..522bc72 100644
  }
  
  void CFRunLoopStop(CFRunLoopRef rl) {
-@@ -2828,6 +2873,10 @@ void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^block)(void))
+@@ -2828,6 +2891,10 @@ void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^block)(void))
  
  Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {
      CHECK_FOR_FORK();
@@ -327,7 +352,7 @@ index e932ea5..522bc72 100644
      CFRunLoopModeRef rlm;
      Boolean hasValue = false;
      __CFRunLoopLock(rl);
-@@ -2849,6 +2898,13 @@ Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStrin
+@@ -2849,6 +2916,13 @@ Boolean CFRunLoopContainsSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStrin
  void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {	/* DOES CALLOUT */
      CHECK_FOR_FORK();
      if (__CFRunLoopIsDeallocating(rl)) return;
@@ -341,7 +366,7 @@ index e932ea5..522bc72 100644
      if (!__CFIsValid(rls)) return;
      Boolean doVer0Callout = false;
      __CFRunLoopLock(rl);
-@@ -2910,6 +2966,10 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
+@@ -2910,6 +2984,10 @@ void CFRunLoopAddSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef mod
  
  void CFRunLoopRemoveSource(CFRunLoopRef rl, CFRunLoopSourceRef rls, CFStringRef modeName) {	/* DOES CALLOUT */
      CHECK_FOR_FORK();
@@ -352,7 +377,7 @@ index e932ea5..522bc72 100644
      Boolean doVer0Callout = false, doRLSRelease = false;
      __CFRunLoopLock(rl);
      if (modeName == kCFRunLoopCommonModes) {
-@@ -3432,6 +3492,12 @@ void CFRunLoopSourceSignal(CFRunLoopSourceRef rls) {
+@@ -3432,6 +3510,12 @@ void CFRunLoopSourceSignal(CFRunLoopSourceRef rls) {
  	__CFRunLoopSourceSetSignaled(rls);
      }
      __CFRunLoopSourceUnlock(rls);
@@ -365,7 +390,7 @@ index e932ea5..522bc72 100644
  }
  
  Boolean CFRunLoopSourceIsSignalled(CFRunLoopSourceRef rls) {
-@@ -3966,4 +4032,3 @@ void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef rlt, CFTimeInterval tolerance)
+@@ -3966,4 +4050,3 @@ void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef rlt, CFTimeInterval tolerance)
      }
  #endif
  }

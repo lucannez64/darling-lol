@@ -25,9 +25,11 @@ def profile_values():
 
 
 class SystemProfileTests(unittest.TestCase):
-    def test_default_profile_is_host_and_compat_is_opt_in(self):
+    def test_default_profile_is_compat_and_host_is_opt_out(self):
+        # Issue #31: the notarization fallback in security.patch needs COMPAT.
         values = profile_values()
-        self.assertEqual(values['profile'], 'host')
+        self.assertEqual(values['profile'], 'compat')
+        self.assertEqual(values['profile.default'], 'compat')
         self.assertEqual(values['compat.cpu.brand'],
                          'Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz')
         self.assertEqual(values['compat.gpu.name'], 'mac')
@@ -58,6 +60,46 @@ class SystemProfileTests(unittest.TestCase):
         installer = (ROOT / 'scripts/install-runtime.sh').read_text()
         self.assertIn('darling-system.prop', installer)
         self.assertIn('[ ! -e "$prefix/private/etc/darling-system.prop" ]', installer)
+        self.assertIn('migrate-system-profile.py "$prefix/private/etc/darling-system.prop"', installer)
+
+    def migrate(self, text):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('migrate_system_profile',
+                                                      ROOT / 'tools/migrate-system-profile.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.migrate(text)
+
+    def test_migration_moves_an_old_host_default_to_compat_once(self):
+        old = '# profile=compat\nprofile=host\nhost.cpu.brand=host\n'
+        new, changed = self.migrate(old)
+        self.assertTrue(changed)
+        self.assertIn('\nprofile=compat\n', new)
+        self.assertIn('# profile=compat\n', new)
+        self.assertTrue(new.endswith('profile.default=compat\n'))
+        # After the marker, an explicit HOST choice is kept.
+        chosen = new.replace('\nprofile=compat\n', '\nprofile=host\n')
+        self.assertEqual(self.migrate(chosen), (chosen, False))
+
+    def test_migration_ignores_lines_the_readers_ignore(self):
+        new, changed = self.migrate('profile=host\n profile=compat\n')
+        self.assertTrue(changed)
+        self.assertTrue(new.startswith('profile=compat\n profile=compat\n'))
+
+    def test_migration_replaces_the_old_i9_brand_only(self):
+        new, _ = self.migrate('profile=compat\n'
+                              'compat.cpu.brand=Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz\n')
+        self.assertIn('compat.cpu.brand=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\n', new)
+        self.assertNotIn('9980HK', new)
+        custom = 'profile=compat\ncompat.cpu.brand=Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz\n'
+        self.assertIn('W-3245', self.migrate(custom)[0])
+
+    def test_migration_keeps_compat_and_the_current_template(self):
+        new, changed = self.migrate('profile=compat\n')
+        self.assertTrue(changed)
+        self.assertIn('profile=compat\n', new)
+        template = PROFILE.read_text()
+        self.assertEqual(self.migrate(template), (template, False))
 
     def launcher_handoff(self, profile, **extra):
         launcher = (ROOT / 'tools/run-riot-client.sh').read_text()
@@ -82,7 +124,13 @@ class SystemProfileTests(unittest.TestCase):
                                     check=True, capture_output=True, text=True)
         return dict(line.split('=', 1) for line in result.stdout.splitlines())
 
-    def test_launcher_defaults_to_host_and_compat_is_explicit(self):
+    def test_launcher_uses_the_file_default_compat(self):
+        self.assertEqual(self.launcher_handoff('')['profile'], 'compat')
+
+    def test_launcher_falls_back_to_compat_on_an_invalid_profile(self):
+        self.assertEqual(self.launcher_handoff('Compat')['profile'], 'compat')
+
+    def test_launcher_honours_explicit_host_and_compat(self):
         host = self.launcher_handoff('host')
         self.assertEqual(host['profile'], 'host')
         self.assertTrue(host['cpu'])

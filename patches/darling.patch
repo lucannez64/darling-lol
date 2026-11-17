@@ -4179,10 +4179,10 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..cfe16ed26 100644
+index 3e9cba226..a50629bad 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,887 @@
+@@ -1,38 +1,941 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -4849,12 +4849,7 @@ index 3e9cba226..cfe16ed26 100644
 +	uint32_t alive;
 +	uint32_t ticks;
 +	uint32_t nullTicks;
-+	/* darling-lol M58e: number of CVDisplayLinkRef objects alive in this
-+	 * process. The pump must keep ticking while >= 1 link exists, and MUST
-+	 * stop invoking the callback after the last link is released — the
-+	 * callback targets Chromium's DisplayLinkMac, which unregisters its
-+	 * callback by releasing the link (calling it afterwards would be
-+	 * use-after-free every tick). */
++    /* Per-link retain count; in the header this is the number of slots. */
 +	uint32_t refs;
 +	uint64_t reserved;
 +    CVDisplayLinkRef link;
@@ -4900,31 +4895,95 @@ index 3e9cba226..cfe16ed26 100644
 +static long clockRead(int fd,void *p,size_t n,off_t offset) { return __lolsys_syscall(fd,(long)p,n,offset,0,0,17); }
 +static long clockWrite(int fd,const void *p,size_t n,off_t offset) { return __lolsys_syscall(fd,(long)p,n,offset,0,0,18); }
 +static int clockFlock(int fd,int op) { return (int)__lolsys_syscall(fd,op,0,0,0,0,73); }
-+static bool readState(CVLinkStateRec *out) {
-+    int fd=clockOpen();if(fd<0)return false;
-+    long got=clockRead(fd,out,sizeof(*out),0);clockClose(fd);
-+    return got==sizeof(*out) && out->magic==kStateMagic && out->version>=1 && out->alive;
++/* The first record owns the process-wide lock and slot count. Every link has
++ * its own record after it: Chromium uses separate links for its Viz and GPU
++ * threads even on one display. A process-wide callback silently drops one. */
++static bool readHeader(int fd, CVLinkStateRec *out) {
++    return clockRead(fd, out, sizeof(*out), 0) == sizeof(*out) &&
++        out->magic == kStateMagic && out->version == 2;
 +}
-+static bool writeState(CVLinkStateRec *rec) {
-+    int fd=clockOpen();if(fd<0)return false;
-+    long put=clockWrite(fd,rec,sizeof(*rec),0);clockClose(fd);return put==sizeof(*rec);
++static off_t slotOffset(uint32_t slot) {
++    return ((off_t)slot + 1) * sizeof(CVLinkStateRec);
 +}
-+struct CVStateGuard {
-+    int fd; bool locked;
-+    CVStateGuard() : fd(clockOpen()), locked(false) {
-+        if(fd<0)return;
-+        uint64_t owner=0;clockRead(fd,&owner,sizeof(owner),offsetof(CVLinkStateRec,reserved));
-+        uint64_t thread=(uintptr_t)pthread_self();
-+        if(!owner || owner!=thread)locked=clockFlock(fd,LOCK_EX)==0;
-+    }
-+    ~CVStateGuard(){if(fd>=0){if(locked)clockFlock(fd,LOCK_UN);clockClose(fd);}}
++// Callback reentrancy belongs to the calling thread, not a fallible file
++// record. Borrow the pump's locked descriptor; other threads still lock it.
++static __thread int callbackClockFD = -1;
++struct CVCallbackScope {
++    int previous;
++    explicit CVCallbackScope(int fd) : previous(callbackClockFD) { callbackClockFD = fd; }
++    ~CVCallbackScope() { callbackClockFD = previous; }
 +};
-+__attribute__((constructor)) static void initializeDisplayClockRecord(void) {
-+    CVLinkStateRec rec={};rec.magic=kStateMagic;rec.version=kStateVersion;rec.alive=1;writeState(&rec);
++struct CVStateGuard {
++    int fd; bool locked; bool borrowed;
++    CVStateGuard() : fd(callbackClockFD), locked(false), borrowed(fd >= 0) {
++        if (borrowed) return;
++        fd = clockOpen();
++        if (fd < 0) return;
++        int result;
++        do { result = clockFlock(fd, LOCK_EX); } while (result == -4); // Linux EINTR.
++        locked = result == 0;
++        if (!locked) { clockClose(fd); fd = -1; }
++    }
++    ~CVStateGuard() {
++        if (fd >= 0 && !borrowed) {
++            if (locked) clockFlock(fd, LOCK_UN);
++            clockClose(fd);
++        }
++    }
++};
++static bool readState(int fd, CVLinkStateRec *out, CVDisplayLinkRef link) {
++    if (fd < 0) return false;
++    CVLinkStateRec header;
++    bool found = false;
++    if (readHeader(fd, &header)) {
++        for (uint32_t i = 0; i < header.refs; ++i) {
++            if (clockRead(fd, out, sizeof(*out), slotOffset(i)) != sizeof(*out)) break;
++            if (out->alive && out->link == link) { found = true; break; }
++        }
++    }
++    return found;
 +}
-+static void registerDisplayLink(CVDisplayLinkRef link) {
-+    CVStateGuard guard;CVLinkStateRec rec={};
-+    if(readState(&rec)){++rec.refs;if(!rec.callback)rec.link=link;writeState(&rec);}
++static bool writeState(int fd, const CVLinkStateRec *rec) {
++    if (fd < 0) return false;
++    CVLinkStateRec header, current;
++    bool written = false;
++    if (readHeader(fd, &header)) {
++        for (uint32_t i = 0; i < header.refs; ++i) {
++            if (clockRead(fd, &current, sizeof(current), slotOffset(i)) != sizeof(current)) break;
++            if (current.link == rec->link) {
++                written = clockWrite(fd, rec, sizeof(*rec), slotOffset(i)) == sizeof(*rec);
++                break;
++            }
++        }
++    }
++    return written;
++}
++__attribute__((constructor)) static void initializeDisplayClockRecord(void) {
++    int fd = clockOpen();
++    if (fd < 0) return;
++    CVLinkStateRec header = {};
++    header.magic = kStateMagic; header.version = 2; header.alive = 1;
++    clockWrite(fd, &header, sizeof(header), 0);
++    clockClose(fd);
++}
++static bool registerDisplayLink(CVDisplayLinkRef link) {
++    CVStateGuard guard;
++    CVLinkStateRec header, current;
++    if (guard.fd < 0 || !readHeader(guard.fd, &header)) return false;
++    uint32_t slot;
++    for (slot = 0; slot < header.refs; ++slot) {
++        if (clockRead(guard.fd, &current, sizeof(current), slotOffset(slot)) != sizeof(current)) return false;
++        if (!current.alive) break;
++    }
++    CVLinkStateRec rec = {};
++    rec.magic = kStateMagic; rec.version = kStateVersion;
++    rec.alive = 1; rec.refs = 1; rec.link = link;
++    if (clockWrite(guard.fd, &rec, sizeof(rec), slotOffset(slot)) != sizeof(rec)) return false;
++    if (slot == header.refs) {
++        ++header.refs;
++        return clockWrite(guard.fd, &header, sizeof(header), 0) == sizeof(header);
++    }
++    return true;
 +}
 +
 +static const char* displayLinkTick =
@@ -4963,38 +5022,27 @@ index 3e9cba226..cfe16ed26 100644
 +	}
 +}
 +
-+/* The runloop timer's handler: re-read the state file fresh each tick. */
-+static void DisplayLinkMainTimerF(CFRunLoopTimerRef timer, void* info) {
-+	CVLinkStateRec rec;
-+	if (!readState(&rec))
-+		return;
-+	displayLinkTickFromRec(&rec);
-+	writeState(&rec);
-+}
-+
-+/* darling-lol M58d: dispatch-source pump.
-+ *
-+ * Diagnosis this session: the runloop-timer pump only ever fires in the
-+ * browser process (12/s measured) — the GPU process has NO CFRunLoop default
-+ * mode traffic: PopupMenu/ChatWindow wait, Chromium's GPU-process message
-+ * loop does not service the Cocoa default runloop constantly, so the CFRunLoop
-+ * timer never fires there and viz *never sends a single begin frame* — the
-+ * compositor surfaces are created but never drawn (a 1-publish artwork per
-+ * run collapses). Per the M58b finding, dispatch sources DO fire from any
-+ * thread; the handler just couldn't see guest memory. This shim already keeps
-+ * its state in a HOST FILE (/dev/shm/darling-cvlink-<pid>.state) — the same
-+ * store that survived everything else — so a dispatch-source timer can safely
-+ * re-read it and invoke the callback.
-+ */
-+static void dispatchTimerFire(void* /*info*/) {
-+    CVStateGuard guard;CVLinkStateRec rec;
-+    if (guard.fd<0 || !readState(&rec)) return;
-+    uint64_t owner=(uintptr_t)pthread_self();
-+    clockWrite(guard.fd,&owner,sizeof(owner),offsetof(CVLinkStateRec,reserved));
-+    displayLinkTickFromRec(&rec);
-+    /* Preserve concurrent/reentrant registration changes; update only counters. */
-+    clockWrite(guard.fd,&rec.ticks,sizeof(rec.ticks)+sizeof(rec.nullTicks),offsetof(CVLinkStateRec,ticks));
-+    owner=0;clockWrite(guard.fd,&owner,sizeof(owner),offsetof(CVLinkStateRec,reserved));
++/* Invoke every running link under the shared, callback-reentrant lock.
++ * External Stop/Release wait for callbacks; a callback may stop itself or a
++ * different link. Re-read each slot before invoking it and preserve mutations
++ * made by callbacks instead of writing an old snapshot over them. */
++static void dispatchTimerFire(void *) {
++    CVStateGuard guard;
++    CVLinkStateRec header;
++    if (guard.fd < 0 || !readHeader(guard.fd, &header)) return;
++    CVCallbackScope callbacks(guard.fd);
++    for (uint32_t i = 0; i < header.refs; ++i) {
++        CVLinkStateRec rec;
++        if (clockRead(guard.fd, &rec, sizeof(rec), slotOffset(i)) != sizeof(rec)) break;
++        if (!rec.alive) continue;
++        displayLinkTickFromRec(&rec);
++        CVLinkStateRec current;
++        if (readState(guard.fd, &current, rec.link)) {
++            current.ticks = rec.ticks;
++            current.nullTicks = rec.nullTicks;
++            writeState(guard.fd, &current);
++        }
++    }
 +}
 +
 +/* Keep callbacks off Darling's dispatch trampoline: Chromium can leave its
@@ -5025,12 +5073,15 @@ index 3e9cba226..cfe16ed26 100644
 +        }
 +    }
 +}
-+static void InstallDispatchPump(void) {
-+    pthread_attr_t attr;pthread_attr_init(&attr);
-+    pthread_attr_setstacksize(&attr,1024*1024);
++static bool InstallDispatchPump(void) {
++    pthread_attr_t attr;
++    if (pthread_attr_init(&attr) != 0) return false;
++    int result = pthread_attr_setstacksize(&attr, 1024 * 1024);
 +    pthread_t thread;
-+    if(pthread_create(&thread,&attr,displayClockThread,NULL)==0)pthread_detach(thread);
++    if (result == 0) result = pthread_create(&thread, &attr, displayClockThread, NULL);
++    if (result == 0) pthread_detach(thread);
 +    pthread_attr_destroy(&attr);
++    return result == 0;
 +}
 +
  CVReturn CVDisplayLinkCreateWithActiveCGDisplays(CVDisplayLinkRef* displayLinkOut)
@@ -5074,53 +5125,41 @@ index 3e9cba226..cfe16ed26 100644
  	[self setObject: array
  			forKey: kDirectDisplayArray];
  
-+	registerDisplayLink((CVDisplayLinkRef)self);
++	if (!registerDisplayLink((CVDisplayLinkRef)self)) {
++        [self release];
++        return kCVReturnAllocationFailed;
++    }
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,35 +890,128 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,35 +944,102 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
 -	// TODO
 +    CVStateGuard guard;
++    if (guard.fd < 0) return kCVReturnError;
 +
 +	/* Install in every process that loads CoreVideo.  The renderer may not
 +	 * create a CVDisplayLink of its own, so CVDisplayLinkStart is too late to
 +	 * be the only installation point. */
 +	installFrameSinkBridge();
 +
-+	/* darling-lol M58b: mark the shared state file running; the runloop
-+	 * timer is installed once per process (the guard `started` uses a
-+	 * static flag rather than per-link state, since state lives in the
-+	 * file, not in guest memory). */
-+	static bool started = false;
-+	if (!started) {
-+        CVLinkStateRec rec;
-+        if(!readState(&rec)) memset(&rec,0,sizeof(rec));
-+		rec.magic = kStateMagic;
-+		rec.version = kStateVersion;
-+		rec.alive = 1;
-+		rec.running = 1;
-+		writeState(&rec);
++    CVLinkStateRec rec;
++    if (!readState(guard.fd, &rec, displayLink)) return kCVReturnInvalidArgument;
++    rec.running = 1;
++    if (!writeState(guard.fd, &rec)) return kCVReturnError;
 +
-+		/* darling-lol M58d: dispatch-source pump, one per process.
-+		 * The old CFRunLoop timer only serviced the browser's main
-+		 * runloop (~12/s) and NEVER fired in the GPU process (no begin
-+		 * frames from viz), so frame production starved
-+		 * nondeterministically. Dispatch sources fire from any thread
-+		 * and this shim's state lives in a host file, which is exactly
-+		 * the store proven to cross the helper-thread visibility gap. */
-+		InstallDispatchPump();
-+		started = true;
-+	} else {
-+		CVLinkStateRec rec;
-+		if (readState(&rec)) {
-+			rec.running = 1;
-+			rec.alive = 1;
-+			writeState(&rec);
-+		}
-+	}
++    // The clock thread is shared, but callback and running state are per link.
++    static bool started = false;
++    if (!started) {
++        if (!InstallDispatchPump()) {
++            rec.running = 0;
++            writeState(guard.fd, &rec);
++            return kCVReturnError;
++        }
++        started = true;
++    }
  	return kCVReturnSuccess;
  }
  
@@ -5131,17 +5170,22 @@ index 3e9cba226..cfe16ed26 100644
 -	// TODO
 -	return kCVReturnSuccess;
 +    if(!displayLink)return kCVReturnInvalidArgument;
-+    CVStateGuard guard;CVLinkStateRec rec;
-+    if(readState(&rec)) { rec.running=0;writeState(&rec); }
-+    return kCVReturnSuccess;
++    CVStateGuard guard;
++    if (guard.fd < 0) return kCVReturnError;
++    CVLinkStateRec rec;
++    if (!readState(guard.fd, &rec, displayLink)) return kCVReturnError;
++    rec.running = 0;
++    return writeState(guard.fd, &rec) ? kCVReturnSuccess : kCVReturnError;
  }
  
  Boolean CVDisplayLinkIsRunning(CVDisplayLinkRef displayLink)
  {
 -	if (!displayLink)
++    CVStateGuard guard;
++    if (guard.fd < 0) return false;
 +    if(!displayLink)return false;
 +	CVLinkStateRec rec;
-+	if (!readState(&rec))
++	if (!readState(guard.fd, &rec, displayLink))
  		return false;
 -	// TODO
 -	return true;
@@ -5150,44 +5194,32 @@ index 3e9cba226..cfe16ed26 100644
 +
 +CVDisplayLinkRef CVDisplayLinkRetain(CVDisplayLinkRef displayLink)
 +{
-+	/* darling-lol M57: Chromium's DisplayLinkMac retains/releases the link. */
-+	if (displayLink) {
-+        CVStateGuard guard;
-+		[(NSMutableDictionary*) displayLink retain];
-+		/* darling-lol M58e: bump the shared refs count so the pump keeps
-+		 * firing while any link exists. */
-+		CVLinkStateRec rec;
-+		if (readState(&rec)) {
-+			rec.refs++;
-+			rec.alive = 1;
-+			writeState(&rec);
-+		}
-+	}
-+	return displayLink;
++    if (!displayLink) return NULL;
++    CVStateGuard guard;
++    CVLinkStateRec rec;
++    if (guard.fd < 0 || !readState(guard.fd, &rec, displayLink)) return NULL;
++    ++rec.refs;
++    if (!writeState(guard.fd, &rec)) return NULL;
++    [(NSMutableDictionary*) displayLink retain];
++    return displayLink;
  }
  
  void CVDisplayLinkRelease(CVDisplayLinkRef displayLink)
  {
 -	NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
 -	[self release];
-+	if (!displayLink)
-+		return;
++    if (!displayLink) return;
 +    CVStateGuard guard;
-+	/* darling-lol M58e: drop the shared refs count. When the last link of
-+	 * this process goes away, drop the callback registration so the leaked
-+	 * pump timer stops invoking a freed Chromium callback (use-after-free
-+	 * guard). */
-+	CVLinkStateRec rec;
-+	if (readState(&rec)) {
-+		if (rec.refs > 0)
-+			rec.refs--;
-+		if (rec.refs == 0 || (rec.link==displayLink && [(NSMutableDictionary*)displayLink retainCount]==1)) {
-+			rec.callback = NULL;
-+			rec.userInfo = NULL;
-+            rec.link=NULL;
-+		}
-+		writeState(&rec);
-+	}
++    CVLinkStateRec rec;
++    if (guard.fd < 0 || !readState(guard.fd, &rec, displayLink)) return;
++    if (rec.refs > 0) --rec.refs;
++    if (rec.refs == 0) {
++        rec.callback = NULL;
++        rec.userInfo = NULL;
++        rec.alive = 0;
++    }
++    // Keep the object alive if its registration could not be retired.
++    if (!writeState(guard.fd, &rec)) return;
 +    [(NSMutableDictionary*) displayLink release];
  }
  
@@ -5202,23 +5234,19 @@ index 3e9cba226..cfe16ed26 100644
 +		return kCVReturnInvalidArgument;
 +
 +    CVStateGuard guard;
++    if (guard.fd < 0) return kCVReturnError;
 +	CVLinkStateRec rec;
-+	if (!readState(&rec)) {
-+		memset(&rec, 0, sizeof(rec));
-+		rec.magic = kStateMagic;
-+		rec.version = kStateVersion;
-+		rec.refs = 1;
-+		rec.alive = 1;
-+	}
++    if (!readState(guard.fd, &rec, displayLink)) return kCVReturnInvalidArgument;
++
 +	rec.link=displayLink;
 +	rec.callback = (void*) callback;
 +	rec.userInfo = userInfo;
-+	writeState(&rec);
++    if (!writeState(guard.fd, &rec)) return kCVReturnError;
 +	traceLog("SETOUT cb=%p pid_ok\n", (uint64_t) callback, 0);
  	return kCVReturnSuccess;
  }
  
-@@ -91,7 +1033,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
+@@ -91,7 +1061,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
  			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
  			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
  
@@ -5227,7 +5255,7 @@ index 3e9cba226..cfe16ed26 100644
  					forKey: kDirectDisplayArray];
  			return kCVReturnSuccess;
  		}
-@@ -117,14 +1059,31 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+@@ -117,14 +1087,34 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -5256,13 +5284,16 @@ index 3e9cba226..cfe16ed26 100644
 +			close(fd);
 +		}
 +	}
-+	registerDisplayLink((CVDisplayLinkRef)self);
++	if (!registerDisplayLink((CVDisplayLinkRef)self)) {
++        [self release];
++        return kCVReturnAllocationFailed;
++    }
  	*displayLinkOut = (CVDisplayLinkRef) self;
 +
  	return kCVReturnSuccess;
  }
  
-@@ -150,3 +1109,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
+@@ -150,3 +1140,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
  	CGDisplayModeRelease(mode);
  	return time;
  }
@@ -14172,3 +14203,52 @@ index 336dfc912..b1a57f23f 100644
  	}
  	
  	// edge cases
+diff --git a/cmake/mig.cmake b/cmake/mig.cmake
+index 256cd54ec..f24c27f6c 100644
+--- a/cmake/mig.cmake
++++ b/cmake/mig.cmake
+@@ -1,3 +1,6 @@
++# Every MIG output depends on this file, so changing how stubs are generated regenerates them.
++set(MIG_CMAKE_FILE "${CMAKE_CURRENT_LIST_FILE}")
++
+ function(mig defFileName)
+         set(MIG_EXECUTABLE "${CMAKE_BINARY_DIR}/build-mig")
+ 
+@@ -54,8 +57,18 @@
+ 			set(MIG_ARCH_SUFFIX "-${MIG_ARCH}-")
+ 		endif()
+ 
++		# A .defs file is often a stub that #includes another one (libsyscall/mach/*.defs include
++		# osfmk/mach/*.defs), so a second preprocessor run, with the same flags as the one in mig.sh,
++		# lists every included file in a depfile. The user source is the first output, so it names the rule.
++		set(MIG_USER_SOURCE ${CMAKE_CURRENT_BINARY_DIR}/${relativeName}${MIG_ARCH_SUFFIX}${MIG_USER_SOURCE_SUFFIX})
++		get_filename_component(MIG_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${defFileName}" DIRECTORY)
++		set(MIG_DEPFILE_ARGS "")
++		if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.20 OR CMAKE_GENERATOR MATCHES "Ninja")
++			set(MIG_DEPFILE_ARGS DEPFILE ${MIG_USER_SOURCE}.d)
++		endif()
++
+ 		add_custom_command(OUTPUT
+-			${CMAKE_CURRENT_BINARY_DIR}/${relativeName}${MIG_ARCH_SUFFIX}${MIG_USER_SOURCE_SUFFIX}
++			${MIG_USER_SOURCE}
+ 			${CMAKE_CURRENT_BINARY_DIR}/${relativeName}${MIG_ARCH_SUFFIX}${MIG_USER_HEADER_SUFFIX}
+ 			${CMAKE_CURRENT_BINARY_DIR}/${relativeName}${MIG_ARCH_SUFFIX}${MIG_SERVER_SOURCE_SUFFIX}
+ 			${CMAKE_CURRENT_BINARY_DIR}/${relativeName}${MIG_ARCH_SUFFIX}${MIG_SERVER_HEADER_SUFFIX}
+@@ -72,11 +85,16 @@
+ 				-xtracemig ${CMAKE_CURRENT_BINARY_DIR}/${relativeName}${MIG_ARCH_SUFFIX}${MIG_XTRACE_SUFFIX}
+ 				${MIG_FLAGS}
+ 				${CMAKE_CURRENT_SOURCE_DIR}/${defFileName} \;
++				${CMAKE_C_COMPILER} -x c -M -MT ${MIG_USER_SOURCE} -MF ${MIG_USER_SOURCE}.d
++				-arch ${MIG_ARCH} -target ${MIG_TARGET_TRIPLET_PRIMARY} -D__MACH30__
++				${MIG_FLAGS} -I ${MIG_SOURCE_DIR}
++				${CMAKE_CURRENT_SOURCE_DIR}/${defFileName} \;
+ 				# this is so that the xtrace file is always produced so that the command is not constantly re-run
+ 				# for MIG definitions that produce no xtrace files
+ 				touch ${CMAKE_CURRENT_BINARY_DIR}/${relativeName}${MIG_ARCH_SUFFIX}${MIG_XTRACE_SUFFIX}
+ 			DEPENDS
+-				migexe migcom
++				migexe migcom ${CMAKE_CURRENT_SOURCE_DIR}/${defFileName} ${MIG_CMAKE_FILE}
++			${MIG_DEPFILE_ARGS}
+ 		)
+ 
+ 		if (NOT TARGET ${bareName}_xtrace_mig AND NOT MIG_NO_XTRACE)
