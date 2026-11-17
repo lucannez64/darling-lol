@@ -20,6 +20,27 @@ python3 scripts/prepare.py --jobs "$prepare_jobs"
 # darling-lol perf: inject -O3 and -march=native even with empty build type,
 # so the base Darling runtime is not compiled at -O0.  The empty build type
 # is required by objc4's debug-ness macro check.
+# find_library() keeps whatever a previous configure cached without checking that the
+# files still exist, so a build directory reused across environments (host vs. toolbox
+# container, or a system upgrade that moved the libraries) poisons the build: configure
+# "finds" a library that is not there anymore and make only fails at link time (e.g.
+# mldr against /usr/lib/libxml2.so, which lives at /usr/lib64 on Fedora). Nothing is
+# removed automatically because the directory may hold useful partial work; if the
+# build fails, deleting build/darling-src/build and rerunning reconfigures fresh.
+# The value names come from a bracket that does not exclude anything CMake puts in
+# an entry name: dashes, dots and pluses appear (e.g. Some-Dashed.var:FILEPATH=...).
+cache=build/darling-src/build/CMakeCache.txt
+if [ -f "$cache" ]; then
+  missing=$(sed -n 's/^[^:#/][^:]*:FILEPATH=//p' "$cache" |
+    while IFS= read -r path; do
+      case $path in ''|*-NOTFOUND) continue ;; esac
+      case $path in /*) [ -e "$path" ] || printf '%s\n' "$path" ;; esac
+    done | sort -u)
+  if [ -n "$missing" ]; then
+    printf 'warning: %s comes from a previous run and caches paths that do not exist in this environment:\n%s\n' "$cache" "$missing" >&2
+    printf 'warning: expect "no rule to make target" style link failures; delete build/darling-src/build and run this script again to reconfigure from scratch.\n' >&2
+  fi
+fi
 # -mtune=generic, not native: clang 23 tuning for AMD Zen (znver*) passes the thread-local
 # variable descriptor in the wrong register on Darwin targets, so every __thread access
 # returns NULL (launchd crashed in libkqueue's epoll_event_dump).
