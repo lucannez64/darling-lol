@@ -378,6 +378,19 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertIn('NoDisplay=true', window.read_text())
         self.assertEqual(parse_entry(launcher)['Exec'], parse_entry(self.entry().read_text())['Exec'])
 
+    def test_foreign_command_with_project_script_argument_is_preserved(self):
+        project = self.project()
+        window = self.window_entry('darling-league-client.desktop')
+        window.parent.mkdir(parents=True)
+        for command in (f'/usr/bin/printf "{project}/scripts/launch-shortcut.sh"',
+                        f'toolbox run -c my-box /usr/bin/printf "{project}/scripts/launch-shortcut.sh"'):
+            text = f'[Desktop Entry]\nExec={command}\n'
+            window.write_text(text)
+            for args in (('--window-entries',), ()):
+                result = self.install(project, *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(window.read_text(), text)
+
     def test_missing_icon_fails(self):
         project = self.project()
         (project / 'darling-lol.png').unlink()

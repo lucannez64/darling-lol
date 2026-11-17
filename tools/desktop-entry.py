@@ -2,6 +2,7 @@
 """Create and install the GNOME / FreeDesktop desktop entry and launcher icon."""
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -77,19 +78,25 @@ def legacy_entry_owned(path: Path) -> bool:
     try:
         # Ownership is the entry's Exec target.  The path in Name, Comment or any
         # other field proves nothing: a foreign file can mention this checkout.
-        text = "\n".join(line for line in path.read_text(errors="ignore").splitlines()
-                         if line.startswith("Exec="))
+        commands = [line[5:].strip() for line in path.read_text(errors="ignore").splitlines()
+                    if line.startswith("Exec=")]
     except OSError:
         # A dangling symlink still counts when it points at this checkout.
         try:
-            text = os.readlink(path)
+            return os.readlink(path) in markers
         except OSError:
             return False
-    # exec_command quotes and escapes a path with reserved characters ($, `, ",
-    # \ and %), so also look for the generated form, not only the raw path.
-    return any(marker in text or marker.replace("%", "%%") in text
-               or quote_exec_argument(marker) in text
-               for marker in markers)
+    # Match the entire command, including the wrapper we generate. A script
+    # path passed as an argument to an unrelated program proves no ownership.
+    targets = {value for marker in markers
+               for value in (marker, marker.replace("%", "%%"), quote_exec_argument(marker))}
+    for command in commands:
+        if command in targets:
+            return True
+        wrapper = re.fullmatch(r'toolbox run -c ("(?:\\.|[^"\\])*"|[^\s"]+) (.+)', command)
+        if wrapper and wrapper[2] in targets:
+            return True
+    return False
 
 
 def remove_legacy_entry(path: Path) -> bool:
