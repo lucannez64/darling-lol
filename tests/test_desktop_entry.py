@@ -309,6 +309,30 @@ class DesktopEntryTests(unittest.TestCase):
                     self.assertFalse(self.window_entry(name).exists(), name)
                 self.assertTrue(self.entry().is_file())
 
+    def test_enabling_the_option_keeps_a_foreign_window_entry(self):
+        project = self.project()
+        foreign = self.window_entry('darling-league-client.desktop')
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_text('[Desktop Entry]\nName=Mine\nExec=/usr/bin/other\n')
+        result = self.install(project, '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(foreign.read_text(), '[Desktop Entry]\nName=Mine\nExec=/usr/bin/other\n')
+        self.assertIn(str(foreign), result.stderr)
+        self.assertNotIn(f'Created window entry: {foreign}', result.stdout)
+        # The conflict does not stop the other entry from being written.
+        self.assertTrue(self.window_entry('darling-riot-client.desktop').is_file())
+
+    def test_enabling_the_option_refreshes_an_entry_this_project_wrote(self):
+        project = self.project()
+        self.assertEqual(self.install(project, '--window-entries').returncode, 0)
+        result = self.install(project, '--toolbox', 'my-box', '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('already exists', result.stderr)
+        exec_line = next(line for line in
+                         self.window_entry('darling-league-client.desktop').read_text().splitlines()
+                         if line.startswith('Exec='))
+        self.assertTrue(exec_line.startswith('Exec=toolbox run -c my-box '), exec_line)
+
     def test_missing_icon_fails(self):
         project = self.project()
         (project / 'darling-lol.png').unlink()

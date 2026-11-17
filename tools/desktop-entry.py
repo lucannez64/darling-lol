@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path("@PROJECT_ROOT@")
@@ -215,13 +216,19 @@ StartupNotify=false
 
     # Window-association entries.  Hidden from menus (NoDisplay) and never put on
     # the desktop: they only let the shell name and icon the client windows.
-    # Without the opt-in, remove the ones this project wrote earlier (an entry
-    # that does not point at this checkout's launch script is left alone).
+    # Without the opt-in, remove the ones this project wrote earlier.  Either
+    # way a file that does not point at this checkout's launch script belongs to
+    # someone else: it is neither removed nor overwritten, and the conflict is
+    # reported.
     for file_name, display_name, wm_class in WINDOW_ENTRIES:
         window_file = apps_base / file_name
         if not window_entries:
             if remove_legacy_entry(window_file):
                 print(f"Removed window entry: {window_file}")
+            continue
+        if (window_file.is_symlink() or window_file.exists()) and not legacy_entry_owned(window_file):
+            print(f"Window entry {window_file} already exists and was not created by this "
+                  "project; leaving it untouched.", file=sys.stderr)
             continue
         window_file.write_text(f"""[Desktop Entry]
 Version=1.0
