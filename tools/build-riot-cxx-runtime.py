@@ -72,10 +72,9 @@ def build(library, object_dir, link_dir, output):
         return chunks
 
     stamp = root / ("build/riot-cxx-%s-build.json" % library)
-    had_stamp = stamp.exists()
     chunks = compute_chunks()
     digest = riot_build_cache.fingerprint(chunks)
-    if riot_build_cache.up_to_date(stamp, digest, [root / "build" / output]):
+    if riot_build_cache.stable_inputs(chunks, chunks) and riot_build_cache.up_to_date(stamp, digest, [root / "build" / output]):
         print(library, "up to date; skipping rebuild", flush=True)
         return
     # A failed build must not leave the old stamp validating its outputs.
@@ -97,7 +96,7 @@ def build(library, object_dir, link_dir, output):
     subprocess.run(link, cwd=folder, check=True)
     print("built build/" + output, len(jobs), "objects at -O3", flush=True)
     post = compute_chunks()
-    if had_stamp and post[:-1] != chunks[:-1]:
+    if not riot_build_cache.stable_inputs(chunks, post):
         # Inputs changed while compiling; record nothing so the next run
         # rebuilds instead of stamping objects compiled from mixed inputs.
         print(library, "inputs changed while building; not recording the stamp", flush=True)

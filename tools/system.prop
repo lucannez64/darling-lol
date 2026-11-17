@@ -5,11 +5,16 @@
 # (model, serial, UUID and board) remains in darling-platform.plist so a bad
 # detection can be corrected without changing this hardware profile.
 #
-# profile=host   (default) report the real host CPU/GPU/VRAM/memory.
-# profile=compat (opt-in)  report the MacBookPro16,1 compatibility values.
-# COMPAT is never selected by default. Change only this key to opt in:
-# profile=compat
-profile=host
+# profile=compat (default) report the MacBookPro16,1 compatibility values.
+# profile=host             report the real host CPU/GPU/VRAM/memory.
+# COMPAT also enables the notarization fallback in patches/security.patch;
+# under HOST, MVG's own `notarized` self-check fails (issue #31).
+# Change only this key to opt out:
+# profile=host
+profile=compat
+# Marks this file as already on the compat default; see
+# tools/migrate-system-profile.py. Keep it.
+profile.default=compat
 
 # HOST: the literal value "host" is resolved at launch from /proc and /sys.
 host.cpu.brand=host

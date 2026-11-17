@@ -58,12 +58,11 @@ def compute_chunks():
  return chunks
 
 stamp=root/'build/riot-platform-strings-build.json'
-had_stamp=stamp.exists()
 chunks=compute_chunks()
 digest=riot_build_cache.fingerprint(chunks)
 outputs=[root/'build/riot-libsystem_platform.dylib',
          root/'build/m810-platform-runtime/libsystem_platform.dylib']
-if riot_build_cache.up_to_date(stamp,digest,outputs):
+if riot_build_cache.stable_inputs(chunks,chunks) and riot_build_cache.up_to_date(stamp,digest,outputs):
  print('libsystem_platform up to date; skipping rebuild',flush=True)
  sys.exit(0)
 # A failed build must not leave the old stamp validating its outputs.
@@ -84,7 +83,7 @@ subprocess.run(link,cwd=folder,check=True)
 print('built build/riot-libsystem_platform.dylib with',recompiled,'string objects at -O3')
 p=root/'build/m810-platform-runtime';p.mkdir(exist_ok=True);shutil.copy2(root/'build/riot-libsystem_platform.dylib',p/'libsystem_platform.dylib')
 post=compute_chunks()
-if had_stamp and post[:-1]!=chunks[:-1]:
+if not riot_build_cache.stable_inputs(chunks,post):
  # Inputs changed while compiling; record nothing so the next run rebuilds
  # instead of stamping objects compiled from mixed inputs.
  print('inputs changed while building; not recording the stamp',flush=True)

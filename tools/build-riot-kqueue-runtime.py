@@ -106,7 +106,7 @@ mig_jobs=[('mach/task-x86_64-User.c',project/'build/riot-kernel-task-x86_64-User
           ('mach/mach_vm-x86_64-User.c',project/'build/riot-kernel-mach_vm-x86_64-User.o',
            ['-Dmach_vm_region_recurse=__darling_rpc_mach_vm_region_recurse'])]
 # Descriptor-leak regression probes, relinked against the repaired kernel.
-PROBES=('riot-task-info-check','riot-kqueue-lifetime-check','riot-kqueue-stack-check','riot-workqueue-reuse-check','riot-dispatch-fd-check','riot-kqueue-dispatch2-check','riot-syscall-fastpath-check','riot-select-backoff-check','riot-vnode-close-check','riot-rpc-signal-mask-check','riot-fileport-lifetime-check','riot-kqueue-timer-check','riot-cancel-rpc-check')
+PROBES=('riot-task-info-check','riot-kqueue-lifetime-check','riot-kqueue-stack-check','riot-workqueue-reuse-check','riot-dispatch-fd-check','riot-kqueue-dispatch2-check','riot-syscall-fastpath-check','riot-select-backoff-check','riot-vnode-close-check','riot-rpc-signal-mask-check','riot-fileport-lifetime-check','riot-kqueue-timer-check','riot-cancel-rpc-check','riot-runloop-wake-check')
 # Locate every object slot this build replaces (and assert each is unique)
 # before compiling; everything else is linked from the configured tree.
 replaced=set()
@@ -146,11 +146,10 @@ def compute_chunks():
     chunks.append(riot_build_cache.dependency_chunk(dep_files))
     return chunks
 stamp=project/'build/riot-kqueue-build.json'
-had_stamp=stamp.exists()
 chunks=compute_chunks()
 digest=riot_build_cache.fingerprint(chunks)
 outputs=[project/'build/riot-libsystem_kernel.dylib']+[project/('build/%s'%probe) for probe in PROBES]
-if riot_build_cache.up_to_date(stamp,digest,outputs):
+if riot_build_cache.stable_inputs(chunks,chunks) and riot_build_cache.up_to_date(stamp,digest,outputs):
     print('libsystem_kernel up to date; skipping rebuild',flush=True)
     sys.exit(0)
 # A failed build must not leave the old stamp validating its outputs.
@@ -190,7 +189,7 @@ for probe in PROBES:
                     '-isysroot', '@DARLING_SDK@', str(obj), '-lSystem', '-o',
                     str(project / f'build/{probe}')], check=True)
 post=compute_chunks()
-if had_stamp and post[:-1]!=chunks[:-1]:
+if not riot_build_cache.stable_inputs(chunks,post):
     # Inputs changed while compiling; record nothing so the next run rebuilds
     # instead of stamping objects compiled from mixed inputs.
     print('inputs changed while building; not recording the stamp',flush=True)

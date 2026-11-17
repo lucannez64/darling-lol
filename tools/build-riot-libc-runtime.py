@@ -172,10 +172,9 @@ def build():
         return chunks
 
     stamp = root / "build/riot-libc-build.json"
-    had_stamp = stamp.exists()
     chunks = compute_chunks()
     digest = riot_build_cache.fingerprint(chunks)
-    if riot_build_cache.up_to_date(stamp, digest, [root / "build/riot-libsystem_c.dylib"]):
+    if riot_build_cache.stable_inputs(chunks, chunks) and riot_build_cache.up_to_date(stamp, digest, [root / "build/riot-libsystem_c.dylib"]):
         print("libsystem_c up to date; skipping rebuild", flush=True)
         return
     # A failed build must not leave the old stamp validating its outputs.
@@ -201,7 +200,7 @@ def build():
     subprocess.run(link, cwd=folder, check=True)
     print("built build/riot-libsystem_c.dylib with", len(jobs), "objects at -O2", flush=True)
     post = compute_chunks()
-    if had_stamp and post[:-1] != chunks[:-1]:
+    if not riot_build_cache.stable_inputs(chunks, post):
         # Inputs changed while compiling; record nothing so the next run
         # rebuilds instead of stamping objects compiled from mixed inputs.
         print("inputs changed while building; not recording the stamp", flush=True)

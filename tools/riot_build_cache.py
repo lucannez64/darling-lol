@@ -12,6 +12,7 @@ fresh cmake configure — produces a different digest and forces a rebuild.
 """
 import hashlib
 import json
+import shlex
 from pathlib import Path
 
 
@@ -51,7 +52,10 @@ def dependency_paths(dep_file):
     except OSError:
         return None
     body = text.split(":", 1)[1] if ":" in text else text
-    return [token for token in body.replace("\\\n", " \n").split()]
+    try:
+        return shlex.split(body.replace("\\\n", " ").replace("$$", "$"), comments=False)
+    except ValueError:
+        return None
 
 
 def dependency_chunk(dep_files):
@@ -86,6 +90,17 @@ def up_to_date(stamp_path, digest, outputs):
     if not isinstance(stamp, dict) or stamp.get("fingerprint") != digest:
         return False
     return all(Path(output).is_file() for output in outputs)
+
+
+def stable_inputs(before, after):
+    """Only cache a build whose full dependency set was known and unchanged.
+
+    The first build discovers headers via -MD. Until a subsequent build verifies
+    those inputs across compilation, do not stamp potentially mixed output.
+    Unreadable dependency lists must never become reusable fingerprints.
+    """
+    return (before == after and bool(before)
+            and before[-1].startswith("dependencies:"))
 
 
 def record(stamp_path, digest, note=""):
