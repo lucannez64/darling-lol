@@ -20,7 +20,7 @@ runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # repository copy is the fallback before install-runtime.sh has run.
 system_prop=${RCLOL_SYSTEM_PROP:-"$prefix_dir/private/etc/darling-system.prop"}
 [ -r "$system_prop" ] || system_prop="$runner_dir/system.prop"
-profile=host
+profile=compat
 host_cpu_brand=host
 host_gpu_name=host
 host_gpu_vram=host
