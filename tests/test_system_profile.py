@@ -86,6 +86,14 @@ class SystemProfileTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertTrue(new.startswith('profile=compat\n profile=compat\n'))
 
+    def test_migration_replaces_the_old_i9_brand_only(self):
+        new, _ = self.migrate('profile=compat\n'
+                              'compat.cpu.brand=Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz\n')
+        self.assertIn('compat.cpu.brand=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\n', new)
+        self.assertNotIn('9980HK', new)
+        custom = 'profile=compat\ncompat.cpu.brand=Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz\n'
+        self.assertIn('W-3245', self.migrate(custom)[0])
+
     def test_migration_keeps_compat_and_the_current_template(self):
         new, changed = self.migrate('profile=compat\n')
         self.assertTrue(changed)
