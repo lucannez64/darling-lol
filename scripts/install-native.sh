@@ -1171,6 +1171,28 @@ main() {
   run 'Installing Darling system components' install_system_components
   run 'Installing the user runtime' install_user_runtime
 
+  # Record the install mode only now that every step above succeeded: a
+  # cancelled confirmation or a failed preflight/build must leave any previous
+  # markers intact so scripts/update.sh keeps pointing at the last working
+  # install. The Toolbox path execs into the container, so a CONTAINER_INSTALL
+  # run never gets here; what does is the inner Toolbox run (DARLING_LOL_TOOLBOX=1,
+  # with the container name passed by the outer installer) or a genuinely native
+  # install. A manual run inside a container (INSIDE_TOOLBOX without
+  # DARLING_LOL_TOOLBOX) records nothing: the container name is not known for sure.
+  if [[ ${DARLING_LOL_TOOLBOX:-0} == 1 && $INSIDE_TOOLBOX == 1 ]]; then
+    # Record the container so scripts/update.sh can re-exec itself inside it:
+    # the build cache and the installed runtime belong to this container.
+    mkdir -p "$TARGET_DIR/build"
+    printf '%s\n' "${DARLING_LOL_TOOLBOX_NAME:-$TOOLBOX_NAME}" > "$TARGET_DIR/build/toolbox-container"
+    rm -f "$TARGET_DIR/build/native-install"
+  elif [[ $INSIDE_TOOLBOX != 1 ]]; then
+    # Explicitly native install: record it so scripts/update.sh never re-execs
+    # into a container, and drop a stale Toolbox marker.
+    mkdir -p "$TARGET_DIR/build"
+    : > "$TARGET_DIR/build/native-install"
+    rm -f "$TARGET_DIR/build/toolbox-container"
+  fi
+
   finish
 }
 

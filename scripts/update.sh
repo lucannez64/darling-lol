@@ -32,6 +32,53 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
   echo 'Rootless update installed. In this shell use scripts/run.sh; otherwise exit this shell and start darling-lol.'
   exit 0
 fi
+
+# A Toolbox install builds against the container's libraries and installs the base
+# runtime into the container's /usr/local, so the update must run in there too.
+# Re-exec when running on the host; the container name comes from the marker
+# written by install-native.sh, or from the installed desktop entry, or — only
+# for legacy checkouts that left no record at all — from finding Darling in the
+# installer's default container. A native install records build/native-install
+# and is never redirected. DARLING_LOL_UPDATE_REEXEC stops the re-exec from
+# looping when the inner run is not recognized as being inside the container.
+if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] && \
+   [ ! -f build/native-install ]; then
+  name=''
+  if [ -f build/toolbox-container ]; then
+    name=$(cat build/toolbox-container)
+  else
+    # $HOME holds a single launcher entry shared by every checkout: only trust
+    # its container name when its Exec points at this checkout's scripts.
+    # Reserved path characters come out escaped in the Exec value, so those
+    # paths may not match here; a false negative is safe.
+    entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
+    name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
+      sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
+  fi
+  # No record of any kind: only a legacy checkout can be assumed to live in the
+  # installer's default container. This probe also starts a stopped container,
+  # so it must not decide for checkouts that are already recorded above.
+  if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 && \
+     toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+    name=darling-lol
+  fi
+  if [ -n "$name" ]; then
+    if ! command -v toolbox >/dev/null 2>&1; then
+      echo "This checkout was installed via Toolbox container '$name', but Toolbox" >&2
+      echo 'is not installed on this host. Install Toolbox, then run the update' >&2
+      echo "inside the container: toolbox enter $name" >&2
+      exit 1
+    fi
+    if ! toolbox run -c "$name" true 2>/dev/null; then
+      echo "This checkout was installed via Toolbox container '$name', but that container is not" >&2
+      echo 'reachable. Start it and run the update inside it: toolbox enter '"$name" >&2
+      exit 1
+    fi
+    echo "Toolbox install detected; running the update inside container '$name'..."
+    exec toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 sh "$repo/scripts/update.sh"
+  fi
+fi
+
 if [ ! -d build/darling-src/build ]; then
 	echo 'No existing build; follow the first-time setup in README.md instead.' >&2
 	exit 1
