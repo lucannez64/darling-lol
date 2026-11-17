@@ -5797,7 +5797,7 @@ index 5ae29bf4..fba1fafd 100644
 +            return NO;
 +        if (ev->type == DestroyNotify)
 +            _occlusionWatchWindow = None;
-+        if (ev->type != PropertyNotify || ev->xproperty.atom == _netWMStateAtom)
++        if (ev->type != PropertyNotify || ev->xproperty.atom == _netWMStateAtom || ev->xproperty.atom == _netWMWindowOpacityAtom)
 +            _occlusionDirty = YES;
 +        return YES;
 +    }
