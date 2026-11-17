@@ -17,6 +17,7 @@ No -DNDEBUG, no -ffast-math, no LTO: only the optimization level changes.
 Output: build/riot-libsystem_c.dylib.
 """
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 import re
 import shlex
@@ -24,9 +25,13 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import riot_build_cache
 import riot_build_gate
 
-root = Path(__file__).resolve().parent.parent
+# The rendered copy in build/runtime/tools resolves build/runtime/build (a
+# symlink to this checkout's build/), but build.make holds real-root path
+# strings; path matching needs the real repository root, not the symlink view.
+root = (Path(__file__).resolve().parent.parent / "build").resolve().parent
 folder = root / "build/darling-src/build/src/external/libc"
 source_root = root / "build/darling-src/src/external/libc"
 resource_dir = subprocess.check_output(["clang", "-print-resource-dir"], text=True).strip()
@@ -49,6 +54,7 @@ def current_clang(values):
     return [re.sub(r"/usr/lib/clang/\d+/include", resource_dir + "/include", value) for value in values]
 
 
+@lru_cache(maxsize=None)
 def variables_of(target_folder):
     variables = {}
     for line in (target_folder / "flags.make").read_text().splitlines():
@@ -107,12 +113,13 @@ def compile_command(target_folder, source, object_path):
 
 
 def build():
-    link = shlex.split((folder / "CMakeFiles/system_c.dir/link.txt").read_text())
+    link_text = (folder / "CMakeFiles/system_c.dir/link.txt").read_text()
+    link = shlex.split(link_text)
     rsp_index = next(index for index, argument in enumerate(link) if argument.startswith("@"))
     # The response file is a whitespace-separated list; CMake leaves the
     # objects of other directories unquoted, so split like the linker does.
     entries = shlex.split((folder / link[rsp_index][1:]).read_text())
-    jobs, objects = [], []
+    jobs, objects, kept = [], [], []
     for entry in entries:
         head, target, relative = split_entry(entry)
         source = source_of(head, relative)
@@ -126,22 +133,55 @@ def build():
             # library also links; the kernel component owns them, so they keep
             # the configured flags here.
             objects.append(entry)
+            kept.append(entry)
             continue
         if source_key in EXCLUDED or source.suffix != ".c" or not source.is_file():
             objects.append(entry)
+            kept.append(entry)
             continue
         obj = root / ("build/riot-libc-%s.o" % (head + target + "-" + relative).replace("/", "_"))
         command = compile_command(target_folder, source, str(obj))
         if command is None:
             print("no compile command for", entry, "- keeping the configured object")
             objects.append(entry)
+            kept.append(entry)
             continue
-        jobs.append((target_folder, command, obj))
+        # Also record the dependencies, so header edits invalidate the cache.
+        command.extend(["-MD", "-MF", str(obj) + ".d"])
+        jobs.append((target_folder, command, obj, source))
         objects.append(str(obj))
     print("recompiling", len(jobs), "of", len(entries), "objects at -O2", flush=True)
 
+    # Wait for a quiet machine before hashing (and later compiling): nothing
+    # below burns CPU a running match would notice.
+    riot_build_gate.wait_until_free()
+
+    def compute_chunks():
+        # Everything that can change the result: this script, the link line,
+        # each recompiled source's content and compile command, the stat of
+        # every configured object kept as-is (the cmake build refreshes those
+        # itself), and the headers recorded by the previous dependency files.
+        chunks = [riot_build_cache.digest_text(Path(__file__).read_text()),
+                  riot_build_cache.digest_text(link_text)]
+        for target_folder, command, obj, source in jobs:
+            chunks.append(" ".join(command) + "\0" + riot_build_cache.digest_file(source))
+        for entry in kept:
+            chunks.append(entry + "\0" + riot_build_cache.stat_entry(folder / entry))
+        chunks.append(riot_build_cache.dependency_chunk(
+            [Path(str(obj) + ".d") for _, _, obj, _ in jobs]))
+        return chunks
+
+    stamp = root / "build/riot-libc-build.json"
+    chunks = compute_chunks()
+    digest = riot_build_cache.fingerprint(chunks)
+    if riot_build_cache.stable_inputs(chunks, chunks) and riot_build_cache.up_to_date(stamp, digest, [root / "build/riot-libsystem_c.dylib"]):
+        print("libsystem_c up to date; skipping rebuild", flush=True)
+        return
+    # A failed build must not leave the old stamp validating its outputs.
+    stamp.unlink(missing_ok=True)
+
     def compile_one(job):
-        working_directory, command, obj = job
+        working_directory, command, obj, source = job
         result = subprocess.run(command, cwd=working_directory, capture_output=True, text=True)
         if result.returncode != 0:
             print("failed:", " ".join(command[-6:]))
@@ -150,7 +190,6 @@ def build():
         if not obj.is_file():
             raise SystemExit("no object produced for " + str(obj))
 
-    riot_build_gate.wait_until_free()
     with ThreadPoolExecutor(max_workers=6) as pool:
         list(pool.map(compile_one, jobs))
 
@@ -160,6 +199,13 @@ def build():
     link[link.index("-o") + 1] = str(root / "build/riot-libsystem_c.dylib")
     subprocess.run(link, cwd=folder, check=True)
     print("built build/riot-libsystem_c.dylib with", len(jobs), "objects at -O2", flush=True)
+    post = compute_chunks()
+    if not riot_build_cache.stable_inputs(chunks, post):
+        # Inputs changed while compiling; record nothing so the next run
+        # rebuilds instead of stamping objects compiled from mixed inputs.
+        print("inputs changed while building; not recording the stamp", flush=True)
+        return
+    riot_build_cache.record(stamp, riot_build_cache.fingerprint(post), "libsystem_c -O3 -march=native")
 
 
 if __name__ == "__main__":

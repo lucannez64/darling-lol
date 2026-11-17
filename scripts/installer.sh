@@ -66,7 +66,17 @@ notify() {
 # owner's pid; a lock whose owner is gone is stale and is taken over.
 lock_dir="$repo/build/installer.lock"
 lock_held=0
+# The background tail that mirrors run.sh's stderr (see run_attempt).
+tail_pid=
+stop_tail() {
+  if [ -n "$tail_pid" ]; then
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+    tail_pid=
+  fi
+}
 release_lock() {
+  stop_tail
   if [ "$lock_held" = 1 ]; then
     lock_held=0
     rm -rf "$lock_dir"
@@ -115,6 +125,47 @@ RIOT_LAUNCHER_HOST="$repo/build/installer/Install League of Legends $region.app/
 RCLOL_REGION=$(printf '%s' "$region" | tr '[:lower:]' '[:upper:]')
 export RIOT_LAUNCHER_HOST RCLOL_REGION
 
+# Run scripts/run.sh once. Its stderr is kept in a file so a failure that no
+# retry can fix is recognised afterwards, and mirrored to this terminal with
+# tail -f as it is written. A file rather than a pipe keeps run.sh a direct
+# child of this shell, and a process that still holds the output open can
+# neither block this shell nor be killed by SIGPIPE. Stdout is left alone.
+run_err="$lock_dir/run.err"
+run_attempt() {
+  : > "$run_err"
+  tail -n +1 -f "$run_err" >&2 &
+  tail_pid=$!
+  status=0
+  sh scripts/run.sh 2>> "$run_err" || status=$?
+  # tail follows the file within milliseconds; let it print the last lines.
+  sleep 1
+  stop_tail
+}
+
+# darlingserver creates its socket after mounting an overlay on the prefix. The
+# kernel mounts an overlay read-only, without failing, when it cannot create
+# the work directory (<prefix>.workdir), so the socket's bind() then fails with
+# EROFS. The cause is persistent: another attempt fails the same way.
+darling_server_read_only() {
+  grep -qs 'Failed to bind socket: Read-only file system' "$run_err"
+}
+
+report_read_only_prefix() {
+  echo 'Darling could not start: its server could not create its socket because the prefix' >&2
+  echo 'overlay was mounted read-only. Retrying will not help.' >&2
+  if [ -e "$prefix.workdir" ] || [ -L "$prefix.workdir" ]; then
+    echo "The overlay work directory next to the prefix is probably unusable, for example" >&2
+    echo 'left by a run under a different user mapping. With no Darling running, move it aside' >&2
+    echo '(use sudo if that is denied) and run the installer again:' >&2
+    echo "  mv \"$prefix.workdir\" \"$prefix.workdir.bak\"" >&2
+  else
+    echo "There is no $prefix.workdir, so check the filesystem that holds the prefix: it must be" >&2
+    echo 'writable and support extended attributes (see docs/TROUBLESHOOTING.md), or set DPREFIX' >&2
+    echo 'to a directory on a supported filesystem.' >&2
+  fi
+  echo 'The kernel logs the reason (journalctl -k -b | grep -i overlay on the host).' >&2
+}
+
 # The installer exits after installing the Riot Client; its own hand-off to the
 # client fails under Darling, so start the installed client here. The
 # installer's native UI has also crashed mid-install under Darling
@@ -125,13 +176,18 @@ clean_partial_install
 attempt=1
 max_attempts=3
 while :; do
-  status=0
-  sh scripts/run.sh || status=$?
+  run_attempt
   # run.sh ended by an interrupt (Ctrl-C reaches the whole foreground group,
   # and the session supervisor reports 128 + signal). A crash (sig 11) is not
   # an interrupt and stays eligible for a retry.
   case "$status" in 129|130|143) interrupted "$status" ;; esac
   client_installed && break
+  if darling_server_read_only; then
+    unset RIOT_LAUNCHER_HOST
+    notify 'Riot Client install failed' 'Darling could not start: the prefix overlay is read-only. See the terminal output.'
+    report_read_only_prefix
+    exit 1
+  fi
   [ "$attempt" -ge "$max_attempts" ] && break
   attempt=$((attempt + 1))
   clean_partial_install
