@@ -39,6 +39,10 @@ USE_TOOLBOX=0
 CONTAINER_INSTALL=0
 INSIDE_TOOLBOX=0
 TOOLBOX_RELEASE=''
+# 1 when the hidden League/Riot Client window entries were requested
+# (--window-entries or DARLING_LOL_WINDOW_ENTRIES=1); never created by default.
+WINDOW_ENTRIES=0
+if [[ ${DARLING_LOL_WINDOW_ENTRIES:-0} == 1 ]]; then WINDOW_ENTRIES=1; fi
 YES=0
 NO_CONFIRM=0
 FAMILY=''
@@ -244,6 +248,9 @@ Options:
                       with --yes or without a terminal: ${DEFAULT_LOCALE})
                       A prefix that already ran the client keeps its saved
                       language unless RCLOL_LOCALE is exported at launch.
+      --window-entries  Also create hidden desktop entries that name and icon the
+                      League and Riot Client windows in the GNOME overview
+                      (off by default; the launcher itself stays neutral)
   -h, --help          Show this help
 
 Environment:
@@ -254,6 +261,7 @@ Environment:
                              hosts (default: ${DEFAULT_FEDORA_RELEASE})
   DARLING_LOL_DESKTOP_ENTRY  Create the desktop entry without asking (1/0);
                              when unset, ask at the end of an interactive install
+  DARLING_LOL_WINDOW_ENTRIES Same as --window-entries when set to 1
   NO_COLOR                   Disable colored output
   XDG_CACHE_HOME             Where the install log is written
 EOF
@@ -265,6 +273,7 @@ parse_args() {
       -v|--verbose) VERBOSE=1 ;;
       -t|--toolbox) USE_TOOLBOX=1 ;;
       -y|--yes) YES=1 ;;
+      --window-entries) WINDOW_ENTRIES=1 ;;
       --no-confirm) NO_CONFIRM=1 ;;
       --region)
         (( $# >= 2 )) || fail '--region requires a value.'
@@ -651,6 +660,7 @@ install_toolbox() {
   local args=(--no-confirm --region "$REGION" --locale "$LOCALE")
   if (( YES )); then args+=(--yes); fi
   if (( VERBOSE )); then args+=(--verbose); fi
+  if (( WINDOW_ENTRIES )); then args+=(--window-entries); fi
 
   # Forward the desktop-entry choice only when set: the inner installer treats
   # unset as "prompt" and 0 as "suppress the prompt without creating an entry".
@@ -961,6 +971,9 @@ create_desktop_entry() {
 
   if (( INSIDE_TOOLBOX )); then
     args+=(--toolbox "$TOOLBOX_NAME")
+  fi
+  if (( WINDOW_ENTRIES )); then
+    args+=(--window-entries)
   fi
 
   local entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"

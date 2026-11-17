@@ -2,8 +2,10 @@
 """Create and install the GNOME / FreeDesktop desktop entry and launcher icon."""
 import argparse
 import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path("@PROJECT_ROOT@")
@@ -20,6 +22,18 @@ URL_HANDLER_SCRIPT = "scripts/open-guest-url.sh"
 
 # Distinctive fragments of the artwork the previous helper wrote.
 LEGACY_SVG_MARKERS = ('id="goldGrad"', 'M172 108 L242 108')
+
+# Opt-in window-association entries (--window-entries / DARLING_LOL_WINDOW_ENTRIES=1).
+# GNOME matches a window to an application by StartupWMClass, so a hidden entry
+# per client window class gives those windows a proper name and icon in the
+# Activities overview and the dash.  They carry third-party product names, so
+# they are never created unless the user asks, and the default launcher stays
+# neutral.  Each tuple is (file name, display name, WM_CLASS).
+WINDOW_ENTRIES = (
+    ("darling-league-client.desktop", "League of Legends", "LeagueClientUx"),
+    ("darling-riot-client.desktop", "Riot Client", "Riot Client"),
+)
+WINDOW_ENTRY_KEYWORDS = "LoL;League;League of Legends;Riot;"
 
 # Characters that force Exec quoting, per the Desktop Entry specification.
 EXEC_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
@@ -58,19 +72,31 @@ def exec_command(script: str, toolbox: str | None = None) -> str:
 
 
 def legacy_entry_owned(path: Path) -> bool:
-    """Return True when a launcher entry was created by this project."""
+    """Return True when an entry's Exec runs this checkout's launcher scripts."""
     markers = [str(PROJECT_ROOT / script) for script in (LEGACY_RUN_SCRIPT,
                                                          LAUNCH_SHORTCUT_SCRIPT)]
     try:
-        text = path.read_text(errors="ignore")
+        # Ownership is the entry's Exec target.  The path in Name, Comment or any
+        # other field proves nothing: a foreign file can mention this checkout.
+        commands = [line[5:].strip() for line in path.read_text(errors="ignore").splitlines()
+                    if line.startswith("Exec=")]
     except OSError:
         # A dangling symlink still counts when it points at this checkout.
         try:
-            text = os.readlink(path)
+            return os.readlink(path) in markers
         except OSError:
             return False
-    return any(marker in text or marker.replace("%", "%%") in text
-               for marker in markers)
+    # Match the entire command, including the wrapper we generate. A script
+    # path passed as an argument to an unrelated program proves no ownership.
+    targets = {value for marker in markers
+               for value in (marker, marker.replace("%", "%%"), quote_exec_argument(marker))}
+    for command in commands:
+        if command in targets:
+            return True
+        wrapper = re.fullmatch(r'toolbox run -c ("(?:\\.|[^"\\])*"|[^\s"]+) (.+)', command)
+        if wrapper and wrapper[2] in targets:
+            return True
+    return False
 
 
 def remove_legacy_entry(path: Path) -> bool:
@@ -112,7 +138,7 @@ def shortcut_directories() -> list[Path]:
     return directories
 
 
-def main(toolbox: str | None = None):
+def main(toolbox: str | None = None, window_entries: bool = False):
     icons_base = HOST_HOME / ".local/share/icons"
     apps_base = HOST_HOME / ".local/share/applications"
 
@@ -165,6 +191,9 @@ def main(toolbox: str | None = None):
     # entry runs the session directly and therefore needs a terminal.
     exec_cmd = exec_command(LAUNCH_SHORTCUT_SCRIPT, toolbox)
     project_path = escape_string(str(PROJECT_ROOT))
+    keywords = "Darling;Launcher;Compatibility;"
+    if window_entries:
+        keywords += WINDOW_ENTRY_KEYWORDS
     desktop_content = f"""[Desktop Entry]
 Version=1.0
 Type=Application
@@ -176,7 +205,7 @@ Path={project_path}
 Icon=darling-launcher
 Terminal=false
 Categories=Game;
-Keywords=Darling;Launcher;Compatibility;
+Keywords={keywords}
 StartupWMClass=RiotClientServices
 StartupNotify=false
 """
@@ -194,6 +223,43 @@ StartupNotify=false
         if gio:
             subprocess.run([gio, "set", str(desktop_shortcut), "metadata::trusted", "true"], check=False)
         print(f"Created desktop shortcut: {desktop_shortcut}")
+
+    # Window-association entries.  Hidden from menus (NoDisplay) and never put on
+    # the desktop: they only let the shell name and icon the client windows.
+    # Without the opt-in, remove the ones this project wrote earlier.  Either
+    # way a file that does not point at this checkout's launch script belongs to
+    # someone else: it is neither removed nor overwritten, and the conflict is
+    # reported.
+    for file_name, display_name, wm_class in WINDOW_ENTRIES:
+        window_file = apps_base / file_name
+        if not window_entries:
+            if remove_legacy_entry(window_file):
+                print(f"Removed window entry: {window_file}")
+            continue
+        if (window_file.is_symlink() or window_file.exists()) and not legacy_entry_owned(window_file):
+            print(f"Window entry {window_file} already exists and was not created by this "
+                  "project; leaving it untouched.", file=sys.stderr)
+            continue
+        # Replace an owned link itself; never write through it into the launcher.
+        if window_file.is_symlink():
+            window_file.unlink()
+        window_file.write_text(f"""[Desktop Entry]
+Version=1.0
+Type=Application
+Name={display_name}
+GenericName=Game
+Comment=Window entry for the client started by the Darling Launcher
+Exec={exec_cmd}
+Path={project_path}
+Icon=darling-launcher
+Terminal=false
+NoDisplay=true
+Categories=Game;
+StartupWMClass={wm_class}
+StartupNotify=false
+""")
+        os.chmod(window_file, 0o755)
+        print(f"Created window entry: {window_file}")
 
     # Link handler for sign-in: Google and other social sign-in finish in the host
     # browser at a riotclient:// URL, which open-guest-url.sh hands to the client
@@ -238,4 +304,11 @@ if __name__ == "__main__":
         "--toolbox", metavar="CONTAINER",
         help="launch the entry through 'toolbox run -c CONTAINER'",
     )
-    main(parser.parse_args().toolbox)
+    parser.add_argument(
+        "--window-entries", action="store_true",
+        default=os.environ.get("DARLING_LOL_WINDOW_ENTRIES") == "1",
+        help="also create hidden entries that name and icon the client windows "
+             "(or set DARLING_LOL_WINDOW_ENTRIES=1)",
+    )
+    arguments = parser.parse_args()
+    main(arguments.toolbox, arguments.window_entries)
