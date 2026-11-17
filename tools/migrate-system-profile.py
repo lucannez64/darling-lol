@@ -52,11 +52,11 @@ def main():
     path = parser.parse_args().path.resolve()
     if not path.is_file():
         return 0
-    old = path.read_text()
+    old = path.read_text(encoding='utf-8', errors='surrogateescape')
     new, changed = migrate(old)
     if changed:
         temporary = path.with_name(path.name + '.tmp')
-        temporary.write_text(new)
+        temporary.write_text(new, encoding='utf-8', errors='surrogateescape')
         temporary.chmod(path.stat().st_mode & 0o777)
         temporary.replace(path)
         if effective_profile(old) == 'host':
