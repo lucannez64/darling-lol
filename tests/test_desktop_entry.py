@@ -39,13 +39,21 @@ class DesktopEntryTests(unittest.TestCase):
         shutil.copy2(ROOT / 'darling-lol.png', project / 'darling-lol.png')
         return project
 
+    def child_env(self, **extra):
+        """Environment for the helper: HOME is the disposable one and an exported
+        DARLING_LOL_WINDOW_ENTRIES never leaks in unless a test sets it."""
+        env = {key: value for key, value in os.environ.items()
+               if key != 'DARLING_LOL_WINDOW_ENTRIES'}
+        env.update(HOME=str(self.home), **extra)
+        return env
+
     def install(self, project, *args):
         script = project / 'desktop-entry.py'
         script.write_text(HELPER.read_text()
                           .replace('@PROJECT_ROOT@', str(project))
                           .replace('@HOST_HOME@', str(self.home)))
         return subprocess.run([sys.executable, str(script), *args], capture_output=True, text=True,
-                              env=dict(os.environ, HOME=str(self.home)), check=False)
+                              env=self.child_env(), check=False)
 
     def entry(self):
         return self.home / '.local/share/applications/darling-launcher.desktop'
@@ -258,8 +266,7 @@ class DesktopEntryTests(unittest.TestCase):
                           .replace('@PROJECT_ROOT@', str(project))
                           .replace('@HOST_HOME@', str(self.home)))
         result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
-                                env=dict(os.environ, HOME=str(self.home),
-                                         DARLING_LOL_WINDOW_ENTRIES='1'), check=False)
+                                env=self.child_env(DARLING_LOL_WINDOW_ENTRIES='1'), check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.window_entry('darling-league-client.desktop').is_file())
         self.assertTrue(self.window_entry('darling-riot-client.desktop').is_file())
@@ -284,6 +291,23 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
         self.assertTrue(foreign.is_file())
         self.assertIn('Name=Mine', foreign.read_text())
+
+    def test_dropping_the_option_removes_entries_of_a_path_with_reserved_characters(self):
+        # exec_command backslash-escapes $ ` " \\ and doubles %, so ownership has to be
+        # recognised from the generated Exec, not only from the raw script path.
+        for args in ((), ('--toolbox', 'my-box')):
+            with self.subTest(args=args):
+                project = self.project("proj $dollar#hash'quote" + ('-tb' if args else ''))
+                enabled = self.install(project, *args, '--window-entries')
+                self.assertEqual(enabled.returncode, 0, enabled.stderr)
+                names = ('darling-league-client.desktop', 'darling-riot-client.desktop')
+                for name in names:
+                    self.assertTrue(self.window_entry(name).is_file(), name)
+                disabled = self.install(project, *args)
+                self.assertEqual(disabled.returncode, 0, disabled.stderr)
+                for name in names:
+                    self.assertFalse(self.window_entry(name).exists(), name)
+                self.assertTrue(self.entry().is_file())
 
     def test_missing_icon_fails(self):
         project = self.project()

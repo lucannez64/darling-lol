@@ -81,7 +81,10 @@ def legacy_entry_owned(path: Path) -> bool:
             text = os.readlink(path)
         except OSError:
             return False
+    # exec_command quotes and escapes a path with reserved characters ($, `, ",
+    # \ and %), so also look for the generated form, not only the raw path.
     return any(marker in text or marker.replace("%", "%%") in text
+               or quote_exec_argument(marker) in text
                for marker in markers)
 
 

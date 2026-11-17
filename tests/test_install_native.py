@@ -18,6 +18,8 @@ def installer_env(**extra):
     env.pop('RCLOL_LOCALE', None)
     # Use the default desktop-entry policy unless a test overrides it.
     env.pop('DARLING_LOL_DESKTOP_ENTRY', None)
+    # Window entries stay off unless a test asks for them, even if exported.
+    env.pop('DARLING_LOL_WINDOW_ENTRIES', None)
     # Keep default-release cases hermetic unless a test overrides it.
     env.pop('DARLING_LOL_TOOLBOX_RELEASE', None)
     # Keep locale detection deterministic unless a test overrides it.
