@@ -35,7 +35,8 @@ if [ ! -e "$prefix/private/etc/darling-system.prop" ]; then
   install -m 0644 build/runtime/tools/system.prop "$prefix/private/etc/darling-system.prop"
 fi
 # One-time move of profiles installed while HOST was the default (issue #31).
-python3 build/runtime/tools/migrate-system-profile.py "$prefix/private/etc/darling-system.prop"
+python3 build/runtime/tools/migrate-system-profile.py "$prefix/private/etc/darling-system.prop" || \
+  echo "Hardware profile not migrated; set profile=compat in $prefix/private/etc/darling-system.prop" >&2
 # Build the system root store now that the prefix exists; Darling is stopped next anyway.
 python3 build/runtime/tools/ensure-darling-root-certificates.py || \
   echo 'Darling system root store not installed; the launcher retries it' >&2
