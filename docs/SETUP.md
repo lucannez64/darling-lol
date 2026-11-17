@@ -38,12 +38,13 @@ are provisioned during runtime installation. For an existing prefix, follow
 shared defaults or create missing identifiers; keep an already custom identity
 stable across updates.
 
-Use `profile=compat` for the recommended application compatibility configuration.
-After runtime installation, edit `<prefix>/private/etc/darling-system.prop` and
-change `profile=host` to `profile=compat`. The installed file takes precedence
-over `tools/system.prop` and is preserved by updates. If it does not exist yet,
-edit `tools/system.prop` before runtime installation. An explicit
-`RCLOL_PLATFORM_PROFILE` environment variable overrides the file.
+`profile=compat` is the default and the recommended configuration. It also
+enables the notarization fallback that MVG's own code-signing self-check needs
+(issue #31). The runtime installer moves a profile installed while `host` was
+the default to `compat` once; after that, `profile=host` in
+`<prefix>/private/etc/darling-system.prop` is kept as your choice. The installed
+file takes precedence over `tools/system.prop` and is preserved by updates. An
+explicit `RCLOL_PLATFORM_PROFILE` environment variable overrides the file.
 
 Provisioning and compat mode are separate steps: provisioning saves your prefix's
 serial and UUID, while compat selects the CPU, GPU and memory presentation.

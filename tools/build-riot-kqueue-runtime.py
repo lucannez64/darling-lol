@@ -121,7 +121,7 @@ for line in (build / 'src/frameworks/CoreVideo/CMakeFiles/CoreVideo.dir/flags.ma
     if line.startswith('C_') and ' = ' in line:
         name, value = line.split(' = ', 1)
         flags[name] = shlex.split(value)
-for probe in ('riot-task-info-check','riot-kqueue-lifetime-check','riot-kqueue-stack-check','riot-workqueue-reuse-check','riot-dispatch-fd-check','riot-kqueue-dispatch2-check','riot-syscall-fastpath-check','riot-select-backoff-check','riot-vnode-close-check','riot-rpc-signal-mask-check','riot-fileport-lifetime-check','riot-kqueue-timer-check','riot-cancel-rpc-check'):
+for probe in ('riot-task-info-check','riot-kqueue-lifetime-check','riot-kqueue-stack-check','riot-workqueue-reuse-check','riot-dispatch-fd-check','riot-kqueue-dispatch2-check','riot-syscall-fastpath-check','riot-select-backoff-check','riot-vnode-close-check','riot-rpc-signal-mask-check','riot-fileport-lifetime-check','riot-kqueue-timer-check','riot-cancel-rpc-check','riot-runloop-wake-check'):
     obj = project / f'build/{probe}.o'
     subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
                     '-O2', '-c', str(project / f'tools/{probe}.c'), '-o', str(obj)], check=True)
