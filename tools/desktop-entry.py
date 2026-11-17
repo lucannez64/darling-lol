@@ -233,6 +233,9 @@ StartupNotify=false
             print(f"Window entry {window_file} already exists and was not created by this "
                   "project; leaving it untouched.", file=sys.stderr)
             continue
+        # Replace an owned link itself; never write through it into the launcher.
+        if window_file.is_symlink():
+            window_file.unlink()
         window_file.write_text(f"""[Desktop Entry]
 Version=1.0
 Type=Application

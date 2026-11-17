@@ -364,6 +364,20 @@ class DesktopEntryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(legacy.read_text(), foreign_text)
 
+    def test_window_entry_symlink_does_not_overwrite_launcher(self):
+        project = self.project()
+        self.assertEqual(self.install(project).returncode, 0)
+        launcher = self.entry().read_text()
+        window = self.window_entry('darling-league-client.desktop')
+        window.symlink_to(self.entry())
+        result = self.install(project, '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(window.is_symlink())
+        self.assertEqual(parse_entry(self.entry().read_text())['Name'], 'Darling Launcher')
+        self.assertNotIn('NoDisplay=true', self.entry().read_text())
+        self.assertIn('NoDisplay=true', window.read_text())
+        self.assertEqual(parse_entry(launcher)['Exec'], parse_entry(self.entry().read_text())['Exec'])
+
     def test_missing_icon_fails(self):
         project = self.project()
         (project / 'darling-lol.png').unlink()
