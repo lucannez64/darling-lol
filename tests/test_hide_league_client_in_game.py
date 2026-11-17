@@ -137,6 +137,27 @@ class HideClientInGameTests(unittest.TestCase):
              patch.object(hide_in_game, 'window_belongs_to_prefix', return_value=True):
             self.assertEqual(hide_in_game.target_windows(self.prefix), [0x10, 0x30])
 
+    def test_riot_client_only_flag_limits_the_target_classes(self):
+        # main() narrows the module's classes; patch.object restores them afterwards
+        with patch.object(hide_in_game, 'TARGET_CLASSES', hide_in_game.TARGET_CLASSES), \
+             patch.dict(os.environ, {'RCLOL_HIDE_CLIENT_IN_GAME': '', 'RCLOL_CLOSE_CLIENT_IN_GAME': '',
+                                     'RCLOL_CLIENT_IN_GAME_TRICKS': ''}):
+            hide_in_game.main(['--riot-client-only'])
+            self.assertEqual(hide_in_game.TARGET_CLASSES, ('riot client',))
+            with patch.object(hide_in_game, 'xprop_root', return_value=['0x10', '0x30']), \
+                 patch.object(hide_in_game, 'window_class', side_effect=[
+                     'wm_class(string) = "leagueclientux"',
+                     'wm_class(string) = "riot client"',
+                 ]), \
+                 patch.object(hide_in_game, 'window_belongs_to_prefix', return_value=True):
+                self.assertEqual(hide_in_game.target_windows(self.prefix), [0x30])
+
+    def test_close_mode_can_also_hide_the_riot_client(self):
+        source = (ROOT / 'tools/run-riot-client.sh').read_text()
+        close = source[source.index('closeLeagueClientDuringGame=true -> close helper'):source.index('   hide)')]
+        self.assertIn('if [ "${RCLOL_HIDE_RIOT_CLIENT_IN_GAME:-0}" = 1 ]; then', close)
+        self.assertIn('hide-league-client-in-game.py" --detach --riot-client-only &', close)
+
     def test_target_windows_requires_this_prefix(self):
         with patch.object(hide_in_game, 'xprop_root',
                           return_value=['0x10', '0x20']), \
