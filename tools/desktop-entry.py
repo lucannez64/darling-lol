@@ -71,11 +71,14 @@ def exec_command(script: str, toolbox: str | None = None) -> str:
 
 
 def legacy_entry_owned(path: Path) -> bool:
-    """Return True when a launcher entry was created by this project."""
+    """Return True when an entry's Exec runs this checkout's launcher scripts."""
     markers = [str(PROJECT_ROOT / script) for script in (LEGACY_RUN_SCRIPT,
                                                          LAUNCH_SHORTCUT_SCRIPT)]
     try:
-        text = path.read_text(errors="ignore")
+        # Ownership is the entry's Exec target.  The path in Name, Comment or any
+        # other field proves nothing: a foreign file can mention this checkout.
+        text = "\n".join(line for line in path.read_text(errors="ignore").splitlines()
+                         if line.startswith("Exec="))
     except OSError:
         # A dangling symlink still counts when it points at this checkout.
         try:

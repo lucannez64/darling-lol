@@ -333,6 +333,37 @@ class DesktopEntryTests(unittest.TestCase):
                          if line.startswith('Exec='))
         self.assertTrue(exec_line.startswith('Exec=toolbox run -c my-box '), exec_line)
 
+    def foreign_entry_mentioning(self, project):
+        """A file that is not ours but names this checkout's launch script outside Exec."""
+        return ('[Desktop Entry]\nName=Mine\n'
+                f'Comment=wraps {project / "scripts/launch-shortcut.sh"} for later\n'
+                'Exec=/usr/bin/other\n')
+
+    def test_ownership_comes_from_exec_not_from_other_fields(self):
+        project = self.project()
+        foreign_text = self.foreign_entry_mentioning(project)
+        names = ('darling-league-client.desktop', 'darling-riot-client.desktop')
+        legacy = self.home / '.local/share/applications/league-of-legends.desktop'
+        with self.subTest(flow='enable'):
+            self.window_entry(names[0]).parent.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                self.window_entry(name).write_text(foreign_text)
+            result = self.install(project, '--window-entries')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name in names:
+                self.assertEqual(self.window_entry(name).read_text(), foreign_text, name)
+                self.assertIn(str(self.window_entry(name)), result.stderr)
+        with self.subTest(flow='disable'):
+            result = self.install(project)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name in names:
+                self.assertEqual(self.window_entry(name).read_text(), foreign_text, name)
+        with self.subTest(flow='legacy cleanup'):
+            legacy.write_text(foreign_text)
+            result = self.install(project)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(legacy.read_text(), foreign_text)
+
     def test_missing_icon_fails(self):
         project = self.project()
         (project / 'darling-lol.png').unlink()
