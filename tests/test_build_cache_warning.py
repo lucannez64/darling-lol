@@ -71,6 +71,14 @@ class BuildCacheWarningTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
 
+    def test_all_zero_prepare_jobs_use_the_fallback(self):
+        for value in ('0', '00', '000'):
+            self.env['RCLOL_PREPARE_JOBS'] = value
+            result = self.run_build()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('scripts/prepare.py --jobs 8', self.log.read_text())
+            self.log.unlink()
+
     def test_ignores_notfound_and_relative_paths(self):
         self.write_cache('X:FILEPATH=X-NOTFOUND', 'Y:FILEPATH=relativo/p')
         result = self.run_build()

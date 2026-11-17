@@ -211,8 +211,9 @@ else:
     # arithmetic) can lack a required submodule; fetch only the missing ones and
     # never touch the submodules already checked out.
     if not a.check_only:
-        pending=ROOT/'build/pending-submodules'
-        marked=set(pending.read_text().split()) if pending.exists() else set()
+        checkout_id=hashlib.sha256(os.fsencode(source)).hexdigest()
+        pending=ROOT/'build'/('pending-submodules-'+checkout_id+'.json')
+        marked=set(json.loads(pending.read_text())) if pending.exists() else set()
         paths=fetch_pathspecs(source)
         missing=[path for path in paths if not (source/path/'.git').exists()]
         # A previous run interrupted mid-initialization left the marker behind;
@@ -222,12 +223,16 @@ else:
         if todo:
             print('Fetching missing submodules:',', '.join(todo),flush=True)
             pending.parent.mkdir(parents=True,exist_ok=True)
-            pending.write_text('\n'.join(todo)+'\n')
+            pending.write_text(json.dumps(todo)+'\n')
             run(['git','-C',str(source),'-c',LFS_URL,*LFS_FILTERS,'submodule','update','--init','--recursive',
                  '--depth','1','--jobs',str(a.jobs),*todo])
             # Only the submodules this run touched; already initialized or
             # patched ones keep their state and are not inspected.
-            repair(source,repos=[source/path for path in todo if (source/path/'.git').exists()])
+            touched=[]
+            for path in todo:
+                parent=source/path
+                if (parent/'.git').exists():touched.extend([parent,*submodules(parent)])
+            repair(source,repos=touched)
             pending.unlink()
 
 # Never reset someone else's checkout to make a patch apply.

@@ -12,6 +12,7 @@ if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; f
 # empty value or other invalid input falls back to the cap.
 prepare_jobs=${RCLOL_PREPARE_JOBS:-$(( $(nproc) > 8 ? 8 : $(nproc) ))}
 case $prepare_jobs in ''|0|*[!0-9]*) prepare_jobs=8;; esac
+case $prepare_jobs in *[!0]*) ;; *) prepare_jobs=8;; esac
 python3 scripts/prepare.py --jobs "$prepare_jobs"
 # Empty build type, as upstream Darling uses: objc4 always defines OBJC_IS_DEBUG_BUILD=1,
 # so Release's -DNDEBUG trips its "mismatch in debug-ness macros" #error.

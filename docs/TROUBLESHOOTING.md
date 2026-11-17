@@ -136,8 +136,9 @@ prefix itself. Delete the `.bak` once Darling starts. The kernel names the reaso
 in its log (`journalctl -k -b | grep -i overlay` on the host).
 
 If there is no `<prefix>.workdir`, check the filesystem that holds the prefix: it
-must be writable, support extended attributes and report `d_type`. NFS, ZFS and
-eCryptfs do not work; set `DPREFIX` to a directory on a supported filesystem.
+must be writable, support extended attributes and report `d_type`. Check that
+its filesystem version and configuration support an OverlayFS upper layer;
+otherwise set `DPREFIX` to a directory on a supported filesystem.
 `scripts/installer.sh` recognises this error, stops retrying and prints these steps.
 
 ## The Darling Launcher shortcut does nothing
