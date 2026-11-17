@@ -367,7 +367,15 @@ def main(argv=None):
                         help='leave the launcher session so a terminal hang-up cannot end it')
     parser.add_argument('--once', action='store_true',
                         help='one game observation and exit (no window changes)')
+    parser.add_argument('--riot-client-only', action='store_true',
+                        help='hide only the Riot Client windows (used next to the close helper, which ends '
+                             'the LeagueClientUx UI itself)')
     args = parser.parse_args(argv)
+    if args.riot_client_only:
+        # An unmapped window is the only occlusion signal an X11 client gets under Wayland (Xwayland reports every
+        # window as unobscured); AppKit turns it into an occlusion change, so Chromium stops painting the hidden client.
+        global TARGET_CLASSES
+        TARGET_CLASSES = ('riot client',)
 
     tricks = os.environ.get('RCLOL_CLIENT_IN_GAME_TRICKS') == '1'
     if not args.once and not tricks and os.environ.get('RCLOL_CLOSE_CLIENT_IN_GAME') == '1':
