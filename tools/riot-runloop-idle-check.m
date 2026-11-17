@@ -97,7 +97,7 @@ int main(void) {
 		double sourceMs = sourceRan > 0 ? sourceRan - sourcePosted : -1;
 		double timerLateMs = timerRan > 0 ? timerRan - timerDue : -1;
 		BOOL ok = idleRate < 150 && dispatchMs >= 0 && dispatchMs < 8 && sourceMs >= 0 && sourceMs < 8 &&
-			timerLateMs > -2 && timerLateMs < 8;
+			timerRan > 0 && timerLateMs > -2 && timerLateMs < 8;
 		printf("RUNLOOP_IDLE idle_passes_per_s=%.0f dispatch_ms=%.2f source_ms=%.2f timer_late_ms=%.2f posted=%d,%d ok=%d\n",
 			idleRate, dispatchMs, sourceMs, timerLateMs, dispatchPosted > 0, sourcePosted > 0, ok);
 		fflush(stdout);

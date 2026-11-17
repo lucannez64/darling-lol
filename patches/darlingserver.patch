@@ -22,7 +22,7 @@ index 4920879..d2c4a41 100644
 +int main(void) {
 +	struct io_uring_params params;
 +	struct io_uring_sqe sqe;
-+	int ops[] = { IORING_OP_RECVMSG, IORING_OP_SENDMSG, IORING_OP_POLL_ADD };
++	int ops[] = { IORING_OP_RECVMSG, IORING_OP_SENDMSG, IORING_OP_POLL_ADD, IORING_OP_TIMEOUT };
 +	(void)params; (void)ops;
 +	sqe.msg_flags = 0;
 +	sqe.poll32_events = 0;
@@ -1892,7 +1892,7 @@ index b960f17..16f651a 100644
  
  namespace DarlingServer {
  	// NOTE: server instances MUST be created with `new` rather than as a normal local/stack variable
-@@ -43,9 +48,46 @@ namespace DarlingServer {
+@@ -43,9 +48,49 @@ namespace DarlingServer {
  		int _epollFD;
  		MessageQueue _inbox;
  		MessageQueue _outbox;
@@ -1920,6 +1920,9 @@ index b960f17..16f651a 100644
 +		std::deque<RingSend> _ringSends;
 +		size_t _ringSendsPending = 0;
 +		bool _ringSendBlocked = false;
++#if DSERVER_IO_URING
++		struct __kernel_timespec _ringSendRetryDelay = {0, 1000000};
++#endif
 +		bool _ringEpollArmed = false;
 +		bool _ringReceiving = false;
 +
@@ -1928,7 +1931,7 @@ index b960f17..16f651a 100644
 +		void _ringFlushSends();
 +		void _ringFinishSends();
 +		void _ringComplete(const Ring::Completion& completion);
-+		void _ringPass();
++		void _ringPass(const bool* completed = nullptr);
 +		bool _runQueued();
 +
 +		void _handleEpollEvents(struct epoll_event* events, int count, bool& wakeupArmed, bool& wakeupFired);
@@ -1940,7 +1943,7 @@ index b960f17..16f651a 100644
  		int _wakeupFD;
  		int _timerFD;
  		uint64_t _currentTimerDeadline = 0;
-@@ -81,6 +123,13 @@ namespace DarlingServer {
+@@ -81,6 +126,13 @@ namespace DarlingServer {
  		void removeMonitor(std::shared_ptr<Monitor> monitor);
  
  		void sendMessage(Message&& message);
@@ -1950,7 +1953,7 @@ index b960f17..16f651a 100644
 +
 +		/** One pass of the io_uring loop: run queued microthreads, send replies, wait for and handle events.
 +		 *  Thread::kernelSync uses it while the loop has not started yet. */
-+		void runOnePass();
++		void runOnePass(const bool* completed = nullptr);
  	};
  };
  
@@ -4433,7 +4436,7 @@ index e502e28..2ca502c 100644
  void DarlingServer::Server::monitorProcess(std::shared_ptr<Process> process) {
  	// the this-capture here is safe because the Server will always out-live everything else
  	std::weak_ptr<Process> weakProcess = process;
-@@ -681,13 +888,281 @@ std::string DarlingServer::Server::prefix() const {
+@@ -681,13 +888,287 @@ std::string DarlingServer::Server::prefix() const {
  };
  
  void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
@@ -4475,9 +4478,9 @@ index e502e28..2ca502c 100644
 +	return !batch.empty();
 +};
 +
-+void DarlingServer::Server::runOnePass() {
++void DarlingServer::Server::runOnePass(const bool* completed) {
 +#if DSERVER_IO_URING
-+	_ringPass();
++	_ringPass(completed);
 +#endif
 +};
 +
@@ -4489,7 +4492,7 @@ index e502e28..2ca502c 100644
 +static constexpr uint64_t ringTagReceive = 1ull << ringTagShift;
 +static constexpr uint64_t ringTagSend = 2ull << ringTagShift;
 +static constexpr uint64_t ringTagEpoll = 3ull << ringTagShift;
-+static constexpr uint64_t ringTagWritable = 4ull << ringTagShift;
++static constexpr uint64_t ringTagSendRetry = 4ull << ringTagShift;
 +
 +static struct io_uring_sqe* ringSubmission(DarlingServer::Ring& ring) {
 +	struct io_uring_sqe* sqe = ring.nextSubmission();
@@ -4614,13 +4617,14 @@ index e502e28..2ca502c 100644
 +	_outbox.requeueFront(std::move(retry));
 +
 +	if (blocked) {
-+		// wait until the socket can take more, then send from the head of the outbox again
++		// The listener is unconnected: POLLOUT does not reflect the destination's
++		// receive queue. Retry after 1 ms without spinning on false readiness.
 +		_ringSendBlocked = true;
 +		struct io_uring_sqe* sqe = ringSubmission(*_ring);
-+		sqe->opcode = IORING_OP_POLL_ADD;
-+		sqe->fd = _listenerSocket;
-+		sqe->poll32_events = POLLOUT;
-+		sqe->user_data = ringTagWritable;
++		sqe->opcode = IORING_OP_TIMEOUT;
++		sqe->addr = reinterpret_cast<uint64_t>(&_ringSendRetryDelay);
++		sqe->len = 1;
++		sqe->user_data = ringTagSendRetry;
 +	}
 +
 +	for (auto& callback: callbacks) {
@@ -4679,12 +4683,15 @@ index e502e28..2ca502c 100644
 +			eventfd_read(_wakeupFD, &value);
 +		}
 +		_ringArmEpoll();
-+	} else if (tag == ringTagWritable) {
++	} else if (tag == ringTagSendRetry) {
++		if (completion.result != -ETIME && completion.result != 0) {
++			throw std::system_error(-completion.result, std::generic_category(), "Failed to wait before retrying replies");
++		}
 +		_ringSendBlocked = false;
 +	}
 +};
 +
-+void DarlingServer::Server::_ringPass() {
++void DarlingServer::Server::_ringPass(const bool* completed) {
 +	_runQueued();
 +	_ringFlushSends();
 +
@@ -4695,7 +4702,9 @@ index e502e28..2ca502c 100644
 +	}
 +
 +	// one system call: submit this pass's sends and re-armed receives, and wait for the next event
-+	int ret = _ring->submitAndWait(moreWork ? 0 : 1);
++	// kernelSync may have completed in _runQueued(); return without waiting
++	// for unrelated I/O before its caller can observe that completion.
++	int ret = _ring->submitAndWait(moreWork || (completed && *completed) ? 0 : 1);
 +	if (ret < 0 && ret != -EINTR && ret != -EAGAIN && ret != -EBUSY && ret != -ETIME) {
 +		throw std::system_error(-ret, std::generic_category(), "Failed to enter the io_uring");
 +	}
@@ -4716,7 +4725,7 @@ index e502e28..2ca502c 100644
  void DarlingServer::Server::addMonitor(std::shared_ptr<Monitor> monitor) {
  	bool valid = true;
  
-@@ -815,5 +1290,22 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
+@@ -815,5 +1296,22 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
@@ -5018,7 +5027,7 @@ index 5563ad9..dfa32a3 100644
 +			finished = true;
 +		});
 +		while (!finished) {
-+			Server::sharedInstance().runOnePass();
++			Server::sharedInstance().runOnePass(&finished);
 +		}
 +		return;
 +	}

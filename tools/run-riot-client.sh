@@ -20,7 +20,7 @@ runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # repository copy is the fallback before install-runtime.sh has run.
 system_prop=${RCLOL_SYSTEM_PROP:-"$prefix_dir/private/etc/darling-system.prop"}
 [ -r "$system_prop" ] || system_prop="$runner_dir/system.prop"
-profile=host
+profile=compat
 host_cpu_brand=host
 host_gpu_name=host
 host_gpu_vram=host
@@ -47,7 +47,7 @@ fi
 profile=${RCLOL_PLATFORM_PROFILE:-$profile}
 case "$profile" in
  host|compat) ;;
- *) echo "system.prop: invalid profile '$profile'; using host" >&2; profile=host;;
+ *) echo "system.prop: invalid profile '$profile'; using compat" >&2; profile=compat;;
 esac
 
 host_cpu_brand_default=$(awk -F: '
@@ -212,7 +212,7 @@ unset RCLOL_UX_ARG2 RCLOL_UX_ARG2_SLOT
 # The paired runtime presents completed GPU textures without CPU readback.
 # Explicit 0 or an empty value selects the CPU fallback for diagnostics.
 # Metal values come from tools/system.prop: HOST reports the real host GPU;
-# COMPAT is the opt-in MacBookPro16,1 presentation.
+# COMPAT is the default MacBookPro16,1 presentation.
 for option in RCLOL_GPU_DIRECT_PRESENT RCLOL_GPU_DIRECT_ASYNC RCLOL_GPU_DIRECT_VSYNC DARLING_CA_PRESENT_AT_COMMIT DARLING_CA_SKIP_LOCAL_IOSURFACE_RENDER RCLOL_FORWARD_MOUSE_MOVED RCLOL_MOUSE_CONFINEMENT; do
  eval 'value=${'"$option"'-1}'
  case "$value" in 0|'') unset "$option";; *) export "$option=$value";; esac

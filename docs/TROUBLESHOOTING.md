@@ -924,17 +924,8 @@ it uses the epoll loop instead.
 | `DSERVER_PCORE_AFFINITY=1` | keep the server's threads on the performance cores of a hybrid Intel CPU |
 | `DSERVER_CALL_STATS=<file>` | every 5 s, append request counts per call, per thread, and (`kinds:` blocks) per message id, wait type, timer distance and busiest object; costs a few percent of one core and a short stall of the loop per flush, so not for normal play |
 
-AppKit's X11 event wait sleeps in one `kevent` on the X11 connection, the
-run-loop mode's Mach port set and the main dispatch queue's port, instead of
-polling the run loop every 2 ms. After 100 ms without work the slice grows to
-16 ms; work ends the wait at once. An idle AppKit app drops from about 930 to
-120 run-loop passes per second (`riot-runloop-idle-check`, see
-[testing](TESTING.md)).
-
-| Variable | Effect |
-|---|---|
-| `RCLOL_RUNLOOP_KEVENT=0` | keep the previous 2 ms `ppoll` |
-| `RCLOL_RUNLOOP_KEVENT_TRACE=1` | report once why the wait falls back, and every 5 s how the waits ended |
+AppKit retains the port wait already shipped on main (`RCLOL_APPKIT_PORT_WAIT=0`
+restores polling). Its latency and wake-up probes are described in [testing](TESTING.md).
 
 ## NVIDIA
 
@@ -1126,14 +1117,14 @@ DARLING_METAL_GPU_NAME='AMD Radeon Pro 5500M' DARLING_METAL_VRAM_MB=4096 ./scrip
 
 The launcher reads one hardware-presentation file,
 `$DPREFIX/private/etc/darling-system.prop` (falling back to the checkout's
-`tools/system.prop`). It defaults to `profile=host`, which reports the real host
-card name and VRAM. To opt into the MacBookPro16,1 presentation for one run:
+`tools/system.prop`). It defaults to `profile=compat`, the MacBookPro16,1
+presentation. To report the real host card name and VRAM for one run:
 
 ```sh
-RCLOL_PLATFORM_PROFILE=compat ./scripts/run.sh
+RCLOL_PLATFORM_PROFILE=host ./scripts/run.sh
 ```
 
-Or set `profile=compat` in the installed `system.prop`. In COMPAT, AMD becomes
+Or set `profile=host` in the installed `system.prop`. In COMPAT, AMD becomes
 `AMD Radeon Pro 5500M` and Intel becomes `Intel UHD Graphics 630`; NVIDIA keeps
 its own name so the game never takes AMD or Intel driver paths on an NVIDIA card.
 The working set is still the host's. `DARLING_METAL_MAC_GPU_NAME=0` and
