@@ -244,6 +244,64 @@ fi''')
         self.assertEqual(len(self.events('CLIENT')), 1)
         self.assertFalse(self.lock.exists())
 
+    READ_ONLY = ('terminate called after throwing an instance of \'std::system_error\'\n'
+                 '  what():  Failed to bind socket: Read-only file system')
+
+    def test_a_read_only_prefix_overlay_is_not_retried_and_names_the_workdir(self):
+        self.make_partial()
+        workdir = Path(f'{self.prefix}.workdir')
+        workdir.mkdir()
+        self.run_stub(f'echo "{self.READ_ONLY}" >&2; exit 1')
+        result = self.install()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        # The cause is persistent, so there is exactly one attempt.
+        self.assertEqual(len(self.events('INSTALLER')), 1)
+        self.assertNotIn('retrying', result.stderr)
+        self.assertNotIn('after 3 attempt(s)', result.stderr)
+        # The darlingserver message still reaches the terminal, followed by the fix.
+        self.assertIn('Failed to bind socket: Read-only file system', result.stderr)
+        self.assertIn(f'mv "{self.prefix}.workdir" "{self.prefix}.workdir.bak"', result.stderr)
+        self.assertIn('Riot Client install failed', self.events('NOTIFY')[-1])
+        # The workdir is only named, never moved or removed on the user's behalf.
+        self.assertTrue(workdir.is_dir())
+        self.assertFalse(self.lock.exists())
+
+    def test_a_read_only_prefix_overlay_without_a_workdir_points_at_the_filesystem(self):
+        self.run_stub(f'echo "{self.READ_ONLY}" >&2; exit 1')
+        result = self.install()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(self.events('INSTALLER')), 1)
+        self.assertNotIn('mv "', result.stderr)
+        self.assertIn(f'There is no {self.prefix}.workdir', result.stderr)
+        self.assertIn('DPREFIX', result.stderr)
+        self.assertFalse(self.lock.exists())
+
+    def test_each_attempt_starts_with_an_empty_error_capture(self):
+        self.make_partial()
+        # The first attempt crashes with an error of its own; the second one
+        # installs. The first attempt's stderr must not be shown or checked again.
+        self.run_stub(f'''if [ -e "$TEST_LOG.second" ]; then
+  mkdir -p "$DPREFIX/{BUNDLE}/Contents/MacOS"
+else
+  echo "first attempt error" >&2
+  : > "$TEST_LOG.second"; mkdir -p "$DPREFIX/{BUNDLE}/Contents/Frameworks"; exit 139
+fi''')
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.events('INSTALLER')), 2)
+        self.assertEqual(result.stderr.count('first attempt error'), 1)
+        self.assertNotIn('read-only', result.stderr)
+
+    def test_other_run_errors_are_shown_and_still_retried(self):
+        self.make_partial()
+        self.run_stub(f'echo "Failed to bind socket: Address already in use" >&2\n'
+                      f'mkdir -p "$DPREFIX/{BUNDLE}/Contents/Frameworks"')
+        result = self.install()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(self.events('INSTALLER')), 3)
+        self.assertEqual(result.stderr.count('Address already in use'), 3)
+        self.assertNotIn('read-only', result.stderr)
+
     def test_a_stale_lock_is_taken_over(self):
         gone = subprocess.Popen(['true'])
         gone.wait()
