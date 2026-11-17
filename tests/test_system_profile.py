@@ -81,6 +81,11 @@ class SystemProfileTests(unittest.TestCase):
         chosen = new.replace('\nprofile=compat\n', '\nprofile=host\n')
         self.assertEqual(self.migrate(chosen), (chosen, False))
 
+    def test_migration_ignores_lines_the_readers_ignore(self):
+        new, changed = self.migrate('profile=host\n profile=compat\n')
+        self.assertTrue(changed)
+        self.assertTrue(new.startswith('profile=compat\n profile=compat\n'))
+
     def test_migration_keeps_compat_and_the_current_template(self):
         new, changed = self.migrate('profile=compat\n')
         self.assertTrue(changed)
@@ -113,6 +118,9 @@ class SystemProfileTests(unittest.TestCase):
 
     def test_launcher_uses_the_file_default_compat(self):
         self.assertEqual(self.launcher_handoff('')['profile'], 'compat')
+
+    def test_launcher_falls_back_to_compat_on_an_invalid_profile(self):
+        self.assertEqual(self.launcher_handoff('Compat')['profile'], 'compat')
 
     def test_launcher_honours_explicit_host_and_compat(self):
         host = self.launcher_handoff('host')

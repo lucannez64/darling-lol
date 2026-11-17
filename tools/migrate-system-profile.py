@@ -22,8 +22,10 @@ def migrate(text):
     lines = text.splitlines()
     if any(line.strip() == MARKER for line in lines):
         return text, False
-    profile_lines = [i for i, line in enumerate(lines) if line.strip().startswith('profile=')]
-    if profile_lines and lines[profile_lines[-1]].strip() == 'profile=host':
+    # Match the readers exactly: run-riot-client.sh and darling-system_profiler.sh
+    # take the last line starting with `profile=` at column 0, untrimmed.
+    profile_lines = [i for i, line in enumerate(lines) if line.startswith('profile=')]
+    if profile_lines and lines[profile_lines[-1]] == 'profile=host':
         lines[profile_lines[-1]] = 'profile=compat'
     lines.append('# Set by tools/migrate-system-profile.py; keep it so profile=host stays a choice.')
     lines.append(MARKER)
@@ -43,9 +45,9 @@ def main():
         temporary.write_text(new)
         temporary.chmod(path.stat().st_mode & 0o777)
         temporary.replace(path)
-        profile = [line for line in new.splitlines() if line.startswith('profile=')][-1:]
-        print(f'{path}: {profile[0] if profile else "no profile line"} (compat is now the default)',
-              file=sys.stderr)
+        if old != new and 'profile=host' in old.splitlines():
+            print(f'darling-lol: hardware profile switched from host to compat, the new default '
+                  f'(issue #31). To keep host, set profile=host in {path}', file=sys.stderr)
     return 0
 
 

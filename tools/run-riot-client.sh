@@ -47,7 +47,7 @@ fi
 profile=${RCLOL_PLATFORM_PROFILE:-$profile}
 case "$profile" in
  host|compat) ;;
- *) echo "system.prop: invalid profile '$profile'; using host" >&2; profile=host;;
+ *) echo "system.prop: invalid profile '$profile'; using compat" >&2; profile=compat;;
 esac
 
 host_cpu_brand_default=$(awk -F: '
