@@ -586,7 +586,16 @@ splash overlay. It is not managed by the window manager, does not appear in
 main client window and should not be presented. See the observed properties in
 [the splash window note](notes/league-splash-window-512x216.md).
 
-An opt-in helper polls the X11 tree every five seconds and unmaps only windows
+A splash that stays after startup usually means LeagueClient never received
+the UX's load report: its `LeagueClient.log` stops at
+`UX_PROCESS_BOOTSTRAP_COMPLETE 6/7` and has no `Ux reports successful load`,
+because LeagueClientUx dropped its link (close code 1003, "Unsupported Data
+Type") first. The launcher's session supervisor delivers that report over the
+client's local API (`PUT /riotclient/ux-load-complete`) after 3 seconds, and
+LeagueClient hides the splash itself. It is on by default;
+`RCLOL_FINISH_LEAGUE_LOAD=0` turns it off.
+
+If the splash still comes back, an opt-in helper polls the X11 tree every five seconds and unmaps only windows
 that match the class, the fixed `512x216` size and the override-redirect flag.
 
 Use the standalone wrapper from a terminal (Ctrl+C stops it):
@@ -1072,14 +1081,14 @@ DARLING_METAL_GPU_NAME='AMD Radeon Pro 5500M' DARLING_METAL_VRAM_MB=4096 ./scrip
 
 The launcher reads one hardware-presentation file,
 `$DPREFIX/private/etc/darling-system.prop` (falling back to the checkout's
-`tools/system.prop`). It defaults to `profile=host`, which reports the real host
-card name and VRAM. To opt into the MacBookPro16,1 presentation for one run:
+`tools/system.prop`). It defaults to `profile=compat`, the MacBookPro16,1
+presentation. To report the real host card name and VRAM for one run:
 
 ```sh
-RCLOL_PLATFORM_PROFILE=compat ./scripts/run.sh
+RCLOL_PLATFORM_PROFILE=host ./scripts/run.sh
 ```
 
-Or set `profile=compat` in the installed `system.prop`. In COMPAT, AMD becomes
+Or set `profile=host` in the installed `system.prop`. In COMPAT, AMD becomes
 `AMD Radeon Pro 5500M` and Intel becomes `Intel UHD Graphics 630`; NVIDIA keeps
 its own name so the game never takes AMD or Intel driver paths on an NVIDIA card.
 The working set is still the host's. `DARLING_METAL_MAC_GPU_NAME=0` and
@@ -1361,3 +1370,41 @@ systemctl --user restart omarchy-crash-watch.service
 as well as loader crashes. Remove the drop-in, then `daemon-reload` and restart
 the unit, to announce them again. Do not use `omarchy-toggle-crash-capture` for
 this: it disables crash notifications for the whole session.
+
+## Riot Client appears to ignore clicks or stops scrolling (#203)
+
+CoreVideo previously kept one display-link callback and running state for the
+entire process. Chromium 150 creates separate display links on its GPU and Viz
+threads, even for one monitor. The second registration replaced the first, so
+rendering ticks continued while presentation callbacks stopped. Chromium then
+reached its two-pending-swap limit and stopped updating the window. Input could
+still reach the page while the displayed controls stayed unchanged.
+
+Display links now keep independent callback, retain and running state. Native
+regression checks cover two links to the same display, independent stop/release,
+slot reuse and callback-side stop. The offline Electron 43 terms fixture
+previously stopped scrolling before Accept enabled; it reaches the bottom and
+accepts with the corrected CoreVideo, with hardware acceleration enabled and
+without disabling frame-rate limiting. In the actual signed-out Riot Client 143,
+the previously frozen language list now scrolls to the end and the dialog closes
+visibly with hardware acceleration enabled. This addresses the reproduced frame
+stall; the reporter's exact authenticated ToS case and normal window-close
+event still need confirmation.
+
+After the base build, compile CoreVideo and the native regression without
+installing them, from the configured runtime workspace:
+
+```sh
+cd build/runtime
+python3 tools/build-m58f341-corevideo.py
+```
+
+This produces `build/riot-display-link-isolation-check`. After selecting an
+idle test prefix with the corrected CoreVideo installed, run from the same
+workspace:
+
+```sh
+python3 tools/run-riot-native-check.py riot-display-link-isolation-check
+```
+
+The probe does not launch Riot or League.

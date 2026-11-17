@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import iridium_identity
 import llvm_tools
 root = Path(__file__).resolve().parent.parent
 folder = root / 'build/darling-src/build/src/external/metal/deps/indium'
@@ -36,6 +37,9 @@ else:
 iridium_flags['CXX_INCLUDES'].insert(0, '-I' + str(llvm_include))
 iridium_flags['CXX_DEFINES'] = [value for value in iridium_flags['CXX_DEFINES'] if not value.startswith('-DHOST_LLVM_LIBNAME=')]
 iridium_flags['CXX_DEFINES'].append('-DHOST_LLVM_LIBNAME="' + str(llvm_library) + '"')
+# The flags file may predate the sources compiled below: hash them now, so cached shaders follow this translator.
+iridium_flags['CXX_DEFINES'] = iridium_identity.replace_definition(
+    iridium_flags['CXX_DEFINES'], root / 'build/darling-src/src/external/metal/deps/indium')
 print(f'Iridium LLVM headers: {llvm_include}; library: {llvm_library}', flush=True)
 iridium_link = shlex.split((folder / 'CMakeFiles/iridium.dir/link.txt').read_text())
 for name in ('air', 'dynamic-llvm', 'iridium', 'spirv'):

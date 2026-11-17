@@ -95,7 +95,7 @@ then follow the commands below. `--provision --write` fills missing identifiers
 and replaces the known shared defaults, while preserving an already custom
 identity. It does not rotate custom identifiers on every run.
 
-Also select `profile=compat` in
+Keep `profile=compat` (the default) in
 `<prefix>/private/etc/darling-system.prop` for the recommended application
 compatibility configuration. See [setup](SETUP.md#recommended-identity-and-compatibility-profile)
 for file precedence and activation. This profile is independent of the saved
@@ -179,11 +179,13 @@ copies it to `$DPREFIX/private/etc/darling-system.prop` once; later updates keep
 existing file so a user's choice is not reset. The launcher reads the installed
 copy first and falls back to the checkout copy.
 
-`profile=host` is the default. It reports the real host CPU, GPU, VRAM and memory.
-`profile=compat` is opt-in and reports the MacBookPro16,1 compatibility values
+`profile=compat` is the default (issue #31; an installed `host` profile from before
+is moved to `compat` once by `tools/migrate-system-profile.py`). It reports the
+MacBookPro16,1 compatibility values
 (`i7-9750H`, `Radeon Pro 5500M` on AMD, `UHD Graphics 630` on Intel, 4096 MB VRAM
 and 16 GiB). NVIDIA cards keep their own name in both profiles so the game does
-not take another vendor's driver path. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
+not take another vendor's driver path. `profile=host` reports the real host CPU,
+GPU, VRAM and memory. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
 file for diagnostics.
 
@@ -210,8 +212,8 @@ override saved by this tool. A field the guest does not provide is left out.
 `python3 -m unittest tests.test_system_profiler` checks the output with stub
 commands.
 
-`SPDisplaysDataType` reads the host DRM cards. In the default `host` profile it
-reports the host card name, device and VRAM. In the opt-in `compat` profile an AMD
+`SPDisplaysDataType` reads the host DRM cards. In the `host` profile it
+reports the host card name, device and VRAM. In the default `compat` profile an AMD
 card is reported as `AMD Radeon Pro 5500M`, vendor `0x1002`, device `0x7340`, bus
 PCIe and VRAM from `compat.gpu.vram` (4096 by default); an Intel card is reported
 as `Intel UHD Graphics 630` on bus Built-In with shared memory. NVIDIA cards keep
