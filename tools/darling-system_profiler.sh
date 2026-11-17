@@ -47,7 +47,7 @@ valid_vram() { # positive decimal MB, bounded so the shell test cannot overflow
 }
 
 displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
- # HOST reports the host card. COMPAT is the opt-in MacBookPro16,1 presentation,
+ # HOST reports the host card. COMPAT is the default MacBookPro16,1 presentation,
  # selected by tools/system.prop; it only changes the reported identity, never
  # the host, the driver, or the GPU that actually presents frames. NVIDIA keeps
  # its own name in COMPAT so the game does not take AMD driver paths.
@@ -55,11 +55,11 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  prop=${RCLOL_SYSTEM_PROP:-/private/etc/darling-system.prop}
  if [ -z "${RCLOL_PLATFORM_PROFILE:-}" ] && [ -r "$prop" ]; then
   RCLOL_PLATFORM_PROFILE=$(sed -n 's/^profile=//p' "$prop" | tail -n 1)
-  case "$RCLOL_PLATFORM_PROFILE" in host|compat) ;; *) RCLOL_PLATFORM_PROFILE=host;; esac
+  case "$RCLOL_PLATFORM_PROFILE" in host|compat) ;; *) RCLOL_PLATFORM_PROFILE=compat;; esac
   [ -n "${RCLOL_GPU_NAME:-}" ] || RCLOL_GPU_NAME=$(sed -n "s/^$RCLOL_PLATFORM_PROFILE\.gpu\.name=//p" "$prop" | tail -n 1)
   [ -n "${RCLOL_GPU_VRAM_MB:-}" ] || RCLOL_GPU_VRAM_MB=$(sed -n "s/^$RCLOL_PLATFORM_PROFILE\.gpu\.vram=//p" "$prop" | tail -n 1)
  fi
- profile=${RCLOL_PLATFORM_PROFILE:-host}
+ profile=${RCLOL_PLATFORM_PROFILE:-compat}
  gpu_mode=${RCLOL_GPU_NAME:-}
  if [ -z "$gpu_mode" ]; then
   case "${DARLING_METAL_MAC_GPU_NAME:-}" in '') ;; 0) ;; *) gpu_mode=mac;; esac
