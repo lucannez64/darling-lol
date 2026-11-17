@@ -30,6 +30,7 @@ checks = {
     "riot-kqueue-stack-check": "KQUEUE_SMALL_STACK",
     "riot-kqueue-dispatch2-check": "DISPATCH2",
     "riot-dispatch-fd-check": "DISPATCH_FD",
+    "riot-runloop-wake-check": "RUNLOOP_WAKE",
 }
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("check", choices=checks)
