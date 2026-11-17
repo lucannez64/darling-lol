@@ -927,7 +927,7 @@ On Hyprland, also check that direct scanout is off (`hyprctl getoption render:di
 On the NVIDIA proprietary driver, check the submit worker's kernel time: a thread of the game process spending most of its time in the kernel (`/proc/<pid>/task/<tid>/stat` system time, or `perf trace -s -p <pid>`) points at driver calls. Each `vkQueueSubmit2` and each CPU-side `vkSignalSemaphore` is an RM control ioctl (command `0xc020462a`) that queues on a driver-wide lock. Before 2026-10-18 every command buffer signalled the event loop's wake-up semaphore, ~25 times per frame; with lazy wake-ups (default) and a 5 ms batch window (`/tmp/metal-submit-batch-us` = `5000`, `/tmp/metal-submit-batch-max` = `64`) an RTX 4090 ran at 206–552 FPS against 91–147 FPS with `/tmp/metal-no-lazy-wakeup`, in alternating 20 s phases of one match (the later phases with wake-ups on were capped at 240 FPS) (see [setup](SETUP.md#metal-and-indium-overlays)).
 
 The NVIDIA performance figures above were reported on an earlier runtime base;
-they have not been remeasured after integration with current `main`. On `bcb3245` an RTX 5060 Laptop reported ~200–215 FPS in Practice Tool ([#53](https://github.com/lucannez64/darling-lol/issues/53)).
+they have not been remeasured after integration with current `main`. On `bcb3245` an RTX 5060 Laptop reported ~200–215 FPS in Practice Tool ([#53](https://github.com/lucannez64/darling-lol/issues/53)). On a hybrid laptop, check the GPU mode first: PRIME render offload measured at less than half the frame rate of the MUX's discrete-only mode ([hybrid graphics](#prime-render-offload-halves-the-frame-rate)).
 
 ## NVIDIA
 
@@ -1025,6 +1025,43 @@ __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json sh s
 ```
 
 The guest file `/tmp/metal-gpu` (a device index or part of its name, for example `nvidia`) moves only the Vulkan side. Use it for diagnosis: on its own it splits the two sides across GPUs, and frames cannot be presented.
+
+### PRIME render offload halves the frame rate
+
+PRIME render offload works, but it costs frames: the NVIDIA GPU renders, the integrated GPU drives the panel, and every
+frame is handed across before it can be shown. On a laptop with a MUX switch, setting the firmware's GPU mode to
+discrete only (NVIDIA drives the panel) avoids that hand-off.
+
+Measured on 2026-11-16 on an Alienware m16 R2 (Core Ultra 9 185H, RTX 4070 Laptop, driver 620.70.06, openSUSE
+Tumbleweed, kernel 7.3.3, GNOME on Wayland with Xwayland 24.1.14, 1920×1080 at 320 Hz). Practice Tool, the same jungle
+route, borderless, frame cap and VSync off. One match per row, so treat the numbers as indicative:
+
+| | hybrid, PRIME offload | discrete only (MUX) |
+|---|---|---|
+| average FPS (whole match) | 122.7 | 284.5 |
+| frame time p50 / p99 | 7.1 / 16.6 ms | 3.1 / 6.2 ms |
+| `eglSwapBuffers` in the present block, p50 | 2.31 ms | 0.05 ms |
+| whole present block (composite + swap), p50 | 3.46 ms | 0.53 ms |
+| game main thread | 49% running; waiting 25% in `drm_syncobj_array_wait_timeout`, 17% in `os_acquire_rwlock_write` (NVIDIA kernel module) | 84% running |
+| NVIDIA GPU busy | 34% | 35% |
+
+The present block runs on the game's main thread, and in every captured frame the game started its next frame only
+after the swap had returned, so the swap's wait came straight off the frame rate. With offload the GPU is mostly idle and
+no CPU thread is saturated; in discrete-only mode the main thread becomes the limit. Fullscreen and borderless gave the
+same result with offload (122.3 and 122.7 FPS). A native EGL program with the same per-frame calls and a 1080p composite
+swapped in 0.02 ms under PRIME offload on the same machine, so the cost appears only with Darling's present path; why
+is not known yet. The RTX 5060 Laptop result in [#53](https://github.com/lucannez64/darling-lol/issues/53) was also
+taken with the MUX set to discrete.
+
+Measured with Indium's existing diagnostics: `/tmp/metal-debug-waits`, `/tmp/metal-frame-interval-capture` (worker and
+present timestamps in `/tmp/metal-frame-intervals.csv` and `/tmp/metal-present-intervals*.csv`) and the per-1024-frame
+lines of `/tmp/indium-submit-stats.log`, plus the host's `/proc/<pid>/task/<tid>/wchan` sampled about 500 times a second.
+
+In discrete-only mode the NVIDIA GPU is the default, so launch without PRIME offload. `switcherooctl` numbers the GPUs
+by default first: with the NVIDIA GPU as default it becomes device 0, and `switcherooctl launch -g 1` then selects the
+integrated GPU, including `VK_LOADER_DRIVERS_SELECT=*intel*`, while `__EGL_VENDOR_LIBRARY_FILENAMES` still forces
+NVIDIA's EGL, which splits Vulkan and OpenGL across GPUs. Pick the device by its `Discrete: yes` line rather than by
+index, or check the result with `DARLING_METAL_DEVICE_LOG=1` as described below.
 
 ### Check which GPU rendered
 
