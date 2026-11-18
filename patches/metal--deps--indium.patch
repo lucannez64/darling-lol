@@ -9213,9 +9213,10 @@ new file mode 100644
 +}
 diff --git a/private-include/indium/memory-pool.private.hpp b/private-include/indium/memory-pool.private.hpp
 new file mode 100644
+index 0000000..4c3b3a1
 --- /dev/null
 +++ b/private-include/indium/memory-pool.private.hpp
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,372 @@
 +#pragma once
 +
 +// Suballocation of device memory for buffers and textures.
@@ -9293,7 +9294,7 @@ new file mode 100644
 +				std::chrono::steady_clock::time_point created;
 +				bool image = false;
 +				int frames = 0;
-+				void* stack[12];
++				void* stack[12] = {}; // backtrace() can fill fewer frames; the whole array is copied
 +			};
 +
 +			// " image`symbol+0x.. image+0x.." for each saved frame
@@ -9465,10 +9466,13 @@ new file mode 100644
 +					s.origins.erase(it);
 +				}
 +				if (!mapped) return; // the CPU never had a pointer into it
-+				const size_t page = (size_t) getpagesize();
-+				const uintptr_t start = (uintptr_t) mapped;
-+				const size_t length = (size_t) ((size + page - 1) / page * page);
-+				const bool reserved = start % page == 0 && MemoryPool::Debug::reserve(mapped, length);
++				// vkMapMemory only guarantees minMemoryMapAlignment, so the mapping can start inside a page: reserve every
++				// page it touched (the reservation still never replaces a page something else maps)
++				const uintptr_t page = (uintptr_t) getpagesize();
++				const uintptr_t start = (uintptr_t) mapped & ~(page - 1);
++				const uintptr_t end = ((uintptr_t) mapped + (uintptr_t) size + page - 1) & ~(page - 1);
++				const size_t length = (size_t) (end - start);
++				const bool reserved = MemoryPool::Debug::reserve((void*) start, length);
 +				char frames[1536];
 +				MemoryPool::Debug::describe(origin, frames, sizeof(frames));
 +				const double age = known ? std::chrono::duration<double>(std::chrono::steady_clock::now() - origin.created).count() : -1;
@@ -9532,7 +9536,7 @@ new file mode 100644
 +					Debug::log("pool owner 0x%llx registered twice: a resource got a recycled handle before the previous owner's memory was released\n",
 +						(unsigned long long) owner);
 +				}
-+				Debug::Origin origin;
++				Debug::Origin origin {};
 +				origin.created = std::chrono::steady_clock::now();
 +				origin.image = image;
 +				origin.frames = backtrace(origin.stack, 12);

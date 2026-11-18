@@ -61,10 +61,13 @@ inline void vkFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCall
         mappings.erase(mapping);
     }
 }
+inline size_t mapOffset = 0;                     // a driver may return a pointer inside a page (minMemoryMapAlignment)
 inline VkResult vkMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize, VkDeviceSize, VkMemoryMapFlags, void** data) {
-    *data = mmap(nullptr, memorySize[key(memory)], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (*data == MAP_FAILED) return VK_ERROR_MEMORY_MAP_FAILED;
-    mappings[key(memory)] = *data;
+    memorySize[key(memory)] += mapOffset;        // vkFreeMemory unmaps the whole range, from the page base
+    void* base = mmap(nullptr, memorySize[key(memory)], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (base == MAP_FAILED) return VK_ERROR_MEMORY_MAP_FAILED;
+    mappings[key(memory)] = base;
+    *data = static_cast<char*>(base) + mapOffset;
     return VK_SUCCESS;
 }
 inline void vkDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) {
@@ -203,6 +206,21 @@ int main(int argc, char** argv) {
     int status = 0;
     waitpid(child, &status, 0);
     assert(WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS));
+
+    // a mapping that starts inside a page is reserved from its page base
+    DynamicVK::mapOffset = 64;
+    MemoryPool::allocate(vkDevice, 0xc000, 0, 100000, 256, false, true);
+    auto* offsetBytes = static_cast<volatile char*>(MemoryPool::map(vkDevice, 0xc000));
+    assert(reinterpret_cast<uintptr_t>(offsetBytes) % getpagesize() == 64);
+    offsetBytes[0] = 1;
+    MemoryPool::free(vkDevice, 0xc000);
+    child = fork();
+    if (child == 0) {
+        offsetBytes[0] = 2; // a late CPU write into the first, partial page
+        _exit(0);
+    }
+    waitpid(child, &status, 0);
+    assert(WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS));
     return 0;
 }
 '''
@@ -210,6 +228,7 @@ int main(int argc, char** argv) {
         log = self.run_cpp(program, poison=True)
         self.assertIn('pool owner 0xb000 registered twice', log)
         self.assertRegex(log, r'freed buffer owner=0xa000 bytes=100000 cpu=\[0x[0-9a-f]+,0x[0-9a-f]+\) reserved-no-access age=[0-9.]+s origin: \S')
+        self.assertRegex(log, r'freed buffer owner=0xc000 bytes=100000 cpu=\[0x[0-9a-f]+000,0x[0-9a-f]+000\) reserved-no-access')
 
     def test_pool_memory_is_released_before_the_handle_value_can_be_reused(self):
         buffer = self.patched('metal--deps--indium', 'src/indium/buffer.cpp')
