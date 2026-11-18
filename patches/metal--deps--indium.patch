@@ -1940,7 +1940,7 @@ index e58f0ba..89930f7 100644
 +    finishTrackedEncoder(_privateCommandBuffer.lock()->commandBuffer());
  };
 diff --git a/src/indium/buffer.cpp b/src/indium/buffer.cpp
-index 23fd2d3..1a48b81 100644
+index 23fd2d3..b8840ef 100644
 --- a/src/indium/buffer.cpp
 +++ b/src/indium/buffer.cpp
 @@ -1,6 +1,8 @@
@@ -2021,7 +2021,7 @@ index 23fd2d3..1a48b81 100644
  		if (DynamicVK::vkFlushMappedMemoryRanges(_privateDevice->device(), 1, &range) != VK_SUCCESS) {
  			// TODO
  			abort();
-@@ -114,12 +86,10 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
+@@ -114,12 +86,14 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
  };
  
  Indium::PrivateBuffer::~PrivateBuffer() {
@@ -2031,13 +2031,17 @@ index 23fd2d3..1a48b81 100644
 -
 +	// the mapping belongs to the shared memory block
 +	auto owner = reinterpret_cast<uint64_t>(_buffer);
++	// Release the memory while the handle is still ours. The pool is keyed by the handle's value, and once
++	// vkDestroyBuffer returns the driver may give that value to a buffer or image created on another thread: free() would
++	// then drop the new resource's entry and release its live memory. Freeing memory that is still bound is valid as long
++	// as the buffer is only destroyed afterwards.
++	MemoryPool::free(_privateDevice->device(), owner);
  	DynamicVK::vkDestroyBuffer(_privateDevice->device(), _buffer, nullptr);
 -	DynamicVK::vkFreeMemory(_privateDevice->device(), _memory, nullptr);
-+	MemoryPool::free(_privateDevice->device(), owner);
  };
  
  std::shared_ptr<Indium::Device> Indium::PrivateBuffer::device() {
-@@ -136,7 +106,8 @@ void* Indium::PrivateBuffer::contents() {
+@@ -136,7 +110,8 @@ void* Indium::PrivateBuffer::contents() {
  	}
  
  	if (!_mapped) {
@@ -2047,7 +2051,7 @@ index 23fd2d3..1a48b81 100644
  			// TODO
  			abort();
  		}
-@@ -148,9 +119,16 @@ void* Indium::PrivateBuffer::contents() {
+@@ -148,9 +123,16 @@ void* Indium::PrivateBuffer::contents() {
  void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
  	VkMappedMemoryRange vulkanRange {};
  	vulkanRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -2066,7 +2070,7 @@ index 23fd2d3..1a48b81 100644
  	if (DynamicVK::vkFlushMappedMemoryRanges(_privateDevice->device(), 1, &vulkanRange) != VK_SUCCESS) {
  		// TODO
  		abort();
-@@ -158,8 +136,10 @@ void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
+@@ -158,8 +140,10 @@ void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
  };
  
  uint64_t Indium::PrivateBuffer::gpuAddress() {
@@ -3033,7 +3037,7 @@ index 5f62ad0..a2906f3 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..a121e9f 100644
+index 322e186..d7d5d38 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,10 @@
@@ -3437,7 +3441,7 @@ index 322e186..a121e9f 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -294,9 +605,434 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -294,9 +605,439 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  			abort();
  		}
  	}
@@ -3858,6 +3862,10 @@ index 322e186..a121e9f 100644
 +	unlink(tmpPath.c_str());
 +}
 +
++namespace {
++void destroyRetiringTimelines(VkDevice device); // with the timeline semaphore pool, below
++}
++
  Indium::PrivateDevice::~PrivateDevice() {
 +	if (_pipelineCache) {
 +		savePipelineCache();
@@ -3868,11 +3876,12 @@ index 322e186..a121e9f 100644
 +	}
 +    for (const auto& entry : _renderPasses) DynamicVK::vkDestroyRenderPass(_device, entry.second, nullptr);
 +    for (const auto& entry : _availableTimelineSemaphores) DynamicVK::vkDestroySemaphore(_device, entry.first, nullptr);
++    destroyRetiringTimelines(_device);
 +	for (auto pool : _availableDescriptorPools) DynamicVK::vkDestroyDescriptorPool(_device, pool, nullptr);
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +1044,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +1049,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3896,7 +3905,7 @@ index 322e186..a121e9f 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +1070,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +1075,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3909,7 +3918,7 @@ index 322e186..a121e9f 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -336,10 +1089,57 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
+@@ -336,10 +1094,57 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
  };
  
  std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* data, size_t length) {
@@ -3971,7 +3980,7 @@ index 322e186..a121e9f 100644
  	PrivateLibrary::FunctionInfoMap funcInfoMap;
  
  	for (const auto& [name, info]: outputInfo.functionInfos) {
-@@ -357,12 +1157,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,12 +1162,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -4017,7 +4026,7 @@ index 322e186..a121e9f 100644
  	return lib;
  };
  
-@@ -382,6 +1213,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
+@@ -382,6 +1218,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
  	return globalDeviceList.empty() ? nullptr : globalDeviceList.front();
  };
  
@@ -4037,7 +4046,7 @@ index 322e186..a121e9f 100644
  void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	// this is held for the entire duration of the poll so we can
  	// ensure we're the only one polling, which allows us to avoid
-@@ -393,9 +1237,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -393,9 +1242,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	const std::vector<VkSemaphore> semaphores = _eventLoopSemaphores;
  	const std::vector<uint64_t> values = _eventLoopWaitValues;
  	const std::vector<std::function<void()>> callbacks = _eventLoopCallbacks;
@@ -4073,7 +4082,7 @@ index 322e186..a121e9f 100644
  	VkSemaphoreWaitInfo info {};
  	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
  	info.semaphoreCount = semaphores.size();
-@@ -403,7 +1273,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -403,7 +1278,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	info.pValues = values.data();
  	info.flags = VK_SEMAPHORE_WAIT_ANY_BIT;
  
@@ -4094,7 +4103,7 @@ index 322e186..a121e9f 100644
  
  	if (result == VK_TIMEOUT) {
  		// timed out with no semaphores ready
-@@ -474,15 +1356,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -474,15 +1361,108 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  		_eventLoopSemaphores.push_back(semaphore);
  		_eventLoopWaitValues.push_back(targetValue);
  		_eventLoopCallbacks.push_back(callback);
@@ -4115,6 +4124,84 @@ index 322e186..a121e9f 100644
 -// TODO: create a semaphore pool to avoid constantly creating and destroying semaphores
 +// Non-exported timeline handles are exclusively leased until the last owner
 +// (including GPU-completion callbacks) releases them. Preserve monotonic values.
++
++// A timeline semaphore leaves the pool for good (pool full) when its last owner lets go. For a texture that is the
++// completion callback of the last command buffer that used it, and that callback runs as soon as the event loop sees
++// the command buffer's *own* semaphore reach its value. Vulkan does not order the signal operations of one batch, so the
++// texture's semaphore can still have its signal pending at that moment, and destroying a semaphore that a submitted
++// batch will still signal is invalid usage. RADV keeps the syncobj alive and nothing happens; on NVIDIA the semaphore's
++// memory is unmapped and the GPU then writes the pending signal into an unmapped page (Xid 31, "ENGINE HOST0 ...
++// ACCESS_TYPE_VIRT_WRITE", #252). So a handle is destroyed only once its counter has reached the last value reserved
++// for it (acquire() and each commit raise `count` before the signal is submitted); until then it waits here and every
++// later put retries. Only the pool-full path pays the counter query; the other puts read one atomic.
++namespace {
++struct RetiringTimelineSemaphore {
++	VkDevice device;
++	VkSemaphore semaphore;
++	uint64_t lastSignal;
++};
++
++struct TimelineRetirement {
++	std::mutex mutex;
++	std::vector<RetiringTimelineSemaphore> waiting;
++	std::atomic<size_t> count {0};
++};
++
++TimelineRetirement& timelineRetirement() {
++	static auto* retirement = new TimelineRetirement; // never destroyed, like the other process-wide pools
++	return *retirement;
++}
++
++bool timelineSignalled(VkDevice device, VkSemaphore semaphore, uint64_t value) {
++	uint64_t current = 0;
++	return Indium::DynamicVK::vkGetSemaphoreCounterValue(device, semaphore, &current) == VK_SUCCESS && current >= value;
++}
++
++// caller holds the retirement mutex
++void destroySignalledTimelines(TimelineRetirement& retirement) {
++	auto& list = retirement.waiting;
++	list.erase(std::remove_if(list.begin(), list.end(), [](const RetiringTimelineSemaphore& entry) {
++		if (!timelineSignalled(entry.device, entry.semaphore, entry.lastSignal)) return false;
++		Indium::DynamicVK::vkDestroySemaphore(entry.device, entry.semaphore, nullptr);
++		return true;
++	}), list.end());
++	retirement.count.store(list.size(), std::memory_order_relaxed);
++}
++
++void retireTimelineSemaphore(VkDevice device, VkSemaphore semaphore, uint64_t lastSignal) {
++	auto& retirement = timelineRetirement();
++	std::lock_guard<std::mutex> lock(retirement.mutex);
++	destroySignalledTimelines(retirement);
++	if (timelineSignalled(device, semaphore, lastSignal)) {
++		Indium::DynamicVK::vkDestroySemaphore(device, semaphore, nullptr);
++		return;
++	}
++	// a lost device never signals: leaking the handle is harmless, destroying it is not
++	if (retirement.waiting.size() >= 4096) return;
++	retirement.waiting.push_back(RetiringTimelineSemaphore { device, semaphore, lastSignal });
++	retirement.count.store(retirement.waiting.size(), std::memory_order_relaxed);
++}
++
++void retryTimelineRetirement() {
++	auto& retirement = timelineRetirement();
++	if (retirement.count.load(std::memory_order_relaxed) == 0) return;
++	std::lock_guard<std::mutex> lock(retirement.mutex);
++	destroySignalledTimelines(retirement);
++}
++
++// device teardown: nothing will be submitted or waited for any more
++void destroyRetiringTimelines(VkDevice device) {
++	auto& retirement = timelineRetirement();
++	std::lock_guard<std::mutex> lock(retirement.mutex);
++	auto& list = retirement.waiting;
++	list.erase(std::remove_if(list.begin(), list.end(), [device](const RetiringTimelineSemaphore& entry) {
++		if (entry.device != device) return false;
++		Indium::DynamicVK::vkDestroySemaphore(entry.device, entry.semaphore, nullptr);
++		return true;
++	}), list.end());
++	retirement.count.store(list.size(), std::memory_order_relaxed);
++}
++}
  
  Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
 +    {
@@ -4128,11 +4215,12 @@ index 322e186..a121e9f 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +1402,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +1485,16 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
 -	DynamicVK::vkDestroySemaphore(_device, semaphore.semaphore, nullptr);
++    retryTimelineRetirement();
 +    {
 +        std::lock_guard<std::mutex> lock(_timelineSemaphorePoolMutex);
 +        if (_availableTimelineSemaphores.size() < 256 && semaphore.count != UINT64_MAX) {
@@ -4140,11 +4228,12 @@ index 322e186..a121e9f 100644
 +            return;
 +        }
 +    }
-+    DynamicVK::vkDestroySemaphore(_device, semaphore.semaphore, nullptr);
++    // never vkDestroySemaphore() here directly: its last signal may still be pending (see retireTimelineSemaphore)
++    retireTimelineSemaphore(_device, semaphore.semaphore, semaphore.count);
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +1455,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +1540,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -5959,7 +6048,7 @@ index 71392df..d82e5f0 100644
  	info.unnormalizedCoordinates = descriptor.normalizedCoordinates ? VK_FALSE : VK_TRUE;
  
 diff --git a/src/indium/texture.cpp b/src/indium/texture.cpp
-index 1e3e971..4c18554 100644
+index 1e3e971..e7ebeae 100644
 --- a/src/indium/texture.cpp
 +++ b/src/indium/texture.cpp
 @@ -1,8 +1,90 @@
@@ -6259,7 +6348,7 @@ index 1e3e971..4c18554 100644
  
  	VkImageViewCreateInfo info2 {};
  	info2.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-@@ -463,12 +570,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -463,12 +570,25 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  		// TODO
  		abort();
  	}
@@ -6279,13 +6368,14 @@ index 1e3e971..4c18554 100644
 +	if (_sampledImageView) DynamicVK::vkDestroyImageView(_device->device(), _sampledImageView, nullptr);
  	DynamicVK::vkDestroyImageView(_device->device(), _imageView, nullptr);
 +	auto owner = reinterpret_cast<uint64_t>(_image);
++	// memory first, while the handle value cannot have been reused yet (see ~PrivateBuffer)
++	MemoryPool::free(_device->device(), owner);
  	DynamicVK::vkDestroyImage(_device->device(), _image, nullptr);
 -	DynamicVK::vkFreeMemory(_device->device(), _memory, nullptr);
-+	MemoryPool::free(_device->device(), owner);
  };
  
  Indium::TextureType Indium::ConcreteTexture::textureType() const {
-@@ -537,7 +656,20 @@ VkImage Indium::ConcreteTexture::image() {
+@@ -537,7 +657,20 @@ VkImage Indium::ConcreteTexture::image() {
  	return _image;
  };
  
@@ -6306,7 +6396,7 @@ index 1e3e971..4c18554 100644
  	return VK_IMAGE_LAYOUT_GENERAL;
  };
  
-@@ -546,6 +678,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -546,6 +679,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  };
  
  void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmapLevel, size_t slice, const void* bytes, size_t bytesPerRow, size_t bytesPerImage) {
@@ -6323,7 +6413,7 @@ index 1e3e971..4c18554 100644
  	if (_storageMode != StorageMode::Managed && _storageMode != StorageMode::Shared) {
  		throw std::runtime_error("Invalid usage of replaceRegion on non-managed and non-shared texture");
  	}
-@@ -556,99 +698,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -556,99 +699,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  
  	auto aspect = pixelFormatToVkImageAspectFlags(_descriptor.pixelFormat);
  
