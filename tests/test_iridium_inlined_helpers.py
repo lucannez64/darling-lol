@@ -3,7 +3,8 @@
 Before helpers were inlined, a kernel that called one failed to translate, so these lowering
 paths were never reached from a helper: comparisons, arithmetic and conversions on i1 (a SPIR-V
 boolean, which the integer instructions reject), a constant GEP into a nested array global,
-i8/i16 constants, and a store to the first element of a local array through the array's pointer.
+i8/i16 constants, unsigned division and remainder, and a store to the first element of a local
+array through the array's pointer.
 Every fixture must translate to a module spirv-val accepts, or fail to translate; none may yield
 a module spirv-val rejects. The translator is built as in test_iridium_lifetime_markers. No game,
 client or guest process is involved. Skipped when the checkout, LLVM or spirv-val is missing.
@@ -32,6 +33,7 @@ VALID = {
     'iridium-constant-gep': ('OpAccessChain',),
     'iridium-narrow-constants': ('OpTypeInt 8 1', 'OpTypeInt 16 1'),
     'iridium-lifetime-markers': ('OpAccessChain',),
+    'iridium-unsigned-division': ('OpUDiv', 'OpUMod', 'OpShiftRightLogical'),
 }
 # fixture -> the error its translation must stop with
 REJECTED = {
@@ -89,7 +91,10 @@ class IridiumInlinedHelpersTest(unittest.TestCase):
             with self.subTest(fixture=fixture):
                 run, module = self.translate(fixture)
                 self.assertIn('1 passed, 0 failed', run.stdout, run.stdout + run.stderr)
-                checked = subprocess.run(['spirv-val', str(module)], capture_output=True, text=True)
+                validator = ['spirv-val']
+                if fixture == 'iridium-unsigned-division':
+                    validator += ['--target-env', 'vulkan1.3']
+                checked = subprocess.run([*validator, str(module)], capture_output=True, text=True)
                 self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
                 # The fixture only covers a lowering while the passes leave its instruction in.
                 listing = subprocess.run(['spirv-dis', '--raw-id', str(module)],
