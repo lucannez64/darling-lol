@@ -4593,7 +4593,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..af904ed 100644
+index c2f70fb..6ba89a3 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -83,6 +83,38 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
@@ -4635,6 +4635,36 @@ index c2f70fb..af904ed 100644
  		case 1: // proc_listpids
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
+@@ -328,6 +360,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 	info->pbi_start_tvusec = starttime_usecs;
+ 
+ 	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
++	// p_name: the full basename (up to 2 * MAXCOMLEN - 1); proc_name() prefers it over pbi_comm
++	darling_process_name(pid, info->pbi_name, sizeof(info->pbi_name));
+ 
+ 	return sizeof(struct proc_bsdinfo);
+ reterr:
+@@ -390,7 +424,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+ 
+ 	// comm
+ 	READELEM();
+-	strncpy(info->pbsi_comm, elem, sizeof(info->pbsi_comm));
++	// macOS fills this from p_comm (the executable's basename), keeping MAXCOMLEN - 1 characters
++	if (!darling_process_name(pid, info->pbsi_comm, sizeof(info->pbsi_comm)))
++		strncpy(info->pbsi_comm, elem, sizeof(info->pbsi_comm));
+ 
+ 	// process state
+ 	READELEM();
+@@ -437,7 +473,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+ 	if (is_64_bit)
+ 		info->pbsi_flags |= P_LP64;
+ 
+-	return 1;
++	// proc_pidinfo() returns the number of bytes filled in, as on macOS
++	return sizeof(*info);
+ reterr:
+ 	return -EINVAL;
+ }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 index 0a8f1e4..9651453 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
@@ -9856,3 +9886,81 @@ index a1b55f5..03dab69 100644
  #else
  host_statistics64(
  #endif
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
+index 6600da7..ec2ecc0 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
+@@ -124,6 +124,48 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
+ 	return ret;
+ }
+ 
++static const char* path_basename(const char* path)
++{
++	const char* base = path;
++	for (const char* p = path; *p != '\0'; ++p) {
++		if (*p == '/')
++			base = p + 1;
++	}
++	return base;
++}
++
++bool darling_process_name(int pid, char* out, unsigned long size)
++{
++	char path[1024];
++	uint64_t fullLength = 0;
++	const char* base = "";
++
++	if (size == 0)
++		return false;
++	// The Mach-O executable darlingserver recorded for the process...
++	if (dserver_rpc_get_executable_path(pid, path, sizeof(path), &fullLength) == 0) {
++		path[sizeof(path) - 1] = '\0';
++		base = path_basename(path);
++	}
++	// ...or, when it has none (a process that has not exec'd a Mach-O through it), argv[0]:
++	// mldr rewrites the Linux command line to the guest's.
++	if (*base == '\0') {
++		char cmdpath[48];
++		__simple_sprintf(cmdpath, "/proc/%d/cmdline", pid);
++		if (!read_string(cmdpath, path, sizeof(path)))
++			return false;
++		base = path_basename(path);
++	}
++	if (*base == '\0' || (base[0] == 'm' && base[1] == 'l' && base[2] == 'd' && base[3] == 'r' && base[4] == '\0'))
++		return false;
++
++	unsigned long i = 0;
++	for (; i + 1 < size && base[i] != '\0'; ++i)
++		out[i] = base[i];
++	out[i] = '\0';
++	return true;
++}
++
+ bool read_string(const char* path, char* dst, int maxlen)
+ {
+ 	int fd, rd;
+@@ -215,7 +257,8 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
+ 
+ 	// comm
+ 	READELEM();
+-	strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm));
++	if (!darling_process_name(kinfo->kinfo.kp_proc.p_pid, kinfo->kinfo.kp_proc.p_comm, sizeof(kinfo->kinfo.kp_proc.p_comm)))
++		strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm));
+ 
+ 	// process state
+ 	READELEM();
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h
+index 407996e..4bcdfa8 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_proc.h
+@@ -8,4 +8,10 @@ bool read_string(const char* path, char* dst, int maxlen);
+ const char* next_stat_elem(char** buf);
+ void skip_stat_elems(char** buf, int count);
+ 
++// The macOS process name: the basename of the process's executable, truncated to
++// fit `size` (a NUL is always written). Linux's comm is "mldr" for every Darling
++// process, which macOS never reports. Returns false for processes darlingserver
++// does not know (host processes); callers then keep the Linux comm.
++bool darling_process_name(int pid, char* out, unsigned long size);
++
+ #endif // _SYSCTL_PROC_H

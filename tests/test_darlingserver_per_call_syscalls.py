@@ -33,7 +33,10 @@ class MainLoopTests(unittest.TestCase):
     def test_eventfd_is_read_only_after_it_fired(self):
         self.assertRegex(self.loop, r'if \(wakeupFired\) \{\s*wakeupFired = false;\s*'
                                     r'eventfd_t value;\s*eventfd_read\(_wakeupFD, &value\);')
-        self.assertEqual(self.loop.count('eventfd_read(_wakeupFD'), 1)
+        # both message loops (epoll and io_uring) read it, and each only after it fired
+        guarded = re.findall(r'if \(wakeupFired\) \{\s*wakeupFired = false;\s*eventfd_t value;\s*'
+                             r'eventfd_read\(_wakeupFD, &value\);', self.loop)
+        self.assertEqual(self.loop.count('eventfd_read(_wakeupFD'), len(guarded))
 
     def test_epoll_registration_changes_only_when_the_wanted_state_does(self):
         self.assertRegex(self.loop, r'if \(wantWakeup != wakeupArmed\) \{\s*'

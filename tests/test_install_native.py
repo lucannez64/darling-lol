@@ -18,6 +18,8 @@ def installer_env(**extra):
     env.pop('RCLOL_LOCALE', None)
     # Use the default desktop-entry policy unless a test overrides it.
     env.pop('DARLING_LOL_DESKTOP_ENTRY', None)
+    # Window entries stay off unless a test asks for them, even if exported.
+    env.pop('DARLING_LOL_WINDOW_ENTRIES', None)
     # Keep default-release cases hermetic unless a test overrides it.
     env.pop('DARLING_LOL_TOOLBOX_RELEASE', None)
     # Keep locale detection deterministic unless a test overrides it.
@@ -131,6 +133,15 @@ class RegionAndArgumentTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'EUW|pt_BR|1|1|1|1')
+
+    def test_window_entries_flag_and_environment(self):
+        flag = run_sourced('source "$INSTALLER"\nparse_args --window-entries\necho "$WINDOW_ENTRIES"')
+        self.assertEqual(flag.returncode, 0, flag.stderr)
+        self.assertEqual(flag.stdout.strip(), '1')
+        env = run_sourced('source "$INSTALLER"\necho "$WINDOW_ENTRIES"', DARLING_LOL_WINDOW_ENTRIES='1')
+        self.assertEqual(env.stdout.strip(), '1')
+        default = run_sourced('source "$INSTALLER"\nparse_args --yes\necho "$WINDOW_ENTRIES"')
+        self.assertEqual(default.stdout.strip(), '0')
 
     def test_parse_args_rejects_an_unknown_region(self):
         result = run_sourced('source "$INSTALLER"\nparse_args --region XX')
@@ -740,7 +751,7 @@ class ArchUpgradeTests(unittest.TestCase):
 
 class DesktopEntryTests(unittest.TestCase):
     def create_entry(self, *, inside_toolbox=0, name='darling-lol', helper=True,
-                     helper_fails=False, entry=None):
+                     helper_fails=False, entry=None, window_entries=0):
         with tempfile.TemporaryDirectory(prefix='install-native-desktop-') as folder:
             repo = Path(folder) / 'repo'
             home = Path(folder) / 'home'
@@ -779,6 +790,7 @@ source "$INSTALLER"
 TARGET_DIR="{repo}"
 TOOLBOX_NAME="{name}"
 INSIDE_TOOLBOX={inside_toolbox}
+WINDOW_ENTRIES={window_entries}
 HOME="{home}"
 {fake_python}
 create_desktop_entry
@@ -801,6 +813,21 @@ create_desktop_entry
         self.assertEqual(len(arguments), 3)
         self.assertEqual(arguments[1:], ['--toolbox', 'my-box'])
         self.assertTrue(arguments[0].endswith('build/runtime/tools/desktop-entry.py'))
+
+    def test_window_entries_are_not_requested_by_default(self):
+        result, arguments, _ = self.create_entry()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--window-entries', arguments)
+
+    def test_native_install_forwards_window_entries(self):
+        result, arguments, _ = self.create_entry(window_entries=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments[1:], ['--window-entries'])
+
+    def test_toolbox_install_forwards_container_and_window_entries(self):
+        result, arguments, _ = self.create_entry(inside_toolbox=1, name='my-box', window_entries=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments[1:], ['--toolbox', 'my-box', '--window-entries'])
 
     def test_an_outdated_shortcut_is_flagged_and_refreshed(self):
         result, _, entry_text = self.create_entry(entry='old')
@@ -1221,6 +1248,140 @@ configure_project
             self.assertEqual(arguments[arguments.index('--region') + 1], 'BR')
             self.assertIn('--locale', arguments)
             self.assertEqual(arguments[arguments.index('--locale') + 1], 'pt_BR')
+
+
+class InstallMarkerTests(unittest.TestCase):
+    """Install-mode markers are written only after every install step succeeded."""
+
+    def run_main(self, target, *, toolbox_env=None, preexisting=None, inside_toolbox=0,
+                 confirm_rc=0, preflight_rc=0, compile_rc=0):
+        """Run main() in a sourced shell with every install step stubbed out.
+
+        compile_project reports compile_rc through the run stub so a build
+        failure aborts main() the way the real run() would. inside_toolbox
+        emulates a manual run inside a container when the env vars do not.
+        """
+        build = Path(target) / 'build'
+        build.mkdir(parents=True, exist_ok=True)
+        if preexisting is not None:
+            (build / 'toolbox-container').write_text(preexisting + '\n')
+        snippet = f'''
+source "$INSTALLER"
+TARGET_DIR="{target}"
+INSIDE_TOOLBOX={inside_toolbox}
+parse_args() {{ :; }}
+detect_distribution() {{ :; }}
+check_toolbox_support() {{ :; }}
+preflight() {{ return {preflight_rc}; }}
+resolve_locale() {{ :; }}
+confirm_install() {{ return {confirm_rc}; }}
+select_locale() {{ :; }}
+resolve_region() {{ :; }}
+confirm_arch_upgrade() {{ :; }}
+init_log() {{ :; }}
+keep_sudo_alive() {{ :; }}
+check_repo_ffmpeg() {{ :; }}
+install_packages() {{ :; }}
+install_packages_tee() {{ :; }}
+ensure_no_active_session() {{ :; }}
+verify_ffmpeg() {{ :; }}
+prepare_python_env() {{ :; }}
+configure_project() {{ :; }}
+compile_project() {{ return {compile_rc}; }}
+install_system_components() {{ :; }}
+install_user_runtime() {{ :; }}
+finish() {{ :; }}
+run() {{ shift; "$@"; }}
+info() {{ :; }}
+python3() {{ :; }}
+main
+'''
+        env = installer_env()
+        env.pop('DARLING_LOL_TOOLBOX', None)
+        env.pop('DARLING_LOL_TOOLBOX_NAME', None)
+        env.update(toolbox_env or {})
+        return subprocess.run(
+            ['bash', '-c', snippet],
+            capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+            env=env,
+        )
+
+    def test_install_toolbox_does_not_write_marker_before_exec(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            marker.parent.mkdir(parents=True)
+            marker.write_text('old\n')
+            snippet = f'''
+source "$INSTALLER"
+TARGET_DIR="{folder}"
+run() {{ printf "run:%s\\n" "$*" >> "{folder}/log"; }}
+info() {{ :; }}
+exec() {{ printf "exec:%s\\n" "$*" >> "{folder}/log"; }}
+podman() {{ return 1; }}
+USE_TOOLBOX=1
+INSIDE_TOOLBOX=0
+REGION=EUW
+LOCALE=pt_BR
+TOOLBOX_NAME=my-box
+install_toolbox
+'''
+            result = run_sourced(snippet)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            log = (Path(folder) / 'log').read_text()
+            self.assertIn('exec:toolbox run --container my-box', log)
+            self.assertIn('env DARLING_LOL_TOOLBOX=1', log)
+            self.assertEqual(marker.read_text(), 'old\n')
+
+    def test_inner_run_success_writes_marker(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, toolbox_env={
+                'DARLING_LOL_TOOLBOX': '1', 'DARLING_LOL_TOOLBOX_NAME': 'newname'},
+                inside_toolbox=1)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'newname\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_inner_run_failure_preserves_existing_marker(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, toolbox_env={
+                'DARLING_LOL_TOOLBOX': '1', 'DARLING_LOL_TOOLBOX_NAME': 'newname'},
+                inside_toolbox=1, compile_rc=1, preexisting='old')
+            self.assertNotEqual(result.returncode, 0)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_manual_run_inside_container_writes_no_marker(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, inside_toolbox=1, preexisting='old')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_native_cancel_keeps_markers(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, confirm_rc=1, preexisting='old')
+            self.assertNotEqual(result.returncode, 0)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, preflight_rc=1, preexisting='old')
+            self.assertNotEqual(result.returncode, 0)
+            marker = Path(folder) / 'build' / 'toolbox-container'
+            self.assertEqual(marker.read_text(), 'old\n')
+            self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_native_success_records_native_mode(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, preexisting='old')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            build = Path(folder) / 'build'
+            self.assertTrue((build / 'native-install').exists())
+            self.assertFalse((build / 'toolbox-container').exists())
 
 
 if __name__ == '__main__':

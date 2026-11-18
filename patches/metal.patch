@@ -25,7 +25,7 @@ index 431f29a..eb3eec8 100644
  
  #
 diff --git a/include/Metal/MTLCommandBuffer.h b/include/Metal/MTLCommandBuffer.h
-index ef43df8..9045a84 100644
+index ef43df8..a4b545c 100644
 --- a/include/Metal/MTLCommandBuffer.h
 +++ b/include/Metal/MTLCommandBuffer.h
 @@ -16,6 +16,7 @@ METAL_DECLARATIONS_BEGIN
@@ -36,7 +36,30 @@ index ef43df8..9045a84 100644
  
  @class MTLComputePassDescriptor;
  @class MTLRenderPassDescriptor;
-@@ -36,9 +37,11 @@ typedef void (^MTLCommandBufferHandler)(id<MTLCommandBuffer>);
+@@ -25,6 +26,15 @@ typedef NS_ENUM(NSUInteger, MTLDispatchType) {
+ 	MTLDispatchTypeConcurrent = 1,
+ };
+ 
++typedef NS_ENUM(NSUInteger, MTLCommandBufferStatus) {
++	MTLCommandBufferStatusNotEnqueued = 0,
++	MTLCommandBufferStatusEnqueued = 1,
++	MTLCommandBufferStatusCommitted = 2,
++	MTLCommandBufferStatusScheduled = 3,
++	MTLCommandBufferStatusCompleted = 4,
++	MTLCommandBufferStatusError = 5,
++};
++
+ typedef void (^MTLCommandBufferHandler)(id<MTLCommandBuffer>);
+ 
+ @protocol MTLCommandBuffer <NSObject>
+@@ -32,13 +42,18 @@ typedef void (^MTLCommandBufferHandler)(id<MTLCommandBuffer>);
+ @property(readonly) id<MTLCommandQueue> commandQueue;
+ @property (readonly) id<MTLDevice> device;
+ @property(nullable, copy, atomic) NSString* label;
++@property(readonly) MTLCommandBufferStatus status;
++@property(readonly) CFTimeInterval GPUStartTime;
++@property(readonly) CFTimeInterval GPUEndTime;
+ 
  - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor: (MTLComputePassDescriptor*)computePassDescriptor;
  - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType: (MTLDispatchType)dispatchType;
  - (id<MTLComputeCommandEncoder>)computeCommandEncoder;
@@ -580,7 +603,7 @@ index e3382a8..1182427 100644
  @synthesize resourceOptions = _resourceOptions;
  @synthesize label = _label;
 diff --git a/src/Metal/MTLCommandBuffer.mm b/src/Metal/MTLCommandBuffer.mm
-index 7dedaa0..5eca991 100644
+index 7dedaa0..443f4e8 100644
 --- a/src/Metal/MTLCommandBuffer.mm
 +++ b/src/Metal/MTLCommandBuffer.mm
 @@ -1,7 +1,18 @@
@@ -802,16 +825,32 @@ index 7dedaa0..5eca991 100644
  #if DARLING_METAL_ENABLED
  // used to take care of RR while passing the block around in C++ code
  struct MTLCommandBufferHandlerWrapper {
-@@ -65,7 +269,7 @@ struct MTLCommandBufferHandlerWrapper {
+@@ -52,6 +256,11 @@ struct MTLCommandBufferHandlerWrapper {
+ 
+ {
+ 	std::shared_ptr<Indium::CommandBuffer> _commandBuffer;
++	// League 16.23 polls `status` for MTLCommandBufferStatusCompleted; read from any thread.
++	std::atomic<NSUInteger> _status;
++	// Commit and completion times in seconds on the monotonic clock (Darling's mach_absolute_time base).
++	std::atomic<double> _gpuStartTime;
++	std::atomic<double> _gpuEndTime;
+ }
+ 
+ @synthesize device = _device;
+@@ -64,8 +273,11 @@ struct MTLCommandBufferHandlerWrapper {
+ 	self = [super init];
  	if (self != nil) {
  		_commandBuffer = commandBuffer;
++		_status.store(MTLCommandBufferStatusNotEnqueued, std::memory_order_relaxed);
++		_gpuStartTime.store(0, std::memory_order_relaxed);
++		_gpuEndTime.store(0, std::memory_order_relaxed);
  		_device = [commandQueue.device retain];
 -		_commandQueue = [_commandQueue retain];
 +		_commandQueue = [commandQueue retain];
  	}
  	return self;
  }
-@@ -78,6 +282,13 @@ struct MTLCommandBufferHandlerWrapper {
+@@ -78,6 +290,13 @@ struct MTLCommandBufferHandlerWrapper {
  	[super dealloc];
  }
  
@@ -825,7 +864,7 @@ index 7dedaa0..5eca991 100644
  - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor: (MTLComputePassDescriptor*)computePassDescriptor
  {
  	auto encoder = _commandBuffer->computeCommandEncoder(computePassDescriptor.asIndiumDescriptor);
-@@ -107,11 +318,91 @@ struct MTLCommandBufferHandlerWrapper {
+@@ -107,11 +326,106 @@ struct MTLCommandBufferHandlerWrapper {
  
  - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor: (MTLRenderPassDescriptor*)renderPassDescriptor
  {
@@ -912,13 +951,28 @@ index 7dedaa0..5eca991 100644
 +	return result;
 +}
 +
++- (MTLCommandBufferStatus)status
++{
++	return (MTLCommandBufferStatus) _status.load(std::memory_order_acquire);
++}
++
++- (CFTimeInterval)GPUStartTime
++{
++	return _gpuStartTime.load(std::memory_order_acquire);
++}
++
++- (CFTimeInterval)GPUEndTime
++{
++	return _gpuEndTime.load(std::memory_order_acquire);
++}
++
 +- (void)addScheduledHandler:(MTLCommandBufferHandler)block
 +{
 +    _commandBuffer->addScheduledHandler(MTLCommandBufferHandlerWrapper(block, self));
  }
  
  - (void)addCompletedHandler: (MTLCommandBufferHandler)block
-@@ -121,17 +412,107 @@ struct MTLCommandBufferHandlerWrapper {
+@@ -121,17 +435,115 @@ struct MTLCommandBufferHandlerWrapper {
  
  - (void)waitUntilCompleted
  {
@@ -1019,6 +1073,14 @@ index 7dedaa0..5eca991 100644
 +	if (MTLDebugEnabled()) {
 +		MTLDebugFlushPass(self);
 +	}
++	_gpuStartTime.store(MTLTraceNow(), std::memory_order_release);
++	_status.store(MTLCommandBufferStatusCommitted, std::memory_order_release);
++	// The wrapper keeps this buffer alive until the handler has run, like every other completed handler here.
++	_commandBuffer->addCompletedHandler(MTLCommandBufferHandlerWrapper(^(id<MTLCommandBuffer> finished) {
++		MTLCommandBufferInternal* buffer = (MTLCommandBufferInternal*) finished;
++		buffer->_gpuEndTime.store(MTLTraceNow(), std::memory_order_release);
++		buffer->_status.store(MTLCommandBufferStatusCompleted, std::memory_order_release);
++	}, self));
  	_commandBuffer->commit();
 +	if (MTLTimingEnabled()) {
 +		MTLTraceTiming("commitCall", MTLTraceNow() - commitStart);

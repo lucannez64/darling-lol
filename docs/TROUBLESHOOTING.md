@@ -102,6 +102,45 @@ bash scripts/install-native.sh --toolbox
 
 If `toolbox` keeps pulling an old image, create the container from an explicit registry tag (for example `toolbox create --image registry.fedoraproject.org/fedora-toolbox:44 darling-lol`). The same requirements apply when you enter the container manually later (Distrobox included): run `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh` from the checkout inside the container.
 
+## Darling does not start: `Failed to bind socket: Read-only file system`
+
+The installer or launcher prints a chain of errors that look unrelated:
+
+```
+Darling system root certificates were not installed: guest keychain build failed (exit 1)
+terminate called after throwing an instance of 'std::system_error'
+  what():  Failed to bind socket: Read-only file system
+*** 1:1: dserver_rpc_explicit_checkin: BAD SEND STATUS: -2 ***
+Failed to checkin with darlingserver
+Cannot open mnt namespace file: No such file or directory
+```
+
+They all follow from the first server failure. `darlingserver` mounts an overlay
+on the prefix (upper layer: the prefix, work directory: `<prefix>.workdir`, for
+example `~/.darling.workdir`) and only then creates `<prefix>/.darlingserver.sock`.
+When the kernel cannot create the work directory it does not fail the mount; it
+mounts the overlay **read-only** and only logs a warning, so the socket `bind()`
+fails with `EROFS`. The certificate and `mnt namespace` messages are
+consequences of the dead server, and retrying never helps.
+
+A work directory left by an earlier run under a different user mapping (the host,
+another container, `sudo`) is the usual cause. With no Darling running
+(`pgrep -a darlingserver` prints nothing), move it aside and start again:
+
+```sh
+mv ~/.darling.workdir ~/.darling.workdir.bak   # add sudo if this is denied
+```
+
+Only the work directory next to the prefix is scratch space; do not touch the
+prefix itself. Delete the `.bak` once Darling starts. The kernel names the reason
+in its log (`journalctl -k -b | grep -i overlay` on the host).
+
+If there is no `<prefix>.workdir`, check the filesystem that holds the prefix: it
+must be writable, support extended attributes and report `d_type`. Check that
+its filesystem version and configuration support an OverlayFS upper layer;
+otherwise set `DPREFIX` to a directory on a supported filesystem.
+`scripts/installer.sh` recognises this error, stops retrying and prints these steps.
+
 ## The Darling Launcher shortcut does nothing
 
 The menu/desktop shortcut runs `scripts/launch-shortcut.sh` (or `toolbox run -c <container> .../scripts/launch-shortcut.sh` in Toolbox mode). It checks for the Riot Client and, when it is missing, sends a desktop notification and runs `scripts/installer.sh` with the region recorded in `build/config.json`. Both outcomes write to `build/desktop-launch.log`, so read that file when a launch appears to do nothing:
@@ -571,6 +610,23 @@ With client optimizations enabled and close-during-game enabled, the close
 helper remains the more aggressive option when in-client chat during the match
 is not needed.
 
+The close helper ends only the `LeagueClientUx` UI; the Riot Client window stays
+mapped, and its Chromium keeps painting (and playing the home-screen video)
+behind the game. Under GNOME Wayland, Xwayland reports every window as
+unobscured whatever covers it, so an unmapped window is the only occlusion
+signal an X11 client gets; AppKit turns it into an occlusion change and
+Chromium stops painting. To hide the Riot Client window as well while a match
+runs:
+
+```sh
+RCLOL_CLIENT_IN_GAME_TRICKS=1 RCLOL_HIDE_RIOT_CLIENT_IN_GAME=1 ./scripts/run.sh
+```
+
+This starts the hide helper with `--riot-client-only` next to the close helper.
+The window is shown again when the match ends. In a 5-minute uncapped match on
+an Alienware m16 R2 (Core Ultra 9 185H, RTX 4070 Laptop) the whole Riot Client
+tree then used about 12% of one core.
+
 Diagnose the match detector without changing any window:
 
 ```sh
@@ -889,7 +945,26 @@ On Hyprland, also check that direct scanout is off (`hyprctl getoption render:di
 On the NVIDIA proprietary driver, check the submit worker's kernel time: a thread of the game process spending most of its time in the kernel (`/proc/<pid>/task/<tid>/stat` system time, or `perf trace -s -p <pid>`) points at driver calls. Each `vkQueueSubmit2` and each CPU-side `vkSignalSemaphore` is an RM control ioctl (command `0xc020462a`) that queues on a driver-wide lock. Before 2026-10-18 every command buffer signalled the event loop's wake-up semaphore, ~25 times per frame; with lazy wake-ups (default) and a 5 ms batch window (`/tmp/metal-submit-batch-us` = `5000`, `/tmp/metal-submit-batch-max` = `64`) an RTX 4090 ran at 206–552 FPS against 91–147 FPS with `/tmp/metal-no-lazy-wakeup`, in alternating 20 s phases of one match (the later phases with wake-ups on were capped at 240 FPS) (see [setup](SETUP.md#metal-and-indium-overlays)).
 
 The NVIDIA performance figures above were reported on an earlier runtime base;
-they have not been remeasured after integration with current `main`. On `bcb3245` an RTX 5060 Laptop reported ~200–215 FPS in Practice Tool ([#53](https://github.com/lucannez64/darling-lol/issues/53)).
+they have not been remeasured after integration with current `main`. On `bcb3245` an RTX 5060 Laptop reported ~200–215 FPS in Practice Tool ([#53](https://github.com/lucannez64/darling-lol/issues/53)). On a hybrid laptop, check the GPU mode first: PRIME render offload measured at less than half the frame rate of the MUX's discrete-only mode ([hybrid graphics](#prime-render-offload-halves-the-frame-rate)).
+
+## darlingserver message loop and idle-wait switches
+
+darlingserver runs its message loop on io_uring when the build target's kernel
+headers provide what it uses (checked by CMake; no liburing needed) and the
+running kernel allows it. One thread receives every call, runs the microthreads
+and sends every reply, with one `io_uring_enter` per pass; replies go out as a
+linked chain, and a full socket sends the rest of the chain again in order. The
+server prints `darlingserver: using the io_uring message loop` at start, or why
+it uses the epoll loop instead.
+
+| Variable | Effect |
+|---|---|
+| `DSERVER_IO_URING=0` | use the previous epoll loop and worker thread |
+| `DSERVER_PCORE_AFFINITY=1` | keep the server's threads on the performance cores of a hybrid Intel CPU |
+| `DSERVER_CALL_STATS=<file>` | every 5 s, append request counts per call, per thread, and (`kinds:` blocks) per message id, wait type, timer distance and busiest object; costs a few percent of one core and a short stall of the loop per flush, so not for normal play |
+
+AppKit retains the port wait already shipped on main (`RCLOL_APPKIT_PORT_WAIT=0`
+restores polling). Its latency and wake-up probes are described in [testing](TESTING.md).
 
 ## NVIDIA
 
@@ -987,6 +1062,43 @@ __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json sh s
 ```
 
 The guest file `/tmp/metal-gpu` (a device index or part of its name, for example `nvidia`) moves only the Vulkan side. Use it for diagnosis: on its own it splits the two sides across GPUs, and frames cannot be presented.
+
+### PRIME render offload halves the frame rate
+
+PRIME render offload works, but it costs frames: the NVIDIA GPU renders, the integrated GPU drives the panel, and every
+frame is handed across before it can be shown. On a laptop with a MUX switch, setting the firmware's GPU mode to
+discrete only (NVIDIA drives the panel) avoids that hand-off.
+
+Measured on 2026-11-16 on an Alienware m16 R2 (Core Ultra 9 185H, RTX 4070 Laptop, driver 620.70.06, openSUSE
+Tumbleweed, kernel 7.3.3, GNOME on Wayland with Xwayland 24.1.14, 1920×1080 at 320 Hz). Practice Tool, the same jungle
+route, borderless, frame cap and VSync off. One match per row, so treat the numbers as indicative:
+
+| | hybrid, PRIME offload | discrete only (MUX) |
+|---|---|---|
+| average FPS (whole match) | 122.7 | 284.5 |
+| frame time p50 / p99 | 7.1 / 16.6 ms | 3.1 / 6.2 ms |
+| `eglSwapBuffers` in the present block, p50 | 2.31 ms | 0.05 ms |
+| whole present block (composite + swap), p50 | 3.46 ms | 0.53 ms |
+| game main thread | 49% running; waiting 25% in `drm_syncobj_array_wait_timeout`, 17% in `os_acquire_rwlock_write` (NVIDIA kernel module) | 84% running |
+| NVIDIA GPU busy | 34% | 35% |
+
+The present block runs on the game's main thread, and in every captured frame the game started its next frame only
+after the swap had returned, so the swap's wait came straight off the frame rate. With offload the GPU is mostly idle and
+no CPU thread is saturated; in discrete-only mode the main thread becomes the limit. Fullscreen and borderless gave the
+same result with offload (122.3 and 122.7 FPS). A native EGL program with the same per-frame calls and a 1080p composite
+swapped in 0.02 ms under PRIME offload on the same machine, so the cost appears only with Darling's present path; why
+is not known yet. The RTX 5060 Laptop result in [#53](https://github.com/lucannez64/darling-lol/issues/53) was also
+taken with the MUX set to discrete.
+
+Measured with Indium's existing diagnostics: `/tmp/metal-debug-waits`, `/tmp/metal-frame-interval-capture` (worker and
+present timestamps in `/tmp/metal-frame-intervals.csv` and `/tmp/metal-present-intervals*.csv`) and the per-1024-frame
+lines of `/tmp/indium-submit-stats.log`, plus the host's `/proc/<pid>/task/<tid>/wchan` sampled about 500 times a second.
+
+In discrete-only mode the NVIDIA GPU is the default, so launch without PRIME offload. `switcherooctl` numbers the GPUs
+by default first: with the NVIDIA GPU as default it becomes device 0, and `switcherooctl launch -g 1` then selects the
+integrated GPU, including `VK_LOADER_DRIVERS_SELECT=*intel*`, while `__EGL_VENDOR_LIBRARY_FILENAMES` still forces
+NVIDIA's EGL, which splits Vulkan and OpenGL across GPUs. Pick the device by its `Discrete: yes` line rather than by
+index, or check the result with `DARLING_METAL_DEVICE_LOG=1` as described below.
 
 ### Check which GPU rendered
 

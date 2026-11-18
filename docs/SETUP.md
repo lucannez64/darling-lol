@@ -98,6 +98,33 @@ the basename of `argv[0]`, so that is the window class of the client the entry
 starts, while `Riot Client` is only its bundle display name.
 Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
 
+### Named windows in the GNOME overview (opt-in)
+
+GNOME names and icons a window from the desktop entry whose `StartupWMClass`
+matches the window's `WM_CLASS`. Only the Riot Client startup window
+(`RiotClientServices`) matches the launcher, so the League client
+(`LeagueClientUx`) and the main Riot Client window (`Riot Client`) show up under
+their raw class names. `--window-entries` (or `DARLING_LOL_WINDOW_ENTRIES=1`)
+adds two hidden entries (`NoDisplay=true`, `darling-league-client.desktop` and
+`darling-riot-client.desktop`) that name those windows `League of Legends` and
+`Riot Client` and give them the launcher icon, and adds `LoL`, `League` and
+`Riot` as search keywords of the launcher:
+
+```sh
+scripts/create-desktop-entry.sh --window-entries
+./scripts/install-native.sh --window-entries   # same option at install time
+```
+
+The option is off by default because those fields carry third-party product
+names while the shipped launcher stays neutral (see `docs/COMPLIANCE.md`; the
+Nix package and its checks are unchanged). Running the helper again without the
+option removes the two entries it created. A file with one of those names that the
+project did not create is never overwritten or removed; the helper reports it on
+stderr and skips that entry. The
+icon is the project's own `darling-launcher`; the helper never extracts one from
+the game. Reopen the client after creating the entries: the shell matches a
+window to its entry when the window is created.
+
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
 to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`
 opts in to Hyprland-only recovery of a default-prefix Riot session with no
@@ -236,7 +263,7 @@ The hand-off experiments (`metal-present-dispatch-wait`, `metal-deferred-blit` a
 | `/tmp/metal-submit-batch-max` | command buffers per batch (1–256, default 16), re-read like the window; `64` lets one batch hold a whole frame |
 | `/tmp/metal-debug-waits` | diagnostic: counts how often and how long threads block at the hand-off waits and in `nextDrawable`, every 5 s in `/tmp/metal-trace.log`; the first check writes a `waits enabled` line |
 
-Create these files from inside the guest, for example `darling shell touch /tmp/metal-debug-waits`, or while Darling is shut down. The guest `/tmp` is `~/.darling/private/tmp` seen through Darling's overlay mount. A file created on the host in that directory while Darling runs may stay invisible to guest processes that already looked for it. The same applies to removing a file. The older `/tmp/metal-no-present-dispatch-wait`, `/tmp/metal-no-deferred-blit` and `/tmp/metal-no-skip-cpu-devices` files are ignored.
+Create these files from inside the guest, for example `darling shell touch /tmp/metal-debug-waits`, after Darling has started and before the game starts. Darling empties the guest `/tmp` when it starts, so a file created while Darling is shut down is gone by the time the game looks for it (seen on 2026-11-16: the flags created before `sh scripts/run.sh` produced no diagnostics, and the directory was empty after the next start). The guest `/tmp` is `~/.darling/private/tmp` seen through Darling's overlay mount. A file created on the host in that directory while Darling runs may stay invisible to guest processes that already looked for it; created after the Riot Client had started and before the game, host-side flag files did take effect in the same test. The same applies to removing a file. The older `/tmp/metal-no-present-dispatch-wait`, `/tmp/metal-no-deferred-blit` and `/tmp/metal-no-skip-cpu-devices` files are ignored.
 
 ### Game-process switches
 

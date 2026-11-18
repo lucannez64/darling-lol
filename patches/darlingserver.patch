@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 4920879..008ff0f 100644
+index 4920879..d2c4a41 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1,3 +1,4 @@
@@ -7,7 +7,45 @@ index 4920879..008ff0f 100644
  project(darlingserver)
  
  cmake_minimum_required(VERSION 3.13)
-@@ -105,6 +106,12 @@ add_custom_target(generate_dserver_rpc_wrappers
+@@ -68,6 +69,37 @@ else()
+ 	)
+ endif()
+ 
++# darling-lol: run the message loop on io_uring when the target's kernel headers provide what it uses. The server
++# talks to the kernel directly (no liburing), and at runtime falls back to the epoll loop when the running kernel
++# does not allow io_uring or DSERVER_IO_URING=0 is set.
++option(DSERVER_IO_URING "Use io_uring for darlingserver's message loop when the target supports it" ON)
++include(CheckCSourceCompiles)
++check_c_source_compiles("
++#include <linux/io_uring.h>
++#include <sys/syscall.h>
++int main(void) {
++	struct io_uring_params params;
++	struct io_uring_sqe sqe;
++	int ops[] = { IORING_OP_RECVMSG, IORING_OP_SENDMSG, IORING_OP_POLL_ADD, IORING_OP_TIMEOUT };
++	(void)params; (void)ops;
++	sqe.msg_flags = 0;
++	sqe.poll32_events = 0;
++	return IORING_FEAT_FAST_POLL | IORING_FEAT_NODROP | IORING_FEAT_SINGLE_MMAP | IORING_SETUP_CQSIZE | IOSQE_IO_LINK
++		| IORING_ENTER_GETEVENTS | (int)IORING_OFF_SQES;
++}" DSERVER_TARGET_HAS_IO_URING)
++
++if (DSERVER_IO_URING AND DSERVER_TARGET_HAS_IO_URING)
++	message(STATUS "darlingserver: io_uring message loop enabled")
++	add_compile_definitions(
++		DSERVER_IO_URING=1
++	)
++else()
++	message(STATUS "darlingserver: io_uring message loop disabled (option ${DSERVER_IO_URING}, target support ${DSERVER_TARGET_HAS_IO_URING})")
++	add_compile_definitions(
++		DSERVER_IO_URING=0
++	)
++endif()
++
+ add_subdirectory(duct-tape)
+ 
+ set(DARLINGSERVER_INIT_PROCESS "/sbin/launchd" CACHE STRING "The init process darlingserver should execute (default is \"/sbin/launchd\")")
+@@ -105,6 +137,12 @@ add_custom_target(generate_dserver_rpc_wrappers
  		${CMAKE_CURRENT_BINARY_DIR}/src/rpc.c
  )
  
@@ -20,16 +58,17 @@ index 4920879..008ff0f 100644
  add_executable(darlingserver
  	src/darlingserver.cpp
  	src/server.cpp
-@@ -118,6 +125,8 @@ add_executable(darlingserver
+@@ -118,6 +156,9 @@ add_executable(darlingserver
  	src/kqchan.cpp
  	src/async-writer.cpp
  	src/stack-pool.cpp
 +	src/cs_verify.cpp
 +	src/trustcache.cpp
++	src/uring.cpp
  )
  
  add_dependencies(darlingserver
-@@ -127,12 +136,22 @@ add_dependencies(darlingserver
+@@ -127,12 +168,22 @@ add_dependencies(darlingserver
  
  target_link_libraries(darlingserver PRIVATE
  	darlingserver_duct_tape
@@ -1690,7 +1729,7 @@ index d46bdb4..9a58727 100644
  		};
  	};
 diff --git a/internal-include/darlingserver/message.hpp b/internal-include/darlingserver/message.hpp
-index 708f3f3..fd46ab8 100644
+index 708f3f3..eba72a1 100644
 --- a/internal-include/darlingserver/message.hpp
 +++ b/internal-include/darlingserver/message.hpp
 @@ -28,6 +28,7 @@
@@ -1713,7 +1752,7 @@ index 708f3f3..fd46ab8 100644
  		/**
  		 * Default-initializes a Message.
  		 *
-@@ -161,13 +167,30 @@ namespace DarlingServer {
+@@ -161,13 +167,34 @@ namespace DarlingServer {
  	class MessageQueue {
  	private:
  		std::deque<Message> _messages;
@@ -1740,6 +1779,10 @@ index 708f3f3..fd46ab8 100644
 +		 * the receiving loop retries once the socket is writable again.
 +		 */
 +		void pushAndSend(Message&& message, int socket);
++
++		/* darling-lol: put messages that could not be sent back at the head of the queue, in their original
++		 * order, so that later messages cannot overtake them (used by the io_uring loop). */
++		void requeueFront(std::deque<Message>&& messages);
 +
  		std::optional<Message> pop();
  
@@ -1834,11 +1877,64 @@ index c97be30..19b1f62 100644
  		void freePages(uintptr_t address, size_t pageCount);
  		uintptr_t mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite);
 diff --git a/internal-include/darlingserver/server.hpp b/internal-include/darlingserver/server.hpp
-index b960f17..5f0e621 100644
+index b960f17..16f651a 100644
 --- a/internal-include/darlingserver/server.hpp
 +++ b/internal-include/darlingserver/server.hpp
-@@ -46,6 +46,9 @@ namespace DarlingServer {
- 		WorkQueue<std::shared_ptr<Thread>> _workQueue;
+@@ -30,6 +30,11 @@
+ #include <darlingserver/registry.hpp>
+ #include <darlingserver/utility.hpp>
+ #include <darlingserver/monitor.hpp>
++#include <darlingserver/uring.hpp>
++#include <deque>
++#include <memory>
++#include <optional>
++#include <array>
+ 
+ namespace DarlingServer {
+ 	// NOTE: server instances MUST be created with `new` rather than as a normal local/stack variable
+@@ -43,9 +48,49 @@ namespace DarlingServer {
+ 		int _epollFD;
+ 		MessageQueue _inbox;
+ 		MessageQueue _outbox;
+-		WorkQueue<std::shared_ptr<Thread>> _workQueue;
++		/* darling-lol: the epoll loop hands calls to a worker thread through this queue. The io_uring loop runs
++		 * them itself instead (see _ring), so it is only created when the server uses the epoll loop. */
++		std::unique_ptr<WorkQueue<std::shared_ptr<Thread>>> _workQueue;
++
++		/* darling-lol: single-threaded io_uring loop, in the style of TigerBeetle. One thread receives every
++		 * call, runs the microthreads, and sends every reply; each pass submits its sends and waits for the next
++		 * receives in one io_uring_enter. Null when the server uses the epoll loop. */
++		std::unique_ptr<Ring> _ring;
++		std::thread::id _loopThread;
++		std::mutex _runQueueLock;
++		std::deque<std::shared_ptr<Thread>> _runQueue;
++		static constexpr size_t ringReceiveCount = 32;
++		static constexpr size_t ringMaxSendChain = 64;
++		std::array<std::optional<Message>, ringReceiveCount> _ringReceives;
++		struct RingSend {
++			Message message;
++			struct msghdr header;
++			int result = 0;
++			RingSend(Message&& msg): message(std::move(msg)) {};
++		};
++		std::deque<RingSend> _ringSends;
++		size_t _ringSendsPending = 0;
++		bool _ringSendBlocked = false;
++#if DSERVER_IO_URING
++		struct __kernel_timespec _ringSendRetryDelay = {0, 1000000};
++#endif
++		bool _ringEpollArmed = false;
++		bool _ringReceiving = false;
++
++		void _ringArmReceive(size_t index);
++		void _ringArmEpoll();
++		void _ringFlushSends();
++		void _ringFinishSends();
++		void _ringComplete(const Ring::Completion& completion);
++		void _ringPass(const bool* completed = nullptr);
++		bool _runQueued();
++
++		void _handleEpollEvents(struct epoll_event* events, int count, bool& wakeupArmed, bool& wakeupFired);
  		bool _canRead = false;
  		bool _canWrite = true;
 +		/* darling-lol: producers send their own replies (see sendMessage) unless
@@ -1847,6 +1943,20 @@ index b960f17..5f0e621 100644
  		int _wakeupFD;
  		int _timerFD;
  		uint64_t _currentTimerDeadline = 0;
+@@ -81,6 +126,13 @@ namespace DarlingServer {
+ 		void removeMonitor(std::shared_ptr<Monitor> monitor);
+ 
+ 		void sendMessage(Message&& message);
++
++		/** True when microthreads run on the loop thread (the io_uring loop) and the caller is that thread. */
++		bool runsWorkOnThisThread() const;
++
++		/** One pass of the io_uring loop: run queued microthreads, send replies, wait for and handle events.
++		 *  Thread::kernelSync uses it while the loop has not started yet. */
++		void runOnePass(const bool* completed = nullptr);
+ 	};
+ };
+ 
 diff --git a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
 index 57117f2..fd55fee 100644
 --- a/internal-include/darlingserver/thread.hpp
@@ -1962,10 +2072,10 @@ index e35221c..cb399e1 100755
  
  ALLOWED_PRIVATE_TYPES = [
 diff --git a/src/call.cpp b/src/call.cpp
-index cc10f1d..0ff928a 100644
+index cc10f1d..447ae53 100644
 --- a/src/call.cpp
 +++ b/src/call.cpp
-@@ -18,27 +18,102 @@
+@@ -18,27 +18,256 @@
   */
  
  #define _GNU_SOURCE 1
@@ -2058,6 +2168,160 @@ index cc10f1d..0ff928a 100644
 +	total = 0;
 +};
 +
++// darling-lol: with DSERVER_CALL_STATS set, also count what each request is about and append it every 5 s as a
++// `kinds:` block: mach_msg by direction and message id (read from the caller's 24-byte message header), waits by
++// whether they time out, and the busiest objects per process (a port, semaphore or timer name, or the address of a
++// mutex, condvar or rwlock). Tab-separated lines: `k count kind`, `tk tid count kind`, `o count object`.
++template<typename T>
++static const T* callStatsBody(const dserver_rpc_callhdr_t* header, size_t size) {
++	return size >= sizeof(T) ? reinterpret_cast<const T*>(header) : nullptr;
++}
++
++// How far away a deadline or timeout is, in coarse buckets ("past" means it was already due).
++static const char* callStatsDelay(int64_t ns) {
++	if (ns <= 0) return "past";
++	if (ns < 100000) return "<0.1ms";
++	if (ns < 1000000) return "0.1-1ms";
++	if (ns < 2000000) return "1-2ms";
++	if (ns < 5000000) return "2-5ms";
++	if (ns < 17000000) return "5-17ms";
++	if (ns < 100000000) return "17-100ms";
++	if (ns < 1000000000) return "0.1-1s";
++	return ">1s";
++}
++
++static void callKindRecord(const dserver_rpc_callhdr_t* header, size_t size, const std::shared_ptr<DarlingServer::Process>& process) {
++	static const char* path = getenv("DSERVER_CALL_STATS");
++	if (!path || !path[0]) {
++		return;
++	}
++	static std::map<std::string, unsigned long> byKind;
++	static std::map<std::pair<int, std::string>, unsigned long> byThreadKind;
++	static std::map<std::string, unsigned long> byObject;
++	static auto last = std::chrono::steady_clock::now();
++
++	const char* name = dserver_callnum_to_string(static_cast<dserver_callnum_t>(header->number));
++	if (strncmp(name, "dserver_callnum_", 16) == 0) {
++		name += 16;
++	}
++	std::string kind = name;
++	char object[96] = "";
++	int pid = process ? static_cast<int>(process->nsid()) : header->pid;
++	auto port = [&](const char* label, unsigned value) {
++		snprintf(object, sizeof(object), "%d %s %s=%u", pid, name, label, value);
++	};
++	auto address = [&](const char* label, uint64_t value) {
++		snprintf(object, sizeof(object), "%d %s %s=0x%llx", pid, name, label, static_cast<unsigned long long>(value));
++	};
++
++	switch (header->number) {
++		case dserver_callnum_mach_msg_overwrite:
++			if (auto call = callStatsBody<dserver_rpc_call_mach_msg_overwrite_t>(header, size)) {
++				const auto& body = call->body;
++				if (body.option & 0x1) { // MACH_SEND_MSG
++					struct { uint32_t bits, size, remote, local, voucher; int32_t id; } msg;
++					if (process && process->readMemory(body.msg, &msg, sizeof(msg))) {
++						kind += " send id=" + std::to_string(msg.id);
++						if (msg.bits & 0x80000000u) { // MACH_MSGH_BITS_COMPLEX
++							kind += " complex";
++						}
++						port("remote", msg.remote);
++					} else {
++						kind += " send id=?";
++					}
++				}
++				if (body.option & 0x2) { // MACH_RCV_MSG
++					if (!(body.option & 0x100)) { // MACH_RCV_TIMEOUT
++						kind += " rcv";
++					} else if (!body.timeout) {
++						kind += " rcv-poll";
++					} else {
++						kind += std::string(" rcv-timed ") + callStatsDelay(int64_t(body.timeout) * 1000000); // timeout is in ms
++					}
++					if (!object[0]) {
++						port("rcv", body.rcv_name);
++					}
++				}
++			}
++			break;
++#define DSERVER_KIND_NAME(call, field, label) \
++		case dserver_callnum_##call: \
++			if (auto c = callStatsBody<dserver_rpc_call_##call##_t>(header, size)) port(label, c->body.field); \
++			break;
++#define DSERVER_KIND_ADDRESS(call, field) \
++		case dserver_callnum_##call: \
++			if (auto c = callStatsBody<dserver_rpc_call_##call##_t>(header, size)) address(#field, c->body.field); \
++			break;
++		DSERVER_KIND_NAME(semaphore_signal, signal_name, "sem")
++		DSERVER_KIND_NAME(semaphore_signal_all, signal_name, "sem")
++		DSERVER_KIND_NAME(semaphore_wait, wait_name, "sem")
++		DSERVER_KIND_NAME(semaphore_wait_signal, wait_name, "sem")
++		DSERVER_KIND_NAME(semaphore_timedwait, wait_name, "sem")
++		DSERVER_KIND_NAME(semaphore_timedwait_signal, wait_name, "sem")
++		case dserver_callnum_mk_timer_arm:
++			// The deadline is in mach_absolute_time units, which in Darling are CLOCK_MONOTONIC nanoseconds
++			// (duct-tape/src/timer.c), so the distance to it shows whether timers are armed already due.
++			if (auto call = callStatsBody<dserver_rpc_call_mk_timer_arm_t>(header, size)) {
++				struct timespec now;
++				clock_gettime(CLOCK_MONOTONIC, &now);
++				int64_t nowNs = int64_t(now.tv_sec) * 1000000000 + now.tv_nsec;
++				kind += std::string(" due ") + callStatsDelay(int64_t(call->body.expire_time) - nowNs);
++				port("timer", call->body.name);
++			}
++			break;
++		DSERVER_KIND_NAME(mk_timer_cancel, name, "timer")
++		DSERVER_KIND_NAME(mk_timer_destroy, name, "timer")
++		DSERVER_KIND_ADDRESS(psynch_cvbroad, cv)
++		DSERVER_KIND_ADDRESS(psynch_cvclrprepost, cv)
++		DSERVER_KIND_ADDRESS(psynch_cvsignal, cv)
++		DSERVER_KIND_ADDRESS(psynch_mutexdrop, mutex)
++		DSERVER_KIND_ADDRESS(psynch_mutexwait, mutex)
++		DSERVER_KIND_ADDRESS(psynch_rw_rdlock, rwlock)
++		DSERVER_KIND_ADDRESS(psynch_rw_unlock, rwlock)
++		DSERVER_KIND_ADDRESS(psynch_rw_wrlock, rwlock)
++#undef DSERVER_KIND_NAME
++#undef DSERVER_KIND_ADDRESS
++		case dserver_callnum_psynch_cvwait:
++			if (auto call = callStatsBody<dserver_rpc_call_psynch_cvwait_t>(header, size)) {
++				kind += (call->body.sec || call->body.nsec) ? " timed" : " untimed";
++				address("cv", call->body.cv);
++			}
++			break;
++		default:
++			break;
++	}
++
++	++byKind[kind];
++	++byThreadKind[{header->tid, kind}];
++	if (object[0]) {
++		++byObject[object];
++	}
++
++	auto now = std::chrono::steady_clock::now();
++	if (now - last < std::chrono::seconds(5)) {
++		return;
++	}
++	double seconds = std::chrono::duration<double>(now - last).count();
++	last = now;
++
++	if (FILE* file = fopen(path, "a")) {
++		fprintf(file, "kinds: in %.1fs\n", seconds);
++		auto top = [&](auto& counts, size_t limit, auto print) {
++			std::vector<std::pair<unsigned long, typename std::decay_t<decltype(counts)>::key_type>> sorted;
++			for (auto& [key, count]: counts) sorted.push_back({count, key});
++			std::sort(sorted.rbegin(), sorted.rend());
++			for (size_t i = 0; i < sorted.size() && i < limit; ++i) print(sorted[i].first, sorted[i].second);
++		};
++		top(byKind, 40, [&](unsigned long n, const std::string& k) { fprintf(file, "  k\t%lu\t%s\n", n, k.c_str()); });
++		top(byThreadKind, 40, [&](unsigned long n, const std::pair<int, std::string>& k) { fprintf(file, "  tk\t%d\t%lu\t%s\n", k.first, n, k.second.c_str()); });
++		top(byObject, 24, [&](unsigned long n, const std::string& k) { fprintf(file, "  o\t%lu\t%s\n", n, k.c_str()); });
++		fclose(file);
++	}
++	byKind.clear();
++	byThreadKind.clear();
++	byObject.clear();
++}
++
  std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Message&& requestMessage) {
  	if (requestMessage.data().size() < sizeof(dserver_rpc_callhdr_t)) {
  		throw std::invalid_argument("Message buffer was too small for call header");
@@ -2068,7 +2332,7 @@ index cc10f1d..0ff928a 100644
  	std::shared_ptr<Call> result = nullptr;
  	std::shared_ptr<Process> process = nullptr;
  	std::shared_ptr<Thread> thread = nullptr;
-@@ -123,9 +198,43 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
+@@ -123,9 +352,45 @@ std::shared_ptr<DarlingServer::Call> DarlingServer::Call::callFromMessage(Messag
  		}
  	}
  
@@ -2080,6 +2344,8 @@ index cc10f1d..0ff928a 100644
 +		auto tidString = (thread) ? (std::to_string(thread->id()) + " (" + std::to_string(thread->nsid()) + ")") : (std::to_string(header->tid) + " (-1)");
 +		callLog.debug() << "Received call #" << header->number << " (" << dserver_callnum_to_string(header->number) << ") from PID " << pidString << ", TID " << tidString << callLog.endLog;
 +	}
++
++	callKindRecord(header, requestMessage.data().size(), process);
 +
 +	/* darling-lol M634: rate-limited trace of EVERY call through dserver, to
 +	 * see which RPCs the launcher's blocked service threads are waiting on
@@ -2115,7 +2381,7 @@ index cc10f1d..0ff928a 100644
  
  	if (header->number == dserver_callnum_s2c) {
  		// this is an S2C reply
-@@ -311,6 +420,7 @@ void DarlingServer::Call::Checkin::processCall() {
+@@ -311,6 +576,7 @@ void DarlingServer::Call::Checkin::processCall() {
  
  void DarlingServer::Call::Checkout::processCall() {
  	int code = 0;
@@ -2123,7 +2389,7 @@ index cc10f1d..0ff928a 100644
  
  	if (auto thread = _thread.lock()) {
  		if (auto process = thread->process()) {
-@@ -370,6 +480,7 @@ void DarlingServer::Call::Checkout::processCall() {
+@@ -370,6 +636,7 @@ void DarlingServer::Call::Checkout::processCall() {
  				}
  			} else {
  				thread->notifyDead();
@@ -2131,7 +2397,7 @@ index cc10f1d..0ff928a 100644
  
  				// if this was the last thread in the process, it'll be automatically unregistered
  			}
-@@ -385,6 +496,22 @@ void DarlingServer::Call::Checkout::processCall() {
+@@ -385,6 +652,22 @@ void DarlingServer::Call::Checkout::processCall() {
  	_thread.reset();
  
  	_sendReply(code);
@@ -2154,7 +2420,7 @@ index cc10f1d..0ff928a 100644
  };
  
  void DarlingServer::Call::VchrootPath::processCall() {
-@@ -521,6 +648,8 @@ void DarlingServer::Call::Uidgid::processCall() {
+@@ -521,6 +804,8 @@ void DarlingServer::Call::Uidgid::processCall() {
  			// HACK
  			// we shouldn't need to access _dtapeTask; Process should provide a method for this (but it doesn't yet because i'm not sure how to make that API feel at-home in C++)
  			dtape_task_uidgid(process->_dtapeTask, _body.new_uid, _body.new_gid, &uid, &gid);
@@ -2163,7 +2429,7 @@ index cc10f1d..0ff928a 100644
  		} else {
  			code = -ESRCH;
  		}
-@@ -694,6 +823,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
+@@ -694,6 +979,60 @@ void DarlingServer::Call::KqchanProcOpen::processCall() {
  	_sendReply(code, socket);
  };
  
@@ -2224,7 +2490,7 @@ index cc10f1d..0ff928a 100644
  void DarlingServer::Call::ForkWaitForChild::processCall() {
  	int code = 0;
  
-@@ -714,6 +897,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
+@@ -714,6 +1053,24 @@ void DarlingServer::Call::Sigprocess::processCall() {
  	int code = 0;
  	int newBSDSignal = 0;
  
@@ -2249,7 +2515,7 @@ index cc10f1d..0ff928a 100644
  	if (auto thread = _thread.lock()) {
  		try {
  			thread->processSignal(_body.bsd_signal_number, _body.linux_signal_number, _body.code, _body.signal_address, _body.thread_state, _body.float_state);
-@@ -1040,6 +1241,236 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
+@@ -1040,6 +1397,236 @@ void DarlingServer::Call::GetExecutablePath::processCall() {
  	_sendReply(code, fullLength);
  }
  
@@ -2860,7 +3126,7 @@ index 7b8000f..dbaf832 100644
  	}
  
 diff --git a/src/message.cpp b/src/message.cpp
-index 414c1d6..a7f5a94 100644
+index 414c1d6..224d49e 100644
 --- a/src/message.cpp
 +++ b/src/message.cpp
 @@ -24,6 +24,25 @@
@@ -2931,7 +3197,22 @@ index 414c1d6..a7f5a94 100644
  	memcpy(CMSG_DATA(credHeader), &creds, sizeof(struct ucred));
  };
  
-@@ -496,13 +509,52 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
+@@ -485,6 +498,14 @@ void DarlingServer::MessageQueue::push(Message&& message) {
+ 	}
+ };
+ 
++void DarlingServer::MessageQueue::requeueFront(std::deque<Message>&& messages) {
++	std::scoped_lock lock(_lock);
++	while (!messages.empty()) {
++		_messages.push_front(std::move(messages.back()));
++		messages.pop_back();
++	}
++};
++
+ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
+ 	std::scoped_lock lock(_lock);
+ 	if (_messages.size() > 0) {
+@@ -496,13 +517,52 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
  	}
  };
  
@@ -2985,7 +3266,7 @@ index 414c1d6..a7f5a94 100644
  	while (ret >= 0) {
  		len = 0;
  		for (size_t i = 0; i < _messages.size() && i < sizeof(mmsgs) / sizeof(*mmsgs); ++i) {
-@@ -538,7 +590,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+@@ -538,7 +598,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  				break;
  			} else if (errno == EINTR) {
  				ret = 0;
@@ -2994,7 +3275,7 @@ index 414c1d6..a7f5a94 100644
  				// this means that peer of the first message we tried to send has died.
  				// we'll just drop that message and try the others.
  				_messages.pop_front();
-@@ -549,6 +601,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+@@ -549,6 +609,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  		}
  
  		for (size_t i = 0; i < ret; ++i) {
@@ -3002,7 +3283,7 @@ index 414c1d6..a7f5a94 100644
  			auto cb = _messages.front().sendNotificationCallback();
  			_messages.pop_front();
  			if (cb) {
-@@ -567,10 +620,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+@@ -567,10 +628,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
  	int ret = 0;
  
  	while (ret >= 0) {
@@ -3018,7 +3299,7 @@ index 414c1d6..a7f5a94 100644
  			mmsgs[i].msg_len = 0;
  		}
  
-@@ -587,11 +641,25 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+@@ -587,11 +649,25 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
  			}
  		}
  
@@ -3049,7 +3330,7 @@ index 414c1d6..a7f5a94 100644
  		}
  	}
  
-@@ -615,3 +683,43 @@ bool DarlingServer::MessageQueue::empty() const {
+@@ -615,3 +691,43 @@ bool DarlingServer::MessageQueue::empty() const {
  	std::unique_lock lock(_lock);
  	return _messages.empty();
  };
@@ -3652,10 +3933,10 @@ index 9cd7b81..f6b87cf 100644
  			continue;
  		}
 diff --git a/src/server.cpp b/src/server.cpp
-index e502e28..c1d9b8f 100644
+index e502e28..2ca502c 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
-@@ -28,6 +28,8 @@
+@@ -28,10 +28,14 @@
  #include <sys/epoll.h>
  #include <fcntl.h>
  #include <system_error>
@@ -3664,7 +3945,13 @@ index e502e28..c1d9b8f 100644
  #include <thread>
  #include <array>
  #include <darlingserver/registry.hpp>
-@@ -40,6 +42,44 @@
+ #include <sys/eventfd.h>
++#include <poll.h>
++#include <algorithm>
+ #include <darlingserver/duct-tape.h>
+ #include <sys/timerfd.h>
+ #include <sys/mman.h>
+@@ -40,6 +44,44 @@
  
  #include <darlingserver/logging.hpp>
  
@@ -3709,7 +3996,7 @@ index e502e28..c1d9b8f 100644
  static DarlingServer::Server* sharedInstancePointer = nullptr;
  
  struct DTapeHooks {
-@@ -104,8 +144,44 @@ struct DTapeHooks {
+@@ -104,8 +146,44 @@ struct DTapeHooks {
  
  		std::unique_lock lock(server._timerLock);
  
@@ -3756,7 +4043,7 @@ index e502e28..c1d9b8f 100644
  		}
  
  		server._currentTimerDeadline = deadline_ns;
-@@ -115,6 +191,11 @@ struct DTapeHooks {
+@@ -115,6 +193,11 @@ struct DTapeHooks {
  		}
  	};
  
@@ -3768,7 +4055,7 @@ index e502e28..c1d9b8f 100644
  	static void dtape_hook_log(dtape_log_level_t level, const char* message) {
  		static const auto log = DarlingServer::Log("dtape");
  		auto process = DarlingServer::Process::currentProcess();
-@@ -244,6 +325,14 @@ struct DTapeHooks {
+@@ -244,6 +327,14 @@ struct DTapeHooks {
  		return static_cast<DarlingServer::Process*>(task_context)->writeMemory(remote_address, local_buffer, length);
  	};
  
@@ -3783,7 +4070,7 @@ index e502e28..c1d9b8f 100644
  	static dtape_task_t* dtape_hook_task_lookup(int id, bool id_is_nsid, bool retain) {
  		auto& registry = DarlingServer::processRegistry();
  		auto maybeProcess = (id_is_nsid) ? registry.lookupEntryByNSID(id) : registry.lookupEntryByID(id);
-@@ -271,11 +360,23 @@ struct DTapeHooks {
+@@ -271,11 +362,23 @@ struct DTapeHooks {
  	};
  
  	static void dtape_hook_task_get_memory_info(void* task_context, dtape_memory_info_t* memory_info) {
@@ -3812,7 +4099,7 @@ index e502e28..c1d9b8f 100644
  	};
  
  	static bool dtape_hook_task_get_memory_region_info(void* task_context, uintptr_t address, dtape_memory_region_info_t* memory_region_info) {
-@@ -392,6 +493,7 @@ struct DTapeHooks {
+@@ -392,6 +495,7 @@ struct DTapeHooks {
  		.timer_arm = dtape_hook_timer_arm,
  
  		.log = dtape_hook_log,
@@ -3820,7 +4107,7 @@ index e502e28..c1d9b8f 100644
  		.get_load_info = dtape_hook_get_load_info,
  
  		.thread_suspend = dtape_hook_thread_suspend,
-@@ -416,6 +518,7 @@ struct DTapeHooks {
+@@ -416,6 +520,7 @@ struct DTapeHooks {
  		.task_read_memory = dtape_hook_task_read_memory,
  		.task_write_memory = dtape_hook_task_write_memory,
  		.task_lookup = dtape_hook_task_lookup,
@@ -3828,24 +4115,110 @@ index e502e28..c1d9b8f 100644
  		.task_lookup_eternal = dtape_hook_task_lookup_eternal,
  		.task_get_memory_info = dtape_hook_task_get_memory_info,
  		.task_get_memory_region_info = dtape_hook_task_get_memory_region_info,
-@@ -445,6 +548,13 @@ DarlingServer::Server::Server(std::string prefix):
+@@ -440,10 +545,35 @@ struct DTapeHooks {
+ 
+ DarlingServer::Server::Server(std::string prefix):
+ 	_prefix(prefix),
+-	_socketPath(_prefix + "/.darlingserver.sock"),
+-	_workQueue(std::bind(&Server::_worker, this, std::placeholders::_1))
++	_socketPath(_prefix + "/.darlingserver.sock")
  {
  	sharedInstancePointer = this;
- 
++	_loopThread = std::this_thread::get_id();
++
++#if DSERVER_IO_URING
++	/* darling-lol: prefer the single-threaded io_uring loop; DSERVER_IO_URING=0 selects the epoll loop. */
++	if (!([]() {
++		const char* value = std::getenv("DSERVER_IO_URING");
++		return value && value[0] == '0' && value[1] == '\0';
++	}())) {
++		_ring = Ring::create(256);
++		if (_ring) {
++			fprintf(stderr, "darlingserver: using the io_uring message loop%s\n", _ring->deferredTaskRun() ? "" : " (without deferred task running)");
++		} else {
++			fprintf(stderr, "darlingserver: io_uring is not available (%s); using the epoll message loop\n", strerror(errno));
++		}
++	}
++#endif
++	if (!_ring) {
++		_workQueue = std::make_unique<WorkQueue<std::shared_ptr<Thread>>>(std::bind(&Server::_worker, this, std::placeholders::_1));
++	}
++
 +	/* darling-lol: producers send their own replies by default; DSERVER_DIRECT_REPLY=0
 +	 * restores the old path (every reply wakes the main loop out of epoll_wait). */
 +	_directReply = []() {
 +		const char* value = std::getenv("DSERVER_DIRECT_REPLY");
 +		return !(value && value[0] == '0' && value[1] == '\0');
 +	}();
-+
+ 
  	// remove the old socket (if it exists)
  	unlink(_socketPath.c_str());
+@@ -479,21 +609,32 @@ DarlingServer::Server::Server(std::string prefix):
+ 	}
  
-@@ -532,6 +642,10 @@ void DarlingServer::Server::start() {
+ 	struct epoll_event settings;
+-	settings.data.ptr = this;
+-	settings.events = EPOLLIN | EPOLLOUT | EPOLLET;
+ 
+-	if (epoll_ctl(_epollFD, EPOLL_CTL_ADD, _listenerSocket, &settings) < 0) {
+-		throw std::system_error(errno, std::generic_category(), "Failed to add listener socket to epoll context");
++	/* darling-lol: the io_uring loop receives and sends through the ring, so the listener socket stays out of
++	 * epoll there: an edge-triggered EPOLLOUT on it fires every time a client consumes a reply. */
++	if (!_ring) {
++		settings.data.ptr = this;
++		settings.events = EPOLLIN | EPOLLOUT | EPOLLET;
++
++		if (epoll_ctl(_epollFD, EPOLL_CTL_ADD, _listenerSocket, &settings) < 0) {
++			throw std::system_error(errno, std::generic_category(), "Failed to add listener socket to epoll context");
++		}
+ 	}
+ 
+ 	settings.data.ptr = &_wakeupFD;
+-	settings.events = EPOLLIN | EPOLLONESHOT;
++	// the io_uring loop always wants to hear from other threads; it resets the eventfd whenever it fires
++	settings.events = _ring ? EPOLLIN : (EPOLLIN | EPOLLONESHOT);
+ 
+ 	if (epoll_ctl(_epollFD, EPOLL_CTL_ADD, _wakeupFD, &settings) < 0) {
+ 		throw std::system_error(errno, std::generic_category(), "Failed to add eventfd to epoll context");
+ 	}
+ 
+ 	_outbox.setMessageArrivalNotificationCallback([this]() {
++		// the io_uring loop sends its own replies at the end of each pass; only other threads need to wake it
++		if (_ring && std::this_thread::get_id() == _loopThread) {
++			return;
++		}
++
+ 		// we don't really have to worry about the eventfd overflowing;
+ 		// if it does, that means the main loop has been waiting a LONG time for the listener socket to become writable again.
+ 		// in that case, we don't really care if the eventfd is being incremented; we can't send anything anyways.
+@@ -529,9 +670,34 @@ void DarlingServer::Server::start() {
+ 	// force the kernel process to be created now
+ 	Process::kernelProcess();
+ 
++#if DSERVER_IO_URING
++	// timers and monitors must work while the initialization below runs microthreads on this thread
++	if (_ring) {
++		_ringArmEpoll();
++	}
++#endif
++
  	// perform dtape initialization that requires a microthread context
  	Thread::kernelSync(dtape_init_in_thread);
  
++#if DSERVER_IO_URING
++	if (_ring) {
++		// like the epoll loop, start taking calls only once initialization is done
++		for (size_t i = 0; i < _ringReceives.size(); ++i) {
++			_ringArmReceive(i);
++		}
++		_ringReceiving = true;
++
++		while (true) {
++			_ringPass();
++		}
++	}
++#endif
++
 +	// the eventfd is registered armed (EPOLLIN | EPOLLONESHOT) in the constructor
 +	bool wakeupArmed = true;
 +	bool wakeupFired = false;
@@ -3853,12 +4226,13 @@ index e502e28..c1d9b8f 100644
  	while (true) {
  		if (_canRead) {
  			_canRead = _inbox.receiveMany(_listenerSocket);
-@@ -540,25 +654,40 @@ void DarlingServer::Server::start() {
+@@ -540,25 +706,40 @@ void DarlingServer::Server::start() {
  				// TODO: this could be done concurrently
  				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
  				if (call) {
+-					_workQueue.push(call->thread());
 +					m58wq_log("push", call->thread());
- 					_workQueue.push(call->thread());
++					_workQueue->push(call->thread());
  				}
  			}
  		}
@@ -3902,43 +4276,167 @@ index e502e28..c1d9b8f 100644
  		}
  
  		struct epoll_event events[16];
-@@ -586,6 +715,9 @@ void DarlingServer::Server::start() {
- 			} else if (event->data.ptr == &_wakeupFD) {
- 				// we allow the loop to go back to the top and try to send some messages
- 				// (if _canWrite is true, the eventfd will be reset; otherwise, there's no point in resetting it)
-+				// the one-shot registration is now disarmed and the eventfd has a count to reset
-+				wakeupArmed = false;
-+				wakeupFired = true;
- 			} else if (event->data.ptr == &_timerFD) {
- 				std::unique_lock lock(_timerLock);
- 				uint64_t expirations = 0;
-@@ -604,6 +736,25 @@ void DarlingServer::Server::start() {
- 					continue;
- 				}
+@@ -572,66 +753,7 @@ void DarlingServer::Server::start() {
+ 			throw std::system_error(errno, std::generic_category(), "Failed to wait on epoll context");
+ 		}
  
-+				/* darling-lol M634: the timer is now consumed; drop the stale
-+				 * armed-deadline marker so future arms are not skipped. Also
-+				 * trace the fire (rate-limited) to diagnose the launch wedge. */
-+				if (m634TraceEnabled()) {
-+					static std::atomic<unsigned> m634FireCount{0};
-+					unsigned seen = m634FireCount.fetch_add(1);
-+					if (seen < 80 || seen % 64 == 0) {
-+						struct timespec nowTs = {0, 0};
-+						clock_gettime(CLOCK_MONOTONIC, &nowTs);
-+						uint64_t nowNs = (uint64_t)nowTs.tv_sec * 1000000000ull + nowTs.tv_nsec;
-+						fprintf(stderr, "M634FIRE line=%u exp=%llu prevDeadline=%llu now=%llu\n",
-+							seen,
-+							(unsigned long long)expirations,
-+							(unsigned long long)_currentTimerDeadline,
-+							(unsigned long long)nowNs);
-+					}
-+				}
-+				_currentTimerDeadline = 0;
+-		for (size_t i = 0; i < ret; ++i) {
+-			struct epoll_event* event = &events[i];
+-
+-			if (event->data.ptr == this) {
+-				if (event->events & EPOLLIN) {
+-					_canRead = true;
+-				}
+-
+-				if (event->events & EPOLLOUT) {
+-					_canWrite = true;
+-				}
+-			} else if (event->data.ptr == &_wakeupFD) {
+-				// we allow the loop to go back to the top and try to send some messages
+-				// (if _canWrite is true, the eventfd will be reset; otherwise, there's no point in resetting it)
+-			} else if (event->data.ptr == &_timerFD) {
+-				std::unique_lock lock(_timerLock);
+-				uint64_t expirations = 0;
+-
+-				if (read(_timerFD, &expirations, sizeof(expirations)) < 0) {
+-					if (errno == EAGAIN) {
+-						// spurious event?
+-						continue;
+-					}
+-
+-					throw std::system_error(errno, std::generic_category(), "Failed to read from timerfd");
+-				}
+-
+-				if (expirations < 1) {
+-					// spurious expiration?
+-					continue;
+-				}
+-
+-				// we're done handling the timerfd;
+-				// we don't need to lock anymore (and the following call might need to arm the timer again)
+-				lock.unlock();
+-
+-				// dtape_timer_fired() calls duct-taped functions that may need to wait (briefly), so it needs to be called in a microthread
+-				Thread::kernelAsync(dtape_timer_fired);
+-			} else {
+-				Monitor* monitor = static_cast<Monitor*>(event->data.ptr);
+-				std::shared_ptr<Monitor> aliveMonitor = nullptr;
+-
+-				// check whether the monitor is still valid
+-				_monitorsLock.lock();
+-				for (const auto& mon: _monitors) {
+-					if (mon.get() == monitor) {
+-						aliveMonitor = mon;
+-						break;
+-					}
+-				}
+-				_monitorsLock.unlock();
+-
+-				// if the monitor died/was removed, ignore the event
+-				if (!aliveMonitor) {
+-					continue;
+-				}
+-
+-				aliveMonitor->_callback(aliveMonitor, static_cast<Monitor::Event>(event->events & (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP)));
+-			}
+-		}
++		_handleEpollEvents(events, ret, wakeupArmed, wakeupFired);
+ 
+ 		// as our final job on this wakeup, clear the list of monitors waiting to be removed.
+ 		// this will destroy those references, possibly causing the monitors to be deallocated.
+@@ -653,6 +775,91 @@ void DarlingServer::Server::start() {
+ 	dtape_deinit();
+ };
+ 
++void DarlingServer::Server::_handleEpollEvents(struct epoll_event* events, int ret, bool& wakeupArmed, bool& wakeupFired) {
++	for (size_t i = 0; i < ret; ++i) {
++		struct epoll_event* event = &events[i];
 +
- 				// we're done handling the timerfd;
- 				// we don't need to lock anymore (and the following call might need to arm the timer again)
- 				lock.unlock();
-@@ -681,6 +832,7 @@ std::string DarlingServer::Server::prefix() const {
++		if (event->data.ptr == this) {
++			if (event->events & EPOLLIN) {
++				_canRead = true;
++			}
++
++			if (event->events & EPOLLOUT) {
++				_canWrite = true;
++			}
++		} else if (event->data.ptr == &_wakeupFD) {
++			// we allow the loop to go back to the top and try to send some messages
++			// (if _canWrite is true, the eventfd will be reset; otherwise, there's no point in resetting it)
++			// the one-shot registration is now disarmed and the eventfd has a count to reset
++			wakeupArmed = false;
++			wakeupFired = true;
++		} else if (event->data.ptr == &_timerFD) {
++			std::unique_lock lock(_timerLock);
++			uint64_t expirations = 0;
++
++			if (read(_timerFD, &expirations, sizeof(expirations)) < 0) {
++				if (errno == EAGAIN) {
++					// spurious event?
++					continue;
++				}
++
++				throw std::system_error(errno, std::generic_category(), "Failed to read from timerfd");
++			}
++
++			if (expirations < 1) {
++				// spurious expiration?
++				continue;
++			}
++
++			/* darling-lol M634: the timer is now consumed; drop the stale
++			 * armed-deadline marker so future arms are not skipped. Also
++			 * trace the fire (rate-limited) to diagnose the launch wedge. */
++			if (m634TraceEnabled()) {
++				static std::atomic<unsigned> m634FireCount{0};
++				unsigned seen = m634FireCount.fetch_add(1);
++				if (seen < 80 || seen % 64 == 0) {
++					struct timespec nowTs = {0, 0};
++					clock_gettime(CLOCK_MONOTONIC, &nowTs);
++					uint64_t nowNs = (uint64_t)nowTs.tv_sec * 1000000000ull + nowTs.tv_nsec;
++					fprintf(stderr, "M634FIRE line=%u exp=%llu prevDeadline=%llu now=%llu\n",
++						seen,
++						(unsigned long long)expirations,
++						(unsigned long long)_currentTimerDeadline,
++						(unsigned long long)nowNs);
++				}
++			}
++			_currentTimerDeadline = 0;
++
++			// we're done handling the timerfd;
++			// we don't need to lock anymore (and the following call might need to arm the timer again)
++			lock.unlock();
++
++			// dtape_timer_fired() calls duct-taped functions that may need to wait (briefly), so it needs to be called in a microthread
++			Thread::kernelAsync(dtape_timer_fired);
++		} else {
++			Monitor* monitor = static_cast<Monitor*>(event->data.ptr);
++			std::shared_ptr<Monitor> aliveMonitor = nullptr;
++
++			// check whether the monitor is still valid
++			_monitorsLock.lock();
++			for (const auto& mon: _monitors) {
++				if (mon.get() == monitor) {
++					aliveMonitor = mon;
++					break;
++				}
++			}
++			_monitorsLock.unlock();
++
++			// if the monitor died/was removed, ignore the event
++			if (!aliveMonitor) {
++				continue;
++			}
++
++			aliveMonitor->_callback(aliveMonitor, static_cast<Monitor::Event>(event->events & (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP)));
++		}
++	}
++};
++
+ void DarlingServer::Server::monitorProcess(std::shared_ptr<Process> process) {
+ 	// the this-capture here is safe because the Server will always out-live everything else
+ 	std::weak_ptr<Process> weakProcess = process;
+@@ -681,13 +888,287 @@ std::string DarlingServer::Server::prefix() const {
  };
  
  void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
@@ -3946,12 +4444,295 @@ index e502e28..c1d9b8f 100644
  	thread->doWork();
  };
  
-@@ -815,5 +967,20 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
+ void DarlingServer::Server::scheduleThread(std::shared_ptr<Thread> thread) {
+-	_workQueue.push(thread);
++	if (!_ring) {
++		_workQueue->push(thread);
++		return;
++	}
++
++	// the io_uring loop runs it at the start of its next pass; scheduling never runs a microthread on the spot
++	{
++		std::scoped_lock lock(_runQueueLock);
++		_runQueue.push_back(std::move(thread));
++	}
++	if (std::this_thread::get_id() != _loopThread) {
++		eventfd_write(_wakeupFD, 1);
++	}
++};
++
++bool DarlingServer::Server::runsWorkOnThisThread() const {
++	return _ring && std::this_thread::get_id() == _loopThread;
++};
++
++bool DarlingServer::Server::_runQueued() {
++	// only what is queued now: a microthread that keeps rescheduling itself must not starve the ring
++	std::deque<std::shared_ptr<Thread>> batch;
++	{
++		std::scoped_lock lock(_runQueueLock);
++		batch.swap(_runQueue);
++	}
++	for (auto& thread: batch) {
++		_worker(std::move(thread));
++	}
++	return !batch.empty();
++};
++
++void DarlingServer::Server::runOnePass(const bool* completed) {
++#if DSERVER_IO_URING
++	_ringPass(completed);
++#endif
++};
++
++#if DSERVER_IO_URING
++
++// darling-lol: what each ring completion belongs to, in the top bits of its user data.
++static constexpr uint64_t ringTagShift = 56;
++static constexpr uint64_t ringTagMask = 0xffull << ringTagShift;
++static constexpr uint64_t ringTagReceive = 1ull << ringTagShift;
++static constexpr uint64_t ringTagSend = 2ull << ringTagShift;
++static constexpr uint64_t ringTagEpoll = 3ull << ringTagShift;
++static constexpr uint64_t ringTagSendRetry = 4ull << ringTagShift;
++
++static struct io_uring_sqe* ringSubmission(DarlingServer::Ring& ring) {
++	struct io_uring_sqe* sqe = ring.nextSubmission();
++	if (!sqe) {
++		// the queue is full: hand what is queued to the kernel and try again
++		ring.submitAndWait(0);
++		sqe = ring.nextSubmission();
++		if (!sqe) {
++			throw std::runtime_error("io_uring submission queue is full");
++		}
++	}
++	return sqe;
++}
++
++void DarlingServer::Server::_ringArmReceive(size_t index) {
++	auto& slot = _ringReceives[index];
++	slot.emplace();
++	struct io_uring_sqe* sqe = ringSubmission(*_ring);
++	sqe->opcode = IORING_OP_RECVMSG;
++	sqe->fd = _listenerSocket;
++	// the kernel writes the name, control and flag lengths back into this header, as recvmsg does
++	sqe->addr = reinterpret_cast<uint64_t>(&slot->rawHeader());
++	sqe->len = 1;
++	sqe->msg_flags = MSG_CMSG_CLOEXEC;
++	sqe->user_data = ringTagReceive | index;
++};
++
++void DarlingServer::Server::_ringArmEpoll() {
++	if (_ringEpollArmed) {
++		return;
++	}
++	// timers, monitors and wakeups from other threads stay in epoll; the ring watches the epoll descriptor
++	struct io_uring_sqe* sqe = ringSubmission(*_ring);
++	sqe->opcode = IORING_OP_POLL_ADD;
++	sqe->fd = _epollFD;
++	sqe->poll32_events = POLLIN;
++	sqe->user_data = ringTagEpoll;
++	_ringEpollArmed = true;
++};
++
++void DarlingServer::Server::_ringFlushSends() {
++	// one chain at a time: a later chain must not overtake messages an earlier one could not send yet
++	if (_ringSendsPending > 0 || _ringSendBlocked) {
++		return;
++	}
++
++	size_t space = _ring->submissionSpace();
++	if (space < 2) {
++		_ring->submitAndWait(0);
++		space = _ring->submissionSpace();
++	}
++	// a link chain must not be split across two submissions
++	size_t limit = std::min(ringMaxSendChain, space > 1 ? space - 1 : 1);
++	while (_ringSends.size() < limit) {
++		auto message = _outbox.pop();
++		if (!message) {
++			break;
++		}
++		_ringSends.emplace_back(std::move(*message));
++	}
++	if (_ringSends.empty()) {
++		return;
++	}
++
++	for (size_t i = 0; i < _ringSends.size(); ++i) {
++		auto& send = _ringSends[i];
++		send.header = send.message.rawHeader();
++
++		// some systems report EINVAL when sending to an address filled with null bytes (as in sendMany)
++		auto address = reinterpret_cast<const struct sockaddr_un*>(send.header.msg_name);
++		bool isAddressEmpty = true;
++		for (size_t j = 0; address && j < sizeof(address->sun_path); ++j) {
++			if (address->sun_path[j] != '\0') {
++				isAddressEmpty = false;
++				break;
++			}
++		}
++		if (isAddressEmpty) {
++			send.header.msg_name = nullptr;
++			send.header.msg_namelen = 0;
++		}
++
++		struct io_uring_sqe* sqe = _ring->nextSubmission();
++		sqe->opcode = IORING_OP_SENDMSG;
++		sqe->fd = _listenerSocket;
++		sqe->addr = reinterpret_cast<uint64_t>(&send.header);
++		sqe->len = 1;
++		// a full socket must fail the send (and cancel the rest of the chain) instead of reordering it
++		sqe->msg_flags = MSG_DONTWAIT;
++		sqe->flags = (i + 1 < _ringSends.size()) ? IOSQE_IO_LINK : 0;
++		sqe->user_data = ringTagSend | i;
++	}
++	_ringSendsPending = _ringSends.size();
++};
++
++void DarlingServer::Server::_ringFinishSends() {
++	std::deque<Message> retry;
++	std::vector<std::function<void()>> callbacks;
++	bool blocked = false;
++
++	for (auto& send: _ringSends) {
++		int result = send.result;
++		if (result >= 0) {
++			if (auto callback = send.message.sendNotificationCallback()) {
++				callbacks.push_back(std::move(callback));
++			}
++		} else if (result == -EAGAIN || result == -EWOULDBLOCK) {
++			blocked = true;
++			retry.push_back(std::move(send.message));
++		} else if (result == -ECANCELED || result == -EINTR) {
++			// an earlier link in the chain failed; send it again, in order
++			retry.push_back(std::move(send.message));
++		} else if (result == -EPIPE || result == -ECONNREFUSED || result == -ENOENT) {
++			// the peer has died; drop the message, as sendMany does
++		} else {
++			fprintf(stderr, "darlingserver: dropping a reply that could not be sent: %s\n", strerror(-result));
++		}
++	}
++
++	_ringSends.clear();
++	_ringSendsPending = 0;
++	_outbox.requeueFront(std::move(retry));
++
++	if (blocked) {
++		// The listener is unconnected: POLLOUT does not reflect the destination's
++		// receive queue. Retry after 1 ms without spinning on false readiness.
++		_ringSendBlocked = true;
++		struct io_uring_sqe* sqe = ringSubmission(*_ring);
++		sqe->opcode = IORING_OP_TIMEOUT;
++		sqe->addr = reinterpret_cast<uint64_t>(&_ringSendRetryDelay);
++		sqe->len = 1;
++		sqe->user_data = ringTagSendRetry;
++	}
++
++	for (auto& callback: callbacks) {
++		callback();
++	}
+ };
+ 
++void DarlingServer::Server::_ringComplete(const Ring::Completion& completion) {
++	uint64_t tag = completion.userData & ringTagMask;
++	uint64_t index = completion.userData & ~ringTagMask;
++
++	if (tag == ringTagReceive) {
++		auto& slot = _ringReceives[index];
++		if (completion.result < 0) {
++			int error = -completion.result;
++			if (error == EINTR || error == EAGAIN) {
++				_ringArmReceive(index);
++				return;
++			}
++			throw std::system_error(error, std::generic_category(), "Failed to receive messages through socket");
++		}
++
++		Message message = std::move(*slot);
++		slot.reset();
++		message.data().resize(completion.result);
++		message.setAddress(Address(*(const struct sockaddr_un*)message.rawHeader().msg_name, message.rawHeader().msg_namelen));
++
++		// keep the socket draining while this call is handled
++		_ringArmReceive(index);
++
++		auto call = DarlingServer::Call::callFromMessage(std::move(message));
++		if (call) {
++			m58wq_log("push", call->thread());
++			scheduleThread(call->thread());
++		}
++	} else if (tag == ringTagSend) {
++		_ringSends[index].result = completion.result;
++		if (--_ringSendsPending == 0) {
++			_ringFinishSends();
++		}
++	} else if (tag == ringTagEpoll) {
++		_ringEpollArmed = false;
++		struct epoll_event events[16];
++		int ret = epoll_wait(_epollFD, events, 16, 0);
++		if (ret < 0 && errno != EINTR) {
++			throw std::system_error(errno, std::generic_category(), "Failed to wait on epoll context");
++		}
++		bool wakeupArmed = true;
++		bool wakeupFired = false;
++		if (ret > 0) {
++			_handleEpollEvents(events, ret, wakeupArmed, wakeupFired);
++		}
++		if (wakeupFired) {
++			wakeupFired = false;
++			eventfd_t value;
++			eventfd_read(_wakeupFD, &value);
++		}
++		_ringArmEpoll();
++	} else if (tag == ringTagSendRetry) {
++		if (completion.result != -ETIME && completion.result != 0) {
++			throw std::system_error(-completion.result, std::generic_category(), "Failed to wait before retrying replies");
++		}
++		_ringSendBlocked = false;
++	}
++};
++
++void DarlingServer::Server::_ringPass(const bool* completed) {
++	_runQueued();
++	_ringFlushSends();
++
++	bool moreWork;
++	{
++		std::scoped_lock lock(_runQueueLock);
++		moreWork = !_runQueue.empty();
++	}
++
++	// one system call: submit this pass's sends and re-armed receives, and wait for the next event
++	// kernelSync may have completed in _runQueued(); return without waiting
++	// for unrelated I/O before its caller can observe that completion.
++	int ret = _ring->submitAndWait(moreWork || (completed && *completed) ? 0 : 1);
++	if (ret < 0 && ret != -EINTR && ret != -EAGAIN && ret != -EBUSY && ret != -ETIME) {
++		throw std::system_error(-ret, std::generic_category(), "Failed to enter the io_uring");
++	}
++
++	Ring::Completion completion;
++	while (_ring->nextCompletion(completion)) {
++		_ringComplete(completion);
++	}
++
++	// as the epoll loop does at the end of each wakeup (see there for why the removal is deferred)
++	_monitorsLock.lock();
++	_monitorsWaitingToDie.clear();
++	_monitorsLock.unlock();
++};
++
++#endif // DSERVER_IO_URING
++
+ void DarlingServer::Server::addMonitor(std::shared_ptr<Monitor> monitor) {
+ 	bool valid = true;
+ 
+@@ -815,5 +1296,22 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
 -	_outbox.push(std::move(message));
-+	if (!_directReply) {
++	/* darling-lol: on the io_uring loop thread, replies are queued and sent together at the end of the pass;
++	 * from any other thread, the outbox callback wakes the loop. */
++	if (!_directReply || _ring) {
 +		_outbox.push(std::move(message));
 +		return;
 +	}
@@ -3969,7 +4750,7 @@ index e502e28..c1d9b8f 100644
 +	}
  };
 diff --git a/src/thread.cpp b/src/thread.cpp
-index 5563ad9..59aa110 100644
+index 5563ad9..dfa32a3 100644
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
 @@ -53,6 +53,120 @@
@@ -4229,7 +5010,32 @@ index 5563ad9..59aa110 100644
  	__builtin_unreachable();
  };
  
-@@ -1443,7 +1565,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
+@@ -872,6 +994,24 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
+ };
+ 
+ void DarlingServer::Thread::kernelSync(std::function<void()> fn) {
++	/* darling-lol: on the io_uring loop, microthreads run on the loop thread itself, so waiting here for another
++	 * thread to run `fn` would never return. Run loop passes until it is done instead. Only the loop itself may
++	 * do that; a microthread doing it would run other microthreads nested inside its own. */
++	if (Server::sharedInstance().runsWorkOnThisThread()) {
++		if (currentThreadVar) {
++			throw std::runtime_error("kernelSync() cannot be used from a microthread on the io_uring loop");
++		}
++		bool finished = false;
++		kernelAsync([&]() {
++			fn();
++			finished = true;
++		});
++		while (!finished) {
++			Server::sharedInstance().runOnePass(&finished);
++		}
++		return;
++	}
++
+ 	std::mutex mutex;
+ 	std::condition_variable condvar;
+ 	bool done = false;
+@@ -1443,7 +1583,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
  #if DSERVER_ASAN
  	__sanitizer_start_switch_fiber(&asanOldFakeStack, stack, stackSize);
  #endif
@@ -4238,7 +5044,7 @@ index 5563ad9..59aa110 100644
  	__builtin_unreachable();
  };
  
-@@ -1543,7 +1665,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
+@@ -1543,7 +1683,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
  	dtape_thread_sigexc_enter(currentThreadVar->_dtapeThread);
  
  	currentThreadVar->_didSyscallReturnDuringInterrupt = false;
@@ -5985,3 +6791,290 @@ index 0000000..2033969
 +    return result;
 +}
 +#endif
+diff --git a/internal-include/darlingserver/uring.hpp b/internal-include/darlingserver/uring.hpp
+new file mode 100644
+index 0000000..f89dffc
+--- /dev/null
++++ b/internal-include/darlingserver/uring.hpp
+@@ -0,0 +1,94 @@
++/**
++ * This file is part of Darling.
++ *
++ * Copyright (C) 2026 Darling developers
++ *
++ * Darling is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * Darling is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _DARLINGSERVER_URING_HPP_
++#define _DARLINGSERVER_URING_HPP_
++
++#include <cstdint>
++#include <memory>
++
++#if DSERVER_IO_URING
++#include <linux/io_uring.h>
++#endif
++
++namespace DarlingServer {
++	/**
++	 * darling-lol: a minimal io_uring submission/completion ring, used by the server's single-threaded message loop.
++	 *
++	 * It talks to the kernel directly (io_uring_setup/io_uring_enter and the mmapped rings) so darlingserver does
++	 * not need liburing. Only the loop thread that created it may use it.
++	 */
++	class Ring {
++	public:
++		struct Completion {
++			uint64_t userData;
++			int32_t result;
++			uint32_t flags;
++		};
++
++#if DSERVER_IO_URING
++	private:
++		int _fd = -1;
++		void* _ringMemory = nullptr;
++		size_t _ringSize = 0;
++		struct io_uring_sqe* _sqes = nullptr;
++		size_t _sqesSize = 0;
++
++		uint32_t* _sqHead = nullptr;
++		uint32_t* _sqTail = nullptr;
++		uint32_t* _sqArray = nullptr;
++		uint32_t _sqMask = 0;
++		uint32_t _sqEntries = 0;
++		uint32_t _sqLocalTail = 0;
++
++		uint32_t* _cqHead = nullptr;
++		uint32_t* _cqTail = nullptr;
++		struct io_uring_cqe* _cqes = nullptr;
++		uint32_t _cqMask = 0;
++
++		bool _deferredTaskRun = false;
++
++		Ring() = default;
++
++	public:
++		/** Returns nullptr (with errno set) when the kernel or its configuration does not allow io_uring. */
++		static std::unique_ptr<Ring> create(unsigned int entries);
++		~Ring();
++
++		Ring(const Ring&) = delete;
++		Ring& operator=(const Ring&) = delete;
++
++		/** A zeroed submission entry, or nullptr when the submission queue is full. */
++		struct io_uring_sqe* nextSubmission();
++
++		/** How many more submission entries fit before the next submit. */
++		unsigned int submissionSpace() const;
++
++		/** Submits everything queued and waits until at least `waitFor` completions are ready. Returns -errno on failure. */
++		int submitAndWait(unsigned int waitFor);
++
++		/** Removes the next completion, if there is one. */
++		bool nextCompletion(Completion& completion);
++
++		bool deferredTaskRun() const { return _deferredTaskRun; };
++#endif
++	};
++};
++
++#endif // _DARLINGSERVER_URING_HPP_
+diff --git a/src/uring.cpp b/src/uring.cpp
+new file mode 100644
+index 0000000..3df2f23
+--- /dev/null
++++ b/src/uring.cpp
+@@ -0,0 +1,181 @@
++/**
++ * This file is part of Darling.
++ *
++ * Copyright (C) 2026 Darling developers
++ *
++ * Darling is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * Darling is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <darlingserver/uring.hpp>
++
++#if DSERVER_IO_URING
++
++#include <cerrno>
++#include <cstring>
++#include <sys/mman.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++#ifndef __NR_io_uring_setup
++#define __NR_io_uring_setup 425
++#endif
++#ifndef __NR_io_uring_enter
++#define __NR_io_uring_enter 426
++#endif
++
++// Flags newer than the kernel headers the build may have; an older running kernel rejects them with EINVAL.
++#ifndef IORING_SETUP_SUBMIT_ALL
++#define IORING_SETUP_SUBMIT_ALL (1U << 7)
++#endif
++#ifndef IORING_SETUP_COOP_TASKRUN
++#define IORING_SETUP_COOP_TASKRUN (1U << 8)
++#endif
++#ifndef IORING_SETUP_SINGLE_ISSUER
++#define IORING_SETUP_SINGLE_ISSUER (1U << 12)
++#endif
++#ifndef IORING_SETUP_DEFER_TASKRUN
++#define IORING_SETUP_DEFER_TASKRUN (1U << 13)
++#endif
++
++static int ioUringSetup(unsigned int entries, struct io_uring_params* params) {
++	return static_cast<int>(syscall(__NR_io_uring_setup, entries, params));
++}
++
++static int ioUringEnter(int fd, unsigned int toSubmit, unsigned int minComplete, unsigned int flags) {
++	return static_cast<int>(syscall(__NR_io_uring_enter, fd, toSubmit, minComplete, flags, nullptr, 0));
++}
++
++std::unique_ptr<DarlingServer::Ring> DarlingServer::Ring::create(unsigned int entries) {
++	// Completions only run when the loop asks for them (DEFER_TASKRUN), from the one thread that submits
++	// (SINGLE_ISSUER): the kernel never interrupts the loop to post them. Older kernels get a plain ring.
++	const uint32_t attempts[] = {
++		IORING_SETUP_CQSIZE | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN,
++		IORING_SETUP_CQSIZE | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_COOP_TASKRUN,
++		IORING_SETUP_CQSIZE,
++	};
++
++	struct io_uring_params params;
++	int fd = -1;
++	for (uint32_t flags: attempts) {
++		memset(&params, 0, sizeof(params));
++		params.flags = flags;
++		params.cq_entries = entries * 4;
++		fd = ioUringSetup(entries, &params);
++		if (fd >= 0 || errno != EINVAL) {
++			break;
++		}
++	}
++	if (fd < 0) {
++		return nullptr;
++	}
++
++	// One mmap for both rings (5.4), completions are never dropped (5.5), and a receive with no data waits on the
++	// socket instead of occupying a kernel worker thread (5.7).
++	const uint32_t required = IORING_FEAT_SINGLE_MMAP | IORING_FEAT_NODROP | IORING_FEAT_FAST_POLL;
++	if ((params.features & required) != required) {
++		close(fd);
++		errno = ENOSYS;
++		return nullptr;
++	}
++
++	std::unique_ptr<Ring> ring(new Ring());
++	ring->_fd = fd;
++	ring->_deferredTaskRun = (params.flags & IORING_SETUP_DEFER_TASKRUN) != 0;
++
++	size_t sqSize = params.sq_off.array + params.sq_entries * sizeof(uint32_t);
++	size_t cqSize = params.cq_off.cqes + params.cq_entries * sizeof(struct io_uring_cqe);
++	ring->_ringSize = sqSize > cqSize ? sqSize : cqSize;
++	ring->_ringMemory = mmap(nullptr, ring->_ringSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
++	if (ring->_ringMemory == MAP_FAILED) {
++		ring->_ringMemory = nullptr;
++		return nullptr;
++	}
++
++	ring->_sqesSize = params.sq_entries * sizeof(struct io_uring_sqe);
++	void* sqes = mmap(nullptr, ring->_sqesSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
++	if (sqes == MAP_FAILED) {
++		return nullptr;
++	}
++	ring->_sqes = static_cast<struct io_uring_sqe*>(sqes);
++
++	auto base = static_cast<uint8_t*>(ring->_ringMemory);
++	ring->_sqHead = reinterpret_cast<uint32_t*>(base + params.sq_off.head);
++	ring->_sqTail = reinterpret_cast<uint32_t*>(base + params.sq_off.tail);
++	ring->_sqArray = reinterpret_cast<uint32_t*>(base + params.sq_off.array);
++	ring->_sqMask = *reinterpret_cast<uint32_t*>(base + params.sq_off.ring_mask);
++	ring->_sqEntries = *reinterpret_cast<uint32_t*>(base + params.sq_off.ring_entries);
++	ring->_sqLocalTail = *ring->_sqTail;
++
++	ring->_cqHead = reinterpret_cast<uint32_t*>(base + params.cq_off.head);
++	ring->_cqTail = reinterpret_cast<uint32_t*>(base + params.cq_off.tail);
++	ring->_cqes = reinterpret_cast<struct io_uring_cqe*>(base + params.cq_off.cqes);
++	ring->_cqMask = *reinterpret_cast<uint32_t*>(base + params.cq_off.ring_mask);
++
++	return ring;
++}
++
++DarlingServer::Ring::~Ring() {
++	if (_sqes) {
++		munmap(_sqes, _sqesSize);
++	}
++	if (_ringMemory) {
++		munmap(_ringMemory, _ringSize);
++	}
++	if (_fd >= 0) {
++		close(_fd);
++	}
++}
++
++unsigned int DarlingServer::Ring::submissionSpace() const {
++	uint32_t head = __atomic_load_n(_sqHead, __ATOMIC_ACQUIRE);
++	return _sqEntries - (_sqLocalTail - head);
++}
++
++struct io_uring_sqe* DarlingServer::Ring::nextSubmission() {
++	if (submissionSpace() == 0) {
++		return nullptr;
++	}
++	uint32_t index = _sqLocalTail & _sqMask;
++	struct io_uring_sqe* sqe = &_sqes[index];
++	memset(sqe, 0, sizeof(*sqe));
++	_sqArray[index] = index;
++	++_sqLocalTail;
++	return sqe;
++}
++
++int DarlingServer::Ring::submitAndWait(unsigned int waitFor) {
++	// publish the new entries before the kernel reads the tail
++	__atomic_store_n(_sqTail, _sqLocalTail, __ATOMIC_RELEASE);
++	unsigned int pending = _sqLocalTail - __atomic_load_n(_sqHead, __ATOMIC_ACQUIRE);
++
++	// GETEVENTS also runs deferred completion work, so ask for it even when not waiting.
++	int ret = ioUringEnter(_fd, pending, waitFor, IORING_ENTER_GETEVENTS);
++	return ret < 0 ? -errno : ret;
++}
++
++bool DarlingServer::Ring::nextCompletion(Completion& completion) {
++	uint32_t head = *_cqHead;
++	if (head == __atomic_load_n(_cqTail, __ATOMIC_ACQUIRE)) {
++		return false;
++	}
++	const struct io_uring_cqe* cqe = &_cqes[head & _cqMask];
++	completion.userData = cqe->user_data;
++	completion.result = cqe->res;
++	completion.flags = cqe->flags;
++	// release the slot before the caller runs, so a throwing handler cannot see the same completion twice
++	__atomic_store_n(_cqHead, head + 1, __ATOMIC_RELEASE);
++	return true;
++}
++
++#endif // DSERVER_IO_URING

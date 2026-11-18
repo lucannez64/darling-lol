@@ -18,6 +18,11 @@ def git_environment(index=None):
                'GIT_NAMESPACE','GIT_SHALLOW_FILE','GIT_GRAFT_FILE','GIT_QUARANTINE_PATH')
     env={key:value for key,value in os.environ.items() if key not in locations}
     if index is not None:env['GIT_INDEX_FILE']=str(index)
+    # Parallelize working-tree writes (~10 GB of files); -c on the parent would
+    # not reach the child git processes, so it travels as GIT_CONFIG_* instead.
+    if 'GIT_CONFIG_COUNT' not in env:
+        env.update(GIT_CONFIG_COUNT='1',GIT_CONFIG_KEY_0='checkout.workers',
+                   GIT_CONFIG_VALUE_0=str(min(8,os.cpu_count() or 1)))
     return env
 
 def git_run(args,**kwargs):
@@ -35,9 +40,35 @@ LFS_URL='lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs'
 LFS_FILTERS=['-c','filter.lfs.required=true','-c','filter.lfs.smudge=git-lfs smudge -- %f',
              '-c','filter.lfs.process=git-lfs filter-process','-c','filter.lfs.clean=git-lfs clean -- %f']
 LFS_POINTER=b'version https://git-lfs.github.com/spec/v1\n'
+# Submodules no CMake target ever references (every add_subdirectory that would
+# use them is commented out upstream): fetching them costs download time and a
+# multi-GB checkout for nothing. mDNSResponder stays in the fetch because the
+# generated SDK symlinks usr/include/dns_sd.h into it for libresolv. Set
+# RCLOL_FETCH_ALL_SUBMODULES=1 to restore a full fetch.
+SUBMODULE_SKIP_FETCH=('src/external/WebCore','src/external/xcbuild',
+                      'src/external/OpenAL','src/external/TextEdit','src/external/glut')
+def fetch_pathspecs(checkout):
+    """Positive pathspecs limiting `submodule update --init` to used submodules."""
+    result=git_run(['git','-C',str(checkout),'config','--file','.gitmodules','--get-regexp',
+                    r'^submodule\..*\.path$'],text=True,capture_output=True)
+    # Exit 1 simply means no submodules are configured; anything else is real.
+    if result.returncode not in (0,1):result.check_returncode()
+    paths=[]
+    for line in result.stdout.splitlines():
+        fields=line.split(None,1)
+        if len(fields)==2:paths.append(fields[1].strip())
+    if os.environ.get('RCLOL_FETCH_ALL_SUBMODULES')=='1' or not paths:return paths
+    return [path for path in paths if path not in SUBMODULE_SKIP_FETCH]
 def submodules(checkout):
     out=git_run(['git','-C',str(checkout),'submodule','status','--recursive'],text=True,capture_output=True,check=True).stdout
-    return [checkout/line.split()[1] for line in out.splitlines() if len(line.split())>1]
+    found=[]
+    for line in out.splitlines():
+        fields=line.split()
+        if len(fields)<2:continue
+        repo=checkout/fields[1]
+        # A submodule that was not fetched has no .git; inspecting it would crash.
+        if (repo/'.git').exists():found.append(repo)
+    return found
 def pointers(repo):
     """Tracked files still checked out as LFS pointer text instead of their real content.
 
@@ -53,10 +84,12 @@ def pointers(repo):
             continue
         if head.startswith(LFS_POINTER) and b'\nsize ' in head:found.append(name)
     return found
-def repair(checkout):
+def repair(checkout,repos=None):
     """An interrupted fetch leaves a submodule with a wiped index or pointer text and 'submodule update'
     treats both as up to date, so check every worktree before this checkout becomes the source tree."""
-    for repo in [checkout,*submodules(checkout)]:
+    from concurrent.futures import ThreadPoolExecutor
+    if repos is None:repos=[checkout,*submodules(checkout)]
+    def fix(repo):
         name=repo.relative_to(checkout) or '.'
         if repo!=checkout and git_run(['git','-C',str(repo),'status','--porcelain'],text=True,
                                              capture_output=True,check=True).stdout.strip():
@@ -67,7 +100,14 @@ def repair(checkout):
             run(['git','-C',str(repo),'lfs','install','--local'],stdout=subprocess.DEVNULL)
             run(['git','-C',str(repo),*(['-c',LFS_URL] if 'swift' in name.parts else []),'lfs','pull'],
                 stdout=subprocess.DEVNULL)
-            if pointers(repo):raise SystemExit(f'{name}: Git LFS objects are still missing; install git-lfs and run this again')
+            if pointers(repo):return f'{name}: Git LFS objects are still missing; install git-lfs and run this again'
+        return None
+    failures=[]
+    # Independent worktrees; a git inspection or fetch per worker saturates nothing.
+    with ThreadPoolExecutor(max_workers=min(8,len(repos) or 1)) as pool:
+        for failure in pool.map(fix,repos):
+            if failure:failures.append(failure)
+    if failures:raise SystemExit('\n'.join(failures))
 
 def applies(repo,patch,reverse=False):
     return git_run(['git','-C',str(repo),'apply',*(['--reverse'] if reverse else []),'--check','-'],input=patch,text=True,
@@ -155,16 +195,45 @@ if not (source/'.git').exists():
             p.error('Git LFS is required to fetch the pinned sources; install git-lfs first')
         run(['git','-C',str(checkout),*LFS_FILTERS,'lfs','install','--local'],stdout=subprocess.DEVNULL)
         print('Initializing Darling submodules (large repositories/LFS assets may take a while)...',flush=True)
+        pathspecs=fetch_pathspecs(checkout)
         for attempt in range(1,4):
             try:
                 run(['git','-C',str(checkout),'-c',LFS_URL,*LFS_FILTERS,'submodule','update','--init','--recursive',
-                     '--depth','1','--jobs',str(a.jobs),'--progress'])
+                     '--depth','1','--jobs',str(a.jobs),'--progress',*pathspecs])
                 break
             except subprocess.CalledProcessError:
                 if attempt==3:raise
                 print(f'Submodule fetch interrupted (attempt {attempt}/3). Retrying...',flush=True)
         repair(checkout)
         checkout.rename(source)
+else:
+    # A checkout fetched by an older version (or by RCLOL_FETCH_ALL_SUBMODULES
+    # arithmetic) can lack a required submodule; fetch only the missing ones and
+    # never touch the submodules already checked out.
+    if not a.check_only:
+        checkout_id=hashlib.sha256(os.fsencode(source)).hexdigest()
+        pending=ROOT/'build'/('pending-submodules-'+checkout_id+'.json')
+        marked=set(json.loads(pending.read_text())) if pending.exists() else set()
+        paths=fetch_pathspecs(source)
+        missing=[path for path in paths if not (source/path/'.git').exists()]
+        # A previous run interrupted mid-initialization left the marker behind;
+        # those submodules need their fetch retried (and repaired) even when a
+        # partial .git already exists.
+        todo=sorted(set(missing)|(marked&set(paths)))
+        if todo:
+            print('Fetching missing submodules:',', '.join(todo),flush=True)
+            pending.parent.mkdir(parents=True,exist_ok=True)
+            pending.write_text(json.dumps(todo)+'\n')
+            run(['git','-C',str(source),'-c',LFS_URL,*LFS_FILTERS,'submodule','update','--init','--recursive',
+                 '--depth','1','--jobs',str(a.jobs),*todo])
+            # Only the submodules this run touched; already initialized or
+            # patched ones keep their state and are not inspected.
+            touched=[]
+            for path in todo:
+                parent=source/path
+                if (parent/'.git').exists():touched.extend([parent,*submodules(parent)])
+            repair(source,repos=touched)
+            pending.unlink()
 
 # Never reset someone else's checkout to make a patch apply.
 for component in manifest['components']:

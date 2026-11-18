@@ -39,6 +39,10 @@ USE_TOOLBOX=0
 CONTAINER_INSTALL=0
 INSIDE_TOOLBOX=0
 TOOLBOX_RELEASE=''
+# 1 when the hidden League/Riot Client window entries were requested
+# (--window-entries or DARLING_LOL_WINDOW_ENTRIES=1); never created by default.
+WINDOW_ENTRIES=0
+if [[ ${DARLING_LOL_WINDOW_ENTRIES:-0} == 1 ]]; then WINDOW_ENTRIES=1; fi
 YES=0
 NO_CONFIRM=0
 FAMILY=''
@@ -244,6 +248,9 @@ Options:
                       with --yes or without a terminal: ${DEFAULT_LOCALE})
                       A prefix that already ran the client keeps its saved
                       language unless RCLOL_LOCALE is exported at launch.
+      --window-entries  Also create hidden desktop entries that name and icon the
+                      League and Riot Client windows in the GNOME overview
+                      (off by default; the launcher itself stays neutral)
   -h, --help          Show this help
 
 Environment:
@@ -254,6 +261,7 @@ Environment:
                              hosts (default: ${DEFAULT_FEDORA_RELEASE})
   DARLING_LOL_DESKTOP_ENTRY  Create the desktop entry without asking (1/0);
                              when unset, ask at the end of an interactive install
+  DARLING_LOL_WINDOW_ENTRIES Same as --window-entries when set to 1
   NO_COLOR                   Disable colored output
   XDG_CACHE_HOME             Where the install log is written
 EOF
@@ -265,6 +273,7 @@ parse_args() {
       -v|--verbose) VERBOSE=1 ;;
       -t|--toolbox) USE_TOOLBOX=1 ;;
       -y|--yes) YES=1 ;;
+      --window-entries) WINDOW_ENTRIES=1 ;;
       --no-confirm) NO_CONFIRM=1 ;;
       --region)
         (( $# >= 2 )) || fail '--region requires a value.'
@@ -651,6 +660,7 @@ install_toolbox() {
   local args=(--no-confirm --region "$REGION" --locale "$LOCALE")
   if (( YES )); then args+=(--yes); fi
   if (( VERBOSE )); then args+=(--verbose); fi
+  if (( WINDOW_ENTRIES )); then args+=(--window-entries); fi
 
   # Forward the desktop-entry choice only when set: the inner installer treats
   # unset as "prompt" and 0 as "suppress the prompt without creating an entry".
@@ -962,6 +972,9 @@ create_desktop_entry() {
   if (( INSIDE_TOOLBOX )); then
     args+=(--toolbox "$TOOLBOX_NAME")
   fi
+  if (( WINDOW_ENTRIES )); then
+    args+=(--window-entries)
+  fi
 
   local entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
   if [[ -f $entry ]] && ! grep -q 'scripts/launch-shortcut.sh' "$entry"; then
@@ -1170,6 +1183,28 @@ main() {
   ensure_no_active_session
   run 'Installing Darling system components' install_system_components
   run 'Installing the user runtime' install_user_runtime
+
+  # Record the install mode only now that every step above succeeded: a
+  # cancelled confirmation or a failed preflight/build must leave any previous
+  # markers intact so scripts/update.sh keeps pointing at the last working
+  # install. The Toolbox path execs into the container, so a CONTAINER_INSTALL
+  # run never gets here; what does is the inner Toolbox run (DARLING_LOL_TOOLBOX=1,
+  # with the container name passed by the outer installer) or a genuinely native
+  # install. A manual run inside a container (INSIDE_TOOLBOX without
+  # DARLING_LOL_TOOLBOX) records nothing: the container name is not known for sure.
+  if [[ ${DARLING_LOL_TOOLBOX:-0} == 1 && $INSIDE_TOOLBOX == 1 ]]; then
+    # Record the container so scripts/update.sh can re-exec itself inside it:
+    # the build cache and the installed runtime belong to this container.
+    mkdir -p "$TARGET_DIR/build"
+    printf '%s\n' "${DARLING_LOL_TOOLBOX_NAME:-$TOOLBOX_NAME}" > "$TARGET_DIR/build/toolbox-container"
+    rm -f "$TARGET_DIR/build/native-install"
+  elif [[ $INSIDE_TOOLBOX != 1 ]]; then
+    # Explicitly native install: record it so scripts/update.sh never re-execs
+    # into a container, and drop a stale Toolbox marker.
+    mkdir -p "$TARGET_DIR/build"
+    : > "$TARGET_DIR/build/native-install"
+    rm -f "$TARGET_DIR/build/toolbox-container"
+  fi
 
   finish
 }
