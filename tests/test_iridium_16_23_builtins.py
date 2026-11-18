@@ -217,6 +217,13 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
             for name, wanted in expected.items():
                 builtins = spirv_builtins((work / 'out' / f'{name}.bin.spv').read_bytes())
                 self.assertTrue(wanted.issubset(builtins), f'{name}: expected BuiltIn {wanted}, got {builtins}')
+                spirv_val = shutil.which('spirv-val')
+                if spirv_val:
+                    # Iridium sizes every kernel with LocalSizeId (maintenance4); that predates these builtins
+                    check = subprocess.run([spirv_val, '--target-env', 'vulkan1.2', '--allow-localsizeid',
+                                            str(work / 'out' / f'{name}.bin.spv')],
+                                           capture_output=True, text=True)
+                    self.assertEqual(check.returncode, 0, f'{name}: {check.stdout}{check.stderr}')
 
 
 if __name__ == '__main__':

@@ -6524,7 +6524,7 @@ index 1e3e971..4c18554 100644
 -	DynamicVK::vkFreeCommandBuffers(_device->device(), _device->oneshotCommandPool(), 1, &cmdBuf);
  };
 diff --git a/src/iridium/air.cpp b/src/iridium/air.cpp
-index 21c501f..4afbf71 100644
+index 21c501f..48e3f06 100644
 --- a/src/iridium/air.cpp
 +++ b/src/iridium/air.cpp
 @@ -4,9 +4,46 @@
@@ -6950,7 +6950,7 @@ index 21c501f..4afbf71 100644
  				case LLVMBitCast: {
  					auto target = DynamicLLVM::LLVMGetOperand(llvmValue, 0);
  					auto targetID = llvmValueToResultID(builder, target);
-@@ -254,13 +540,378 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -254,15 +540,380 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  				} break;
  
  				default:
@@ -6962,9 +6962,9 @@ index 21c501f..4afbf71 100644
  		default:
 -			throw ImpossibleResultID();
 +			throw ImpossibleResultID("Unsupported LLVM value: " + describeLLVMValue(llvmValue));
-+	}
-+};
-+
+ 	}
+ };
+ 
 +
 +static std::vector<std::string_view> splitAirName(std::string_view name) {
 +	std::vector<std::string_view> parts;
@@ -7325,12 +7325,14 @@ index 21c501f..4afbf71 100644
 +
 +		resID = (type == unpackVecType) ? unpacked : builder.encodeFConvert(type, unpacked);
 +		return true;
- 	}
++	}
 +
 +	return false;
- };
- 
++};
++
  void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& outputInfo) {
+ 	//auto tmp = DynamicLLVM::LLVMPrintModuleToString(_module.get());
+ 	//std::cout << "    " << tmp << std::endl;
 @@ -312,7 +963,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		});
  
@@ -7528,7 +7530,7 @@ index 21c501f..4afbf71 100644
  
  			// find the location index info
  			size_t infoIdx = 0;
-@@ -687,6 +1439,49 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -687,6 +1439,55 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				resultType = uvec2Type;
  			}
  
@@ -7575,10 +7577,16 @@ index 21c501f..4afbf71 100644
 +				resultType = narrowType;
 +			}
 +
++			// AIR integers are typed signed; hand the kernel the type its instructions expect
++			if (resultType != type) {
++				target = builder.encodeBitcast(type, target);
++				resultType = type;
++			}
++
  			builder.associateExistingResultID(target, llparamVal);
  			builder.setResultType(target, resultType);
  		}
-@@ -761,14 +1556,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -761,14 +1562,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				realSampleType = fakeSampleType;
  			}
  
@@ -7606,7 +7614,7 @@ index 21c501f..4afbf71 100644
  			auto imagePtrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::UniformConstant, imageType, 8));
  			auto var = builder.addGlobalVariable(imagePtrType, SPIRV::StorageClass::UniformConstant);
  			//auto load = builder.encodeLoad(imageType, var);
-@@ -959,68 +1759,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -959,68 +1765,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  	enum class CFGType {
  		None = 0,
  		Selection,
@@ -7754,7 +7762,7 @@ index 21c501f..4afbf71 100644
  		if (isFirst) {
  			isFirst = false;
  
-@@ -1030,16 +1860,59 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1030,16 +1866,59 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			builder.insertLabel(builder.lookupResultID(reinterpret_cast<uintptr_t>(bb)));
  		}
  
@@ -7815,7 +7823,7 @@ index 21c501f..4afbf71 100644
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
  					builder.setResultType(resID, type);
-@@ -1048,6 +1921,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1048,6 +1927,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				// TODO: look into using physical addressing instead of logical addressing, which should simplify the translation process
  				//       (since i *think* that's the same addressing mode used by Metal code)
  
@@ -7834,7 +7842,7 @@ index 21c501f..4afbf71 100644
  				case LLVMGetElementPtr: {
  					auto base = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto targetType = DynamicLLVM::LLVMTypeOf(inst);
-@@ -1060,17 +1945,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1060,17 +1951,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						indices.push_back(llvmValueToResultID(builder, llindex));
  					}
  
@@ -7868,7 +7876,7 @@ index 21c501f..4afbf71 100644
  					// strangely enough, SPIR-V provides no instruction that can do an initial pointer offset like LLVM's GEP does.
  					// there's OpPtrAccessChain, which is tantalizingly named, but unfortunately that instruction doesn't work as expected
  					// either. i've tried using the raw index (i.e. in element units) and the multiplied index (i.e. in bytes), but no dice.
-@@ -1112,6 +2012,10 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1112,6 +2018,10 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						op = access;
  					}
  
@@ -7879,7 +7887,7 @@ index 21c501f..4afbf71 100644
  					auto resID = builder.encodeLoad(type, op, alignment);
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-@@ -1123,7 +2027,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1123,7 +2033,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto llval = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto llptr = DynamicLLVM::LLVMGetOperand(inst, 1);
  					auto val = llvmValueToResultID(builder, llval);
@@ -7888,7 +7896,7 @@ index 21c501f..4afbf71 100644
  
  					// TODO: also handle runtime arrays properly here
  
-@@ -1149,50 +2053,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1149,50 +2059,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeConvertUToF(type, llvmValueToResultID(builder, arg));
@@ -7941,7 +7949,7 @@ index 21c501f..4afbf71 100644
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeFConvert(type, llvmValueToResultID(builder, arg));
-@@ -1223,14 +2085,65 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1223,14 +2091,65 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto operand2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  
  						resID = builder.encodeFMax(type, llvmValueToResultID(builder, operand1), llvmValueToResultID(builder, operand2));
@@ -8010,7 +8018,7 @@ index 21c501f..4afbf71 100644
  				case LLVMFMul:
  				case LLVMFDiv:
  				case LLVMFAdd:
-@@ -1365,28 +2278,90 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1365,28 +2284,90 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto op1 = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto op2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  					auto predicate = DynamicLLVM::LLVMGetFCmpPredicate(inst);
@@ -8112,7 +8120,7 @@ index 21c501f..4afbf71 100644
  					if (DynamicLLVM::LLVMIsConditional(inst)) {
  						auto condition = DynamicLLVM::LLVMGetCondition(inst);
  						auto trueLabel = DynamicLLVM::LLVMBasicBlockAsValue(DynamicLLVM::LLVMGetSuccessor(inst, 0));
-@@ -1422,25 +2397,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1422,25 +2403,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto type = llvmTypeToSPIRVType(builder, lltype);
  
  					std::vector<std::pair<SPIRV::ResultID, SPIRV::ResultID>> variablesAndBlocks;
@@ -8154,7 +8162,7 @@ index 21c501f..4afbf71 100644
  
  					// ensure the resulting pointer storage class is the same as the input pointer storage class
  					auto typeInst = *builder.reverseLookupType(type);
-@@ -1474,6 +2462,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1474,6 +2468,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		}
  	}
  
