@@ -37,6 +37,13 @@ inline VkResult vkGetSemaphoreCounterValue(VkDevice, VkSemaphore semaphore, uint
     *value = counters[key(semaphore)];
     return VK_SUCCESS;
 }
+inline VkResult vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo* info, uint64_t) {
+    for (uint32_t i = 0; i < info->semaphoreCount; ++i) {
+        if (failing.count(key(info->pSemaphores[i]))) return VK_ERROR_DEVICE_LOST;
+        if (counters[key(info->pSemaphores[i])] < info->pValues[i]) return VK_TIMEOUT;
+    }
+    return VK_SUCCESS;
+}
 inline void vkDestroySemaphore(VkDevice, VkSemaphore semaphore, const VkAllocationCallbacks*) {
     if (!destroyed.insert(key(semaphore)).second) throw "semaphore destroyed twice";
 }
@@ -142,13 +149,16 @@ int main() {
     device.putTimelineSemaphore({sem(1004), 7});
     assert(!destroyed.count(1003) && destroyed.count(1004));
 
-    // bounded: beyond 4096 waiting handles further pending ones are leaked, never destroyed early
+    // beyond 4096 waiting handles further pending ones are still never destroyed early, and stay tracked
     for (uint64_t i = 0; i < 5000; ++i) device.putTimelineSemaphore({sem(20000 + i), 1});
     for (uint64_t i = 0; i < 5000; ++i) assert(!destroyed.count(20000 + i));
 
-    // teardown destroys what is still waiting for this device
+    // teardown destroys the waiting handles whose last signal landed, including those past the cap, and leaks the
+    // ones still pending or on a lost device
+    for (uint64_t i = 0; i < 4999; ++i) counters[20000 + i] = 1;
     destroyRetiringTimelines(device._device);
-    assert(destroyed.count(1003) && destroyed.count(20000));
+    assert(destroyed.count(20000) && destroyed.count(24998));
+    assert(!destroyed.count(24999) && !destroyed.count(1003));
     return 0;
 }
 '''
@@ -158,7 +168,8 @@ int main() {
         self.assertIn('poison enabled', log)
         self.assertIn('timeline semaphore 0x3e8 destroy deferred (#1): value 4, last signal 5 still pending', log)
         self.assertIn('timeline semaphore 0x3e8 destroyed: its last signal (5) landed', log)
-        self.assertRegex(log, r'timeline semaphore 0x[0-9a-f]+ leaked: 4096 destroys already wait')
+        self.assertRegex(log, r'timeline semaphore 0x[0-9a-f]+ kept past the cap: 4096 destroys already wait')
+        self.assertIn('timeline semaphore 0x61a7 leaked at device teardown: its last signal (1) never landed', log)
 
     def test_poison_mode_traps_cpu_writes_to_freed_mappings_and_logs_their_origin(self):
         program = r'''

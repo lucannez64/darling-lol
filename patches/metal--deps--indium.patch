@@ -3037,7 +3037,7 @@ index 5f62ad0..a2906f3 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..36f6645 100644
+index 322e186..236d385 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,10 @@
@@ -3334,12 +3334,12 @@ index 322e186..36f6645 100644
 +			selectedReason = skipCPUDevices ? "loader-first-hardware" : "loader-first";
 +			break;
 +		}
-+	}
+ 	}
 +
 +	if (selectedIndex < 0) {
 +		appendDeviceLog("no usable supported Vulkan device found; Metal will have no device");
 +		return;
- 	}
++	}
 +
 +	DeviceCandidate& selected = candidates[selectedIndex];
 +	appendDeviceLog("selected name=\"" + std::string(selected.properties.deviceName) + "\""
@@ -4107,7 +4107,7 @@ index 322e186..36f6645 100644
  
  	if (result == VK_TIMEOUT) {
  		// timed out with no semaphores ready
-@@ -474,15 +1362,129 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -474,15 +1362,171 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  		_eventLoopSemaphores.push_back(semaphore);
  		_eventLoopWaitValues.push_back(targetValue);
  		_eventLoopCallbacks.push_back(callback);
@@ -4123,9 +4123,8 @@ index 322e186..36f6645 100644
 +    } else {
 +        noteWakeup("wakeupSkipped");
 +    }
- };
- 
--// TODO: create a semaphore pool to avoid constantly creating and destroying semaphores
++};
++
 +// Non-exported timeline handles are exclusively leased until the last owner
 +// (including GPU-completion callbacks) releases them. Preserve monotonic values.
 +
@@ -4151,8 +4150,9 @@ index 322e186..36f6645 100644
 +	std::vector<RetiringTimelineSemaphore> waiting;
 +	std::atomic<size_t> count {0};
 +	uint64_t deferred = 0; // debug-mode statistics, under the mutex
-+};
-+
+ };
+ 
+-// TODO: create a semaphore pool to avoid constantly creating and destroying semaphores
 +TimelineRetirement& timelineRetirement() {
 +	static auto* retirement = new TimelineRetirement; // never destroyed, like the other process-wide pools
 +	return *retirement;
@@ -4179,18 +4179,34 @@ index 322e186..36f6645 100644
 +	retirement.count.store(list.size(), std::memory_order_relaxed);
 +}
 +
++// bounded host wait for one timeline value; false on timeout or a lost device. Never called with the retirement mutex held.
++bool waitTimelineSignal(VkDevice device, VkSemaphore semaphore, uint64_t value, uint64_t timeoutNanoseconds) {
++	VkSemaphoreWaitInfo info {};
++	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
++	info.semaphoreCount = 1;
++	info.pSemaphores = &semaphore;
++	info.pValues = &value;
++	return Indium::DynamicVK::vkWaitSemaphores(device, &info, timeoutNanoseconds) == VK_SUCCESS;
++}
++
 +void retireTimelineSemaphore(VkDevice device, VkSemaphore semaphore, uint64_t lastSignal) {
 +	auto& retirement = timelineRetirement();
-+	std::lock_guard<std::mutex> lock(retirement.mutex);
++	std::unique_lock<std::mutex> lock(retirement.mutex);
 +	destroySignalledTimelines(retirement);
 +	if (timelineSignalled(device, semaphore, lastSignal)) {
 +		Indium::DynamicVK::vkDestroySemaphore(device, semaphore, nullptr);
 +		return;
 +	}
-+	// a lost device never signals: leaking the handle is harmless, destroying it is not
 +	if (retirement.waiting.size() >= 4096) {
-+		if (Indium::MemoryPool::Debug::enabled()) Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx leaked: 4096 destroys already wait for their signal\n", (unsigned long long) (uintptr_t) semaphore);
-+		return;
++		// backpressure: a bounded wait for this signal, outside the mutex. A handle still pending after it (a lost device
++		// never signals) stays tracked past the cap, so a later retry or the device teardown still owns it.
++		lock.unlock();
++		if (waitTimelineSignal(device, semaphore, lastSignal, 100'000'000)) {
++			Indium::DynamicVK::vkDestroySemaphore(device, semaphore, nullptr);
++			return;
++		}
++		lock.lock();
++		if (Indium::MemoryPool::Debug::enabled()) Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx kept past the cap: 4096 destroys already wait for their signal\n", (unsigned long long) (uintptr_t) semaphore);
 +	}
 +	retirement.waiting.push_back(RetiringTimelineSemaphore { device, semaphore, lastSignal, std::chrono::steady_clock::now() });
 +	retirement.count.store(retirement.waiting.size(), std::memory_order_relaxed);
@@ -4214,17 +4230,43 @@ index 322e186..36f6645 100644
 +	destroySignalledTimelines(retirement);
 +}
 +
-+// device teardown: nothing will be submitted or waited for any more
++// device teardown: nothing new is submitted, but the last signal of a waiting handle may still be pending. Wait (bounded,
++// outside the mutex) for those signals, destroy the handles whose signal landed and leak the rest: destroying a
++// semaphore that a submitted batch will still signal is invalid usage, leaking it at teardown is harmless.
 +void destroyRetiringTimelines(VkDevice device) {
 +	auto& retirement = timelineRetirement();
-+	std::lock_guard<std::mutex> lock(retirement.mutex);
-+	auto& list = retirement.waiting;
-+	list.erase(std::remove_if(list.begin(), list.end(), [device](const RetiringTimelineSemaphore& entry) {
-+		if (entry.device != device) return false;
-+		Indium::DynamicVK::vkDestroySemaphore(entry.device, entry.semaphore, nullptr);
-+		return true;
-+	}), list.end());
-+	retirement.count.store(list.size(), std::memory_order_relaxed);
++	std::vector<RetiringTimelineSemaphore> mine;
++	{
++		std::lock_guard<std::mutex> lock(retirement.mutex);
++		auto& list = retirement.waiting;
++		auto split = std::stable_partition(list.begin(), list.end(), [device](const RetiringTimelineSemaphore& entry) {
++			return entry.device != device;
++		});
++		mine.assign(split, list.end());
++		list.erase(split, list.end());
++		retirement.count.store(list.size(), std::memory_order_relaxed);
++	}
++	if (mine.empty()) return;
++	std::vector<VkSemaphore> semaphores;
++	std::vector<uint64_t> values;
++	for (const auto& entry : mine) {
++		semaphores.push_back(entry.semaphore);
++		values.push_back(entry.lastSignal);
++	}
++	VkSemaphoreWaitInfo info {};
++	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
++	info.semaphoreCount = static_cast<uint32_t>(semaphores.size());
++	info.pSemaphores = semaphores.data();
++	info.pValues = values.data();
++	Indium::DynamicVK::vkWaitSemaphores(device, &info, 1'000'000'000); // all of them, 1 s at most
++	for (const auto& entry : mine) {
++		if (timelineSignalled(entry.device, entry.semaphore, entry.lastSignal)) {
++			Indium::DynamicVK::vkDestroySemaphore(entry.device, entry.semaphore, nullptr);
++		} else if (Indium::MemoryPool::Debug::enabled()) {
++			Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx leaked at device teardown: its last signal (%llu) never landed\n",
++				(unsigned long long) (uintptr_t) entry.semaphore, (unsigned long long) entry.lastSignal);
++		}
++	}
 +}
 +}
  
@@ -4240,7 +4282,7 @@ index 322e186..36f6645 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +1507,16 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +1549,16 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -4258,7 +4300,7 @@ index 322e186..36f6645 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +1562,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +1604,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
