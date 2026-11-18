@@ -95,6 +95,9 @@ void checkMetalBatch(id<MTLDevice> device, id<MTLSamplerState> sampler) {
     pass.stencilAttachment.clearStencil = 7;
     id<MTLCommandQueue> queue = [device newCommandQueue];
     id<MTLCommandBuffer> commands = [queue commandBuffer];
+    verifyBatch(commands.status == MTLCommandBufferStatusNotEnqueued, "initial command buffer status");
+    [commands enqueue];
+    verifyBatch(commands.status == MTLCommandBufferStatusEnqueued, "enqueued command buffer status");
     id<MTLRenderCommandEncoder> render = [commands renderCommandEncoderWithDescriptor:pass];
     verifyBatch(render != nil, "combined depth/stencil render encoder");
     [render setDepthStencilState:state]; [render setDepthBias:0 slopeScale:0 clamp:0]; [render setStencilReferenceValue:7];
@@ -106,7 +109,13 @@ void checkMetalBatch(id<MTLDevice> device, id<MTLSamplerState> sampler) {
     __block unsigned callbackState = 0;
     [commands addScheduledHandler:^(id<MTLCommandBuffer> buffer) { verifyBatch(buffer == commands, "scheduled buffer identity"); callbackState = 1; }];
     [commands addCompletedHandler:^(id<MTLCommandBuffer> buffer) { verifyBatch(callbackState == 1 && buffer == commands, "scheduled/completed handler order"); callbackState = 2; dispatch_semaphore_signal(done); }];
-    [commands commit]; [commands waitUntilCompleted];
+    [commands commit];
+    [commands waitUntilScheduled];
+    verifyBatch(commands.status >= MTLCommandBufferStatusScheduled, "scheduled command buffer status");
+    [commands waitUntilCompleted];
+    verifyBatch(commands.status == MTLCommandBufferStatusCompleted && commands.error == nil, "completed command buffer status");
+    verifyBatch(commands.GPUStartTime > 0.0 && commands.GPUEndTime >= commands.GPUStartTime, "GPU start/end timestamps");
+    verifyBatch(commands.kernelStartTime > 0.0 && commands.kernelEndTime >= commands.kernelStartTime, "kernel start/end timestamps");
     verifyBatch(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0 && callbackState == 2, "GPU handlers complete");
     dispatch_release(done);
     id<MTLBuffer> output = [device newBufferWithLength:512 options:MTLResourceStorageModeShared];

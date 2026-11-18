@@ -25,7 +25,7 @@ index 431f29a..eb3eec8 100644
  
  #
 diff --git a/include/Metal/MTLCommandBuffer.h b/include/Metal/MTLCommandBuffer.h
-index ef43df8..9045a84 100644
+index ef43df8..72aadfc 100644
 --- a/include/Metal/MTLCommandBuffer.h
 +++ b/include/Metal/MTLCommandBuffer.h
 @@ -16,6 +16,7 @@ METAL_DECLARATIONS_BEGIN
@@ -36,7 +36,33 @@ index ef43df8..9045a84 100644
  
  @class MTLComputePassDescriptor;
  @class MTLRenderPassDescriptor;
-@@ -36,9 +37,11 @@ typedef void (^MTLCommandBufferHandler)(id<MTLCommandBuffer>);
+@@ -25,6 +26,15 @@ typedef NS_ENUM(NSUInteger, MTLDispatchType) {
+ 	MTLDispatchTypeConcurrent = 1,
+ };
+ 
++typedef NS_ENUM(NSUInteger, MTLCommandBufferStatus) {
++	MTLCommandBufferStatusNotEnqueued = 0,
++	MTLCommandBufferStatusEnqueued = 1,
++	MTLCommandBufferStatusCommitted = 2,
++	MTLCommandBufferStatusScheduled = 3,
++	MTLCommandBufferStatusCompleted = 4,
++	MTLCommandBufferStatusError = 5,
++};
++
+ typedef void (^MTLCommandBufferHandler)(id<MTLCommandBuffer>);
+ 
+ @protocol MTLCommandBuffer <NSObject>
+@@ -32,14 +42,24 @@ typedef void (^MTLCommandBufferHandler)(id<MTLCommandBuffer>);
+ @property(readonly) id<MTLCommandQueue> commandQueue;
+ @property (readonly) id<MTLDevice> device;
+ @property(nullable, copy, atomic) NSString* label;
++@property(readonly) MTLCommandBufferStatus status;
++@property(readonly, nullable) NSError* error;
++@property(readonly) NSTimeInterval kernelStartTime;
++@property(readonly) NSTimeInterval kernelEndTime;
++@property(readonly) NSTimeInterval GPUStartTime;
++@property(readonly) NSTimeInterval GPUEndTime;
+ 
  - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor: (MTLComputePassDescriptor*)computePassDescriptor;
  - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType: (MTLDispatchType)dispatchType;
  - (id<MTLComputeCommandEncoder>)computeCommandEncoder;
@@ -44,10 +70,13 @@ index ef43df8..9045a84 100644
  
  - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor: (MTLRenderPassDescriptor*)renderPassDescriptor;
  
++- (void)enqueue;
 +- (void)addScheduledHandler:(MTLCommandBufferHandler)block;
  - (void)addCompletedHandler: (MTLCommandBufferHandler)block;
++- (void)waitUntilScheduled;
  - (void)waitUntilCompleted;
  - (void)presentDrawable: (id<MTLDrawable>)drawable;
+ - (void)commit;
 diff --git a/include/Metal/MTLComputeCommandEncoder.h b/include/Metal/MTLComputeCommandEncoder.h
 index 06f4e51..a8e7436 100644
 --- a/include/Metal/MTLComputeCommandEncoder.h
@@ -580,7 +609,7 @@ index e3382a8..1182427 100644
  @synthesize resourceOptions = _resourceOptions;
  @synthesize label = _label;
 diff --git a/src/Metal/MTLCommandBuffer.mm b/src/Metal/MTLCommandBuffer.mm
-index 7dedaa0..5eca991 100644
+index 7dedaa0..8750db0 100644
 --- a/src/Metal/MTLCommandBuffer.mm
 +++ b/src/Metal/MTLCommandBuffer.mm
 @@ -1,7 +1,18 @@
@@ -825,7 +854,7 @@ index 7dedaa0..5eca991 100644
  - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor: (MTLComputePassDescriptor*)computePassDescriptor
  {
  	auto encoder = _commandBuffer->computeCommandEncoder(computePassDescriptor.asIndiumDescriptor);
-@@ -107,11 +318,91 @@ struct MTLCommandBufferHandlerWrapper {
+@@ -107,11 +318,126 @@ struct MTLCommandBufferHandlerWrapper {
  
  - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor: (MTLRenderPassDescriptor*)renderPassDescriptor
  {
@@ -912,14 +941,56 @@ index 7dedaa0..5eca991 100644
 +	return result;
 +}
 +
++- (MTLCommandBufferStatus)status
++{
++	return static_cast<MTLCommandBufferStatus>(_commandBuffer->status());
++}
++
++- (NSError*)error
++{
++	return nil;
++}
++
++- (NSTimeInterval)kernelStartTime
++{
++	return _commandBuffer->gpuStartTime();
++}
++
++- (NSTimeInterval)kernelEndTime
++{
++	return _commandBuffer->gpuEndTime();
++}
++
++- (NSTimeInterval)GPUStartTime
++{
++	return _commandBuffer->gpuStartTime();
++}
++
++- (NSTimeInterval)GPUEndTime
++{
++	return _commandBuffer->gpuEndTime();
++}
++
++- (void)enqueue
++{
++	_commandBuffer->enqueue();
++}
++
 +- (void)addScheduledHandler:(MTLCommandBufferHandler)block
 +{
 +    _commandBuffer->addScheduledHandler(MTLCommandBufferHandlerWrapper(block, self));
  }
  
  - (void)addCompletedHandler: (MTLCommandBufferHandler)block
-@@ -121,17 +412,107 @@ struct MTLCommandBufferHandlerWrapper {
+@@ -119,19 +445,114 @@ struct MTLCommandBufferHandlerWrapper {
+ 	_commandBuffer->addCompletedHandler(MTLCommandBufferHandlerWrapper(block, self));
+ }
  
++- (void)waitUntilScheduled
++{
++	_commandBuffer->waitUntilScheduled();
++}
++
  - (void)waitUntilCompleted
  {
 +	double waitStart = MTLTimingEnabled() ? MTLTraceNow() : 0;
@@ -1149,7 +1220,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..88ec70f 100644
+index f58184a..6dadf24 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,34 @@
@@ -1302,7 +1373,7 @@ index f58184a..88ec70f 100644
  
  	[super dealloc];
  }
-@@ -153,12 +253,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +253,109 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1406,13 +1477,14 @@ index f58184a..88ec70f 100644
 +	try { pso = _device->newComputePipelineState(descriptor.asIndiumDescriptor, static_cast<Indium::PipelineOption>(options), nullptr); }
 +	catch (...) {
 +		MTLDebugPipelineFailure("computePipelineFailure");
-+		if (error) *error = MTLErrorFromCurrentException("newComputePipelineStateWithDescriptor");
++		NSError* err = MTLErrorFromCurrentException("newComputePipelineStateWithDescriptor");
++		if (error) *error = err;
 +		return nil;
 +	}
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +362,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +363,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1420,7 +1492,7 @@ index f58184a..88ec70f 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +380,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +381,14 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1429,13 +1501,14 @@ index f58184a..88ec70f 100644
 +	try { pso = _device->newComputePipelineState(((MTLFunctionInternal*)computeFunction).function, static_cast<Indium::PipelineOption>(options), nullptr); }
 +	catch (...) {
 +		MTLDebugPipelineFailure("computePipelineFailure");
-+		if (error) *error = MTLErrorFromCurrentException("newComputePipelineStateWithFunction");
++		NSError* err = MTLErrorFromCurrentException("newComputePipelineStateWithFunction");
++		if (error) *error = err;
 +		return nil;
 +	}
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +394,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +396,45 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1475,13 +1548,14 @@ index f58184a..88ec70f 100644
 +	catch (...) {
 +		MTLDebugPipelineFailure("renderPipelineFailure");
 +		MTLTraceCount("pipelineException");
-+		if (error) *error = MTLErrorFromCurrentException("newRenderPipelineStateWithDescriptor");
++		NSError* err = MTLErrorFromCurrentException("newRenderPipelineStateWithDescriptor");
++		if (error) *error = err;
 +		return nil;
 +	}
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +439,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +442,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1601,7 +1675,22 @@ index f58184a..88ec70f 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +620,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -265,7 +613,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 		// error was already written
+ 		return nil;
+ 	}
+-	auto lib = _device->newLibrary(data.bytes, data.length);
++	std::shared_ptr<Indium::Library> lib;
++	try { lib = _device->newLibrary(data.bytes, data.length); }
++	catch (...) {
++		NSError* err = MTLErrorFromCurrentException("newLibraryWithURL");
++		if (error) *error = err;
++		return nil;
++	}
+ 	if (!lib) {
+ 		return nil;
+ 	}
+@@ -275,8 +629,22 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -1618,7 +1707,8 @@ index f58184a..88ec70f 100644
 +    try { lib = _device->newLibrary(bytes, length); }
 +    catch (...) {
 +        dispatch_release(mapped);
-+        if (error) *error = MTLErrorFromCurrentException("newLibraryWithData");
++        NSError* err = MTLErrorFromCurrentException("newLibraryWithData");
++        if (error) *error = err;
 +        return nil;
 +    }
 +    dispatch_release(mapped);
