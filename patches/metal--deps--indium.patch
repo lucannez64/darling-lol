@@ -1612,7 +1612,7 @@ index b3756ef..f6d648f 100644
  		#define IRIDIUM_DYNAMICLLVM_FUNCTION_DECL(_name) \
  			extern DynamicFunction<decltype(_name)> _name;
 diff --git a/private-include/iridium/spirv.hpp b/private-include/iridium/spirv.hpp
-index 95cd3de..fc34de1 100644
+index 95cd3de..272f926 100644
 --- a/private-include/iridium/spirv.hpp
 +++ b/private-include/iridium/spirv.hpp
 @@ -61,6 +61,9 @@ namespace Iridium {
@@ -1625,15 +1625,16 @@ index 95cd3de..fc34de1 100644
  		};
  
  		enum class StorageClass: uint32_t {
-@@ -68,6 +71,7 @@ namespace Iridium {
+@@ -68,6 +71,8 @@ namespace Iridium {
  			Input = 1,
  			Uniform = 2,
  			Output = 3,
++			Workgroup = 4,
 +            Private = 6,
  			Function = 7,
  			StorageBuffer = 12,
  			PhysicalStorageBuffer = 5349,
-@@ -82,6 +86,8 @@ namespace Iridium {
+@@ -82,6 +87,8 @@ namespace Iridium {
  			Int64 = 11,
  			Int16 = 22,
  			Int8 = 39,
@@ -1642,7 +1643,7 @@ index 95cd3de..fc34de1 100644
  			PhysicalStorageBufferAddresses = 5347,
  		};
  
-@@ -255,6 +261,10 @@ namespace Iridium {
+@@ -255,6 +262,10 @@ namespace Iridium {
  			ImageFormat imageFormat = ImageFormat::Unknown;
  			ResultID imageRealSampleTypeID = ResultIDInvalid;
  
@@ -1653,7 +1654,7 @@ index 95cd3de..fc34de1 100644
  			// this does NOT need to be considered for equality
  			ResultID arrayLengthID = ResultIDInvalid;
  
-@@ -372,6 +382,7 @@ struct std::hash<Iridium::SPIRV::Type> {
+@@ -372,6 +383,7 @@ struct std::hash<Iridium::SPIRV::Type> {
  		result = ((result << 1) ^ std::hash<size_t>()(type.scalarWidth)) >> 1;
  		result = ((result << 1) ^ std::hash<bool>()(type.integerIsSigned)) >> 1;
  		result = ((result << 1) ^ std::hash<size_t>()(type.entryCount)) >> 1;
@@ -1661,7 +1662,7 @@ index 95cd3de..fc34de1 100644
  		for (const auto& member: type.structureMembers) {
  			result = ((result << 1) ^ std::hash<Iridium::SPIRV::ResultID>()(member.id)) >> 1;
  			for (const auto& decoration: member.decorations) {
-@@ -412,6 +423,7 @@ namespace Iridium {
+@@ -412,6 +424,7 @@ namespace Iridium {
  		struct GlobalVariable {
  			StorageClass storageClass;
  			ResultID typeID;
@@ -1669,7 +1670,7 @@ index 95cd3de..fc34de1 100644
  		};
  
  		struct FunctionVariable {
-@@ -485,7 +497,7 @@ namespace Iridium {
+@@ -485,7 +498,7 @@ namespace Iridium {
  			IMul = 132,
  			FMul = 133,
  			UDiv = 134,
@@ -1678,7 +1679,7 @@ index 95cd3de..fc34de1 100644
  			FDiv = 136,
  			UMod = 137,
  			SRem = 138,
-@@ -618,12 +630,14 @@ namespace Iridium {
+@@ -618,12 +631,14 @@ namespace Iridium {
  			std::unordered_map<ResultID, DynamicByteWriter> _functionWriters;
  			PrivateFunctionInfo* _currentFunctionInfo = nullptr;
  			DynamicByteWriter* _currentFunctionWriter = nullptr;
@@ -1693,7 +1694,7 @@ index 95cd3de..fc34de1 100644
  			std::unordered_map<ResultID, ResultID> _undefinedValues;
  			std::unordered_map<ResultID, ResultID> _nullValues;
  			std::unordered_map<ResultID, ResultID> _resultIDTypes;
-@@ -673,7 +687,8 @@ namespace Iridium {
+@@ -673,7 +688,8 @@ namespace Iridium {
  			ResultID lookupResultID(uintptr_t association) const;
  
  			void addEntryPoint(const EntryPoint& entryPoint);
@@ -1703,7 +1704,7 @@ index 95cd3de..fc34de1 100644
  			void addDecoration(ResultID resultID, const Decoration& decoration);
  			FunctionInfo declareFunction(ResultID functionType);
  
-@@ -686,6 +701,7 @@ namespace Iridium {
+@@ -686,6 +702,7 @@ namespace Iridium {
  			ResultID declareConstantComposite(ResultID typeID, std::vector<ResultID> elements);
  
  			ResultID declareUndefinedValue(ResultID typeID);
@@ -1711,7 +1712,7 @@ index 95cd3de..fc34de1 100644
  			ResultID declareNullValue(ResultID typeID);
  
  			ResultID insertLabel(ResultID id = ResultIDInvalid);
-@@ -717,9 +733,13 @@ namespace Iridium {
+@@ -717,9 +734,13 @@ namespace Iridium {
  			ResultID encodeFOrdGreaterThan(ResultID operand1, ResultID operand2);
  			void encodeBranch(ResultID targetLabel);
  			void encodeBranchConditional(ResultID condition, ResultID trueLabel, ResultID falseLabel);
@@ -1939,7 +1940,7 @@ index e58f0ba..89930f7 100644
 +    finishTrackedEncoder(_privateCommandBuffer.lock()->commandBuffer());
  };
 diff --git a/src/indium/buffer.cpp b/src/indium/buffer.cpp
-index 23fd2d3..1a48b81 100644
+index 23fd2d3..b8840ef 100644
 --- a/src/indium/buffer.cpp
 +++ b/src/indium/buffer.cpp
 @@ -1,6 +1,8 @@
@@ -2020,7 +2021,7 @@ index 23fd2d3..1a48b81 100644
  		if (DynamicVK::vkFlushMappedMemoryRanges(_privateDevice->device(), 1, &range) != VK_SUCCESS) {
  			// TODO
  			abort();
-@@ -114,12 +86,10 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
+@@ -114,12 +86,14 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
  };
  
  Indium::PrivateBuffer::~PrivateBuffer() {
@@ -2030,13 +2031,17 @@ index 23fd2d3..1a48b81 100644
 -
 +	// the mapping belongs to the shared memory block
 +	auto owner = reinterpret_cast<uint64_t>(_buffer);
++	// Release the memory while the handle is still ours. The pool is keyed by the handle's value, and once
++	// vkDestroyBuffer returns the driver may give that value to a buffer or image created on another thread: free() would
++	// then drop the new resource's entry and release its live memory. Freeing memory that is still bound is valid as long
++	// as the buffer is only destroyed afterwards.
++	MemoryPool::free(_privateDevice->device(), owner);
  	DynamicVK::vkDestroyBuffer(_privateDevice->device(), _buffer, nullptr);
 -	DynamicVK::vkFreeMemory(_privateDevice->device(), _memory, nullptr);
-+	MemoryPool::free(_privateDevice->device(), owner);
  };
  
  std::shared_ptr<Indium::Device> Indium::PrivateBuffer::device() {
-@@ -136,7 +106,8 @@ void* Indium::PrivateBuffer::contents() {
+@@ -136,7 +110,8 @@ void* Indium::PrivateBuffer::contents() {
  	}
  
  	if (!_mapped) {
@@ -2046,7 +2051,7 @@ index 23fd2d3..1a48b81 100644
  			// TODO
  			abort();
  		}
-@@ -148,9 +119,16 @@ void* Indium::PrivateBuffer::contents() {
+@@ -148,9 +123,16 @@ void* Indium::PrivateBuffer::contents() {
  void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
  	VkMappedMemoryRange vulkanRange {};
  	vulkanRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -2065,7 +2070,7 @@ index 23fd2d3..1a48b81 100644
  	if (DynamicVK::vkFlushMappedMemoryRanges(_privateDevice->device(), 1, &vulkanRange) != VK_SUCCESS) {
  		// TODO
  		abort();
-@@ -158,8 +136,10 @@ void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
+@@ -158,8 +140,10 @@ void Indium::PrivateBuffer::didModifyRange(Range<size_t> range) {
  };
  
  uint64_t Indium::PrivateBuffer::gpuAddress() {
@@ -3032,7 +3037,7 @@ index 5f62ad0..a2906f3 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..a121e9f 100644
+index 322e186..36f6645 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,10 @@
@@ -3046,7 +3051,11 @@ index 322e186..a121e9f 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,39 +18,212 @@
+@@ -9,42 +15,216 @@
+ #include <indium/depth-stencil.private.hpp>
+ #include <indium/compute-pipeline.private.hpp>
+ #include <indium/dynamic-vk.hpp>
++#include <indium/memory-pool.private.hpp>
  
  #include <iridium/iridium.hpp>
  
@@ -3265,7 +3274,7 @@ index 322e186..a121e9f 100644
  			continue;
  		}
  
-@@ -67,12 +246,105 @@ void Indium::initGlobalDeviceList() {
+@@ -67,12 +247,105 @@ void Indium::initGlobalDeviceList() {
  		DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
  
  		if (!features12.timelineSemaphore) {
@@ -3330,7 +3339,7 @@ index 322e186..a121e9f 100644
 +	if (selectedIndex < 0) {
 +		appendDeviceLog("no usable supported Vulkan device found; Metal will have no device");
 +		return;
-+	}
+ 	}
 +
 +	DeviceCandidate& selected = candidates[selectedIndex];
 +	appendDeviceLog("selected name=\"" + std::string(selected.properties.deviceName) + "\""
@@ -3365,7 +3374,7 @@ index 322e186..a121e9f 100644
 +
 +	for (size_t index: creationOrder) {
 +		globalDeviceList.push_back(std::make_shared<PrivateDevice>(candidates[index].device));
- 	}
++	}
 +
 +	appendDeviceLog("created VkDevice for " + std::to_string(globalDeviceList.size()) + " of "
 +		+ std::to_string(candidates.size()) + " supported device(s)"
@@ -3373,7 +3382,7 @@ index 322e186..a121e9f 100644
  };
  
  void Indium::finitGlobalDeviceList() {
-@@ -83,8 +355,16 @@ Indium::Device::~Device() {};
+@@ -83,8 +356,16 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -3391,7 +3400,7 @@ index 322e186..a121e9f 100644
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
  	uint32_t count = 0;
-@@ -233,6 +513,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +514,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -3428,7 +3437,7 @@ index 322e186..a121e9f 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +556,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +557,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -3436,7 +3445,7 @@ index 322e186..a121e9f 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -294,9 +605,434 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -294,9 +606,439 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  			abort();
  		}
  	}
@@ -3857,6 +3866,10 @@ index 322e186..a121e9f 100644
 +	unlink(tmpPath.c_str());
 +}
 +
++namespace {
++void destroyRetiringTimelines(VkDevice device); // with the timeline semaphore pool, below
++}
++
  Indium::PrivateDevice::~PrivateDevice() {
 +	if (_pipelineCache) {
 +		savePipelineCache();
@@ -3867,11 +3880,12 @@ index 322e186..a121e9f 100644
 +	}
 +    for (const auto& entry : _renderPasses) DynamicVK::vkDestroyRenderPass(_device, entry.second, nullptr);
 +    for (const auto& entry : _availableTimelineSemaphores) DynamicVK::vkDestroySemaphore(_device, entry.first, nullptr);
++    destroyRetiringTimelines(_device);
 +	for (auto pool : _availableDescriptorPools) DynamicVK::vkDestroyDescriptorPool(_device, pool, nullptr);
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +1044,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +1050,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3895,7 +3909,7 @@ index 322e186..a121e9f 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +1070,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +1076,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3908,7 +3922,7 @@ index 322e186..a121e9f 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -336,10 +1089,57 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
+@@ -336,10 +1095,57 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
  };
  
  std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* data, size_t length) {
@@ -3970,7 +3984,7 @@ index 322e186..a121e9f 100644
  	PrivateLibrary::FunctionInfoMap funcInfoMap;
  
  	for (const auto& [name, info]: outputInfo.functionInfos) {
-@@ -357,12 +1157,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,12 +1163,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -4016,7 +4030,7 @@ index 322e186..a121e9f 100644
  	return lib;
  };
  
-@@ -382,6 +1213,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
+@@ -382,6 +1219,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
  	return globalDeviceList.empty() ? nullptr : globalDeviceList.front();
  };
  
@@ -4036,7 +4050,7 @@ index 322e186..a121e9f 100644
  void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	// this is held for the entire duration of the poll so we can
  	// ensure we're the only one polling, which allows us to avoid
-@@ -393,9 +1237,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -393,9 +1243,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	const std::vector<VkSemaphore> semaphores = _eventLoopSemaphores;
  	const std::vector<uint64_t> values = _eventLoopWaitValues;
  	const std::vector<std::function<void()>> callbacks = _eventLoopCallbacks;
@@ -4072,7 +4086,7 @@ index 322e186..a121e9f 100644
  	VkSemaphoreWaitInfo info {};
  	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
  	info.semaphoreCount = semaphores.size();
-@@ -403,7 +1273,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -403,7 +1279,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	info.pValues = values.data();
  	info.flags = VK_SEMAPHORE_WAIT_ANY_BIT;
  
@@ -4093,7 +4107,7 @@ index 322e186..a121e9f 100644
  
  	if (result == VK_TIMEOUT) {
  		// timed out with no semaphores ready
-@@ -474,15 +1356,30 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -474,15 +1362,129 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  		_eventLoopSemaphores.push_back(semaphore);
  		_eventLoopWaitValues.push_back(targetValue);
  		_eventLoopCallbacks.push_back(callback);
@@ -4114,6 +4128,105 @@ index 322e186..a121e9f 100644
 -// TODO: create a semaphore pool to avoid constantly creating and destroying semaphores
 +// Non-exported timeline handles are exclusively leased until the last owner
 +// (including GPU-completion callbacks) releases them. Preserve monotonic values.
++
++// A timeline semaphore leaves the pool for good (pool full) when its last owner lets go. For a texture that is the
++// completion callback of the last command buffer that used it, and that callback runs as soon as the event loop sees
++// the command buffer's *own* semaphore reach its value. Vulkan does not order the signal operations of one batch, so the
++// texture's semaphore can still have its signal pending at that moment, and destroying a semaphore that a submitted
++// batch will still signal is invalid usage. RADV keeps the syncobj alive and nothing happens; on NVIDIA the semaphore's
++// memory is unmapped and the GPU then writes the pending signal into an unmapped page (Xid 31, "ENGINE HOST0 ...
++// ACCESS_TYPE_VIRT_WRITE", #252). So a handle is destroyed only once its counter has reached the last value reserved
++// for it (acquire() and each commit raise `count` before the signal is submitted); until then it waits here and every
++// later put retries. Only the pool-full path pays the counter query; the other puts read one atomic.
++namespace {
++struct RetiringTimelineSemaphore {
++	VkDevice device;
++	VkSemaphore semaphore;
++	uint64_t lastSignal;
++	std::chrono::steady_clock::time_point since;
++};
++
++struct TimelineRetirement {
++	std::mutex mutex;
++	std::vector<RetiringTimelineSemaphore> waiting;
++	std::atomic<size_t> count {0};
++	uint64_t deferred = 0; // debug-mode statistics, under the mutex
++};
++
++TimelineRetirement& timelineRetirement() {
++	static auto* retirement = new TimelineRetirement; // never destroyed, like the other process-wide pools
++	return *retirement;
++}
++
++bool timelineSignalled(VkDevice device, VkSemaphore semaphore, uint64_t value) {
++	uint64_t current = 0;
++	return Indium::DynamicVK::vkGetSemaphoreCounterValue(device, semaphore, &current) == VK_SUCCESS && current >= value;
++}
++
++// caller holds the retirement mutex
++void destroySignalledTimelines(TimelineRetirement& retirement) {
++	auto& list = retirement.waiting;
++	list.erase(std::remove_if(list.begin(), list.end(), [](const RetiringTimelineSemaphore& entry) {
++		if (!timelineSignalled(entry.device, entry.semaphore, entry.lastSignal)) return false;
++		Indium::DynamicVK::vkDestroySemaphore(entry.device, entry.semaphore, nullptr);
++		if (Indium::MemoryPool::Debug::enabled()) {
++			Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx destroyed: its last signal (%llu) landed %.3f ms after the destroy was first due\n",
++				(unsigned long long) (uintptr_t) entry.semaphore, (unsigned long long) entry.lastSignal,
++				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.since).count());
++		}
++		return true;
++	}), list.end());
++	retirement.count.store(list.size(), std::memory_order_relaxed);
++}
++
++void retireTimelineSemaphore(VkDevice device, VkSemaphore semaphore, uint64_t lastSignal) {
++	auto& retirement = timelineRetirement();
++	std::lock_guard<std::mutex> lock(retirement.mutex);
++	destroySignalledTimelines(retirement);
++	if (timelineSignalled(device, semaphore, lastSignal)) {
++		Indium::DynamicVK::vkDestroySemaphore(device, semaphore, nullptr);
++		return;
++	}
++	// a lost device never signals: leaking the handle is harmless, destroying it is not
++	if (retirement.waiting.size() >= 4096) {
++		if (Indium::MemoryPool::Debug::enabled()) Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx leaked: 4096 destroys already wait for their signal\n", (unsigned long long) (uintptr_t) semaphore);
++		return;
++	}
++	retirement.waiting.push_back(RetiringTimelineSemaphore { device, semaphore, lastSignal, std::chrono::steady_clock::now() });
++	retirement.count.store(retirement.waiting.size(), std::memory_order_relaxed);
++	if (Indium::MemoryPool::Debug::enabled()) {
++		// each line is a destroy the previous code did with the signal still pending (#252)
++		uint64_t current = 0;
++		Indium::DynamicVK::vkGetSemaphoreCounterValue(device, semaphore, &current);
++		++retirement.deferred;
++		if (retirement.deferred <= 200 || retirement.deferred % 1000 == 0) {
++			Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx destroy deferred (#%llu): value %llu, last signal %llu still pending, %zu waiting\n",
++				(unsigned long long) (uintptr_t) semaphore, (unsigned long long) retirement.deferred, (unsigned long long) current,
++				(unsigned long long) lastSignal, retirement.waiting.size());
++		}
++	}
++}
++
++void retryTimelineRetirement() {
++	auto& retirement = timelineRetirement();
++	if (retirement.count.load(std::memory_order_relaxed) == 0) return;
++	std::lock_guard<std::mutex> lock(retirement.mutex);
++	destroySignalledTimelines(retirement);
++}
++
++// device teardown: nothing will be submitted or waited for any more
++void destroyRetiringTimelines(VkDevice device) {
++	auto& retirement = timelineRetirement();
++	std::lock_guard<std::mutex> lock(retirement.mutex);
++	auto& list = retirement.waiting;
++	list.erase(std::remove_if(list.begin(), list.end(), [device](const RetiringTimelineSemaphore& entry) {
++		if (entry.device != device) return false;
++		Indium::DynamicVK::vkDestroySemaphore(entry.device, entry.semaphore, nullptr);
++		return true;
++	}), list.end());
++	retirement.count.store(list.size(), std::memory_order_relaxed);
++}
++}
  
  Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
 +    {
@@ -4127,11 +4240,12 @@ index 322e186..a121e9f 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +1402,14 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +1507,16 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
 -	DynamicVK::vkDestroySemaphore(_device, semaphore.semaphore, nullptr);
++    retryTimelineRetirement();
 +    {
 +        std::lock_guard<std::mutex> lock(_timelineSemaphorePoolMutex);
 +        if (_availableTimelineSemaphores.size() < 256 && semaphore.count != UINT64_MAX) {
@@ -4139,11 +4253,12 @@ index 322e186..a121e9f 100644
 +            return;
 +        }
 +    }
-+    DynamicVK::vkDestroySemaphore(_device, semaphore.semaphore, nullptr);
++    // never vkDestroySemaphore() here directly: its last signal may still be pending (see retireTimelineSemaphore)
++    retireTimelineSemaphore(_device, semaphore.semaphore, semaphore.count);
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +1455,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +1562,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -5958,7 +6073,7 @@ index 71392df..d82e5f0 100644
  	info.unnormalizedCoordinates = descriptor.normalizedCoordinates ? VK_FALSE : VK_TRUE;
  
 diff --git a/src/indium/texture.cpp b/src/indium/texture.cpp
-index 1e3e971..4c18554 100644
+index 1e3e971..e7ebeae 100644
 --- a/src/indium/texture.cpp
 +++ b/src/indium/texture.cpp
 @@ -1,8 +1,90 @@
@@ -6258,7 +6373,7 @@ index 1e3e971..4c18554 100644
  
  	VkImageViewCreateInfo info2 {};
  	info2.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-@@ -463,12 +570,24 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+@@ -463,12 +570,25 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
  		// TODO
  		abort();
  	}
@@ -6278,13 +6393,14 @@ index 1e3e971..4c18554 100644
 +	if (_sampledImageView) DynamicVK::vkDestroyImageView(_device->device(), _sampledImageView, nullptr);
  	DynamicVK::vkDestroyImageView(_device->device(), _imageView, nullptr);
 +	auto owner = reinterpret_cast<uint64_t>(_image);
++	// memory first, while the handle value cannot have been reused yet (see ~PrivateBuffer)
++	MemoryPool::free(_device->device(), owner);
  	DynamicVK::vkDestroyImage(_device->device(), _image, nullptr);
 -	DynamicVK::vkFreeMemory(_device->device(), _memory, nullptr);
-+	MemoryPool::free(_device->device(), owner);
  };
  
  Indium::TextureType Indium::ConcreteTexture::textureType() const {
-@@ -537,7 +656,20 @@ VkImage Indium::ConcreteTexture::image() {
+@@ -537,7 +657,20 @@ VkImage Indium::ConcreteTexture::image() {
  	return _image;
  };
  
@@ -6305,7 +6421,7 @@ index 1e3e971..4c18554 100644
  	return VK_IMAGE_LAYOUT_GENERAL;
  };
  
-@@ -546,6 +678,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -546,6 +679,16 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  };
  
  void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmapLevel, size_t slice, const void* bytes, size_t bytesPerRow, size_t bytesPerImage) {
@@ -6322,7 +6438,7 @@ index 1e3e971..4c18554 100644
  	if (_storageMode != StorageMode::Managed && _storageMode != StorageMode::Shared) {
  		throw std::runtime_error("Invalid usage of replaceRegion on non-managed and non-shared texture");
  	}
-@@ -556,99 +698,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+@@ -556,99 +699,109 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
  
  	auto aspect = pixelFormatToVkImageAspectFlags(_descriptor.pixelFormat);
  
@@ -6524,7 +6640,7 @@ index 1e3e971..4c18554 100644
 -	DynamicVK::vkFreeCommandBuffers(_device->device(), _device->oneshotCommandPool(), 1, &cmdBuf);
  };
 diff --git a/src/iridium/air.cpp b/src/iridium/air.cpp
-index 21c501f..6fc7adb 100644
+index 21c501f..c8b2ef4 100644
 --- a/src/iridium/air.cpp
 +++ b/src/iridium/air.cpp
 @@ -4,9 +4,46 @@
@@ -6746,7 +6862,7 @@ index 21c501f..6fc7adb 100644
  		} break;
  
  		default:
-@@ -146,6 +299,68 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
+@@ -146,6 +299,74 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
  	}
  };
  
@@ -6786,6 +6902,12 @@ index 21c501f..6fc7adb 100644
 +	return builder.declareConstantComposite(llvmTypeToSPIRVType(builder, type), std::vector<Iridium::SPIRV::ResultID>(DynamicLLVM::LLVMGetVectorSize(type), scalar));
 +}
 +
++// Variables Iridium declares itself (locals, module globals, threadgroup memory) have no explicit layout.
++static bool isLayoutFreeStorage(Iridium::SPIRV::StorageClass storageClass) {
++	using Iridium::SPIRV::StorageClass;
++	return storageClass == StorageClass::Private || storageClass == StorageClass::Function || storageClass == StorageClass::Workgroup;
++}
++
 +// AIR reads and writes the leading scalar or vector of a local or global aggregate through the
 +// aggregate's own (opaque) pointer. SPIR-V wants the access chain to that element spelled out.
 +// Returns `pointer` unchanged when it already points at `valueType` or does not start with one.
@@ -6796,7 +6918,7 @@ index 21c501f..6fc7adb 100644
 +		default: return pointer;
 +	}
 +	auto pointerType = builder.reverseLookupType(builder.lookupResultType(pointer));
-+	if (!pointerType || (pointerType->pointerStorageClass != StorageClass::Private && pointerType->pointerStorageClass != StorageClass::Function)) return pointer;
++	if (!pointerType || !isLayoutFreeStorage(pointerType->pointerStorageClass)) return pointer;
 +	auto valueType = llvmTypeToSPIRVType(builder, llvmValueType);
 +	size_t depth = 0;
 +	for (auto current = pointerType->targetType; current != valueType; ++depth) {
@@ -6815,7 +6937,7 @@ index 21c501f..6fc7adb 100644
  static std::string_view llvmMDStringToStringView(LLVMValueRef llvmMDString) {
  	unsigned int length = 0;
  	auto rawStr = DynamicLLVM::LLVMGetMDString(llvmMDString, &length);
-@@ -162,16 +377,63 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -162,16 +383,73 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  	{
  		ResultID maybe = builder.lookupResultID(reinterpret_cast<uintptr_t>(llvmValue));
  		if (maybe != ResultIDInvalid) {
@@ -6858,6 +6980,16 @@ index 21c501f..6fc7adb 100644
 +            if (!initializer) throw ImpossibleResultID("External AIR globals are unsupported");
 +            LayoutFreeScope layoutFree(true);
 +            auto valueType = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMGlobalGetValueType(llvmValue));
++            if (DynamicLLVM::LLVMGetPointerAddressSpace(type) == 3) {
++                // `threadgroup` memory (League 16.23 blur kernels). Metal leaves it uninitialized and Vulkan forbids
++                // Workgroup initializers, so the zeroinitializer is dropped.
++                auto pointerType = builder.declareType(Type(Type::PointerTag{}, StorageClass::Workgroup, valueType, 8));
++                auto result = builder.addGlobalVariable(pointerType, StorageClass::Workgroup);
++                builder.setResultType(result, pointerType);
++                builder.associateExistingResultID(result, reinterpret_cast<uintptr_t>(llvmValue));
++                builder.referenceGlobalVariable(result);
++                return result;
++            }
 +            auto pointerType = builder.declareType(Type(Type::PointerTag{}, StorageClass::Private, valueType, 8));
 +            auto initialValue = llvmValueToResultID(builder, initializer);
 +            auto result = builder.addGlobalVariable(pointerType, StorageClass::Private, initialValue);
@@ -6880,7 +7012,7 @@ index 21c501f..6fc7adb 100644
  		} break;
  
  		case LLVMConstantFPValueKind: {
-@@ -191,13 +453,15 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -191,13 +469,15 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  				} break;
  
  				default:
@@ -6899,7 +7031,7 @@ index 21c501f..6fc7adb 100644
  
  			for (size_t i = 0; i < count; ++i) {
  				auto constant = DynamicLLVM::LLVMGetOperand(llvmValue, i);
-@@ -207,10 +471,11 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -207,10 +487,11 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  			return builder.declareConstantComposite(llvmTypeToSPIRVType(builder, type), vals);
  		} break;
  
@@ -6913,7 +7045,7 @@ index 21c501f..6fc7adb 100644
  
  			for (size_t i = 0; i < count; ++i) {
  				auto constant = DynamicLLVM::LLVMGetElementAsConstant(llvmValue, i);
-@@ -220,7 +485,8 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -220,7 +501,8 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  			return builder.declareConstantComposite(llvmTypeToSPIRVType(builder, type), vals);
  		} break;
  
@@ -6923,7 +7055,7 @@ index 21c501f..6fc7adb 100644
  			return builder.declareUndefinedValue(llvmTypeToSPIRVType(builder, type));
  		} break;
  
-@@ -231,6 +497,26 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -231,6 +513,26 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  
  		case LLVMConstantExprValueKind: {
  			switch (DynamicLLVM::LLVMGetConstOpcode(llvmValue)) {
@@ -6936,7 +7068,7 @@ index 21c501f..6fc7adb 100644
 +                    std::vector<ResultID> indices;
 +                    for (unsigned i=2;i<DynamicLLVM::LLVMGetNumOperands(llvmValue);++i) indices.push_back(llvmValueToResultID(builder,DynamicLLVM::LLVMGetOperand(llvmValue,i)));
 +                    // The selected member has the layout mode its global or local was declared with.
-+                    LayoutFreeScope layoutFree(baseType.pointerStorageClass == StorageClass::Private || baseType.pointerStorageClass == StorageClass::Function);
++                    LayoutFreeScope layoutFree(isLayoutFreeStorage(baseType.pointerStorageClass));
 +                    // An access chain cannot reinterpret the base as another aggregate.
 +                    if (llvmTypeToSPIRVType(builder,DynamicLLVM::LLVMGetGEPSourceElementType(llvmValue)) != baseType.targetType)
 +                        throw ImpossibleResultID("Constant AIR GEP reinterprets its base: " + describeLLVMValue(llvmValue));
@@ -6950,7 +7082,7 @@ index 21c501f..6fc7adb 100644
  				case LLVMBitCast: {
  					auto target = DynamicLLVM::LLVMGetOperand(llvmValue, 0);
  					auto targetID = llvmValueToResultID(builder, target);
-@@ -254,13 +540,378 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
+@@ -254,15 +556,381 @@ static Iridium::SPIRV::ResultID llvmValueToResultID(Iridium::SPIRV::Builder& bui
  				} break;
  
  				default:
@@ -6962,9 +7094,9 @@ index 21c501f..6fc7adb 100644
  		default:
 -			throw ImpossibleResultID();
 +			throw ImpossibleResultID("Unsupported LLVM value: " + describeLLVMValue(llvmValue));
-+	}
-+};
-+
+ 	}
+ };
+ 
 +
 +static std::vector<std::string_view> splitAirName(std::string_view name) {
 +	std::vector<std::string_view> parts;
@@ -6989,7 +7121,7 @@ index 21c501f..6fc7adb 100644
 +		while (!token.empty() && token[0] >= '0' && token[0] <= '9') {
 +			token.remove_prefix(1);
 +		}
- 	}
++	}
 +	return !token.empty() && token[0] == 'f';
 +};
 +
@@ -7039,6 +7171,7 @@ index 21c501f..6fc7adb 100644
 +	constexpr uint16_t DPdx = 207;
 +	constexpr uint16_t DPdy = 208;
 +	constexpr uint16_t Fwidth = 209;
++	constexpr uint16_t ControlBarrier = 224;
 +	constexpr uint16_t Kill = 252;
 +};
 +
@@ -7328,10 +7461,12 @@ index 21c501f..6fc7adb 100644
 +	}
 +
 +	return false;
- };
- 
++};
++
  void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& outputInfo) {
-@@ -312,7 +963,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+ 	//auto tmp = DynamicLLVM::LLVMPrintModuleToString(_module.get());
+ 	//std::cout << "    " << tmp << std::endl;
+@@ -312,7 +980,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		});
  
  		// declare the GLSL PerVertex structure
@@ -7340,7 +7475,7 @@ index 21c501f..6fc7adb 100644
  			SPIRV::Type::Member {
  				vec4Type,
  				0,
-@@ -321,13 +972,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -321,13 +989,21 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				}
  			},
  			// TODO: declare the rest of the structure
@@ -7363,7 +7498,7 @@ index 21c501f..6fc7adb 100644
  
  		// declare the GLSL VertexIndex input variable
  		vertexIndexVar = builder.addGlobalVariable(ptrIntType, SPIRV::StorageClass::Input);
-@@ -425,7 +1084,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -425,7 +1101,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  	// if the function returns a structure, we need to separate the components
  	// into separate output variables.
  
@@ -7372,7 +7507,7 @@ index 21c501f..6fc7adb 100644
  	auto funcRetType = DynamicLLVM::LLVMGetReturnType(llfuncType);
  	std::vector<LLVMTypeRef> funcParamTypes(DynamicLLVM::LLVMCountParamTypes(llfuncType));
  	DynamicLLVM::LLVMGetParamTypes(llfuncType, funcParamTypes.data());
-@@ -460,7 +1119,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -460,7 +1136,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				auto type = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMStructGetTypeAtIndex(funcRetType, i));
  				auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
  				auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
@@ -7381,7 +7516,7 @@ index 21c501f..6fc7adb 100644
  				++location;
  				_outputValueIDs.push_back(var);
  				builder.referenceGlobalVariable(var);
-@@ -472,13 +1131,69 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -472,13 +1148,69 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		auto type = llvmTypeToSPIRVType(builder, funcRetType);
  		auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
  		auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
@@ -7452,7 +7587,7 @@ index 21c501f..6fc7adb 100644
  
  	//
  	// analyze parameters and mark special values (like the vertex ID)
-@@ -519,7 +1234,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -519,7 +1251,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			auto kind = llvmMDStringToStringView(parameterInfo[1]);
  
  			if (kind == "air.buffer") {
@@ -7463,7 +7598,7 @@ index 21c501f..6fc7adb 100644
  				auto addrPtrTypeInst = SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::PhysicalStorageBuffer, type, 8);
  				auto addrPtrType = builder.declareType(addrPtrTypeInst);
  				bufferMembers.push_back(SPIRV::Type::Member { addrPtrType, 8 * bufferIndex, {} });
-@@ -575,7 +1292,33 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -575,7 +1309,33 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			_parameterIDs.push_back(load);
  			builder.associateExistingResultID(load, llparamVal);
  			builder.setResultType(load, intType);
@@ -7498,7 +7633,7 @@ index 21c501f..6fc7adb 100644
  			// find the location index info
  			size_t infoIdx = 0;
  			for (; infoIdx < parameterInfo.size(); ++infoIdx) {
-@@ -620,7 +1363,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -620,7 +1380,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Input);
  			auto load = builder.encodeLoad(type, var);
  
@@ -7507,7 +7642,7 @@ index 21c501f..6fc7adb 100644
  			++paramLocation;
  
  			builder.referenceGlobalVariable(var);
-@@ -631,9 +1374,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -631,9 +1391,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			builder.setResultType(load, type);
  		} else if (kind == "air.vertex_input") {
  			auto type = llvmTypeToSPIRVType(builder, funcParamTypes[i]);
@@ -7528,7 +7663,63 @@ index 21c501f..6fc7adb 100644
  
  			// find the location index info
  			size_t infoIdx = 0;
-@@ -761,14 +1513,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -687,6 +1456,55 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+ 				resultType = uvec2Type;
+ 			}
+ 
++			builder.associateExistingResultID(target, llparamVal);
++			builder.setResultType(target, resultType);
++		} else if (kind == "air.thread_position_in_threadgroup" || kind == "air.threadgroup_position_in_grid") {
++			// Metal's [[thread_position_in_threadgroup]]/[[threadgroup_position_in_grid]] are Vulkan's
++			// LocalInvocationId/WorkgroupId. League 16.23 compute kernels declare them as uint3; uint, uint2
++			// and the ushort variants take the leading components, like air.thread_position_in_grid.
++			auto builtin = kind == "air.thread_position_in_threadgroup" ? SPIRV::BuiltinID::LocalInvocationId : SPIRV::BuiltinID::WorkgroupId;
++			auto ptrUVec3Type = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Input, uvec3Type, 8));
++			auto var = builder.addGlobalVariable(ptrUVec3Type, SPIRV::StorageClass::Input);
++			builder.addDecoration(var, SPIRV::Decoration { SPIRV::DecorationType::Builtin, { static_cast<uint32_t>(builtin) } });
++			builder.referenceGlobalVariable(var);
++
++			auto type = llvmTypeToSPIRVType(builder, funcParamTypes[i]);
++			auto typeInst = *builder.reverseLookupType(type);
++			auto load = builder.encodeLoad(uvec3Type, var);
++			auto target = load;
++			auto resultType = uvec3Type;
++			size_t width = 32;
++
++			if (typeInst.backingType == SPIRV::Type::BackingType::Integer) {
++				target = builder.encodeCompositeExtract(u32Type, load, { 0 });
++				resultType = u32Type;
++				width = typeInst.scalarWidth;
++			} else if (typeInst.backingType == SPIRV::Type::BackingType::Vector) {
++				width = builder.reverseLookupType(typeInst.targetType)->scalarWidth;
++				if (typeInst.entryCount == 2) {
++					auto uvec2Type = builder.declareType(SPIRV::Type(SPIRV::Type::VectorTag {}, 2, u32Type, 8, 8));
++					target = builder.encodeVectorShuffle(uvec2Type, load, load, { 0, 1 });
++					resultType = uvec2Type;
++				}
++			}
++
++			if (width != 32) {
++				// ushort variants: OpUConvert needs an unsigned result type (encodeUConvert would
++				// only flip the flag on the vector type itself, not its components)
++				auto narrowType = builder.declareType(SPIRV::Type(SPIRV::Type::IntegerTag {}, width, false));
++				if (typeInst.backingType == SPIRV::Type::BackingType::Vector) {
++					narrowType = builder.declareType(SPIRV::Type(SPIRV::Type::VectorTag {}, typeInst.entryCount, narrowType, typeInst.size, typeInst.alignment));
++				}
++				target = builder.encodeRawOp(SPIRVOp::UConvert, narrowType, { target });
++				resultType = narrowType;
++			}
++
++			// AIR integers are typed signed; hand the kernel the type its instructions expect
++			if (resultType != type) {
++				target = builder.encodeBitcast(type, target);
++				resultType = type;
++			}
++
+ 			builder.associateExistingResultID(target, llparamVal);
+ 			builder.setResultType(target, resultType);
+ 		}
+@@ -761,14 +1579,19 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				realSampleType = fakeSampleType;
  			}
  
@@ -7556,7 +7747,7 @@ index 21c501f..6fc7adb 100644
  			auto imagePtrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::UniformConstant, imageType, 8));
  			auto var = builder.addGlobalVariable(imagePtrType, SPIRV::StorageClass::UniformConstant);
  			//auto load = builder.encodeLoad(imageType, var);
-@@ -959,68 +1716,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -959,68 +1782,98 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  	enum class CFGType {
  		None = 0,
  		Selection,
@@ -7704,7 +7895,7 @@ index 21c501f..6fc7adb 100644
  		if (isFirst) {
  			isFirst = false;
  
-@@ -1030,16 +1817,59 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1030,16 +1883,59 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  			builder.insertLabel(builder.lookupResultID(reinterpret_cast<uintptr_t>(bb)));
  		}
  
@@ -7765,7 +7956,7 @@ index 21c501f..6fc7adb 100644
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
  					builder.setResultType(resID, type);
-@@ -1048,6 +1878,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1048,6 +1944,18 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  				// TODO: look into using physical addressing instead of logical addressing, which should simplify the translation process
  				//       (since i *think* that's the same addressing mode used by Metal code)
  
@@ -7784,14 +7975,14 @@ index 21c501f..6fc7adb 100644
  				case LLVMGetElementPtr: {
  					auto base = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto targetType = DynamicLLVM::LLVMTypeOf(inst);
-@@ -1060,17 +1902,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1060,17 +1968,32 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						indices.push_back(llvmValueToResultID(builder, llindex));
  					}
  
 -					auto tmp = llvmTypeToSPIRVType(builder, targetType);
  					auto tmp2 = llvmValueToResultID(builder, base);
 +					auto baseStorageClass = builder.reverseLookupType(builder.lookupResultType(tmp2))->pointerStorageClass;
-+					LayoutFreeScope layoutFree(baseStorageClass == SPIRV::StorageClass::Private || baseStorageClass == SPIRV::StorageClass::Function);
++					LayoutFreeScope layoutFree(isLayoutFreeStorage(baseStorageClass));
 +					auto tmp = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::PhysicalStorageBuffer, llvmTypeToSPIRVType(builder, gepElementType(inst)), 8));
  
  					// ensure the resulting pointer storage class is the same as the input pointer storage class
@@ -7818,7 +8009,7 @@ index 21c501f..6fc7adb 100644
  					// strangely enough, SPIR-V provides no instruction that can do an initial pointer offset like LLVM's GEP does.
  					// there's OpPtrAccessChain, which is tantalizingly named, but unfortunately that instruction doesn't work as expected
  					// either. i've tried using the raw index (i.e. in element units) and the multiplied index (i.e. in bytes), but no dice.
-@@ -1112,6 +1969,10 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1112,6 +2035,10 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						op = access;
  					}
  
@@ -7829,7 +8020,7 @@ index 21c501f..6fc7adb 100644
  					auto resID = builder.encodeLoad(type, op, alignment);
  
  					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-@@ -1123,7 +1984,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1123,7 +2050,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto llval = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto llptr = DynamicLLVM::LLVMGetOperand(inst, 1);
  					auto val = llvmValueToResultID(builder, llval);
@@ -7838,7 +8029,7 @@ index 21c501f..6fc7adb 100644
  
  					// TODO: also handle runtime arrays properly here
  
-@@ -1149,50 +2010,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1149,50 +2076,8 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeConvertUToF(type, llvmValueToResultID(builder, arg));
@@ -7891,10 +8082,24 @@ index 21c501f..6fc7adb 100644
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeFConvert(type, llvmValueToResultID(builder, arg));
-@@ -1223,14 +2042,65 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1223,14 +2108,79 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto operand2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  
  						resID = builder.encodeFMax(type, llvmValueToResultID(builder, operand1), llvmValueToResultID(builder, operand2));
++					} else if (name == "air.wg.barrier") {
++						// threadgroup_barrier(mem_flags): the first operand is Metal's mem_flags bitmask
++						// (1 device, 2 threadgroup, 4 texture); the second, the scope, is always 1 in League's shaders.
++						auto flagsValue = DynamicLLVM::LLVMGetOperand(inst, 0);
++						if (DynamicLLVM::LLVMGetValueKind(flagsValue) != LLVMConstantIntValueKind)
++							throw std::runtime_error("air.wg.barrier requires constant memory flags");
++						auto flags = DynamicLLVM::LLVMConstIntGetZExtValue(flagsValue);
++						uint32_t semantics = 0;
++						if (flags & 1) semantics |= 0x40; // UniformMemory
++						if (flags & 2) semantics |= 0x100; // WorkgroupMemory
++						if (flags & 4) semantics |= 0x800; // ImageMemory
++						if (semantics) semantics |= 0x8; // AcquireRelease
++						auto workgroupScope = builder.declareConstantScalar<uint32_t>(2);
++						builder.encodeRawOpNoResult(SPIRVOp::ControlBarrier, { workgroupScope, workgroupScope, builder.declareConstantScalar<uint32_t>(semantics) });
 +					} else if (translateAirIntrinsic(builder, inst, name, type, resID, blockTerminated)) {
 +						// handled
 +					} else if (name.substr(0, 14) == "llvm.lifetime.") {
@@ -7910,8 +8115,8 @@ index 21c501f..6fc7adb 100644
 +						builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
 +						builder.setResultType(resID, type);
 +					}
-+				} break;
-+
+ 				} break;
+ 
 +				case LLVMUDiv:
 +				case LLVMURem: {
 +					auto llvmType = DynamicLLVM::LLVMTypeOf(inst);
@@ -7936,8 +8141,8 @@ index 21c501f..6fc7adb 100644
 +					result = builder.encodeBitcast(type, result);
 +					builder.associateExistingResultID(result, reinterpret_cast<uintptr_t>(inst));
 +					builder.setResultType(result, type);
- 				} break;
- 
++				} break;
++
 +                case LLVMAdd: case LLVMSub: case LLVMMul: case LLVMSDiv:
 +                case LLVMSRem: case LLVMShl: case LLVMLShr: case LLVMAShr:
 +                case LLVMAnd: case LLVMOr: case LLVMXor: {
@@ -7960,7 +8165,7 @@ index 21c501f..6fc7adb 100644
  				case LLVMFMul:
  				case LLVMFDiv:
  				case LLVMFAdd:
-@@ -1365,28 +2235,90 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1365,28 +2315,90 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto op1 = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto op2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  					auto predicate = DynamicLLVM::LLVMGetFCmpPredicate(inst);
@@ -7993,14 +8198,14 @@ index 21c501f..6fc7adb 100644
 +					}
 +
 +					auto resID = builder.encodeRawOp(spirvOpcode, type, { llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2) });
-+
-+					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-+					builder.setResultType(resID, type);
-+				} break;
  
 -						case LLVMRealOLT: {
 -							resID = builder.encodeFOrdLessThan(llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2));
 -						} break;
++					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
++					builder.setResultType(resID, type);
++				} break;
++
 +				case LLVMICmp: {
 +					auto op1 = DynamicLLVM::LLVMGetOperand(inst, 0);
 +					auto op2 = DynamicLLVM::LLVMGetOperand(inst, 1);
@@ -8035,10 +8240,11 @@ index 21c501f..6fc7adb 100644
  
 +					auto resID = builder.encodeRawOp(spirvOpcode, type, { llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2) });
 +
-+					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-+					builder.setResultType(resID, type);
-+				} break;
-+
+ 					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
+ 					builder.setResultType(resID, type);
+ 				} break;
+ 
+-				case LLVMBr: {
 +				case LLVMSelect: {
 +					auto type = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMTypeOf(inst));
 +					auto resID = builder.encodeRawOp(SPIRVOp::Select, type, {
@@ -8047,11 +8253,10 @@ index 21c501f..6fc7adb 100644
 +						llvmValueToResultID(builder, DynamicLLVM::LLVMGetOperand(inst, 2)),
 +					});
 +
- 					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
- 					builder.setResultType(resID, type);
- 				} break;
- 
--				case LLVMBr: {
++					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
++					builder.setResultType(resID, type);
++				} break;
++
 +				IRIDIUM_BR_CASES: {
 +                    auto loop=cfgInfos.find(builder.lookupResultID(reinterpret_cast<uintptr_t>(bb)));
 +                    if(loop!=cfgInfos.end() && loop->second.type==CFGType::Loop){
@@ -8062,7 +8267,7 @@ index 21c501f..6fc7adb 100644
  					if (DynamicLLVM::LLVMIsConditional(inst)) {
  						auto condition = DynamicLLVM::LLVMGetCondition(inst);
  						auto trueLabel = DynamicLLVM::LLVMBasicBlockAsValue(DynamicLLVM::LLVMGetSuccessor(inst, 0));
-@@ -1422,25 +2354,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1422,25 +2434,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto type = llvmTypeToSPIRVType(builder, lltype);
  
  					std::vector<std::pair<SPIRV::ResultID, SPIRV::ResultID>> variablesAndBlocks;
@@ -8104,7 +8309,7 @@ index 21c501f..6fc7adb 100644
  
  					// ensure the resulting pointer storage class is the same as the input pointer storage class
  					auto typeInst = *builder.reverseLookupType(type);
-@@ -1474,6 +2419,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1474,6 +2499,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		}
  	}
  
@@ -8968,7 +9173,7 @@ diff --git a/private-include/indium/memory-pool.private.hpp b/private-include/in
 new file mode 100644
 --- /dev/null
 +++ b/private-include/indium/memory-pool.private.hpp
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,369 @@
 +#pragma once
 +
 +// Suballocation of device memory for buffers and textures.
@@ -8985,18 +9190,117 @@ new file mode 100644
 +#include <indium/dynamic-vk.hpp>
 +
 +#include <chrono>
++#include <cstdarg>
 +#include <cstdint>
++#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
 +#include <deque>
 +#include <map>
 +#include <memory>
 +#include <mutex>
 +#include <unordered_map>
++#include <utility>
 +#include <vector>
++#include <dlfcn.h>
++#include <execinfo.h>
++#include <sys/mman.h>
 +#include <unistd.h>
 +
 +namespace Indium {
 +	namespace MemoryPool {
++		// Opt-in check for writes into freed Indium memory (#252). Read once per process: environment
++		// INDIUM_POISON_FREED_MAPPINGS=1, or the guest file /tmp/metal-poison-freed-mappings. Off, each site costs one
++		// predictable branch. On:
++		//  - every buffer and texture gets its own VkDeviceMemory (as with /tmp/metal-no-pool), so a free really unmaps;
++		//  - the CPU address range of a freed mapping is kept reserved without access (PROT_NONE) instead of going back to
++		//    the address space, so a late CPU write crashes at that address on any driver, AMD included;
++		//  - the guest /tmp/indium-poison.log gets one line per freed mapping (address range, size, age, the frames that
++		//    created it) and one per lifetime hazard Indium caught: a pool owner registered twice (a recycled handle) and a
++		//    timeline semaphore destroy deferred because its last signal was still pending.
++		namespace Debug {
++			inline bool enabled() {
++				static const bool value = [] {
++					const char* variable = getenv("INDIUM_POISON_FREED_MAPPINGS");
++					if (variable && variable[0] == '1' && variable[1] == 0) return true;
++					return access("/tmp/metal-poison-freed-mappings", F_OK) == 0;
++				}();
++				return value;
++			}
++
++			// one complete line per call (the file is line buffered, so a crash right after loses nothing);
++			// INDIUM_POISON_LOG overrides the path so the host-side test does not write to the real log
++			inline void log(const char* format, ...) {
++				static std::mutex* mutex = new std::mutex;
++				static FILE* file = nullptr;
++				std::lock_guard<std::mutex> lock(*mutex);
++				if (!file) {
++					const char* path = getenv("INDIUM_POISON_LOG");
++					file = fopen(path && *path ? path : "/tmp/indium-poison.log", "a");
++					if (!file) return;
++					setvbuf(file, nullptr, _IOLBF, 0);
++					fprintf(file, "poison enabled pid=%d\n", (int) getpid());
++				}
++				va_list arguments;
++				va_start(arguments, format);
++				vfprintf(file, format, arguments);
++				va_end(arguments);
++			}
++
++			struct Origin {
++				std::chrono::steady_clock::time_point created;
++				bool image = false;
++				int frames = 0;
++				void* stack[12];
++			};
++
++			// " image`symbol+0x.. image+0x.." for each saved frame
++			inline void describe(const Origin& origin, char* out, size_t size) {
++				size_t used = 0;
++				out[0] = 0;
++				for (int i = 0; i < origin.frames && used + 1 < size; ++i) {
++					Dl_info info {};
++					const char* image = "?";
++					const char* symbol = nullptr;
++					uintptr_t offset = (uintptr_t) origin.stack[i];
++					if (dladdr(origin.stack[i], &info)) {
++						if (info.dli_fname) image = strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname;
++						if (info.dli_sname && info.dli_saddr) {
++							symbol = info.dli_sname;
++							offset = (uintptr_t) origin.stack[i] - (uintptr_t) info.dli_saddr;
++						} else if (info.dli_fbase) {
++							offset = (uintptr_t) origin.stack[i] - (uintptr_t) info.dli_fbase;
++						}
++					}
++					int written = symbol ? snprintf(out + used, size - used, " %s`%s+0x%lx", image, symbol, (unsigned long) offset)
++						: snprintf(out + used, size - used, " %s+0x%lx", image, (unsigned long) offset);
++					if (written < 0) break;
++					used += (size_t) written;
++				}
++			}
++
++			// Keeps [address, address + length) mapped without access so nothing else lands there. Each reservation is one
++			// kernel mapping (vm.max_map_count is 65530 by default), so the oldest are given back beyond 16384.
++			inline bool reserve(void* address, size_t length) {
++				static std::mutex* mutex = new std::mutex;
++				static auto* reserved = new std::deque<std::pair<void*, size_t>>;
++				void* result = mmap(address, length, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
++				if (result == MAP_FAILED) return false;
++				if (result != address) {
++					// the driver still maps the range, or something else took it already
++					munmap(result, length);
++					return false;
++				}
++				std::lock_guard<std::mutex> lock(*mutex);
++				reserved->emplace_back(address, length);
++				if (reserved->size() > 16384) {
++					munmap(reserved->front().first, reserved->front().second);
++					reserved->pop_front();
++				}
++				return true;
++			}
++		}
++
 +		struct Allocation {
 +			VkDeviceMemory memory = VK_NULL_HANDLE;
 +			VkDeviceSize offset = 0;
@@ -9038,7 +9342,8 @@ new file mode 100644
 +				std::unordered_map<uint64_t, Entry> entries;
 +				std::unordered_map<uint32_t, std::vector<std::shared_ptr<Block>>> blocks;
 +				std::deque<Pending> pending;
-+				bool disabled = access("/tmp/metal-no-pool", F_OK) == 0;
++				bool disabled = access("/tmp/metal-no-pool", F_OK) == 0 || MemoryPool::Debug::enabled();
++				std::unordered_map<uint64_t, MemoryPool::Debug::Origin> origins; // owner -> creation site, debug mode only
 +			};
 +
 +			inline State& state() {
@@ -9107,6 +9412,29 @@ new file mode 100644
 +					}
 +				}
 +			}
++
++			// debug mode, after a dedicated allocation was freed; `mapped` is where the CPU saw it (null: never mapped)
++			inline void noteFreed(State& s, uint64_t owner, void* mapped, VkDeviceSize size) {
++				MemoryPool::Debug::Origin origin {};
++				auto it = s.origins.find(owner);
++				const bool known = it != s.origins.end();
++				if (known) {
++					origin = it->second;
++					s.origins.erase(it);
++				}
++				if (!mapped) return; // the CPU never had a pointer into it
++				const size_t page = (size_t) getpagesize();
++				const uintptr_t start = (uintptr_t) mapped;
++				const size_t length = (size_t) ((size + page - 1) / page * page);
++				const bool reserved = start % page == 0 && MemoryPool::Debug::reserve(mapped, length);
++				char frames[1536];
++				MemoryPool::Debug::describe(origin, frames, sizeof(frames));
++				const double age = known ? std::chrono::duration<double>(std::chrono::steady_clock::now() - origin.created).count() : -1;
++				MemoryPool::Debug::log("freed %s owner=0x%llx bytes=%llu cpu=[0x%lx,0x%lx) %s age=%.3fs origin:%s\n",
++					origin.image ? "image" : "buffer", (unsigned long long) owner, (unsigned long long) size,
++					(unsigned long) start, (unsigned long) (start + length), reserved ? "reserved-no-access" : "NOT-reserved",
++					age, known ? frames : " unknown");
++			}
 +		}
 +
 +		// `owner` is the buffer or image handle the memory will be bound to
@@ -9157,6 +9485,17 @@ new file mode 100644
 +				}
 +				if (!entry.block) abort();
 +			}
++			if (Debug::enabled()) {
++				if (s.entries.count(owner)) {
++					Debug::log("pool owner 0x%llx registered twice: a resource got a recycled handle before the previous owner's memory was released\n",
++						(unsigned long long) owner);
++				}
++				Debug::Origin origin;
++				origin.created = std::chrono::steady_clock::now();
++				origin.image = image;
++				origin.frames = backtrace(origin.stack, 12);
++				s.origins[owner] = origin;
++			}
 +			s.entries[owner] = entry;
 +			return Allocation { entry.block->memory, entry.offset, entry.size };
 +		}
@@ -9194,7 +9533,9 @@ new file mode 100644
 +			s.entries.erase(it);
 +			if (entry.block->dedicated) {
 +				// nothing can reuse a dedicated allocation, and the kernel keeps it alive for work in flight
++				void* mapped = entry.block->mapped;
 +				DynamicVK::vkFreeMemory(device, entry.block->memory, nullptr);
++				if (Debug::enabled()) noteFreed(s, owner, mapped, entry.size);
 +			} else {
 +				s.pending.push_back(Pending { std::chrono::steady_clock::now(), entry.block, entry.offset, entry.size });
 +			}
