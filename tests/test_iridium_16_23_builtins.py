@@ -164,11 +164,14 @@ def metallib(bitcode, name):
 def spirv_instructions(module):
     """Yield (opcode, operands) for every instruction of a SPIR-V module."""
     words = struct.unpack(f'<{len(module) // 4}I', module)
-    assert words[0] == 0x07230203, 'not a SPIR-V module'
+    if not words or words[0] != 0x07230203:
+        raise ValueError('not a SPIR-V module')
     index = 5
     while index < len(words):
         opcode, count = words[index] & 0xffff, words[index] >> 16
-        assert count > 0 and index + count <= len(words), f'invalid SPIR-V word count {count} at word {index}'
+        # not an assert: python -O would drop it, and a zero count never advances
+        if count == 0 or index + count > len(words):
+            raise ValueError(f'invalid SPIR-V word count {count} at word {index}')
         yield opcode, words[index + 1:index + count]
         index += count
 
@@ -186,8 +189,8 @@ def spirv_constants(module):
 
 
 def prerequisites():
-    if not (shutil.which('clang++') and shutil.which('git') and llvm_tools.find('llvm-config')):
-        return 'clang++, git and llvm-config are required'
+    if not (shutil.which('clang++') and shutil.which('git') and shutil.which('tar') and llvm_tools.find('llvm-config')):
+        return 'clang++, git, tar and llvm-config are required'
     assembler = Path(llvm_tools.config('--bindir')) / 'llvm-as'
     if not assembler.is_file():
         return f'llvm-as executable missing at {assembler}'
@@ -275,7 +278,10 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
             # with Workgroup (2) execution/memory scopes and AcquireRelease|WorkgroupMemory (0x108)
             tile = (work / 'out' / 'cs_tile.bin.spv').read_bytes()
             instructions = list(spirv_instructions(tile))
-            self.assertTrue(any(opcode == 59 and operands[2] == 4 for opcode, operands in instructions))
+            workgroup = [operands for opcode, operands in instructions if opcode == 59 and operands[2] == 4]
+            self.assertTrue(workgroup)
+            # result type, result id, storage class: Vulkan forbids a Workgroup initializer operand
+            self.assertTrue(all(len(operands) == 3 for operands in workgroup), workgroup)
             constants = spirv_constants(tile)
             barriers = [[constants.get(operand) for operand in operands] for opcode, operands in instructions if opcode == 224]
             self.assertEqual(barriers, [[2, 2, 0x108]])

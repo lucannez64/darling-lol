@@ -263,10 +263,10 @@ template<class Resource> static void check(bool image, VkDeviceSize size) {
     MemoryPool::allocate(vkDevice, handle, 0, size, 256, image, !image);
     // another thread creates a resource as soon as the driver has recycled the handle value
     afterDestroyHandle = [&](uint64_t recycled) {
-        afterDestroyHandle = nullptr;
         MemoryPool::allocate(vkDevice, recycled, 0, size, 256, !image, image);
     };
     Resource(handle).destroy();
+    afterDestroyHandle = nullptr; // not inside the callback: that would destroy the closure while it runs
     MemoryPool::Allocation allocation;
     assert(MemoryPool::lookup(handle, allocation));     // the new resource still owns its entry...
     assert(liveMemory.count(key(allocation.memory)));   // ...and its memory
