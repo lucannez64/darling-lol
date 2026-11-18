@@ -44,7 +44,9 @@ class DesktopEntryTests(unittest.TestCase):
         DARLING_LOL_WINDOW_ENTRIES never leaks in unless a test sets it."""
         env = {key: value for key, value in os.environ.items()
                if key != 'DARLING_LOL_WINDOW_ENTRIES'}
-        env.update(HOME=str(self.home), **extra)
+        # Keep desktop discovery (xdg-user-dir) inside the disposable home.
+        env.update(HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / '.config'),
+                   **extra)
         return env
 
     def install(self, project, *args):
@@ -390,6 +392,280 @@ class DesktopEntryTests(unittest.TestCase):
                 result = self.install(project, *args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(window.read_text(), text)
+
+    def test_custom_name_is_used_in_the_menu_and_desktop_entries(self):
+        project = self.project()
+        (self.home / 'Desktop').mkdir()
+        result = self.install(project, '--name', 'My Game Launcher')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in (self.entry(), self.home / 'Desktop/darling-launcher.desktop'):
+            self.assertEqual(parse_entry(path.read_text())['Name'], 'My Game Launcher')
+        # Identity is still neutral: a custom name must not drag brands in.
+        for field in ('Comment', 'GenericName', 'Keywords'):
+            line = next(line for line in self.entry().read_text().splitlines()
+                        if line.startswith(field + '='))
+            for brand in ('League', 'LoL', 'Riot'):
+                self.assertNotIn(brand.lower(), line.lower())
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(self.entry())],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_env_flags_are_written_into_exec(self):
+        project = self.project()
+        result = self.install(project, '--env', 'RCLOL_HIDE_LEAGUE_SPLASH=1',
+                              '--env', 'RCLOL_RECOVER_STALE_CLIENT=1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exec_line = next(line for line in self.entry().read_text().splitlines()
+                         if line.startswith('Exec='))
+        self.assertEqual(
+            exec_line,
+            f'Exec=env RCLOL_HIDE_LEAGUE_SPLASH=1 RCLOL_RECOVER_STALE_CLIENT=1 '
+            f'"{project}/scripts/launch-shortcut.sh"')
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(self.entry())],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_env_flags_launch_through_the_container(self):
+        project = self.project()
+        result = self.install(project, '--toolbox', 'my-box', '--env', 'RCLOL_CLEAN_ON_EXIT=0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exec_line = next(line for line in self.entry().read_text().splitlines()
+                         if line.startswith('Exec='))
+        self.assertEqual(
+            exec_line,
+            f'Exec=toolbox run -c my-box env RCLOL_CLEAN_ON_EXIT=0 '
+            f'"{project}/scripts/launch-shortcut.sh"')
+
+    def test_env_values_with_spaces_survive_and_stay_owned(self):
+        project = self.project()
+        result = self.install(project, '--env', 'RCLOL_KEEP_HOST_ENV=A B')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exec_line = next(line for line in self.entry().read_text().splitlines()
+                         if line.startswith('Exec='))
+        self.assertIn('env "RCLOL_KEEP_HOST_ENV=A B" ', exec_line)
+        # A second run must still recognise its own entry (owned, not foreign).
+        again = self.install(project, '--env', 'RCLOL_KEEP_HOST_ENV=A B')
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertNotIn('was not created by this project', again.stderr)
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(self.entry())],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_invalid_env_value_is_rejected(self):
+        project = self.project()
+        result = self.install(project, '--env', 'RCLOL value')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('NAME=VALUE', result.stderr)
+        self.assertFalse(self.entry().exists())
+
+    def test_show_reports_the_installed_settings(self):
+        project = self.project()
+        missing = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+        self.assertEqual(missing.stdout, 'owned=no\n')
+        self.install(project, '--name', 'Renamed', '--toolbox', 'my-box',
+                     '--env', 'RCLOL_HIDE_LEAGUE_SPLASH=1', '--env', 'RCLOL_CLEAN_ON_EXIT=0')
+        shown = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(
+            shown.stdout,
+            'owned=yes\nname=Renamed\nicon=darling-launcher\ntoolbox=my-box\n'
+            'env=RCLOL_HIDE_LEAGUE_SPLASH=1\nenv=RCLOL_CLEAN_ON_EXIT=0\n')
+
+    def installed_helper(self, project):
+        """The rendered helper inside the project, as the shell wrappers run it."""
+        script = project / 'desktop-entry.py'
+        if not script.exists():
+            script.write_text(HELPER.read_text()
+                              .replace('@PROJECT_ROOT@', str(project))
+                              .replace('@HOST_HOME@', str(self.home)))
+        return script
+
+    def test_remove_takes_only_owned_files(self):
+        project = self.project()
+        (self.home / 'Desktop').mkdir()
+        foreign = self.window_entry('darling-riot-client.desktop')
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text('[Desktop Entry]\nName=Mine\nExec=/usr/bin/other\n')
+        self.assertEqual(self.install(project, '--window-entries').returncode, 0)
+        handler = self.home / '.local/share/applications/darling-url-handler.desktop'
+        result = self.install(project, '--remove')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.entry().exists())
+        self.assertFalse((self.home / 'Desktop/darling-launcher.desktop').exists())
+        self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertTrue(foreign.is_file())
+        self.assertTrue(handler.is_file())
+        self.assertIn('Removed application launcher', result.stdout)
+        # A second run finds nothing left to do.
+        again = self.install(project, '--remove')
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn('No shortcuts created by this project were found.', again.stdout)
+
+    def test_remove_all_also_takes_the_link_handler(self):
+        project = self.project()
+        self.assertEqual(self.install(project).returncode, 0)
+        handler = self.home / '.local/share/applications/darling-url-handler.desktop'
+        result = self.install(project, '--remove', '--remove-all')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.entry().exists())
+        self.assertFalse(handler.exists())
+
+    def test_remove_leaves_a_foreign_launcher_entry(self):
+        project = self.project()
+        other = self.root / 'elsewhere'
+        self.entry().parent.mkdir(parents=True)
+        self.entry().write_text(f'[Desktop Entry]\nExec={other}/scripts/desktop-run.sh\n')
+        result = self.install(project, '--remove')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.entry().is_file())
+        self.assertIn('No shortcuts created by this project were found.', result.stdout)
+
+    def test_window_entry_ownership_survives_the_env_wrapper(self):
+        project = self.project()
+        names = ('darling-league-client.desktop', 'darling-riot-client.desktop')
+        self.assertEqual(
+            self.install(project, '--window-entries', '--env', 'RCLOL_CLEAN_ON_EXIT=0').returncode, 0)
+        # Re-running without the flag must still recognise the entries as ours
+        # and refresh them, not report a foreign conflict.
+        result = self.install(project, '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('was not created by this project', result.stderr)
+        for name in names:
+            entry = parse_entry(self.window_entry(name).read_text())
+            self.assertNotIn('env RCLOL_CLEAN_ON_EXIT=0', entry['Exec'])
+        # And the reverse: adding flags replaces the plain entries.
+        result = self.install(project, '--window-entries', '--env', 'RCLOL_CLEAN_ON_EXIT=0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('was not created by this project', result.stderr)
+        for name in names:
+            self.assertIn('env RCLOL_CLEAN_ON_EXIT=0 ',
+                          parse_entry(self.window_entry(name).read_text())['Exec'])
+
+    def test_foreign_env_command_is_not_owned(self):
+        project = self.project()
+        window = self.window_entry('darling-league-client.desktop')
+        window.parent.mkdir(parents=True)
+        for command in (f'env FOO=1 /usr/bin/printf "{project}/scripts/launch-shortcut.sh"',
+                        f'env FOO=1 toolbox run -c my-box /usr/bin/printf "{project}/scripts/launch-shortcut.sh"',
+                        f'env "/foo" "{project}/scripts/launch-shortcut.sh"'):
+            text = f'[Desktop Entry]\nExec={command}\n'
+            window.write_text(text)
+            result = self.install(project, '--window-entries')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(window.read_text(), text)
+            self.assertIn(str(window), result.stderr)
+
+    def test_custom_icon_is_written_into_the_entries(self):
+        project = self.project()
+        (self.home / 'Desktop').mkdir()
+        icon = project / 'custom-icon.svg'
+        icon.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        result = self.install(project, '--icon', str(icon), '--window-entries')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in (self.entry(), self.home / 'Desktop/darling-launcher.desktop',
+                     self.window_entry('darling-league-client.desktop')):
+            self.assertEqual(parse_entry(path.read_text())['Icon'], str(icon))
+        if shutil.which('desktop-file-validate'):
+            check = subprocess.run(['desktop-file-validate', str(self.entry())],
+                                   capture_output=True, text=True, check=False)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        shown = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertIn(f'icon={icon}', shown.stdout)
+        # Re-running without --icon falls back to the project icon.
+        again = self.install(project)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(parse_entry(self.entry().read_text())['Icon'], 'darling-launcher')
+
+    def test_custom_icon_must_exist(self):
+        project = self.project()
+        result = self.install(project, '--icon', str(project / 'no-such-icon.png'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('existing icon file', result.stderr)
+        self.assertFalse(self.entry().exists())
+
+    def test_show_decodes_the_name_and_icon_it_escaped(self):
+        project = self.project()
+        name = 'Back\\slash\tTab'
+        icon_dir = self.root / 'icon\\dir'
+        icon_dir.mkdir()
+        icon = icon_dir / 'custom-icon.svg'
+        icon.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        result = self.install(project, '--name', name, '--icon', str(icon))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        helper = str(self.installed_helper(project))
+        shown = subprocess.run([sys.executable, helper, '--show'],
+                               capture_output=True, text=True,
+                               env=self.child_env(), check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f'name={name}\n', shown.stdout)
+        self.assertIn(f'icon={icon}\n', shown.stdout)
+        # Feeding the decoded values back must not double the escapes.
+        text = self.entry().read_text()
+        again = self.install(project, '--name', name, '--icon', str(icon))
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.entry().read_text(), text)
+
+    def test_env_empty_and_quoted_values_stay_owned(self):
+        project = self.project()
+        args = ('--window-entries', '--env', 'RCLOL_EMPTY=',
+                '--env', 'RCLOL_KEEP_HOST_ENV=A B')
+        self.assertEqual(self.install(project, *args).returncode, 0)
+        shown = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn('owned=yes\n', shown.stdout)
+        self.assertIn('env=RCLOL_EMPTY=\n', shown.stdout)
+        self.assertIn('env=RCLOL_KEEP_HOST_ENV=A B\n', shown.stdout)
+        # The window entries stay recognised, so a second run refreshes them.
+        again = self.install(project, *args)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertNotIn('was not created by this project', again.stderr)
+
+    def test_window_entries_environment_does_not_block_show_or_remove(self):
+        project = self.project()
+        self.assertEqual(self.install(project, '--window-entries').returncode, 0)
+        script = str(self.installed_helper(project))
+        env = self.child_env(DARLING_LOL_WINDOW_ENTRIES='1')
+        shown = subprocess.run([sys.executable, script, '--show'],
+                               capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn('owned=yes\n', shown.stdout)
+        removed = subprocess.run([sys.executable, script, '--remove'],
+                                 capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+
+    def test_show_reports_a_missing_entry_without_an_icon(self):
+        project = self.project()
+        shown = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertEqual(shown.stdout, 'owned=no\n')
+
+    def test_remove_and_show_reject_conflicting_options(self):
+        project = self.project()
+        script = self.installed_helper(project)
+        for args in (('--remove', '--name', 'X'), ('--remove', '--env', 'A=1'),
+                     ('--remove', '--toolbox', 'box'),
+                     ('--show', '--name', 'X'), ('--show', '--env', 'A=1'),
+                     ('--show', '--remove'), ('--show', '--window-entries'),
+                     ('--env', 'A=1', '--remove-all')):
+            result = subprocess.run([sys.executable, str(script), *args],
+                                    capture_output=True, text=True,
+                                    env=self.child_env(), check=False)
+            self.assertNotEqual(result.returncode, 0, args)
+            self.assertIn('error', result.stderr.lower())
 
     def test_missing_icon_fails(self):
         project = self.project()
