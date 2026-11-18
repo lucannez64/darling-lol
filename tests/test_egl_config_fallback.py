@@ -89,15 +89,18 @@ int main(int argc, char **argv) {
     EGLDisplay d = eglGetPlatformDisplay(0x31D5, x, NULL);
     if (d == EGL_NO_DISPLAY || !eglInitialize(d, NULL, NULL)) return 77;
 
+    EGLConfig direct = NULL; EGLint dn = 0;
+    if (mode == 0) {
+        /* The original query needs a GLES1 config, which a -Dgles1=disabled host lacks;
+         * only this scenario depends on it (mode 1 simulates that host). */
+        if (!eglChooseConfig(d, attribute_list, &direct, 1, &dn) || dn < 1) { printf("host has no GLES1 config\n"); return 78; }
+    }
+
     EGLConfig cfg = NULL; EGLint n = 0;
     EGLBoolean ok = chooseDefaultConfig(d, &cfg, &n, "harness");
     if (mode == 2) { printf("result ok=%d n=%d\n", ok, n); return n == 0 ? 0 : 1; }
     if (!ok || n < 1 || !cfg) { printf("no config\n"); return 1; }
-    if (mode == 0) {
-        EGLConfig direct = NULL; EGLint dn = 0;
-        eglChooseConfig(d, attribute_list, &direct, 1, &dn);
-        if (direct != cfg) { printf("success path changed\n"); return 1; }
-    }
+    if (mode == 0 && direct != cfg) { printf("success path changed\n"); return 1; }
     /* What cocotron does with it: CGLGetWindow + CGLCreateContext + attach. */
     EGLint visual = 0;
     eglGetConfigAttrib(d, cfg, EGL_NATIVE_VISUAL_ID, &visual);
@@ -154,6 +157,8 @@ class EGLConfigFallbackHost(unittest.TestCase):
         result = subprocess.run([str(self.binary), str(mode)], capture_output=True, text=True, timeout=60)
         if result.returncode == 77:
             self.skipTest('host EGL X11 display unavailable')
+        if result.returncode == 78:
+            self.skipTest('host EGL has no GLES1 config; the original-success path cannot run here')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 

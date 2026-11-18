@@ -1211,7 +1211,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..25d0455 100644
+index f58184a..a524710 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,34 @@
@@ -1666,7 +1666,7 @@ index f58184a..25d0455 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,9 +623,28 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,9 +623,33 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -1690,6 +1690,11 @@ index f58184a..25d0455 100644
 +    }
 +    dispatch_release(mapped);
  	if (!lib) {
++		// logged even when error is NULL, like the exception path above
++		if (FILE* log = fopen("/tmp/metal-errors.log", "a")) {
++			fprintf(log, "newLibraryWithData: no library (%zu bytes of input)\n", length);
++			fclose(log);
++		}
 +		if (error) {
 +			*error = [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 3
 +			                         userInfo: @{NSLocalizedDescriptionKey: @"Failed to load Metal library"}];
@@ -3553,7 +3558,7 @@ diff --git a/include/Metal/MTLExceptionBridge.h b/include/Metal/MTLExceptionBrid
 new file mode 100644
 --- /dev/null
 +++ b/include/Metal/MTLExceptionBridge.h
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,26 @@
 +#pragma once
 +#import <Foundation/Foundation.h>
 +#include <cstdio>
@@ -3574,8 +3579,11 @@ new file mode 100644
 +		fprintf(log, "%s: %s\n", where, message.c_str());
 +		fclose(log);
 +	}
++	// nil for bytes that are not valid UTF-8, and a nil dictionary value would raise; the log keeps the raw message
++	NSString* text = [NSString stringWithUTF8String: message.c_str()];
++	if (!text) text = @"Metal backend error (message is not valid UTF-8)";
 +	return [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 3
-+	                       userInfo: @{NSLocalizedDescriptionKey: [NSString stringWithUTF8String: message.c_str()]}];
++	                       userInfo: @{NSLocalizedDescriptionKey: text}];
 +}
 diff --git a/include/Metal/MTLTrace.h b/include/Metal/MTLTrace.h
 new file mode 100644

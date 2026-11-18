@@ -140,6 +140,72 @@ declare void @air.wg.barrier(i32, i32)
 !3 = !{i32 0, !"air.thread_position_in_threadgroup"}
 """
 
+# A select between the scalar grid and threadgroup positions: both must reach the kernel with one type.
+COMPUTE_SELECT_AIR = r"""
+target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
+target triple = "air64-apple-macosx14.0.0"
+
+@sink = internal global i32 0
+
+define void @cs_select(i32 %grid, i32 %local) {
+entry:
+  %small = icmp ult i32 %grid, 64
+  %pick = select i1 %small, i32 %grid, i32 %local
+  store i32 %pick, ptr @sink, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @cs_select, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.thread_position_in_grid"}
+!4 = !{i32 1, !"air.thread_position_in_threadgroup"}
+"""
+
+# Threadgroup edge cases outside the 16.23 corpus: a scalar access to the first lane of the leading
+# vector, an array-typed GEP at offset zero of the struct (instruction and constant expression), and
+# whole-struct stores and loads of a layout-free struct.
+COMPUTE_THREADGROUP_EDGES_AIR = r"""
+target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
+target triple = "air64-apple-macosx14.0.0"
+
+%struct.tile = type { [64 x <2 x float>] }
+%struct.pair = type { i32, i32 }
+@tile = internal unnamed_addr addrspace(3) global %struct.tile zeroinitializer, align 8
+@pair = internal unnamed_addr addrspace(3) global %struct.pair zeroinitializer, align 4
+@sinkf = internal global float 0.0
+@sinkv = internal global <2 x float> zeroinitializer
+@sinki = internal global i32 0
+
+define void @cs_edges(<3 x i32> %tid) {
+entry:
+  %x = extractelement <3 x i32> %tid, i32 0
+  %i = zext i32 %x to i64
+  store float 3.0, ptr addrspace(3) @tile, align 8
+  %slot = getelementptr inbounds [64 x <2 x float>], ptr addrspace(3) @tile, i64 0, i64 %i
+  store <2 x float> <float 1.0, float 2.0>, ptr addrspace(3) %slot, align 8
+  store %struct.pair { i32 1, i32 2 }, ptr addrspace(3) @pair, align 4
+  tail call void @air.wg.barrier(i32 2, i32 1)
+  %lane = load float, ptr addrspace(3) @tile, align 8
+  store float %lane, ptr @sinkf, align 4
+  %third = load <2 x float>, ptr addrspace(3) getelementptr inbounds ([64 x <2 x float>], ptr addrspace(3) @tile, i64 0, i64 3), align 8
+  store <2 x float> %third, ptr @sinkv, align 8
+  %p = load %struct.pair, ptr addrspace(3) @pair, align 4
+  %second = extractvalue %struct.pair %p, 1
+  store i32 %second, ptr @sinki, align 4
+  ret void
+}
+
+declare void @air.wg.barrier(i32, i32)
+
+!air.kernel = !{!0}
+!0 = !{ptr @cs_edges, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.thread_position_in_threadgroup"}
+"""
+
 
 def pinned_revision():
     manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
@@ -164,11 +230,14 @@ def metallib(bitcode, name):
 def spirv_instructions(module):
     """Yield (opcode, operands) for every instruction of a SPIR-V module."""
     words = struct.unpack(f'<{len(module) // 4}I', module)
-    assert words[0] == 0x07230203, 'not a SPIR-V module'
+    if not words or words[0] != 0x07230203:
+        raise ValueError('not a SPIR-V module')
     index = 5
     while index < len(words):
         opcode, count = words[index] & 0xffff, words[index] >> 16
-        assert count > 0 and index + count <= len(words), f'invalid SPIR-V word count {count} at word {index}'
+        # not an assert: python -O would drop it, and a zero count never advances
+        if count == 0 or index + count > len(words):
+            raise ValueError(f'invalid SPIR-V word count {count} at word {index}')
         yield opcode, words[index + 1:index + count]
         index += count
 
@@ -186,8 +255,8 @@ def spirv_constants(module):
 
 
 def prerequisites():
-    if not (shutil.which('clang++') and shutil.which('git') and llvm_tools.find('llvm-config')):
-        return 'clang++, git and llvm-config are required'
+    if not (shutil.which('clang++') and shutil.which('git') and shutil.which('tar') and llvm_tools.find('llvm-config')):
+        return 'clang++, git, tar and llvm-config are required'
     assembler = Path(llvm_tools.config('--bindir')) / 'llvm-as'
     if not assembler.is_file():
         return f'llvm-as executable missing at {assembler}'
@@ -225,7 +294,7 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
     def test_translates_base_vertex_base_instance_and_compute_thread_positions(self):
         # 4424/4425 BaseVertex/BaseInstance, 26 WorkgroupId, 27 LocalInvocationId
         expected = {'vs_base': {4424, 4425}, 'cs_pos': {26, 27}, 'cs_pos16': {26, 27}, 'cs_pos3': {26, 27},
-                    'cs_tile': {27}}
+                    'cs_tile': {27}, 'cs_select': {27, 28}, 'cs_edges': {27}}
         with tempfile.TemporaryDirectory() as folder:
             work = Path(folder)
             tree = work / 'indium'
@@ -252,7 +321,8 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
             (work / 'in').mkdir()
             (work / 'out').mkdir()
             for name, ir in (('vs_base', VERTEX_AIR), ('cs_pos', COMPUTE_AIR), ('cs_pos16', COMPUTE_16BIT_AIR),
-                             ('cs_pos3', COMPUTE_VEC3_AIR), ('cs_tile', COMPUTE_THREADGROUP_AIR)):
+                             ('cs_pos3', COMPUTE_VEC3_AIR), ('cs_tile', COMPUTE_THREADGROUP_AIR),
+                             ('cs_select', COMPUTE_SELECT_AIR), ('cs_edges', COMPUTE_THREADGROUP_EDGES_AIR)):
                 ll, bc = work / f'{name}.ll', work / f'{name}.bc'
                 ll.write_text(ir)
                 subprocess.run([llvm_as, str(ll), '-o', str(bc)], check=True)
@@ -275,7 +345,10 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
             # with Workgroup (2) execution/memory scopes and AcquireRelease|WorkgroupMemory (0x108)
             tile = (work / 'out' / 'cs_tile.bin.spv').read_bytes()
             instructions = list(spirv_instructions(tile))
-            self.assertTrue(any(opcode == 59 and operands[2] == 4 for opcode, operands in instructions))
+            workgroup = [operands for opcode, operands in instructions if opcode == 59 and operands[2] == 4]
+            self.assertTrue(workgroup)
+            # result type, result id, storage class: Vulkan forbids a Workgroup initializer operand
+            self.assertTrue(all(len(operands) == 3 for operands in workgroup), workgroup)
             constants = spirv_constants(tile)
             barriers = [[constants.get(operand) for operand in operands] for opcode, operands in instructions if opcode == 224]
             self.assertEqual(barriers, [[2, 2, 0x108]])

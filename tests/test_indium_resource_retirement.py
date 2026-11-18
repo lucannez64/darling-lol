@@ -37,6 +37,13 @@ inline VkResult vkGetSemaphoreCounterValue(VkDevice, VkSemaphore semaphore, uint
     *value = counters[key(semaphore)];
     return VK_SUCCESS;
 }
+inline VkResult vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo* info, uint64_t) {
+    for (uint32_t i = 0; i < info->semaphoreCount; ++i) {
+        if (failing.count(key(info->pSemaphores[i]))) return VK_ERROR_DEVICE_LOST;
+        if (counters[key(info->pSemaphores[i])] < info->pValues[i]) return VK_TIMEOUT;
+    }
+    return VK_SUCCESS;
+}
 inline void vkDestroySemaphore(VkDevice, VkSemaphore semaphore, const VkAllocationCallbacks*) {
     if (!destroyed.insert(key(semaphore)).second) throw "semaphore destroyed twice";
 }
@@ -54,10 +61,13 @@ inline void vkFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCall
         mappings.erase(mapping);
     }
 }
+inline size_t mapOffset = 0;                     // a driver may return a pointer inside a page (minMemoryMapAlignment)
 inline VkResult vkMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize, VkDeviceSize, VkMemoryMapFlags, void** data) {
-    *data = mmap(nullptr, memorySize[key(memory)], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (*data == MAP_FAILED) return VK_ERROR_MEMORY_MAP_FAILED;
-    mappings[key(memory)] = *data;
+    memorySize[key(memory)] += mapOffset;        // vkFreeMemory unmaps the whole range, from the page base
+    void* base = mmap(nullptr, memorySize[key(memory)], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (base == MAP_FAILED) return VK_ERROR_MEMORY_MAP_FAILED;
+    mappings[key(memory)] = base;
+    *data = static_cast<char*>(base) + mapOffset;
     return VK_SUCCESS;
 }
 inline void vkDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) {
@@ -142,13 +152,16 @@ int main() {
     device.putTimelineSemaphore({sem(1004), 7});
     assert(!destroyed.count(1003) && destroyed.count(1004));
 
-    // bounded: beyond 4096 waiting handles further pending ones are leaked, never destroyed early
+    // beyond 4096 waiting handles further pending ones are still never destroyed early, and stay tracked
     for (uint64_t i = 0; i < 5000; ++i) device.putTimelineSemaphore({sem(20000 + i), 1});
     for (uint64_t i = 0; i < 5000; ++i) assert(!destroyed.count(20000 + i));
 
-    // teardown destroys what is still waiting for this device
+    // teardown destroys the waiting handles whose last signal landed, including those past the cap, and leaks the
+    // ones still pending or on a lost device
+    for (uint64_t i = 0; i < 4999; ++i) counters[20000 + i] = 1;
     destroyRetiringTimelines(device._device);
-    assert(destroyed.count(1003) && destroyed.count(20000));
+    assert(destroyed.count(20000) && destroyed.count(24998));
+    assert(!destroyed.count(24999) && !destroyed.count(1003));
     return 0;
 }
 '''
@@ -158,7 +171,8 @@ int main() {
         self.assertIn('poison enabled', log)
         self.assertIn('timeline semaphore 0x3e8 destroy deferred (#1): value 4, last signal 5 still pending', log)
         self.assertIn('timeline semaphore 0x3e8 destroyed: its last signal (5) landed', log)
-        self.assertRegex(log, r'timeline semaphore 0x[0-9a-f]+ leaked: 4096 destroys already wait')
+        self.assertRegex(log, r'timeline semaphore 0x[0-9a-f]+ kept past the cap: 4096 destroys already wait')
+        self.assertIn('timeline semaphore 0x61a7 leaked at device teardown: its last signal (1) never landed', log)
 
     def test_poison_mode_traps_cpu_writes_to_freed_mappings_and_logs_their_origin(self):
         program = r'''
@@ -192,6 +206,21 @@ int main(int argc, char** argv) {
     int status = 0;
     waitpid(child, &status, 0);
     assert(WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS));
+
+    // a mapping that starts inside a page is reserved from its page base
+    DynamicVK::mapOffset = 64;
+    MemoryPool::allocate(vkDevice, 0xc000, 0, 100000, 256, false, true);
+    auto* offsetBytes = static_cast<volatile char*>(MemoryPool::map(vkDevice, 0xc000));
+    assert(reinterpret_cast<uintptr_t>(offsetBytes) % getpagesize() == 64);
+    offsetBytes[0] = 1;
+    MemoryPool::free(vkDevice, 0xc000);
+    child = fork();
+    if (child == 0) {
+        offsetBytes[0] = 2; // a late CPU write into the first, partial page
+        _exit(0);
+    }
+    waitpid(child, &status, 0);
+    assert(WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS));
     return 0;
 }
 '''
@@ -199,6 +228,7 @@ int main(int argc, char** argv) {
         log = self.run_cpp(program, poison=True)
         self.assertIn('pool owner 0xb000 registered twice', log)
         self.assertRegex(log, r'freed buffer owner=0xa000 bytes=100000 cpu=\[0x[0-9a-f]+,0x[0-9a-f]+\) reserved-no-access age=[0-9.]+s origin: \S')
+        self.assertRegex(log, r'freed buffer owner=0xc000 bytes=100000 cpu=\[0x[0-9a-f]+000,0x[0-9a-f]+000\) reserved-no-access')
 
     def test_pool_memory_is_released_before_the_handle_value_can_be_reused(self):
         buffer = self.patched('metal--deps--indium', 'src/indium/buffer.cpp')
@@ -233,10 +263,10 @@ template<class Resource> static void check(bool image, VkDeviceSize size) {
     MemoryPool::allocate(vkDevice, handle, 0, size, 256, image, !image);
     // another thread creates a resource as soon as the driver has recycled the handle value
     afterDestroyHandle = [&](uint64_t recycled) {
-        afterDestroyHandle = nullptr;
         MemoryPool::allocate(vkDevice, recycled, 0, size, 256, !image, image);
     };
     Resource(handle).destroy();
+    afterDestroyHandle = nullptr; // not inside the callback: that would destroy the closure while it runs
     MemoryPool::Allocation allocation;
     assert(MemoryPool::lookup(handle, allocation));     // the new resource still owns its entry...
     assert(liveMemory.count(key(allocation.memory)));   // ...and its memory
