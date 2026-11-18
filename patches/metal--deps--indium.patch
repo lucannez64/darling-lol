@@ -6524,7 +6524,7 @@ index 1e3e971..4c18554 100644
 -	DynamicVK::vkFreeCommandBuffers(_device->device(), _device->oneshotCommandPool(), 1, &cmdBuf);
  };
 diff --git a/src/iridium/air.cpp b/src/iridium/air.cpp
-index 21c501f..db748d9 100644
+index 21c501f..6fc7adb 100644
 --- a/src/iridium/air.cpp
 +++ b/src/iridium/air.cpp
 @@ -4,9 +4,46 @@
@@ -6975,7 +6975,7 @@ index 21c501f..db748d9 100644
 +		}
 +		parts.push_back(name.substr(start, dot - start));
 +		start = dot + 1;
- 	}
++	}
 +	return parts;
 +};
 +
@@ -6989,7 +6989,7 @@ index 21c501f..db748d9 100644
 +		while (!token.empty() && token[0] >= '0' && token[0] <= '9') {
 +			token.remove_prefix(1);
 +		}
-+	}
+ 	}
 +	return !token.empty() && token[0] == 'f';
 +};
 +
@@ -7891,7 +7891,7 @@ index 21c501f..db748d9 100644
  						auto arg = DynamicLLVM::LLVMGetOperand(inst, 0);
  
  						resID = builder.encodeFConvert(type, llvmValueToResultID(builder, arg));
-@@ -1223,14 +2042,39 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1223,14 +2042,65 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  						auto operand2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  
  						resID = builder.encodeFMax(type, llvmValueToResultID(builder, operand1), llvmValueToResultID(builder, operand2));
@@ -7910,17 +7910,43 @@ index 21c501f..db748d9 100644
 +						builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
 +						builder.setResultType(resID, type);
 +					}
++				} break;
++
++				case LLVMUDiv:
++				case LLVMURem: {
++					auto llvmType = DynamicLLVM::LLVMTypeOf(inst);
++					if (isBooleanLLVMType(llvmType)) {
++						throw std::runtime_error("Unsupported AIR boolean arithmetic: " + describeLLVMValue(inst));
++					}
++
++					auto type = llvmTypeToSPIRVType(builder, llvmType);
++					// SPIR-V requires unsigned types here. Preserve the LLVM value's
++					// usual representation for all other instructions.
++					auto unsignedType = integerTypeWithSign(builder, type, false);
++					auto lhs = llvmValueToResultID(builder, DynamicLLVM::LLVMGetOperand(inst, 0));
++					auto rhs = llvmValueToResultID(builder, DynamicLLVM::LLVMGetOperand(inst, 1));
++					auto op = opcode == LLVMUDiv ? SPIRV::Opcode::UDiv : SPIRV::Opcode::UMod;
++					if (builder.lookupResultType(lhs) != unsignedType) {
++						lhs = builder.encodeBitcast(unsignedType, lhs);
++					}
++					if (builder.lookupResultType(rhs) != unsignedType) {
++						rhs = builder.encodeBitcast(unsignedType, rhs);
++					}
++					auto result = builder.encodeArithBinop(op, unsignedType, lhs, rhs);
++					result = builder.encodeBitcast(type, result);
++					builder.associateExistingResultID(result, reinterpret_cast<uintptr_t>(inst));
++					builder.setResultType(result, type);
  				} break;
  
-+                case LLVMAdd: case LLVMSub: case LLVMMul: case LLVMUDiv: case LLVMSDiv:
-+                case LLVMURem: case LLVMSRem: case LLVMShl: case LLVMLShr: case LLVMAShr:
++                case LLVMAdd: case LLVMSub: case LLVMMul: case LLVMSDiv:
++                case LLVMSRem: case LLVMShl: case LLVMLShr: case LLVMAShr:
 +                case LLVMAnd: case LLVMOr: case LLVMXor: {
 +                    auto lhs=llvmValueToResultID(builder,DynamicLLVM::LLVMGetOperand(inst,0));
 +                    auto rhs=llvmValueToResultID(builder,DynamicLLVM::LLVMGetOperand(inst,1));
 +                    auto type=llvmTypeToSPIRVType(builder,DynamicLLVM::LLVMTypeOf(inst));
 +                    uint16_t op=0;
 +                    switch(opcode){case LLVMAdd:op=128;break;case LLVMSub:op=130;break;case LLVMMul:op=132;break;
-+                      case LLVMUDiv:op=134;break;case LLVMSDiv:op=135;break;case LLVMURem:op=137;break;case LLVMSRem:op=138;break;
++                      case LLVMSDiv:op=135;break;case LLVMSRem:op=138;break;
 +                      case LLVMShl:op=196;break;case LLVMLShr:op=194;break;case LLVMAShr:op=195;break;
 +                      case LLVMAnd:op=199;break;case LLVMOr:op=197;break;case LLVMXor:op=198;break;default:break;}
 +                    if(isBooleanLLVMType(DynamicLLVM::LLVMTypeOf(inst))){
@@ -7934,7 +7960,7 @@ index 21c501f..db748d9 100644
  				case LLVMFMul:
  				case LLVMFDiv:
  				case LLVMFAdd:
-@@ -1365,28 +2209,90 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1365,28 +2235,90 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto op1 = DynamicLLVM::LLVMGetOperand(inst, 0);
  					auto op2 = DynamicLLVM::LLVMGetOperand(inst, 1);
  					auto predicate = DynamicLLVM::LLVMGetFCmpPredicate(inst);
@@ -7996,7 +8022,7 @@ index 21c501f..db748d9 100644
  						default:
 -							throw std::runtime_error("TODO: handle fcmp predicate: " + std::to_string(predicate));
 +							throw std::runtime_error("TODO: handle icmp predicate: " + std::to_string(predicate));
- 					}
++					}
 +					if (isBooleanLLVMType(DynamicLLVM::LLVMTypeOf(op1))) {
 +						// OpIEqual and the ordered integer comparisons require integer operands
 +						switch (predicate) {
@@ -8005,15 +8031,14 @@ index 21c501f..db748d9 100644
 +							default:
 +								throw std::runtime_error("Unsupported AIR boolean comparison: " + describeLLVMValue(inst));
 +						}
-+					}
-+
+ 					}
+ 
 +					auto resID = builder.encodeRawOp(spirvOpcode, type, { llvmValueToResultID(builder, op1), llvmValueToResultID(builder, op2) });
- 
- 					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
- 					builder.setResultType(resID, type);
- 				} break;
- 
--				case LLVMBr: {
++
++					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
++					builder.setResultType(resID, type);
++				} break;
++
 +				case LLVMSelect: {
 +					auto type = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMTypeOf(inst));
 +					auto resID = builder.encodeRawOp(SPIRVOp::Select, type, {
@@ -8022,10 +8047,11 @@ index 21c501f..db748d9 100644
 +						llvmValueToResultID(builder, DynamicLLVM::LLVMGetOperand(inst, 2)),
 +					});
 +
-+					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
-+					builder.setResultType(resID, type);
-+				} break;
-+
+ 					builder.associateExistingResultID(resID, reinterpret_cast<uintptr_t>(inst));
+ 					builder.setResultType(resID, type);
+ 				} break;
+ 
+-				case LLVMBr: {
 +				IRIDIUM_BR_CASES: {
 +                    auto loop=cfgInfos.find(builder.lookupResultID(reinterpret_cast<uintptr_t>(bb)));
 +                    if(loop!=cfgInfos.end() && loop->second.type==CFGType::Loop){
@@ -8036,7 +8062,7 @@ index 21c501f..db748d9 100644
  					if (DynamicLLVM::LLVMIsConditional(inst)) {
  						auto condition = DynamicLLVM::LLVMGetCondition(inst);
  						auto trueLabel = DynamicLLVM::LLVMBasicBlockAsValue(DynamicLLVM::LLVMGetSuccessor(inst, 0));
-@@ -1422,25 +2328,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1422,25 +2354,38 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  					auto type = llvmTypeToSPIRVType(builder, lltype);
  
  					std::vector<std::pair<SPIRV::ResultID, SPIRV::ResultID>> variablesAndBlocks;
@@ -8078,7 +8104,7 @@ index 21c501f..db748d9 100644
  
  					// ensure the resulting pointer storage class is the same as the input pointer storage class
  					auto typeInst = *builder.reverseLookupType(type);
-@@ -1474,6 +2393,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+@@ -1474,6 +2419,7 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
  		}
  	}
  
