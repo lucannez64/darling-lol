@@ -504,6 +504,40 @@ detect_distribution() {
   esac
 }
 
+# Where the guest prefix lives: the configured one once build/config.json
+# exists, the default otherwise.
+darling_prefix_dir() {
+  local prefix='' config="$TARGET_DIR/build/config.json"
+  if [[ -r $config ]]; then
+    prefix=$(sed -n 's/^[[:space:]]*"prefix"[[:space:]]*:[[:space:]]*"\(.*\)".*$/\1/p' "$config" | head -n 1)
+  fi
+  printf '%s\n' "${prefix:-$HOME/.darling}"
+}
+
+# Disk space already consumed by Darling on the target filesystem, in KiB.
+# A reinstall reuses (or replaces) the build tree, the guest prefix and the
+# installed system runtime, so counting them avoids demanding the full
+# MIN_FREE_GIB on top of an install that mostly already exists.
+darling_footprint_kib() {
+  local target_device path used_kib total=0
+  local -a paths=("$TARGET_DIR/build" "$(darling_prefix_dir)" /usr/local/libexec/darling)
+
+  target_device=$(df -Pk "$TARGET_DIR" | awk 'NR == 2 {print $1}')
+  for path in "${paths[@]}"; do
+    [[ -d $path ]] || continue
+    # Space on another filesystem does not relieve this one.
+    [[ $(df -Pk "$path" 2>/dev/null | awk 'NR == 2 {print $1}') == "$target_device" ]] || continue
+    used_kib=$(du -sxk "$path" 2>/dev/null | awk '{print $1}')
+    [[ $used_kib =~ ^[0-9]+$ ]] || continue
+    total=$(( total + used_kib ))
+  done
+  printf '%s\n' "$total"
+}
+
+gib_display() {
+  awk -v kib="$1" 'BEGIN { printf "%.1f", kib / 1024 / 1024 }'
+}
+
 preflight() {
   [[ $EUID -ne 0 ]] || fail 'Run as a regular user, not root.'
   [[ $(uname -m) == x86_64 ]] || fail 'Only x86_64 is supported.'
@@ -514,7 +548,7 @@ preflight() {
   fi
   command -v git >/dev/null 2>&1 || fail 'Git is required.'
 
-  local kernel_major kernel_minor free_kib
+  local kernel_major kernel_minor free_kib footprint_kib total_kib required_kib
   IFS=. read -r kernel_major kernel_minor _ < <(uname -r)
   kernel_minor=${kernel_minor%%[!0-9]*}
   (( kernel_major > 5 || (kernel_major == 5 && ${kernel_minor:-0} >= 14) )) ||
@@ -522,8 +556,13 @@ preflight() {
 
   free_kib=$(df -Pk "$TARGET_DIR" | awk 'NR == 2 {print $4}')
   [[ $free_kib =~ ^[0-9]+$ ]] || fail 'Could not determine available disk space.'
-  (( free_kib >= MIN_FREE_GIB * 1024 * 1024 )) ||
-    fail "At least ${MIN_FREE_GIB} GiB of free disk space is required."
+  # Existing Darling data (build tree, guest prefix, system runtime) on the
+  # target filesystem already occupies part of the required footprint.
+  footprint_kib=$(darling_footprint_kib)
+  total_kib=$(( free_kib + footprint_kib ))
+  required_kib=$(( MIN_FREE_GIB * 1024 * 1024 ))
+  (( total_kib >= required_kib )) ||
+    fail "At least ${MIN_FREE_GIB} GiB of disk space is required (free plus existing Darling-LoL data): $(gib_display "$free_kib") GiB free and $(gib_display "$footprint_kib") GiB already used by Darling-LoL."
 
   local required_files=(
     scripts/preflight.py

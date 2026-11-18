@@ -680,6 +680,79 @@ class PreflightTests(unittest.TestCase):
         self.assertIn('sudo is required', result.stderr)
 
 
+class DiskSpaceTests(unittest.TestCase):
+    """Existing Darling data counts toward the required install footprint."""
+
+    GIB_KIB = 1024 * 1024
+
+    def run_preflight(self, *, free_kib, prefix_kib=0, other_device=False):
+        with tempfile.TemporaryDirectory(prefix='install-native-disk ') as folder:
+            home = Path(folder, 'home')
+            (home / '.darling').mkdir(parents=True)
+            repo = Path(folder, 'repo')
+            for rel_path in ('scripts/preflight.py', 'scripts/configure.py',
+                             'scripts/build.sh', 'scripts/install-runtime.sh',
+                             'requirements.txt'):
+                (repo / rel_path).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel_path).touch()
+            # Only a prefix that is meant to live elsewhere gets a distinct
+            # device from df; the marker never matches a real path otherwise.
+            other_marker = str(home / '.darling') if other_device else '/no-such-device-marker'
+            snippet = '\n'.join([
+                'source "$INSTALLER"',
+                'sudo() { :; }',
+                'git() { :; }',
+                # Every path reports the same filesystem unless the prefix is
+                # meant to live on another one.
+                f'df() {{ case "$*" in *"{other_marker}"*) dev=other ;; *) dev=mock ;; esac',
+                '  printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n'
+                '  %s 1 1 %s 1%% /\\n" "$dev" "$DF_FREE"; }',
+                # Only the guest prefix holds existing Darling data here.
+                f'du() {{ case "$*" in *"{home}/.darling"*) printf "%s\\t/x\\n" "$DU_KIB" ;;'
+                '  *) printf "0\\t/x\\n" ;; esac; }',
+                f'TARGET_DIR="{repo}"',
+                f'HOME="{home}"',
+                f'DF_FREE={free_kib}',
+                f'DU_KIB={prefix_kib}',
+                'preflight',
+            ])
+            return run_sourced(snippet)
+
+    def test_existing_darling_data_covers_the_shortfall(self):
+        # 30 GiB free is not enough alone, but the 25 GiB guest prefix already
+        # installed brings the available footprint past the 50 GiB minimum.
+        result = self.run_preflight(free_kib=30 * self.GIB_KIB,
+                                    prefix_kib=25 * self.GIB_KIB)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_free_space_alone_still_passes(self):
+        result = self.run_preflight(free_kib=60 * self.GIB_KIB)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_shortfall_is_reported_when_existing_data_is_too_small(self):
+        result = self.run_preflight(free_kib=30 * self.GIB_KIB,
+                                    prefix_kib=1 * self.GIB_KIB)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('30.0 GiB free', result.stderr)
+        self.assertIn('1.0 GiB already used by Darling-LoL', result.stderr)
+
+    def test_a_prefix_on_another_filesystem_does_not_count(self):
+        result = self.run_preflight(free_kib=30 * self.GIB_KIB,
+                                    prefix_kib=25 * self.GIB_KIB,
+                                    other_device=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('30.0 GiB free', result.stderr)
+
+    def test_the_prefix_comes_from_the_saved_configuration(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-prefix ') as folder:
+            repo = Path(folder, 'repo')
+            (repo / 'build').mkdir(parents=True)
+            (repo / 'build/config.json').write_text('{\n  "prefix": "/custom/prefix"\n}\n')
+            result = run_sourced(f'source "$INSTALLER"\nTARGET_DIR="{repo}"\ndarling_prefix_dir')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), '/custom/prefix')
+
+
 class ShowBannerTests(unittest.TestCase):
     def run_banner(self, *, container=0, family='debian', region='EUW', locale='pt_BR',
                    toolbox_release='', explicit=1, yes=0):
