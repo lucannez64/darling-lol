@@ -1915,10 +1915,10 @@ index 0000000..9901d10
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..0588004
+index 0000000..016ae49
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,667 @@
+@@ -0,0 +1,770 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2031,11 +2031,13 @@ index 0000000..0588004
 +// against game build 16.22.8348910 (x86_64). Values are *unslid* absolute
 +// addresses (also used as the sig_data cookie).
 +
-+// Group 1: the CPU identity function at 0x1014c5bb0 (brand-string leaves
++// Group 1: the CPU identity function (brand-string leaves
 +// 0x80000002..4 and the leaf-1 signature). Four sites, so they fill DR0-DR3:
 +// this is the group to arm in fake mode.
++// Updated for game build 16.23.8396405 (0x1014dd5c4..0x1014dd6c6), with
++// bounded __TEXT,__text pattern fallback below if a patch shifts __TEXT.
 +static const unsigned long rclol_group1[RCLOL_MAX_SITES] =
-+	{ 0x1014c5c04UL, 0x1014c5c38UL, 0x1014c5c64UL, 0x1014c5d06UL };
++	{ 0x1014dd5c4UL, 0x1014dd5f8UL, 0x1014dd624UL, 0x1014dd6c6UL };
 +// Group 2: generic feature detection at 0x101c67ed0 (vendor leaf 0, leaf 1,
 +// max extended 0x80000000, cache leaf 0x80000006).
 +static const unsigned long rclol_group2[RCLOL_MAX_SITES] =
@@ -2352,6 +2354,89 @@ index 0000000..0588004
 +// ---------------------------------------------------------------------------
 +// LC_UUID of the loaded image (for the log / game-version correlation).
 +
++static int rclol_match_tag16(const unsigned char* field, const char* tag)
++{
++	for (int i = 0; i < 16; ++i) {
++		if ((char) field[i] != tag[i])
++			return 0;
++		if (tag[i] == '\0')
++			return 1;
++	}
++	return 1;
++}
++
++// Locate the slid [start, end) bounds of __TEXT,__text from the Mach-O header.
++static int rclol_find_text_section(const void* base, unsigned long slide,
++	unsigned long* out_start, unsigned long* out_end)
++{
++	const uint32_t* h = (const uint32_t*) base;
++	if (!h || h[0] != 0xfeedfacfU /* MH_MAGIC_64 */)
++		return 0;
++	uint32_t ncmds = h[4];
++	uint32_t sizeofcmds = h[5];
++	const unsigned char* p = (const unsigned char*) base + 32;
++	const unsigned char* cmds_end = p + sizeofcmds;
++	for (uint32_t i = 0; i < ncmds && p + 8 <= cmds_end; ++i) {
++		uint32_t cmd = ((const uint32_t*) p)[0];
++		uint32_t cmdsize = ((const uint32_t*) p)[1];
++		if (cmdsize < 8 || p + cmdsize > cmds_end)
++			break;
++		if (cmd == 0x19 /* LC_SEGMENT_64 */ && cmdsize >= 72 &&
++		    rclol_match_tag16(p + 8, "__TEXT")) {
++			uint32_t nsects = *(const uint32_t*) (p + 64);
++			if ((uint64_t) nsects * 80ULL <= cmdsize - 72) {
++				const unsigned char* sp = p + 72;
++				for (uint32_t s = 0; s < nsects; ++s, sp += 80) {
++					if (rclol_match_tag16(sp, "__text")) {
++						uint64_t addr = *(const uint64_t*) (sp + 32);
++						uint64_t size = *(const uint64_t*) (sp + 40);
++						if (size > 0 && size <= 0x10000000ULL) {
++							*out_start = (unsigned long) addr + slide;
++							*out_end = *out_start + (unsigned long) size;
++							return 1;
++						}
++					}
++				}
++			}
++		}
++		p += cmdsize;
++	}
++	return 0;
++}
++
++static int rclol_is_cpuid_insn(unsigned long addr, int has_text,
++	unsigned long text_start, unsigned long text_end)
++{
++	if (!has_text || addr < text_start || addr + 2 > text_end)
++		return 0;
++	const unsigned char* p = (const unsigned char*) addr;
++	return p[0] == 0x0f && p[1] == 0xa2;
++}
++
++// Scan __TEXT,__text for Group 1's four cpuid sites (+0, +0x34, +0x60, +0x102).
++static int rclol_arm_group1_scan(unsigned long text_start, unsigned long text_end,
++	unsigned long slide)
++{
++	if (text_end <= text_start || text_end - text_start <= 0x104UL)
++		return 0;
++	const unsigned char* scan_start = (const unsigned char*) text_start;
++	const unsigned char* scan_end = (const unsigned char*) (text_end - 0x104UL);
++	for (const unsigned char* p = scan_start; p <= scan_end; ++p) {
++		if (p[0] == 0x0f && p[1] == 0xa2 &&
++		    p[0x34] == 0x0f && p[0x35] == 0xa2 &&
++		    p[0x60] == 0x0f && p[0x61] == 0xa2 &&
++		    p[0x102] == 0x0f && p[0x103] == 0xa2) {
++			unsigned long found_unslid = (unsigned long) p - slide;
++			rclol_cpuid_trace_arm((unsigned long) p, found_unslid);
++			rclol_cpuid_trace_arm((unsigned long) p + 0x34UL, found_unslid + 0x34UL);
++			rclol_cpuid_trace_arm((unsigned long) p + 0x60UL, found_unslid + 0x60UL);
++			rclol_cpuid_trace_arm((unsigned long) p + 0x102UL, found_unslid + 0x102UL);
++			return 1;
++		}
++	}
++	return 0;
++}
++
 +static void rclol_log_uuid(const void* base)
 +{
 +	// mach_header_64: magic,cputype,cpusubtype,filetype,ncmds,sizeofcmds,flags,reserved
@@ -2571,8 +2656,26 @@ index 0000000..0588004
 +	}
 +
 +	if (chosen) {
-+		for (int i = 0; i < RCLOL_MAX_SITES; ++i)
-+			rclol_cpuid_trace_arm(chosen[i] + slide, chosen[i]);
++		if (chosen == rclol_group1) {
++			unsigned long text_start = 0, text_end = 0;
++			int has_text = rclol_find_text_section((const void*) base, slide,
++				&text_start, &text_end);
++			int static_ok = has_text;
++			for (int i = 0; static_ok && i < RCLOL_MAX_SITES; ++i) {
++				if (!rclol_is_cpuid_insn(chosen[i] + slide, has_text,
++				                         text_start, text_end))
++					static_ok = 0;
++			}
++			if (static_ok) {
++				for (int i = 0; i < RCLOL_MAX_SITES; ++i)
++					rclol_cpuid_trace_arm(chosen[i] + slide, chosen[i]);
++			} else if (has_text) {
++				rclol_arm_group1_scan(text_start, text_end, slide);
++			}
++		} else {
++			for (int i = 0; i < RCLOL_MAX_SITES; ++i)
++				rclol_cpuid_trace_arm(chosen[i] + slide, chosen[i]);
++		}
 +	} else {
 +		for (int i = 0; i < n_explicit; ++i)
 +			rclol_cpuid_trace_arm(explicit_sites[i] + slide, explicit_sites[i]);
