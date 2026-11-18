@@ -216,6 +216,28 @@ static void exerciseQueryForms(NSMutableDictionary *cases, NSString *identifier)
     record(cases, @"forms.password_acl_declined", control && !key,
            error ? CFErrorGetCode(error) : 0);
     if (error) CFRelease(error);
+    error = NULL;
+    if (key) CFRelease(key);
+
+    /* A pair whose private half cannot be stored must not leave its public half behind. */
+    NSData *halfTag = data([identifier stringByAppendingString:@".half"]);
+    control = SecAccessControlCreateWithFlags(NULL, kSecAttrAccessibleWhenUnlocked,
+                                              kSecAccessControlApplicationPassword, NULL);
+    key = NULL;
+    if (control) {
+        NSMutableDictionary *pair = [NSMutableDictionary dictionaryWithDictionary:base];
+        pair[S(kSecAttrIsPermanent)] = @YES;
+        pair[S(kSecAttrApplicationTag)] = halfTag;
+        pair[S(kSecPrivateKeyAttrs)] = @{S(kSecAttrAccessControl): (id)control};
+        key = SecKeyCreateRandomKey((CFDictionaryRef)pair, &error);
+        CFRelease(control);
+    }
+    NSDictionary *publicHalf = @{S(kSecClass): S(kSecClassKey), S(kSecAttrApplicationTag): halfTag,
+        S(kSecAttrKeyClass): S(kSecAttrKeyClassPublic), S(kSecUseDataProtectionKeychain): @YES};
+    OSStatus halfStatus = SecItemCopyMatching((CFDictionaryRef)publicHalf, NULL);
+    record(cases, @"forms.failed_pair_leaves_nothing",
+           control && !key && halfStatus == errSecItemNotFound, halfStatus);
+    if (error) CFRelease(error);
     if (key) CFRelease(key);
 
     for (NSData *wanted in @[tag, aclTag]) {
@@ -259,6 +281,22 @@ static void exerciseQueryForms(NSMutableDictionary *cases, NSString *identifier)
     checkStatus(cases, @"forms.other_group_add", SecItemAdd((CFDictionaryRef)otherAdd, NULL), errSecSuccess);
     checkStatus(cases, @"forms.other_group_delete", SecItemDelete((CFDictionaryRef)other), errSecSuccess);
     fetchPassword(cases, @"forms.password_kept", query, tag);
+
+    /* An item stored without a group is not reached by a query that names one. */
+    NSDictionary *plain = @{S(kSecClass): S(kSecClassGenericPassword),
+        S(kSecAttrService): @"org.darling.keychain-compat.forms.plain",
+        S(kSecAttrAccount): identifier, S(kSecUseDataProtectionKeychain): @YES};
+    NSMutableDictionary *plainAdd = [NSMutableDictionary dictionaryWithDictionary:plain];
+    plainAdd[S(kSecValueData)] = tag;
+    checkStatus(cases, @"forms.ungrouped_add", SecItemAdd((CFDictionaryRef)plainAdd, NULL), errSecSuccess);
+    NSMutableDictionary *grouped = [NSMutableDictionary dictionaryWithDictionary:plain];
+    grouped[S(kSecAttrAccessGroup)] = @"org.darling.keychain-compat.other";
+    checkStatus(cases, @"forms.ungrouped_group_delete_missing",
+                SecItemDelete((CFDictionaryRef)grouped), errSecItemNotFound);
+    NSMutableDictionary *plainFetch = [NSMutableDictionary dictionaryWithDictionary:plain];
+    plainFetch[S(kSecReturnData)] = @YES;
+    fetchPassword(cases, @"forms.ungrouped_kept", plainFetch, tag);
+    checkStatus(cases, @"forms.ungrouped_delete", SecItemDelete((CFDictionaryRef)plain), errSecSuccess);
 
     /* macOS does not return the data of several passwords in one call. */
     NSMutableDictionary *every = [NSMutableDictionary dictionaryWithDictionary:query];
