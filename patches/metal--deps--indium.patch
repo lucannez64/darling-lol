@@ -3037,7 +3037,7 @@ index 5f62ad0..a2906f3 100644
  	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
  };
 diff --git a/src/indium/device.cpp b/src/indium/device.cpp
-index 322e186..d7d5d38 100644
+index 322e186..36f6645 100644
 --- a/src/indium/device.cpp
 +++ b/src/indium/device.cpp
 @@ -1,4 +1,10 @@
@@ -3051,7 +3051,11 @@ index 322e186..d7d5d38 100644
  #include <indium/instance.private.hpp>
  #include <indium/command-queue.private.hpp>
  #include <indium/render-pipeline.private.hpp>
-@@ -12,39 +18,212 @@
+@@ -9,42 +15,216 @@
+ #include <indium/depth-stencil.private.hpp>
+ #include <indium/compute-pipeline.private.hpp>
+ #include <indium/dynamic-vk.hpp>
++#include <indium/memory-pool.private.hpp>
  
  #include <iridium/iridium.hpp>
  
@@ -3270,7 +3274,7 @@ index 322e186..d7d5d38 100644
  			continue;
  		}
  
-@@ -67,12 +246,105 @@ void Indium::initGlobalDeviceList() {
+@@ -67,12 +247,105 @@ void Indium::initGlobalDeviceList() {
  		DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
  
  		if (!features12.timelineSemaphore) {
@@ -3335,7 +3339,7 @@ index 322e186..d7d5d38 100644
 +	if (selectedIndex < 0) {
 +		appendDeviceLog("no usable supported Vulkan device found; Metal will have no device");
 +		return;
-+	}
+ 	}
 +
 +	DeviceCandidate& selected = candidates[selectedIndex];
 +	appendDeviceLog("selected name=\"" + std::string(selected.properties.deviceName) + "\""
@@ -3370,7 +3374,7 @@ index 322e186..d7d5d38 100644
 +
 +	for (size_t index: creationOrder) {
 +		globalDeviceList.push_back(std::make_shared<PrivateDevice>(candidates[index].device));
- 	}
++	}
 +
 +	appendDeviceLog("created VkDevice for " + std::to_string(globalDeviceList.size()) + " of "
 +		+ std::to_string(candidates.size()) + " supported device(s)"
@@ -3378,7 +3382,7 @@ index 322e186..d7d5d38 100644
  };
  
  void Indium::finitGlobalDeviceList() {
-@@ -83,8 +355,16 @@ Indium::Device::~Device() {};
+@@ -83,8 +356,16 @@ Indium::Device::~Device() {};
  
  Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	_physicalDevice(physicalDevice)
@@ -3396,7 +3400,7 @@ index 322e186..d7d5d38 100644
  
  	std::vector<VkQueueFamilyProperties> queueFamilies;
  	uint32_t count = 0;
-@@ -233,6 +513,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -233,6 +514,36 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  		}
  	}
  
@@ -3433,7 +3437,7 @@ index 322e186..d7d5d38 100644
  	VkDeviceCreateInfo deviceCreateInfo {};
  	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
  	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
-@@ -246,6 +556,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -246,6 +557,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  	}
  
  	_features = indiumFeatures;
@@ -3441,7 +3445,7 @@ index 322e186..d7d5d38 100644
  
  	for (const auto& index: queueFamilyIndices) {
  		VkQueue queue;
-@@ -294,9 +605,439 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+@@ -294,9 +606,439 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
  			abort();
  		}
  	}
@@ -3881,7 +3885,7 @@ index 322e186..d7d5d38 100644
  	if (_oneshotCommandPool) {
  		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
  	}
-@@ -308,6 +1049,23 @@ std::string Indium::PrivateDevice::name() const {
+@@ -308,6 +1050,23 @@ std::string Indium::PrivateDevice::name() const {
  	return _properties.deviceName;
  };
  
@@ -3905,7 +3909,7 @@ index 322e186..d7d5d38 100644
  std::shared_ptr<Indium::CommandQueue> Indium::PrivateDevice::newCommandQueue() {
  	return std::make_shared<PrivateCommandQueue>(shared_from_this());
  };
-@@ -317,9 +1075,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
+@@ -317,9 +1076,9 @@ std::shared_ptr<Indium::RenderPipelineState> Indium::PrivateDevice::newRenderPip
  };
  
  std::shared_ptr<Indium::ComputePipelineState> Indium::PrivateDevice::newComputePipelineState(const ComputePipelineDescriptor& descriptor, PipelineOption options, std::shared_ptr<ComputePipelineReflection> reflection) {
@@ -3918,7 +3922,7 @@ index 322e186..d7d5d38 100644
  	return std::make_shared<PrivateComputePipelineState>(shared_from_this(), descriptor);
  };
  
-@@ -336,10 +1094,57 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
+@@ -336,10 +1095,57 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
  };
  
  std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* data, size_t length) {
@@ -3980,7 +3984,7 @@ index 322e186..d7d5d38 100644
  	PrivateLibrary::FunctionInfoMap funcInfoMap;
  
  	for (const auto& [name, info]: outputInfo.functionInfos) {
-@@ -357,12 +1162,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+@@ -357,12 +1163,43 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
  				break;
  		}
  
@@ -4026,7 +4030,7 @@ index 322e186..d7d5d38 100644
  	return lib;
  };
  
-@@ -382,6 +1218,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
+@@ -382,6 +1219,19 @@ std::shared_ptr<Indium::Device> Indium::createSystemDefaultDevice() {
  	return globalDeviceList.empty() ? nullptr : globalDeviceList.front();
  };
  
@@ -4046,7 +4050,7 @@ index 322e186..d7d5d38 100644
  void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	// this is held for the entire duration of the poll so we can
  	// ensure we're the only one polling, which allows us to avoid
-@@ -393,9 +1242,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -393,9 +1243,35 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	const std::vector<VkSemaphore> semaphores = _eventLoopSemaphores;
  	const std::vector<uint64_t> values = _eventLoopWaitValues;
  	const std::vector<std::function<void()>> callbacks = _eventLoopCallbacks;
@@ -4082,7 +4086,7 @@ index 322e186..d7d5d38 100644
  	VkSemaphoreWaitInfo info {};
  	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
  	info.semaphoreCount = semaphores.size();
-@@ -403,7 +1278,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
+@@ -403,7 +1279,19 @@ void Indium::PrivateDevice::pollEvents(uint64_t timeoutNanoseconds) {
  	info.pValues = values.data();
  	info.flags = VK_SEMAPHORE_WAIT_ANY_BIT;
  
@@ -4103,7 +4107,7 @@ index 322e186..d7d5d38 100644
  
  	if (result == VK_TIMEOUT) {
  		// timed out with no semaphores ready
-@@ -474,15 +1361,108 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
+@@ -474,15 +1362,129 @@ void Indium::PrivateDevice::waitForSemaphore(VkSemaphore semaphore, uint64_t tar
  		_eventLoopSemaphores.push_back(semaphore);
  		_eventLoopWaitValues.push_back(targetValue);
  		_eventLoopCallbacks.push_back(callback);
@@ -4139,12 +4143,14 @@ index 322e186..d7d5d38 100644
 +	VkDevice device;
 +	VkSemaphore semaphore;
 +	uint64_t lastSignal;
++	std::chrono::steady_clock::time_point since;
 +};
 +
 +struct TimelineRetirement {
 +	std::mutex mutex;
 +	std::vector<RetiringTimelineSemaphore> waiting;
 +	std::atomic<size_t> count {0};
++	uint64_t deferred = 0; // debug-mode statistics, under the mutex
 +};
 +
 +TimelineRetirement& timelineRetirement() {
@@ -4163,6 +4169,11 @@ index 322e186..d7d5d38 100644
 +	list.erase(std::remove_if(list.begin(), list.end(), [](const RetiringTimelineSemaphore& entry) {
 +		if (!timelineSignalled(entry.device, entry.semaphore, entry.lastSignal)) return false;
 +		Indium::DynamicVK::vkDestroySemaphore(entry.device, entry.semaphore, nullptr);
++		if (Indium::MemoryPool::Debug::enabled()) {
++			Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx destroyed: its last signal (%llu) landed %.3f ms after the destroy was first due\n",
++				(unsigned long long) (uintptr_t) entry.semaphore, (unsigned long long) entry.lastSignal,
++				std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.since).count());
++		}
 +		return true;
 +	}), list.end());
 +	retirement.count.store(list.size(), std::memory_order_relaxed);
@@ -4177,9 +4188,23 @@ index 322e186..d7d5d38 100644
 +		return;
 +	}
 +	// a lost device never signals: leaking the handle is harmless, destroying it is not
-+	if (retirement.waiting.size() >= 4096) return;
-+	retirement.waiting.push_back(RetiringTimelineSemaphore { device, semaphore, lastSignal });
++	if (retirement.waiting.size() >= 4096) {
++		if (Indium::MemoryPool::Debug::enabled()) Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx leaked: 4096 destroys already wait for their signal\n", (unsigned long long) (uintptr_t) semaphore);
++		return;
++	}
++	retirement.waiting.push_back(RetiringTimelineSemaphore { device, semaphore, lastSignal, std::chrono::steady_clock::now() });
 +	retirement.count.store(retirement.waiting.size(), std::memory_order_relaxed);
++	if (Indium::MemoryPool::Debug::enabled()) {
++		// each line is a destroy the previous code did with the signal still pending (#252)
++		uint64_t current = 0;
++		Indium::DynamicVK::vkGetSemaphoreCounterValue(device, semaphore, &current);
++		++retirement.deferred;
++		if (retirement.deferred <= 200 || retirement.deferred % 1000 == 0) {
++			Indium::MemoryPool::Debug::log("timeline semaphore 0x%llx destroy deferred (#%llu): value %llu, last signal %llu still pending, %zu waiting\n",
++				(unsigned long long) (uintptr_t) semaphore, (unsigned long long) retirement.deferred, (unsigned long long) current,
++				(unsigned long long) lastSignal, retirement.waiting.size());
++		}
++	}
 +}
 +
 +void retryTimelineRetirement() {
@@ -4215,7 +4240,7 @@ index 322e186..d7d5d38 100644
  	VkSemaphoreTypeCreateInfo typeInfo {};
  	typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
  	typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-@@ -505,7 +1485,16 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
+@@ -505,7 +1507,16 @@ Indium::TimelineSemaphore Indium::PrivateDevice::getTimelineSemaphore() {
  };
  
  void Indium::PrivateDevice::putTimelineSemaphore(const TimelineSemaphore& semaphore) {
@@ -4233,7 +4258,7 @@ index 322e186..d7d5d38 100644
  };
  
  std::shared_ptr<Indium::TimelineSemaphore> Indium::PrivateDevice::getWrappedTimelineSemaphore() {
-@@ -551,3 +1540,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+@@ -551,3 +1562,164 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
  		delete ptr;
  	});
  };
@@ -9148,7 +9173,7 @@ diff --git a/private-include/indium/memory-pool.private.hpp b/private-include/in
 new file mode 100644
 --- /dev/null
 +++ b/private-include/indium/memory-pool.private.hpp
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,369 @@
 +#pragma once
 +
 +// Suballocation of device memory for buffers and textures.
@@ -9165,18 +9190,117 @@ new file mode 100644
 +#include <indium/dynamic-vk.hpp>
 +
 +#include <chrono>
++#include <cstdarg>
 +#include <cstdint>
++#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
 +#include <deque>
 +#include <map>
 +#include <memory>
 +#include <mutex>
 +#include <unordered_map>
++#include <utility>
 +#include <vector>
++#include <dlfcn.h>
++#include <execinfo.h>
++#include <sys/mman.h>
 +#include <unistd.h>
 +
 +namespace Indium {
 +	namespace MemoryPool {
++		// Opt-in check for writes into freed Indium memory (#252). Read once per process: environment
++		// INDIUM_POISON_FREED_MAPPINGS=1, or the guest file /tmp/metal-poison-freed-mappings. Off, each site costs one
++		// predictable branch. On:
++		//  - every buffer and texture gets its own VkDeviceMemory (as with /tmp/metal-no-pool), so a free really unmaps;
++		//  - the CPU address range of a freed mapping is kept reserved without access (PROT_NONE) instead of going back to
++		//    the address space, so a late CPU write crashes at that address on any driver, AMD included;
++		//  - the guest /tmp/indium-poison.log gets one line per freed mapping (address range, size, age, the frames that
++		//    created it) and one per lifetime hazard Indium caught: a pool owner registered twice (a recycled handle) and a
++		//    timeline semaphore destroy deferred because its last signal was still pending.
++		namespace Debug {
++			inline bool enabled() {
++				static const bool value = [] {
++					const char* variable = getenv("INDIUM_POISON_FREED_MAPPINGS");
++					if (variable && variable[0] == '1' && variable[1] == 0) return true;
++					return access("/tmp/metal-poison-freed-mappings", F_OK) == 0;
++				}();
++				return value;
++			}
++
++			// one complete line per call (the file is line buffered, so a crash right after loses nothing);
++			// INDIUM_POISON_LOG overrides the path so the host-side test does not write to the real log
++			inline void log(const char* format, ...) {
++				static std::mutex* mutex = new std::mutex;
++				static FILE* file = nullptr;
++				std::lock_guard<std::mutex> lock(*mutex);
++				if (!file) {
++					const char* path = getenv("INDIUM_POISON_LOG");
++					file = fopen(path && *path ? path : "/tmp/indium-poison.log", "a");
++					if (!file) return;
++					setvbuf(file, nullptr, _IOLBF, 0);
++					fprintf(file, "poison enabled pid=%d\n", (int) getpid());
++				}
++				va_list arguments;
++				va_start(arguments, format);
++				vfprintf(file, format, arguments);
++				va_end(arguments);
++			}
++
++			struct Origin {
++				std::chrono::steady_clock::time_point created;
++				bool image = false;
++				int frames = 0;
++				void* stack[12];
++			};
++
++			// " image`symbol+0x.. image+0x.." for each saved frame
++			inline void describe(const Origin& origin, char* out, size_t size) {
++				size_t used = 0;
++				out[0] = 0;
++				for (int i = 0; i < origin.frames && used + 1 < size; ++i) {
++					Dl_info info {};
++					const char* image = "?";
++					const char* symbol = nullptr;
++					uintptr_t offset = (uintptr_t) origin.stack[i];
++					if (dladdr(origin.stack[i], &info)) {
++						if (info.dli_fname) image = strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname;
++						if (info.dli_sname && info.dli_saddr) {
++							symbol = info.dli_sname;
++							offset = (uintptr_t) origin.stack[i] - (uintptr_t) info.dli_saddr;
++						} else if (info.dli_fbase) {
++							offset = (uintptr_t) origin.stack[i] - (uintptr_t) info.dli_fbase;
++						}
++					}
++					int written = symbol ? snprintf(out + used, size - used, " %s`%s+0x%lx", image, symbol, (unsigned long) offset)
++						: snprintf(out + used, size - used, " %s+0x%lx", image, (unsigned long) offset);
++					if (written < 0) break;
++					used += (size_t) written;
++				}
++			}
++
++			// Keeps [address, address + length) mapped without access so nothing else lands there. Each reservation is one
++			// kernel mapping (vm.max_map_count is 65530 by default), so the oldest are given back beyond 16384.
++			inline bool reserve(void* address, size_t length) {
++				static std::mutex* mutex = new std::mutex;
++				static auto* reserved = new std::deque<std::pair<void*, size_t>>;
++				void* result = mmap(address, length, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
++				if (result == MAP_FAILED) return false;
++				if (result != address) {
++					// the driver still maps the range, or something else took it already
++					munmap(result, length);
++					return false;
++				}
++				std::lock_guard<std::mutex> lock(*mutex);
++				reserved->emplace_back(address, length);
++				if (reserved->size() > 16384) {
++					munmap(reserved->front().first, reserved->front().second);
++					reserved->pop_front();
++				}
++				return true;
++			}
++		}
++
 +		struct Allocation {
 +			VkDeviceMemory memory = VK_NULL_HANDLE;
 +			VkDeviceSize offset = 0;
@@ -9218,7 +9342,8 @@ new file mode 100644
 +				std::unordered_map<uint64_t, Entry> entries;
 +				std::unordered_map<uint32_t, std::vector<std::shared_ptr<Block>>> blocks;
 +				std::deque<Pending> pending;
-+				bool disabled = access("/tmp/metal-no-pool", F_OK) == 0;
++				bool disabled = access("/tmp/metal-no-pool", F_OK) == 0 || MemoryPool::Debug::enabled();
++				std::unordered_map<uint64_t, MemoryPool::Debug::Origin> origins; // owner -> creation site, debug mode only
 +			};
 +
 +			inline State& state() {
@@ -9287,6 +9412,29 @@ new file mode 100644
 +					}
 +				}
 +			}
++
++			// debug mode, after a dedicated allocation was freed; `mapped` is where the CPU saw it (null: never mapped)
++			inline void noteFreed(State& s, uint64_t owner, void* mapped, VkDeviceSize size) {
++				MemoryPool::Debug::Origin origin {};
++				auto it = s.origins.find(owner);
++				const bool known = it != s.origins.end();
++				if (known) {
++					origin = it->second;
++					s.origins.erase(it);
++				}
++				if (!mapped) return; // the CPU never had a pointer into it
++				const size_t page = (size_t) getpagesize();
++				const uintptr_t start = (uintptr_t) mapped;
++				const size_t length = (size_t) ((size + page - 1) / page * page);
++				const bool reserved = start % page == 0 && MemoryPool::Debug::reserve(mapped, length);
++				char frames[1536];
++				MemoryPool::Debug::describe(origin, frames, sizeof(frames));
++				const double age = known ? std::chrono::duration<double>(std::chrono::steady_clock::now() - origin.created).count() : -1;
++				MemoryPool::Debug::log("freed %s owner=0x%llx bytes=%llu cpu=[0x%lx,0x%lx) %s age=%.3fs origin:%s\n",
++					origin.image ? "image" : "buffer", (unsigned long long) owner, (unsigned long long) size,
++					(unsigned long) start, (unsigned long) (start + length), reserved ? "reserved-no-access" : "NOT-reserved",
++					age, known ? frames : " unknown");
++			}
 +		}
 +
 +		// `owner` is the buffer or image handle the memory will be bound to
@@ -9337,6 +9485,17 @@ new file mode 100644
 +				}
 +				if (!entry.block) abort();
 +			}
++			if (Debug::enabled()) {
++				if (s.entries.count(owner)) {
++					Debug::log("pool owner 0x%llx registered twice: a resource got a recycled handle before the previous owner's memory was released\n",
++						(unsigned long long) owner);
++				}
++				Debug::Origin origin;
++				origin.created = std::chrono::steady_clock::now();
++				origin.image = image;
++				origin.frames = backtrace(origin.stack, 12);
++				s.origins[owner] = origin;
++			}
 +			s.entries[owner] = entry;
 +			return Allocation { entry.block->memory, entry.offset, entry.size };
 +		}
@@ -9374,7 +9533,9 @@ new file mode 100644
 +			s.entries.erase(it);
 +			if (entry.block->dedicated) {
 +				// nothing can reuse a dedicated allocation, and the kernel keeps it alive for work in flight
++				void* mapped = entry.block->mapped;
 +				DynamicVK::vkFreeMemory(device, entry.block->memory, nullptr);
++				if (Debug::enabled()) noteFreed(s, owner, mapped, entry.size);
 +			} else {
 +				s.pending.push_back(Pending { std::chrono::steady_clock::now(), entry.block, entry.offset, entry.size });
 +			}

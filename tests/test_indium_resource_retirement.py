@@ -19,12 +19,15 @@ DYNAMIC_VK = r'''
 #include <functional>
 #include <map>
 #include <set>
+#include <sys/mman.h>
 namespace Indium { namespace DynamicVK {
 inline std::map<uint64_t, uint64_t> counters;    // semaphore -> current value
 inline std::set<uint64_t> destroyed;             // destroyed semaphores
 inline std::set<uint64_t> failing;               // semaphores whose counter query fails (lost device)
 inline unsigned counterQueries = 0;
 inline std::set<uint64_t> liveMemory;            // allocated, not freed VkDeviceMemory
+inline std::map<uint64_t, VkDeviceSize> memorySize;
+inline std::map<uint64_t, void*> mappings;       // like a driver: vkFreeMemory unmaps
 inline uint64_t nextMemory = 0x1000;
 inline std::function<void(uint64_t)> afterDestroyHandle; // runs when vkDestroyBuffer/vkDestroyImage returns
 inline uint64_t key(const void* handle) { return reinterpret_cast<uint64_t>(handle); }
@@ -37,17 +40,24 @@ inline VkResult vkGetSemaphoreCounterValue(VkDevice, VkSemaphore semaphore, uint
 inline void vkDestroySemaphore(VkDevice, VkSemaphore semaphore, const VkAllocationCallbacks*) {
     if (!destroyed.insert(key(semaphore)).second) throw "semaphore destroyed twice";
 }
-inline VkResult vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo*, const VkAllocationCallbacks*, VkDeviceMemory* memory) {
+inline VkResult vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks*, VkDeviceMemory* memory) {
     *memory = reinterpret_cast<VkDeviceMemory>(nextMemory += 0x10);
     liveMemory.insert(key(*memory));
+    memorySize[key(*memory)] = info->allocationSize;
     return VK_SUCCESS;
 }
 inline void vkFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) {
     if (!liveMemory.erase(key(memory))) throw "memory freed twice";
+    auto mapping = mappings.find(key(memory));
+    if (mapping != mappings.end()) {
+        munmap(mapping->second, memorySize[key(memory)]);
+        mappings.erase(mapping);
+    }
 }
-inline VkResult vkMapMemory(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize size, VkMemoryMapFlags, void** data) {
-    static char storage[64 << 20];
-    *data = storage;
+inline VkResult vkMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize, VkDeviceSize, VkMemoryMapFlags, void** data) {
+    *data = mmap(nullptr, memorySize[key(memory)], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (*data == MAP_FAILED) return VK_ERROR_MEMORY_MAP_FAILED;
+    mappings[key(memory)] = *data;
     return VK_SUCCESS;
 }
 inline void vkDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) {
@@ -142,7 +152,53 @@ int main() {
     return 0;
 }
 '''
-        self.run_cpp(program)
+        self.assertEqual(self.run_cpp(program), '')
+        # debug mode: every deferral (a destroy the old code did too early) and its later destroy are logged
+        log = self.run_cpp(program, poison=True)
+        self.assertIn('poison enabled', log)
+        self.assertIn('timeline semaphore 0x3e8 destroy deferred (#1): value 4, last signal 5 still pending', log)
+        self.assertIn('timeline semaphore 0x3e8 destroyed: its last signal (5) landed', log)
+        self.assertRegex(log, r'timeline semaphore 0x[0-9a-f]+ leaked: 4096 destroys already wait')
+
+    def test_poison_mode_traps_cpu_writes_to_freed_mappings_and_logs_their_origin(self):
+        program = r'''
+#include <indium/dynamic-vk.hpp>
+#include <indium/memory-pool.private.hpp>
+#include <cassert>
+#include <csignal>
+#include <cstdlib>
+#include <sys/wait.h>
+#include <unistd.h>
+using namespace Indium;
+static VkDevice vkDevice = reinterpret_cast<VkDevice>(0x55);
+int main(int argc, char** argv) {
+    const bool poison = MemoryPool::Debug::enabled();
+    MemoryPool::allocate(vkDevice, 0xa000, 0, 100000, 256, false, true);
+    MemoryPool::allocate(vkDevice, 0xb000, 0, 100000, 256, false, true);
+    MemoryPool::Allocation first, second;
+    assert(MemoryPool::lookup(0xa000, first) && MemoryPool::lookup(0xb000, second));
+    // off: small buffers share a pool block; on: each has its own memory, so freeing it unmaps it
+    assert((first.memory == second.memory) == !poison);
+    if (!poison) return 0;
+    auto* bytes = static_cast<volatile char*>(MemoryPool::map(vkDevice, 0xa000));
+    bytes[0] = 1;
+    MemoryPool::allocate(vkDevice, 0xb000, 0, 4096, 256, false, true); // a recycled handle registered again
+    MemoryPool::free(vkDevice, 0xa000);
+    pid_t child = fork();
+    if (child == 0) {
+        bytes[4096] = 2; // a late CPU write into the freed mapping
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(child, &status, 0);
+    assert(WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS));
+    return 0;
+}
+'''
+        self.assertEqual(self.run_cpp(program), '')
+        log = self.run_cpp(program, poison=True)
+        self.assertIn('pool owner 0xb000 registered twice', log)
+        self.assertRegex(log, r'freed buffer owner=0xa000 bytes=100000 cpu=\[0x[0-9a-f]+,0x[0-9a-f]+\) reserved-no-access age=[0-9.]+s origin: \S')
 
     def test_pool_memory_is_released_before_the_handle_value_can_be_reused(self):
         buffer = self.patched('metal--deps--indium', 'src/indium/buffer.cpp')
@@ -195,7 +251,8 @@ int main() {
 '''.replace('BUFFER_BODY', buffer_body).replace('TEXTURE_BODY', texture_body)
         self.run_cpp(program)
 
-    def run_cpp(self, text):
+    def run_cpp(self, text, poison=False):
+        """Compile and run; returns the debug log (empty without `poison`)."""
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
             include = path / 'include/indium'
@@ -207,9 +264,13 @@ int main() {
             compile = subprocess.run(['c++', '-std=c++17', '-pthread', '-I', str(path / 'include'), str(path / 'check.cpp'),
                                       '-o', str(path / 'check')], capture_output=True, text=True)
             self.assertEqual(compile.returncode, 0, compile.stderr)
-            result = subprocess.run([str(path / 'check')], capture_output=True, text=True, timeout=30,
-                                    env={'PATH': '/usr/bin:/bin'})
+            env = {'PATH': '/usr/bin:/bin'}
+            if poison:
+                env.update(INDIUM_POISON_FREED_MAPPINGS='1', INDIUM_POISON_LOG=str(path / 'poison.log'))
+            result = subprocess.run([str(path / 'check')], capture_output=True, text=True, timeout=30, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
+            log = path / 'poison.log'
+            return log.read_text() if log.exists() else ''
 
 
 if __name__ == '__main__':
