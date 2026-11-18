@@ -80,7 +80,11 @@ exit 1
         return str(bin_dir)
 
     def run_script(self, *args, path=None, input=None, desktop='X-Unknown'):
-        env = {**os.environ, 'HOME': str(self.home)}
+        env = {**os.environ,
+               'HOME': str(self.home),
+               # Desktop discovery (xdg-user-dir) must not read the caller's
+               # configuration and write shortcuts into their real folders.
+               'XDG_CONFIG_HOME': str(self.home / '.config')}
         # Deterministic session: only XDG_CURRENT_DESKTOP=GNOME may create the
         # window entries by default or ask the window-entries question.
         env['XDG_CURRENT_DESKTOP'] = desktop
@@ -323,6 +327,46 @@ exit 1
         self.assertIn('env RCLOL_CLEAN_ON_EXIT=0', entry['Exec'])
         for name in ('darling-league-client.desktop', 'darling-riot-client.desktop'):
             self.assertTrue(self.window_entry(name).is_file(), name)
+
+    def test_update_keeps_installed_flags_when_the_defaults_are_accepted(self):
+        self.fake_repo()
+        self.assertEqual(self.run_script(
+            '--yes', '--create', '--env', 'RCLOL_CLEAN_ON_EXIT=0').returncode, 0)
+        result = self.run_script(
+            # 1) menu, 2) name (Enter), 3) change the flags (Enter keeps
+            # them), 4) Toolbox (Enter runs on the host), 5) summary.
+            input='2\n\n\n\n\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Current flags: RCLOL_CLEAN_ON_EXIT=0', result.stdout)
+        self.assertIn('Launch flags: RCLOL_CLEAN_ON_EXIT=0', result.stdout)
+        entry = parse_entry(self.entry().read_text())
+        self.assertIn('env RCLOL_CLEAN_ON_EXIT=0', entry['Exec'])
+
+    def test_update_clears_flags_only_when_asked(self):
+        self.fake_repo()
+        self.assertEqual(self.run_script(
+            '--yes', '--create', '--env', 'RCLOL_CLEAN_ON_EXIT=0').returncode, 0)
+        result = self.run_script(
+            # 1) menu, 2) name, 3) change the flags, 4) 'none' clears them,
+            # 5) Toolbox (host), 6) summary.
+            input='2\n\ny\nnone\n\n\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Launch flags: none', result.stdout)
+        entry = parse_entry(self.entry().read_text())
+        self.assertNotIn('env ', entry['Exec'])
+
+    def test_update_keeps_a_flag_value_with_spaces_on_enter(self):
+        self.fake_repo()
+        self.assertEqual(self.run_script(
+            '--yes', '--create', '--env', 'RCLOL_KEEP_HOST_ENV=A B').returncode, 0)
+        result = self.run_script(
+            # 1) menu, 2) name, 3) change the flags, 4) Enter keeps the
+            # current array (the value has a space and cannot be retyped),
+            # 5) Toolbox (host), 6) summary.
+            input='2\n\ny\n\n\n\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry(self.entry().read_text())
+        self.assertIn('"RCLOL_KEEP_HOST_ENV=A B"', entry['Exec'])
 
     def test_update_removes_window_entries_outside_gnome(self):
         self.fake_repo()

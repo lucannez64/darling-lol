@@ -44,7 +44,9 @@ class DesktopEntryTests(unittest.TestCase):
         DARLING_LOL_WINDOW_ENTRIES never leaks in unless a test sets it."""
         env = {key: value for key, value in os.environ.items()
                if key != 'DARLING_LOL_WINDOW_ENTRIES'}
-        env.update(HOME=str(self.home), **extra)
+        # Keep desktop discovery (xdg-user-dir) inside the disposable home.
+        env.update(HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / '.config'),
+                   **extra)
         return env
 
     def install(self, project, *args):
@@ -590,6 +592,59 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('existing icon file', result.stderr)
         self.assertFalse(self.entry().exists())
+
+    def test_show_decodes_the_name_and_icon_it_escaped(self):
+        project = self.project()
+        name = 'Back\\slash\tTab'
+        icon_dir = self.root / 'icon\\dir'
+        icon_dir.mkdir()
+        icon = icon_dir / 'custom-icon.svg'
+        icon.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        result = self.install(project, '--name', name, '--icon', str(icon))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        helper = str(self.installed_helper(project))
+        shown = subprocess.run([sys.executable, helper, '--show'],
+                               capture_output=True, text=True,
+                               env=self.child_env(), check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f'name={name}\n', shown.stdout)
+        self.assertIn(f'icon={icon}\n', shown.stdout)
+        # Feeding the decoded values back must not double the escapes.
+        text = self.entry().read_text()
+        again = self.install(project, '--name', name, '--icon', str(icon))
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.entry().read_text(), text)
+
+    def test_env_empty_and_quoted_values_stay_owned(self):
+        project = self.project()
+        args = ('--window-entries', '--env', 'RCLOL_EMPTY=',
+                '--env', 'RCLOL_KEEP_HOST_ENV=A B')
+        self.assertEqual(self.install(project, *args).returncode, 0)
+        shown = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn('owned=yes\n', shown.stdout)
+        self.assertIn('env=RCLOL_EMPTY=\n', shown.stdout)
+        self.assertIn('env=RCLOL_KEEP_HOST_ENV=A B\n', shown.stdout)
+        # The window entries stay recognised, so a second run refreshes them.
+        again = self.install(project, *args)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertNotIn('was not created by this project', again.stderr)
+
+    def test_window_entries_environment_does_not_block_show_or_remove(self):
+        project = self.project()
+        self.assertEqual(self.install(project, '--window-entries').returncode, 0)
+        script = str(self.installed_helper(project))
+        env = self.child_env(DARLING_LOL_WINDOW_ENTRIES='1')
+        shown = subprocess.run([sys.executable, script, '--show'],
+                               capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn('owned=yes\n', shown.stdout)
+        removed = subprocess.run([sys.executable, script, '--remove'],
+                                 capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
 
     def test_show_reports_a_missing_entry_without_an_icon(self):
         project = self.project()

@@ -366,23 +366,27 @@ show_flag_reference() {
 # The question comes first; the documented list below is only a reference,
 # shown after a yes, and the answer itself is free-form NAME=VALUE input.
 choose_flags() {
-  local reply token invalid accepted=() reply_default=''
+  local reply token invalid accepted=() reply_default='' question
   if (( ${#ENV_FLAGS[@]} )); then
     return 0
   fi
+  # An update starts from the installed flags, so accepting every default
+  # keeps them; 'none' at the value prompt is the explicit way to clear them.
+  if (( CURRENT_OWNED )) && (( ${#CURRENT_ENV[@]} )); then
+    ENV_FLAGS=("${CURRENT_ENV[@]}")
+    reply_default=${ENV_FLAGS[*]}
+    question='Change the launch flags (environment variables)?'
+  else
+    question='Add custom launch flags (environment variables)?'
+  fi
   if ! interactive_run; then
-    # Unattended update: Enter keeps the installed flags.
-    if (( CURRENT_OWNED )) && (( ${#CURRENT_ENV[@]} )); then
-      ENV_FLAGS=("${CURRENT_ENV[@]}")
-    fi
     return 0
   fi
-  if (( CURRENT_OWNED )) && (( ${#CURRENT_ENV[@]} )); then
-    printf '%sCurrent flags: %s%s\n' "$DIM" "${CURRENT_ENV[*]}" "$RESET"
-    reply_default=${CURRENT_ENV[*]}
+  if [[ -n $reply_default ]]; then
+    printf '%sCurrent flags: %s%s\n' "$DIM" "$reply_default" "$RESET"
   fi
   while true; do
-    read -r -p "${CYAN}${ICON_INFO}${RESET} Add custom launch flags (environment variables)? [y/N]: " reply ||
+    read -r -p "${CYAN}${ICON_INFO}${RESET} ${question} [y/N]: " reply ||
       fail 'No input received while choosing the launch flags.'
     case ${reply,,} in
       ''|n|no) return 0 ;;
@@ -391,10 +395,17 @@ choose_flags() {
     esac
   done
   show_flag_reference
+  if [[ -n $reply_default ]]; then
+    info "Enter keeps the current flags; type 'none' to clear them."
+  fi
   while true; do
     read -r -p "${CYAN}${ICON_INFO}${RESET} Launch flags (NAME=VALUE, space-separated) [${reply_default:-none}]: " reply ||
       fail 'No input received while entering the launch flags.'
-    reply=${reply:-$reply_default}
+    # Enter keeps the current array exactly: an installed value with spaces
+    # cannot be retyped in this space-separated format.
+    if [[ -z $reply ]]; then
+      return 0
+    fi
     if [[ ${reply,,} == none ]]; then
       ENV_FLAGS=()
       return 0

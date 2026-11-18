@@ -50,6 +50,24 @@ def escape_string(value: str) -> str:
             .replace("\n", "\\n").replace("\r", "\\r"))
 
 
+def unescape_string(value: str) -> str:
+    """Inverse of :func:`escape_string` for values this helper wrote."""
+    escapes = {"\\": "\\", "t": "\t", "n": "\n", "r": "\r"}
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            replacement = escapes.get(value[index + 1])
+            if replacement is not None:
+                result.append(replacement)
+                index += 2
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
 def quote_exec_argument(value: str) -> str:
     """Escape and quote one Exec argument as the specification requires."""
     escaped = value.replace("%", "%%")
@@ -85,11 +103,11 @@ def exec_command(script: str, toolbox: str | None = None, env=()) -> str:
 # rules: a double-quoted string with backslash escapes, or a bare run that
 # stops at whitespace or a double quote.
 EXEC_TOKEN = r'"(?:\\.|[^"\\])*"|[^\s"]+'
-# An environment assignment as this helper writes it into Exec: NAME=VALUE
-# with the value quoted like any other token.  Ownership only recognises
-# assignments, so a foreign command such as
+# An environment assignment as this helper writes it into Exec: NAME=VALUE,
+# where the value may be quoted (spaces), empty or ordinary.  Ownership only
+# recognises assignments, so a foreign command such as
 # ``env FOO=1 /usr/bin/printf ".../launch-shortcut.sh"`` is never ours.
-ENV_ASSIGNMENT = rf"[A-Za-z_][A-Za-z0-9_]*=(?:{EXEC_TOKEN})"
+ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 
 
 def unquote_exec_argument(value: str) -> str:
@@ -117,13 +135,17 @@ def unwrap_exec(command: str) -> tuple[str | None, list[str], str]:
         command = wrapper[2]
     env: list[str] = []
     while True:
-        match = re.fullmatch(rf"env ({ENV_ASSIGNMENT}) (.+)", command)
+        match = re.fullmatch(rf"env ({EXEC_TOKEN}) (.+)", command)
         if match is None and env:
             # Assignments after the first one are not preceded by `env` again.
-            match = re.fullmatch(rf"({ENV_ASSIGNMENT}) (.+)", command)
+            match = re.fullmatch(rf"({EXEC_TOKEN}) (.+)", command)
         if match is None:
             break
-        env.append(unquote_exec_argument(match[1]))
+        # Decode the complete token first: a quoted value may contain spaces.
+        assignment = unquote_exec_argument(match[1])
+        if ENV_ASSIGNMENT.fullmatch(assignment) is None:
+            break
+        env.append(assignment)
         command = match[2]
     return toolbox, env, command
 
@@ -422,11 +444,13 @@ def show() -> None:
     commands = [line[5:].strip() for line in lines if line.startswith("Exec=")]
     owned = bool(commands) and unwrap_exec(commands[0])[2] in exec_marker_variants()
     print(f"owned={'yes' if owned else 'no'}")
-    print("name=" + next((line[5:] for line in lines if line.startswith("Name=")), ""))
+    print("name=" + unescape_string(
+        next((line[5:] for line in lines if line.startswith("Name=")), "")))
     if not owned:
         return
     toolbox, env, _ = unwrap_exec(commands[0])
-    print("icon=" + next((line[5:] for line in lines if line.startswith("Icon=")), ""))
+    print("icon=" + unescape_string(
+        next((line[5:] for line in lines if line.startswith("Icon=")), "")))
     print(f"toolbox={toolbox or ''}")
     for item in env:
         print(f"env={item}")
@@ -440,7 +464,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--window-entries", action="store_true",
-        default=os.environ.get("DARLING_LOL_WINDOW_ENTRIES") == "1",
         help="also create hidden entries that name and icon the client windows "
              "(or set DARLING_LOL_WINDOW_ENTRIES=1)",
     )
@@ -482,6 +505,10 @@ if __name__ == "__main__":
         if not icon_path.is_file():
             parser.error(f"--icon expects an existing icon file, got {arguments.icon!r}")
         icon = str(icon_path.resolve())
+    # The environment only supplies the default for creation: keeping it out of
+    # the parsed flag lets --show/--remove stay usable with it exported.
+    window_entries = (arguments.window_entries
+                      or os.environ.get("DARLING_LOL_WINDOW_ENTRIES") == "1")
     if arguments.show:
         if (arguments.toolbox is not None or arguments.window_entries
                 or arguments.remove or arguments.remove_all or arguments.env
@@ -497,4 +524,4 @@ if __name__ == "__main__":
     else:
         if arguments.remove_all:
             parser.error("--remove-all is only valid together with --remove")
-        main(arguments.toolbox, arguments.window_entries, arguments.name, arguments.env, icon)
+        main(arguments.toolbox, window_entries, arguments.name, arguments.env, icon)
