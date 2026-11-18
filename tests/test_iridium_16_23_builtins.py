@@ -59,6 +59,28 @@ entry:
 !4 = !{i32 1, !"air.threadgroup_position_in_grid"}
 """
 
+COMPUTE_16BIT_AIR = r"""
+target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
+target triple = "air64-apple-macosx14.0.0"
+
+@sink16 = internal global i16 0
+
+define void @cs_pos16(<2 x i16> %tid, i16 %gid) {
+entry:
+  %ty = extractelement <2 x i16> %tid, i32 1
+  %mix = add i16 %ty, %gid
+  store i16 %mix, ptr @sink16, align 2
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @cs_pos16, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.thread_position_in_threadgroup"}
+!4 = !{i32 1, !"air.threadgroup_position_in_grid"}
+"""
+
 
 def pinned_revision():
     manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
@@ -88,6 +110,7 @@ def spirv_builtins(module):
     index = 5
     while index < len(words):
         opcode, count = words[index] & 0xffff, words[index] >> 16
+        assert count > 0 and index + count <= len(words), f'invalid SPIR-V word count {count} at word {index}'
         operands = words[index + 1:index + count]
         if opcode == 71 and len(operands) >= 3 and operands[1] == 11:
             found.add(operands[2])
@@ -98,6 +121,9 @@ def spirv_builtins(module):
 def prerequisites():
     if not (shutil.which('clang++') and shutil.which('git') and llvm_tools.find('llvm-config')):
         return 'clang++, git and llvm-config are required'
+    assembler = Path(llvm_tools.config('--bindir')) / 'llvm-as'
+    if not assembler.is_file():
+        return f'llvm-as executable missing at {assembler}'
     if not (CHECKOUT / '.git').exists():
         return 'the Indium component checkout is not prepared'
     found = subprocess.run(['git', '-C', str(CHECKOUT), 'cat-file', '-e',
@@ -119,6 +145,7 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
             '"air.base_instance"',
             '"air.thread_position_in_threadgroup"',
             '"air.threadgroup_position_in_grid"',
+            'encodeUConvert',
         ):
             self.assertIn(token, added)
 
@@ -147,21 +174,19 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
                             '-ldl', '-o', str(translator)], check=True)
 
             llvm_as = str(Path(llvm_tools.config('--bindir')) / 'llvm-as')
-            vs_ll, vs_bc = work / 'vs.ll', work / 'vs.bc'
-            cs_ll, cs_bc = work / 'cs.ll', work / 'cs.bc'
-            vs_ll.write_text(VERTEX_AIR)
-            cs_ll.write_text(COMPUTE_AIR)
-            subprocess.run([llvm_as, str(vs_ll), '-o', str(vs_bc)], check=True)
-            subprocess.run([llvm_as, str(cs_ll), '-o', str(cs_bc)], check=True)
             (work / 'in').mkdir()
             (work / 'out').mkdir()
-            (work / 'in/vs_base.bin').write_bytes(metallib(vs_bc.read_bytes(), 'vs_base'))
-            (work / 'in/cs_pos.bin').write_bytes(metallib(cs_bc.read_bytes(), 'cs_pos'))
+            for name, ir in (('vs_base', VERTEX_AIR), ('cs_pos', COMPUTE_AIR), ('cs_pos16', COMPUTE_16BIT_AIR)):
+                ll, bc = work / f'{name}.ll', work / f'{name}.bc'
+                ll.write_text(ir)
+                subprocess.run([llvm_as, str(ll), '-o', str(bc)], check=True)
+                (work / 'in' / f'{name}.bin').write_bytes(metallib(bc.read_bytes(), name))
             run = subprocess.run([str(translator), str(work / 'in'), str(work / 'out')],
                                  capture_output=True, text=True, timeout=60)
-            self.assertIn('2 passed, 0 failed', run.stdout, run.stdout + run.stderr)
-            builtins = spirv_builtins((work / 'out/cs_pos.bin.spv').read_bytes())
-            self.assertTrue({26, 27}.issubset(builtins), f'expected BuiltIn 26/27, got {builtins}')
+            self.assertIn('3 passed, 0 failed', run.stdout, run.stdout + run.stderr)
+            for out_name in ('cs_pos.bin.spv', 'cs_pos16.bin.spv'):
+                builtins = spirv_builtins((work / 'out' / out_name).read_bytes())
+                self.assertTrue({26, 27}.issubset(builtins), f'{out_name}: expected BuiltIn 26/27, got {builtins}')
 
 
 if __name__ == '__main__':

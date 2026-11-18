@@ -609,7 +609,7 @@ index e3382a8..1182427 100644
  @synthesize resourceOptions = _resourceOptions;
  @synthesize label = _label;
 diff --git a/src/Metal/MTLCommandBuffer.mm b/src/Metal/MTLCommandBuffer.mm
-index 7dedaa0..8750db0 100644
+index 7dedaa0..ca1a8ef 100644
 --- a/src/Metal/MTLCommandBuffer.mm
 +++ b/src/Metal/MTLCommandBuffer.mm
 @@ -1,7 +1,18 @@
@@ -953,12 +953,12 @@ index 7dedaa0..8750db0 100644
 +
 +- (NSTimeInterval)kernelStartTime
 +{
-+	return _commandBuffer->gpuStartTime();
++	return _commandBuffer->kernelStartTime();
 +}
 +
 +- (NSTimeInterval)kernelEndTime
 +{
-+	return _commandBuffer->gpuEndTime();
++	return _commandBuffer->kernelEndTime();
 +}
 +
 +- (NSTimeInterval)GPUStartTime
@@ -1220,7 +1220,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..6dadf24 100644
+index f58184a..29acce1 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,34 @@
@@ -1675,7 +1675,7 @@ index f58184a..6dadf24 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -265,7 +613,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -265,8 +613,17 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		// error was already written
  		return nil;
  	}
@@ -1688,9 +1688,13 @@ index f58184a..6dadf24 100644
 +		return nil;
 +	}
  	if (!lib) {
++		if (error) {
++			*error = [NSError errorWithDomain:@"MTLLibraryErrorDomain" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Failed to load Metal library"}];
++		}
  		return nil;
  	}
-@@ -275,8 +629,22 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+ 	return [[MTLLibraryInternal alloc] initWithLibrary: lib device: self];
+@@ -275,9 +632,26 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -1713,8 +1717,12 @@ index f58184a..6dadf24 100644
 +    }
 +    dispatch_release(mapped);
  	if (!lib) {
++		if (error) {
++			*error = [NSError errorWithDomain:@"MTLLibraryErrorDomain" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Failed to load Metal library"}];
++		}
  		return nil;
  	}
+ 	return [[MTLLibraryInternal alloc] initWithLibrary: lib device: self];
 diff --git a/src/Metal/MTLLibrary.mm b/src/Metal/MTLLibrary.mm
 index 0feb46e..703c437 100644
 --- a/src/Metal/MTLLibrary.mm

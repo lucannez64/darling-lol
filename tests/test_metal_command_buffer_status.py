@@ -54,10 +54,12 @@ class MetalCommandBufferStatusTests(unittest.TestCase):
             'virtual double gpuEndTime() const = 0;',
             'virtual void enqueue() = 0;',
             'virtual void waitUntilScheduled() = 0;',
+            'virtual double kernelStartTime() const = 0;',
+            'virtual double kernelEndTime() const = 0;',
         ):
             self.assertIn(expected, indium_hdr)
 
-    def test_objective_c_wrapper_and_new_library_url_catch(self):
+    def test_objective_c_wrapper_and_library_error_paths(self):
         impl = added_lines('patches/metal.patch', 'src/Metal/MTLCommandBuffer.mm')
         for selector in (
             '- (MTLCommandBufferStatus)status',
@@ -68,11 +70,25 @@ class MetalCommandBufferStatusTests(unittest.TestCase):
             '- (NSTimeInterval)GPUEndTime',
             '- (void)enqueue',
             '- (void)waitUntilScheduled',
+            'return _commandBuffer->kernelStartTime();',
+            'return _commandBuffer->kernelEndTime();',
         ):
             self.assertIn(selector, impl)
         dev = diff_section('patches/metal.patch', 'src/Metal/MTLDevice.mm')
         self.assertIn('MTLErrorFromCurrentException("newLibraryWithURL")', dev)
         self.assertIn('try { lib = _device->newLibrary(data.bytes, data.length); }', dev)
+        self.assertGreaterEqual(dev.count('Failed to load Metal library'), 2)
+
+    def test_submission_timing_and_completion_ordering(self):
+        cpp = diff_section('patches/metal--deps--indium.patch', 'src/indium/command-buffer.cpp')
+        self.assertIn('markSubmitted(kStart, kEnd)', cpp)
+        self.assertIn('_gpuTimingReady.load(std::memory_order_acquire)', cpp)
+        self.assertIn('_kernelTimingReady.load(std::memory_order_acquire)', cpp)
+        self.assertIn('_statusCondvar.wait(statusLock, [this] { return _scheduled; })', cpp)
+        completed_handlers_pos = cpp.find('for (const auto& handler: self->_completedHandlers)')
+        completed_flag_pos = cpp.find('self->_completed = true;', completed_handlers_pos)
+        self.assertGreater(completed_handlers_pos, 0)
+        self.assertGreater(completed_flag_pos, completed_handlers_pos)
 
     def test_private_command_buffer_appends_new_members_after_committed_atomic(self):
         priv = diff_section('patches/metal--deps--indium.patch',
