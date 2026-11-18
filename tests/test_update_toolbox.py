@@ -73,11 +73,11 @@ class UpdateToolboxTests(unittest.TestCase):
         self.env.pop('DARLING_WORKSPACE', None)
         self.env.pop('DARLING_LOL_UPDATE_REEXEC', None)
 
-    def run_update(self, **overrides):
+    def run_update(self, *args, **overrides):
         env = dict(self.env)
         env.update(overrides)
         return subprocess.run(
-            [SH, str(self.repo / 'scripts' / 'update.sh')],
+            [SH, str(self.repo / 'scripts' / 'update.sh'), *args],
             capture_output=True, text=True, check=False, env=env,
         )
 
@@ -189,6 +189,25 @@ class UpdateToolboxTests(unittest.TestCase):
     def test_workspace_branch_unaffected(self):
         result = self.run_update(DARLING_WORKSPACE='/nix/store/abc/share/darling-lol')
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.argv_lines(), [])
+
+    def test_verbose_flag_is_forwarded_to_the_container(self):
+        self.write_marker('mycont')
+        result = self.run_update('--verbose', FAKE_TOOLBOX_CONTAINER_OK='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'{REEXEC_ARGV.format(name="mycont", repo=self.repo)} --verbose',
+                      self.argv_lines())
+
+    def test_help_exits_without_touching_the_container(self):
+        result = self.run_update('--help')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--verbose', result.stdout)
+        self.assertEqual(self.argv_lines(), [])
+
+    def test_unknown_option_is_rejected(self):
+        result = self.run_update('--bogus')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Unknown option: --bogus', result.stderr)
         self.assertEqual(self.argv_lines(), [])
 
 

@@ -184,7 +184,7 @@ file descriptors above stderr before the guest starts.
 
 ## Updating an existing runtime
 
-`./scripts/update.sh` updates everything after `git pull`: `build.sh`, then the base install, then `install-runtime.sh`. When a pull changes a patch, `prepare.py` finds the earlier version applied in that component (its copy in `build/applied-patches`, or a version from this repository's history), reverts it, and applies the new one. It never resets a repository; if neither version matches, it stops and names the repository with other edits. The steps below update single components instead.
+`./scripts/update.sh` updates everything after `git pull`: `build.sh`, then the base install, then `install-runtime.sh`. Without arguments each step runs behind a progress spinner and its output is written to `~/.cache/darling-lol-update.log` (or `$XDG_CACHE_HOME`), whose path is printed at the end; `./scripts/update.sh --verbose` streams every step's output to the terminal instead. When a pull changes a patch, `prepare.py` finds the earlier version applied in that component (its copy in `build/applied-patches`, or a version from this repository's history), reverts it, and applies the new one. It never resets a repository; if neither version matches, it stops and names the repository with other edits. The steps below update single components instead.
 
 These commands assume the pinned, patched source tree and its configured Makefiles already exist. From the repository root, build the two components with one worker to reduce resource contention:
 

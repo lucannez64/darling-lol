@@ -168,7 +168,7 @@ git pull
 sh scripts/run.sh
 ```
 
-`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
+`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. Each step runs behind a progress spinner and its output goes to the update log printed at the end; pass `--verbose` to stream it to the terminal instead. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
 
 A built runtime can also be shipped without the toolchain via `tools/runtime-package.py`: see [prebuilt runtime overlays](docs/PACKAGING.md).
 
