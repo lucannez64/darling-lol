@@ -742,13 +742,14 @@ index 0000000..dad11d5
 +#endif
 diff --git a/OSX/sec/Security/DarlingKeychain.m b/OSX/sec/Security/DarlingKeychain.m
 new file mode 100644
-index 0000000..eedf5e9
+index 00000000..7f610c40
 --- /dev/null
 +++ b/OSX/sec/Security/DarlingKeychain.m
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,476 @@
 +#import <Foundation/Foundation.h>
 +#include <Security/SecKey.h>
 +#include <Security/SecItemPriv.h>
++#include <Security/SecAccessControlPriv.h>
 +
 +#include <errno.h>
 +#include <fcntl.h>
@@ -767,16 +768,8 @@ index 0000000..eedf5e9
 +static const char storeName[] = "items-v1.plist";
 +static const size_t storeLimit = 16 * 1024 * 1024;
 +
-+bool DarlingKeychainHandles(CFDictionaryRef query, DarlingKeychainOperation operation)
-+{
-+    if (!query || CFGetTypeID(query) != CFDictionaryGetTypeID() ||
-+        CFDictionaryGetValue(query, kSecUseDataProtectionKeychain) != kCFBooleanTrue)
-+        return false;
-+    CFTypeRef itemClass = CFDictionaryGetValue(query, kSecClass);
-+    if (!itemClass)
-+        return operation == DarlingKeychainAdd && CFDictionaryContainsKey(query, kSecValueRef);
-+    return CFEqual(itemClass, kSecClassGenericPassword) || CFEqual(itemClass, kSecClassKey);
-+}
++/* Internal parse result: the query needs a feature this store does not provide. */
++enum { unsupportedQuery = 1 };
 +
 +static NSArray *identityKeys(BOOL keyItem)
 +{
@@ -795,8 +788,11 @@ index 0000000..eedf5e9
 +{
 +    if ([name isEqual:S(kSecAttrAccessible)])
 +        return [value isEqual:S(kSecAttrAccessibleAfterFirstUnlock)] ||
-+               [value isEqual:S(kSecAttrAccessibleWhenUnlocked)];
-+    if ([name isEqual:S(kSecAttrLabel)])
++               [value isEqual:S(kSecAttrAccessibleWhenUnlocked)] ||
++               [value isEqual:S(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)] ||
++               [value isEqual:S(kSecAttrAccessibleWhenUnlockedThisDeviceOnly)];
++    if ([name isEqual:S(kSecAttrLabel)] || [name isEqual:S(kSecAttrDescription)] ||
++        [name isEqual:S(kSecAttrComment)])
 +        return [value isKindOfClass:[NSString class]];
 +    if ([name isEqual:S(kSecAttrSynchronizable)])
 +        return value == (id)kCFBooleanFalse;
@@ -1030,35 +1026,111 @@ index 0000000..eedf5e9
 +    return values[S(kSecValueData)];
 +}
 +
++/*
++ * The protection class of an access control object whose operations are all
++ * unconditionally allowed. Passcode, biometry and similar constraints are
++ * dictionaries; this store cannot enforce them.
++ */
++static id plainProtection(id value)
++{
++    if (CFGetTypeID((CFTypeRef)value) != SecAccessControlGetTypeID())
++        return nil;
++    NSDictionary *constraints = (NSDictionary *)SecAccessControlGetConstraints((SecAccessControlRef)value);
++    for (id operation in constraints)
++        if (constraints[operation] != (id)kCFBooleanTrue) return nil;
++    return (id)SecAccessControlGetProtection((SecAccessControlRef)value);
++}
++
++static BOOL softwareP256Key(CFTypeRef ref)
++{
++    if (CFGetTypeID(ref) != SecKeyGetTypeID())
++        return NO;
++    NSDictionary *attrs = [(NSDictionary *)SecKeyCopyAttributes((SecKeyRef)ref) autorelease];
++    return attrs && !attrs[S(kSecAttrTokenID)] &&
++           [attrs[S(kSecAttrKeyType)] isEqual:S(kSecAttrKeyTypeECSECPrimeRandom)] &&
++           [attrs[S(kSecAttrKeySizeInBits)] isEqual:@256];
++}
++
++/*
++ * Collects the attribute filters of a query. Returns unsupportedQuery when the
++ * query needs something outside this store, so the caller can leave it to the
++ * stock Security path, and errSecParam for a malformed supported query.
++ */
++static OSStatus parseQuery(DarlingKeychainOperation operation, NSDictionary *query, BOOL keyItem,
++                           NSMutableDictionary *filters, BOOL *all)
++{
++    BOOL add = operation == DarlingKeychainAdd;
++    BOOL find = operation == DarlingKeychainFind;
++    for (NSString *key in query) {
++        NSString *name = key;
++        id value = query[key];
++        if ([name isEqual:S(kSecClass)] || [name isEqual:S(kSecUseDataProtectionKeychain)])
++            continue;
++        if (add && ([name isEqual:S(kSecValueRef)] || [name isEqual:S(kSecValueData)]))
++            continue;
++        if ([name isEqual:S(kSecMatchLimit)]) {
++            if (!find) return errSecParam;
++            *all = [value isEqual:S(kSecMatchLimitAll)];
++            if (!*all && ![value isEqual:S(kSecMatchLimitOne)]) return errSecParam;
++            continue;
++        }
++        if ([name isEqual:S(kSecReturnData)] || [name isEqual:S(kSecReturnRef)] ||
++            [name isEqual:S(kSecReturnAttributes)]) {
++            if ((!add && !find) || !isBoolean(value)) return errSecParam;
++            continue;
++        }
++        /* One implicit access group: the attribute neither stores nor filters. */
++        if ([name isEqual:S(kSecAttrAccessGroup)] && [value isKindOfClass:[NSString class]])
++            continue;
++        /* Every item is local, so "any" places no constraint on a search. */
++        if (!add && [name isEqual:S(kSecAttrSynchronizable)] &&
++            [value isEqual:S(kSecAttrSynchronizableAny)])
++            continue;
++        if ([name isEqual:S(kSecAttrAccessControl)]) {
++            value = plainProtection(value);
++            if (!value || filters[S(kSecAttrAccessible)]) return unsupportedQuery;
++            name = S(kSecAttrAccessible);
++        } else if ([name isEqual:S(kSecAttrAccessible)] && filters[name]) {
++            return unsupportedQuery;
++        }
++        if (!validAttribute(name, value, keyItem)) return unsupportedQuery;
++        filters[name] = value;
++    }
++    return errSecSuccess;
++}
++
++bool DarlingKeychainHandles(CFDictionaryRef query, DarlingKeychainOperation operation)
++{
++    if (!query || CFGetTypeID(query) != CFDictionaryGetTypeID() ||
++        CFDictionaryGetValue(query, kSecUseDataProtectionKeychain) != kCFBooleanTrue)
++        return false;
++    CFTypeRef itemClass = CFDictionaryGetValue(query, kSecClass);
++    CFTypeRef ref = CFDictionaryGetValue(query, kSecValueRef);
++    BOOL keyItem = !itemClass || CFEqual(itemClass, kSecClassKey);
++    if (!itemClass && !(operation == DarlingKeychainAdd && ref))
++        return false;
++    if (!keyItem && !CFEqual(itemClass, kSecClassGenericPassword))
++        return false;
++    /* Claim only what the store can answer; the rest keeps its stock status. */
++    @autoreleasepool {
++        if (keyItem && operation == DarlingKeychainAdd && ref && !softwareP256Key(ref))
++            return false;
++        BOOL all = NO;
++        return parseQuery(operation, (NSDictionary *)query, keyItem,
++                          [NSMutableDictionary dictionary], &all) != unsupportedQuery;
++    }
++}
++
 +static OSStatus perform(DarlingKeychainOperation operation, NSDictionary *query,
 +                        NSDictionary *changes, CFTypeRef *result)
 +{
 +    if (result) *result = NULL;
 +    BOOL keyItem = !query[S(kSecClass)] || [query[S(kSecClass)] isEqual:S(kSecClassKey)];
 +    NSMutableDictionary *filters = [NSMutableDictionary dictionary];
-+    filters[S(kSecClass)] = keyItem ? S(kSecClassKey) : S(kSecClassGenericPassword);
 +    BOOL all = NO;
-+    for (NSString *name in query) {
-+        id value = query[name];
-+        if ([name isEqual:S(kSecClass)] || [name isEqual:S(kSecUseDataProtectionKeychain)])
-+            continue;
-+        if (operation == DarlingKeychainAdd &&
-+            ([name isEqual:S(kSecValueRef)] || [name isEqual:S(kSecValueData)]))
-+            continue;
-+        if (operation == DarlingKeychainFind && [name isEqual:S(kSecMatchLimit)]) {
-+            all = [value isEqual:S(kSecMatchLimitAll)];
-+            if (!all && ![value isEqual:S(kSecMatchLimitOne)]) return errSecParam;
-+            continue;
-+        }
-+        if ((operation == DarlingKeychainAdd || operation == DarlingKeychainFind) &&
-+            ([name isEqual:S(kSecReturnData)] || [name isEqual:S(kSecReturnRef)] ||
-+             [name isEqual:S(kSecReturnAttributes)])) {
-+            if (!isBoolean(value)) return errSecParam;
-+            continue;
-+        }
-+        if (!validAttribute(name, value, keyItem)) return errSecParam;
-+        filters[name] = value;
-+    }
++    OSStatus parsed = parseQuery(operation, query, keyItem, filters, &all);
++    if (parsed != errSecSuccess) return errSecParam;
++    filters[S(kSecClass)] = keyItem ? S(kSecClassKey) : S(kSecClassGenericPassword);
 +
 +    NSMutableDictionary *item = nil;
 +    if (operation == DarlingKeychainAdd) {

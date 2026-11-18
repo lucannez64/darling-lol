@@ -12,7 +12,7 @@ no guidance for changing any outcome.
 | Build | Riot Client `143.0.8.5295` (launcher CL 5295, release `07AAF191150F5E09`) |
 | Analyzed image | `RiotGamesApi` x86_64, sha256 `a094db97d1d5d4aa…` |
 | Comparison image | `141.0.7.5129` framework, x86_64 sha256 `68ae2d3ec20ff26f…` |
-| Evidence bundles | `build/keychain-compat/darling.json` (probe), e2e logs under `build/e2e-rc143/` |
+| Evidence bundles | `build/keychain-compat/darling.json` (probe), e2e logs under `build/e2e-rc143/` (local run outputs, not tracked) |
 | Disassembly | rizin; all addresses below are x86_64 file vaddrs in the 143 image |
 
 Runtime corroborating logs: the issue #31 report bundle (TR region, Darling)

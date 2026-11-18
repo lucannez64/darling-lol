@@ -104,7 +104,11 @@ def main():
                                      text=True, timeout=25)
             (out / 'shutdown.log').write_text(stopped.stdout + stopped.stderr)
             if stopped.returncode == 0 or 'Darling container is not running' in stopped.stderr:
-                shutil.rmtree(private)
+                # Darling leaves an empty root-owned overlay work directory behind.
+                shutil.rmtree(private, ignore_errors=True)
+                leftovers = [path.name for path in private.iterdir()] if private.exists() else []
+                if leftovers and leftovers != ['prefix.workdir']:
+                    report['retained_private_prefix'] = str(private)
             else:
                 report['retained_private_prefix'] = str(private)
         except (OSError, subprocess.SubprocessError) as error:

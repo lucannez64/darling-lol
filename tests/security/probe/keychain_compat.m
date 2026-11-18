@@ -171,6 +171,82 @@ static void exercisePassword(NSMutableDictionary *cases, NSString *account, BOOL
     }
 }
 
+/* Query forms real clients use: permanent generation, access control, access groups. */
+static void exerciseQueryForms(NSMutableDictionary *cases, NSString *identifier)
+{
+    NSData *tag = data([identifier stringByAppendingString:@".permanent"]);
+    NSData *aclTag = data([identifier stringByAppendingString:@".acl"]);
+    NSDictionary *base = @{S(kSecAttrKeyType): S(kSecAttrKeyTypeECSECPrimeRandom),
+                           S(kSecAttrKeySizeInBits): @256, S(kSecUseDataProtectionKeychain): @YES};
+    NSMutableDictionary *generate = [NSMutableDictionary dictionaryWithDictionary:base];
+    generate[S(kSecPrivateKeyAttrs)] = @{S(kSecAttrIsPermanent): @YES, S(kSecAttrApplicationTag): tag};
+    CFErrorRef error = NULL;
+    SecKeyRef key = SecKeyCreateRandomKey((CFDictionaryRef)generate, &error);
+    record(cases, @"forms.permanent_generate", key != NULL, error ? CFErrorGetCode(error) : 0);
+    if (error) CFRelease(error);
+    error = NULL;
+    if (key) CFRelease(key);
+
+    SecAccessControlRef control = SecAccessControlCreateWithFlags(
+        NULL, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, 0, NULL);
+    if (control) {
+        generate[S(kSecPrivateKeyAttrs)] = @{S(kSecAttrIsPermanent): @YES,
+            S(kSecAttrApplicationTag): aclTag, S(kSecAttrAccessControl): (id)control};
+        key = SecKeyCreateRandomKey((CFDictionaryRef)generate, &error);
+        CFRelease(control);
+    } else {
+        key = NULL;
+    }
+    record(cases, @"forms.access_control_generate", key != NULL, error ? CFErrorGetCode(error) : 0);
+    if (error) CFRelease(error);
+    if (key) CFRelease(key);
+
+    for (NSData *wanted in @[tag, aclTag]) {
+        NSString *name = wanted == tag ? @"forms.permanent" : @"forms.access_control";
+        NSDictionary *query = @{S(kSecClass): S(kSecClassKey), S(kSecAttrApplicationTag): wanted,
+            S(kSecAttrKeyClass): S(kSecAttrKeyClassPrivate), S(kSecUseDataProtectionKeychain): @YES};
+        NSMutableDictionary *fetch = [NSMutableDictionary dictionaryWithDictionary:query];
+        fetch[S(kSecReturnRef)] = @YES;
+        fetch[S(kSecAttrSynchronizable)] = S(kSecAttrSynchronizableAny);
+        CFTypeRef fetched = NULL;
+        OSStatus status = SecItemCopyMatching((CFDictionaryRef)fetch, &fetched);
+        record(cases, [name stringByAppendingString:@"_fetch"],
+               status == errSecSuccess && fetched && CFGetTypeID(fetched) == SecKeyGetTypeID(), status);
+        if (fetched) CFRelease(fetched);
+        checkStatus(cases, [name stringByAppendingString:@"_delete"],
+                    SecItemDelete((CFDictionaryRef)query), errSecSuccess);
+    }
+
+    NSDictionary *identity = @{S(kSecClass): S(kSecClassGenericPassword),
+        S(kSecAttrService): @"org.darling.keychain-compat.forms", S(kSecAttrAccount): identifier,
+        S(kSecAttrAccessGroup): @"org.darling.keychain-compat", S(kSecUseDataProtectionKeychain): @YES};
+    NSMutableDictionary *add = [NSMutableDictionary dictionaryWithDictionary:identity];
+    add[S(kSecValueData)] = tag;
+    add[S(kSecAttrDescription)] = @"synthetic";
+    add[S(kSecAttrAccessible)] = S(kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
+    checkStatus(cases, @"forms.password_add", SecItemAdd((CFDictionaryRef)add, NULL), errSecSuccess);
+    NSMutableDictionary *query = [NSMutableDictionary dictionaryWithDictionary:identity];
+    query[S(kSecAttrSynchronizable)] = S(kSecAttrSynchronizableAny);
+    query[S(kSecReturnData)] = @YES;
+    fetchPassword(cases, @"forms.password_fetch", query, tag);
+
+    /* Outside the store: the stock status must come back, not a parameter error. */
+    query[S(kSecReturnPersistentRef)] = @YES;
+    OSStatus status = SecItemCopyMatching((CFDictionaryRef)query, NULL);
+    record(cases, @"forms.persistent_ref_declined",
+           status != errSecSuccess && status != errSecParam, status);
+    NSDictionary *rsa = @{S(kSecClass): S(kSecClassKey), S(kSecAttrKeyType): S(kSecAttrKeyTypeRSA),
+                          S(kSecUseDataProtectionKeychain): @YES};
+    status = SecItemCopyMatching((CFDictionaryRef)rsa, NULL);
+    record(cases, @"forms.rsa_declined", status != errSecSuccess && status != errSecParam, status);
+
+    /* macOS rejects a match limit on delete. */
+    NSMutableDictionary *limited = [NSMutableDictionary dictionaryWithDictionary:identity];
+    limited[S(kSecMatchLimit)] = S(kSecMatchLimitOne);
+    checkStatus(cases, @"forms.delete_match_limit", SecItemDelete((CFDictionaryRef)limited), errSecParam);
+    checkStatus(cases, @"forms.password_delete", SecItemDelete((CFDictionaryRef)identity), errSecSuccess);
+}
+
 static void exerciseSecureEnclave(NSMutableDictionary *cases)
 {
     NSDictionary *attributes = @{
@@ -202,7 +278,10 @@ int main(int argc, const char **argv)
         exerciseKey(cases, keyIDs, @"when_unlocked", data([identifier stringByAppendingString:@".unlocked"]),
                     kSecAttrAccessibleWhenUnlocked, create);
         exercisePassword(cases, identifier, create);
-        if (create) exerciseSecureEnclave(cases);
+        if (create) {
+            exerciseQueryForms(cases, identifier);
+            exerciseSecureEnclave(cases);
+        }
 
         unsigned failures = 0;
         for (NSDictionary *result in [cases allValues]) {
