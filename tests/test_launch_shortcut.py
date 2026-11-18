@@ -12,7 +12,7 @@ SCRIPT = ROOT / 'scripts/launch-shortcut.sh'
 
 # Binaries the launcher needs from PATH; everything else is a builtin or a
 # stub under test control.
-REAL_BINARIES = ('dirname', 'mkdir', 'touch', 'chmod', 'id', 'python3')
+REAL_BINARIES = ('dirname', 'mkdir', 'touch', 'chmod', 'id', 'python3', 'tr')
 
 
 def stub_script(path, body):
@@ -73,12 +73,15 @@ class LaunchShortcutTests(unittest.TestCase):
         (self.prefix / 'Applications/Riot Client.app').mkdir(parents=True)
         (self.prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/Frameworks').mkdir(parents=True)
 
-    def run_launcher(self, *, notify=False, dprefix=True):
+    def run_launcher(self, *, notify=False, dprefix=True, region=None):
         stub_script(self.repo / 'scripts/desktop-run.sh', 'echo "RUN $*"')
         stub_script(self.repo / 'scripts/installer.sh', 'echo "INSTALL $*"')
         env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin_sandbox(notify)))
         env.pop('DPREFIX', None)
         env.pop('RIOT_GUEST_HOME', None)
+        env.pop('RCLOL_REGION', None)
+        if region is not None:
+            env['RCLOL_REGION'] = region
         if dprefix:
             env['DPREFIX'] = str(self.prefix)
         result = subprocess.run(
@@ -150,6 +153,15 @@ class LaunchShortcutTests(unittest.TestCase):
         self.assertNotIn('RUN', log)
         self.assertIn('Riot Client is not installed', log)
         self.assertIn('NOTIFY', (self.root / 'notify.log').read_text())
+
+    def test_a_shortcut_region_overrides_the_configured_region(self):
+        # create-shortcuts.sh bakes the system region into Exec; the first
+        # launch must install that region, not the one in build/config.json.
+        self.write_config('BR')
+        result, log = self.run_launcher(region='KR')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('INSTALL kr', log)
+        self.assertNotIn('INSTALL br', log)
 
     def test_a_missing_config_falls_back_to_the_default_region(self):
         result, log = self.run_launcher()

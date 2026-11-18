@@ -106,11 +106,12 @@ exit 1
         env = {**os.environ,
                'HOME': str(self.home),
                'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'DARLING_LOL_SHORTCUT_SCRIPT': str(self.repo / 'scripts/create-shortcuts.sh'),
                'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
                **overrides}
         return subprocess.run(
             ['/bin/bash', '-c',
-             f'source "{self.repo}/scripts/create-shortcuts.sh"\n{snippet}'],
+             f'source "$DARLING_LOL_SHORTCUT_SCRIPT"\n{snippet}'],
             capture_output=True, text=True, env=env, check=False,
             cwd=str(self.repo))
 
@@ -539,6 +540,7 @@ exit 1
         entry = parse_entry(self.entry().read_text())
         self.assertIn('env RCLOL_CLEAN_ON_EXIT=0', entry['Exec'])
         self.assertNotIn('RCLOL_REGION', entry['Exec'])
+        self.assertNotIn('RCLOL_LOCALE', entry['Exec'])
 
     def test_update_keeps_installed_region_and_locale_flags(self):
         self.fake_repo()
@@ -551,6 +553,18 @@ exit 1
         self.assertIn('env RCLOL_REGION=NA RCLOL_LOCALE=en_US', entry['Exec'])
         self.assertEqual(entry['Exec'].count('RCLOL_REGION='), 1)
         self.assertNotIn('RCLOL_LOCALE=pt_BR', entry['Exec'])
+
+    def test_an_unattended_update_does_not_add_region_and_locale_flags(self):
+        # The installed shortcut had no automatic flags; an unattended update
+        # must keep it that way instead of baking the system locale in.
+        self.fake_repo()
+        self.assertEqual(self.run_script('--yes', '--create', lang='C').returncode, 0)
+        result = self.run_script('--yes', '--update', lang='pt_BR.UTF-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry(self.entry().read_text())
+        self.assertNotIn('RCLOL_REGION', entry['Exec'])
+        self.assertNotIn('RCLOL_LOCALE', entry['Exec'])
+        self.assertIn('Launch flags: none', result.stdout)
 
     def test_flag_reference_lists_the_idle_stop_timeout(self):
         self.fake_repo()

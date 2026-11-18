@@ -362,7 +362,9 @@ choose_window_entries() {
 # shortcut can bake the desktop session's own server and client language into
 # its Exec line.
 normalize_locale() {
-  local value=${1//-/_}
+  # Case conversion and the ASCII ranges must not follow a locale such as
+  # tr_TR, where they would produce non-ASCII codes.
+  local LC_ALL=C value=${1//-/_}
   if [[ $value =~ ^([A-Za-z]{2})_([A-Za-z]{2})$ ]]; then
     printf '%s_%s' "${BASH_REMATCH[1],,}" "${BASH_REMATCH[2]^^}"
     return 0
@@ -561,6 +563,11 @@ choose_region_locale() {
   fi
   region=$(region_for_locale "$locale")
   if ! interactive_run; then
+    # An unattended update keeps what the installed shortcut already has; only
+    # creation (or an update that falls back to creation) takes the suggestion.
+    if (( CURRENT_OWNED )); then
+      return 0
+    fi
     ENV_FLAGS+=("RCLOL_REGION=$region" "RCLOL_LOCALE=$locale")
     info "Using the system region and language: $region / $locale."
     return 0

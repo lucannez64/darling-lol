@@ -847,7 +847,8 @@ INSIDE_TOOLBOX=0
 WINDOW_ENTRIES=1
 create_desktop_entry
 '''
-            result = run_sourced(snippet, HOME=str(home))
+            result = run_sourced(snippet, HOME=str(home),
+                                 XDG_CONFIG_HOME=str(home / '.config'))
             self.assertEqual(result.returncode, 0, result.stderr)
             applications = home / '.local/share/applications'
             for name in ('darling-league-client.desktop', 'darling-league-game.desktop',

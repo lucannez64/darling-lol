@@ -120,11 +120,11 @@ scripts/create-desktop-entry.sh --window-entries
 The option is off by default because those fields carry third-party product
 names while the shipped launcher stays neutral (see `docs/COMPLIANCE.md`; the
 Nix package and its checks are unchanged). Running the helper again without the
-option removes the three entries it created. A file with one of those names
-that the project did not create is never overwritten or removed; the helper
-reports it on stderr and skips that entry. The helper never extracts an icon
-from the game. Reopen the client after creating the entries: the shell matches a
-window to its entry when the window is created.
+option removes the three entries it created. When the option is enabled, a file
+with one of those names that the project did not create is never overwritten or
+removed; the helper reports it on stderr and skips that entry. The helper never
+extracts an icon from the game. Reopen the client after creating the entries:
+the shell matches a window to its entry when the window is created.
 
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
 to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`

@@ -1,8 +1,9 @@
 #!/bin/sh
 # Menu launcher entry point. When the Riot Client is missing, run the
-# installer with the configured region instead of failing; when it exists,
-# hand off to desktop-run.sh unchanged. A menu launch has no terminal, so all
-# diagnostics land in build/desktop-launch.log (shared with desktop-run.sh).
+# installer with the shortcut's region (RCLOL_REGION baked into Exec, else the
+# configured one) instead of failing; when it exists, hand off to
+# desktop-run.sh unchanged. A menu launch has no terminal, so all diagnostics
+# land in build/desktop-launch.log (shared with desktop-run.sh).
 set -eu
 umask 077
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -35,15 +36,22 @@ fi
 
 # First launch without a client: install it with the region chosen during the
 # Darling-LoL install. installer.sh starts the client itself when it finishes,
-# so no extra hand-off is needed here.
-region=$(python3 - "$repo/build/config.json" <<'PY'
+# so no extra hand-off is needed here. A shortcut created with the system
+# region bakes RCLOL_REGION into Exec, and that validated choice wins; the
+# configured region stays the fallback when the shortcut has no override.
+region=${RCLOL_REGION:-}
+if [ -z "$region" ]; then
+  region=$(python3 - "$repo/build/config.json" <<'PY'
 import json, sys
 try:
     print(json.load(open(sys.argv[1])).get("region", "EUW").lower())
 except Exception:
     print("euw")
 PY
-) || region=euw
+  ) || region=euw
+fi
+# installer.sh takes lowercase installer codes.
+region=$(printf '%s' "$region" | tr '[:upper:]' '[:lower:]')
 
 # Surface the long installation through the desktop notification service when
 # it is reachable. Toolbox containers share the host session bus and Fedora
