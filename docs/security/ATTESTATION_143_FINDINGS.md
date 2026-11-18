@@ -92,7 +92,7 @@ TryEarlyAttestation(out, state, tag):
 ```
 
 The runner requires the very status it is the only one allowed to produce.
-With `vt[0x60] == 0`, no unmodified entry point (config update, the async
+With `vt[0x60] == 0` and no remote `attestation` bypass key (§4), no unmodified entry point (config update, the async
 `AttestationStart` operation, the `status == 1` continuation) can reach the
 attestation work: every path funnels into the same status gate.
 
@@ -113,7 +113,9 @@ and `cfg_attestation` is the exact string compared against `"bypass"` in
 §1. In other words:
 
 ```c
-if (remoteConfig["attestation"] == "bypass")
+if (platform_gates_ok && !early_attestation_ran && provider != NULL
+        && (provider->vt[0x68]() || flag_0x7c8)
+        && remoteConfig["attestation"] == "bypass")
     status = 1;      // logged as "Attestation bypass configured"
 ```
 
@@ -144,7 +146,9 @@ override, in the same release that removed the
 
 ```text
 141: supported  = flag_0x8ab (set to 1 in-binary at init)
-143: supported  = early_attestation_ran(…) or cfg_attestation=="bypass"
+143: supported  = platform gates pass, and then in order:
+                  the early result if early attestation ran,
+                  else (provider present) cfg_attestation=="bypass"
                   or provider->vt[0x60]()        ← 0 in the shipped image
 ```
 
@@ -176,9 +180,13 @@ Darling environment changes the verdict: the deciding consult is a
 constant in the image, and the re-enable path is a server-side setting.
 The message is cosmetic for login and gameplay: sessions authorize via
 the standard RSO flow (`keypairSupported: false` in the session
-lifecycle telemetry), as both report bundles and the e2e boot show.
+lifecycle telemetry), as both issue #31 report bundles show. The
+fresh-prefix e2e boot stopped at the login UX, so it supports only the
+attestation state, not the authorization path.
 
 The falsifier for this model is a real-Mac login log on this exact
-release showing either no attestation lines at all (would contradict the
-"not supported" default) or the `Attestation bypass configured`
-signature (would prove the remote key is served to some population).
+release that shows no attestation lines at all, or attestation activity
+without the `Attestation bypass configured` line: either would contradict
+the "not supported" default. A log with the `Attestation bypass
+configured` signature would not contradict the model; it would confirm
+that the remote key is served to some population.

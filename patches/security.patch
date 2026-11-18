@@ -671,7 +671,7 @@ index 5b343f6..19c246e 100644
                      require_action_quiet(err == 0, out, (CFReleaseNull(result),
                                                           SecError(errSecParam, error, CFSTR("%@: X962 signing failed (ccerr %d)"),
 diff --git a/OSX/sec/Security/SecKey.m b/OSX/sec/Security/SecKey.m
-index 723a8bb..d913143 100644
+index 723a8bb7..4b896f43 100644
 --- a/OSX/sec/Security/SecKey.m
 +++ b/OSX/sec/Security/SecKey.m
 @@ -70,6 +70,9 @@
@@ -708,12 +708,27 @@ index 723a8bb..d913143 100644
              result = SecCTKKeyGeneratePair(parameters, &pubKey, &privKey);
          } else if (CFEqual(ktype, kSecAttrKeyTypeECSECPrimeRandom)) {
              result = SecECKeyGeneratePair(parameters, &pubKey, &privKey);
+@@ -356,7 +369,13 @@ OSStatus SecKeyGeneratePair(CFDictionaryRef parameters,
+             require_noerr_quiet(result = add_key(pubKey, pubParams), errOut);
+         }
+         if (getBoolForKey(privParams, kSecAttrIsPermanent, CFDictionaryContainsKey(privParams, kSecAttrTokenID))) {
+-            require_noerr_quiet(result = add_key(privKey, privParams), errOut);
++            result = add_key(privKey, privParams);
++#if defined(DARLING)
++            // Do not leave the public half behind when the private half was not stored.
++            if (result != errSecSuccess && getBoolForKey(pubParams, kSecAttrIsPermanent, false))
++                DarlingKeychainForgetKey(pubKey);
++#endif
++            require_noerr_quiet(result, errOut);
+         }
+ 
+         if (publicKey) {
 diff --git a/OSX/sec/Security/DarlingKeychain.h b/OSX/sec/Security/DarlingKeychain.h
 new file mode 100644
-index 0000000..dad11d5
+index 00000000..ab15449c
 --- /dev/null
 +++ b/OSX/sec/Security/DarlingKeychain.h
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,28 @@
 +#ifndef DARLING_KEYCHAIN_H
 +#define DARLING_KEYCHAIN_H
 +
@@ -734,6 +749,8 @@ index 0000000..dad11d5
 +bool DarlingKeychainHandles(CFDictionaryRef query, DarlingKeychainOperation operation);
 +OSStatus DarlingKeychainPerform(DarlingKeychainOperation operation, CFDictionaryRef query,
 +                                CFDictionaryRef changes, CFTypeRef *result);
++/* Removes a key this store holds; used to undo half of a failed key pair. */
++void DarlingKeychainForgetKey(SecKeyRef key);
 +
 +#ifdef __cplusplus
 +}
@@ -742,10 +759,10 @@ index 0000000..dad11d5
 +#endif
 diff --git a/OSX/sec/Security/DarlingKeychain.m b/OSX/sec/Security/DarlingKeychain.m
 new file mode 100644
-index 00000000..36140c78
+index 00000000..e7d8b928
 --- /dev/null
 +++ b/OSX/sec/Security/DarlingKeychain.m
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,497 @@
 +#import <Foundation/Foundation.h>
 +#include <Security/SecKey.h>
 +#include <Security/SecItemPriv.h>
@@ -820,11 +837,9 @@ index 00000000..36140c78
 +
 +static BOOL itemMatches(NSDictionary *item, NSDictionary *filters)
 +{
-+    for (NSString *name in filters) {
-+        /* An item stored without a group sits in the caller's default group. */
-+        if ([name isEqual:S(kSecAttrAccessGroup)] && !item[name]) continue;
++    /* An explicit access group matches only items stored with that group. */
++    for (NSString *name in filters)
 +        if (![item[name] isEqual:filters[name]]) return NO;
-+    }
 +    return YES;
 +}
 +
@@ -1222,6 +1237,20 @@ index 00000000..36140c78
 +    close(dir);
 +    if (status == errSecSuccess && result) *result = (CFTypeRef)[output retain];
 +    return status;
++}
++
++void DarlingKeychainForgetKey(SecKeyRef key)
++{
++    @autoreleasepool {
++        NSDictionary *attrs = [(NSDictionary *)SecKeyCopyAttributes(key) autorelease];
++        id label = attrs[S(kSecAttrApplicationLabel)], keyClass = attrs[S(kSecAttrKeyClass)];
++        if (!label || !keyClass) return;
++        NSDictionary *query = @{S(kSecClass): S(kSecClassKey), S(kSecAttrKeyClass): keyClass,
++                                S(kSecAttrApplicationLabel): label,
++                                S(kSecUseDataProtectionKeychain): @YES};
++        if (DarlingKeychainHandles((CFDictionaryRef)query, DarlingKeychainDelete))
++            perform(DarlingKeychainDelete, query, nil, NULL);
++    }
 +}
 +
 +OSStatus DarlingKeychainPerform(DarlingKeychainOperation operation, CFDictionaryRef query,
