@@ -103,12 +103,14 @@ Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
 GNOME names and icons a window from the desktop entry whose `StartupWMClass`
 matches the window's `WM_CLASS`. Only the Riot Client startup window
 (`RiotClientServices`) matches the launcher, so the League client
-(`LeagueClientUx`) and the main Riot Client window (`Riot Client`) show up under
-their raw class names. `--window-entries` (or `DARLING_LOL_WINDOW_ENTRIES=1`)
-adds two hidden entries (`NoDisplay=true`, `darling-league-client.desktop` and
-`darling-riot-client.desktop`) that name those windows `League of Legends` and
-`Riot Client` and give them the launcher icon, and adds `LoL`, `League` and
-`Riot` as search keywords of the launcher:
+(`LeagueClientUx`), the game window (`LeagueofLegends`) and the main Riot Client
+window (`Riot Client`) show up under their raw class names. `--window-entries`
+(or `DARLING_LOL_WINDOW_ENTRIES=1`) adds three hidden entries (`NoDisplay=true`,
+`darling-league-client.desktop`, `darling-league-game.desktop` and
+`darling-riot-client.desktop`) that name the two League windows `League of
+Legends` and the Riot Client window `Riot Client` and give all three the
+launcher icon, or the custom icon passed with `--icon`; it also adds `LoL`,
+`League` and `Riot` as search keywords of the launcher:
 
 ```sh
 scripts/create-desktop-entry.sh --window-entries
@@ -118,11 +120,10 @@ scripts/create-desktop-entry.sh --window-entries
 The option is off by default because those fields carry third-party product
 names while the shipped launcher stays neutral (see `docs/COMPLIANCE.md`; the
 Nix package and its checks are unchanged). Running the helper again without the
-option removes the two entries it created. A file with one of those names that the
-project did not create is never overwritten or removed; the helper reports it on
-stderr and skips that entry. The
-icon is the project's own `darling-launcher`; the helper never extracts one from
-the game. Reopen the client after creating the entries: the shell matches a
+option removes the three entries it created. A file with one of those names
+that the project did not create is never overwritten or removed; the helper
+reports it on stderr and skips that entry. The helper never extracts an icon
+from the game. Reopen the client after creating the entries: the shell matches a
 window to its entry when the window is created.
 
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`

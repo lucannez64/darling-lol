@@ -208,6 +208,7 @@ exit 1
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('GNOME overview? [Y/n]', result.stdout)
         self.assertTrue(self.window_entry('darling-league-client.desktop').is_file())
+        self.assertTrue(self.window_entry('darling-league-game.desktop').is_file())
         self.assertTrue(self.window_entry('darling-riot-client.desktop').is_file())
 
     def test_declining_the_suggestion_runs_on_the_host(self):
@@ -277,6 +278,7 @@ exit 1
         result = self.run_script('--yes', '--create', desktop='GNOME')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.window_entry('darling-league-client.desktop').is_file())
+        self.assertTrue(self.window_entry('darling-league-game.desktop').is_file())
         self.assertTrue(self.window_entry('darling-riot-client.desktop').is_file())
 
     def test_create_with_every_option(self):
@@ -294,6 +296,7 @@ exit 1
         self.assertEqual(parse_entry(self.desktop_shortcut().read_text())['Name'],
                          'My Game Launcher')
         for name, wm_class in (('darling-league-client.desktop', 'LeagueClientUx'),
+                               ('darling-league-game.desktop', 'LeagueofLegends'),
                                ('darling-riot-client.desktop', 'Riot Client')):
             window = parse_entry(self.window_entry(name).read_text())
             self.assertEqual(window['StartupWMClass'], wm_class)
@@ -342,7 +345,8 @@ exit 1
         self.assertIn('Launch flags: RCLOL_CLEAN_ON_EXIT=0', result.stdout)
         entry = parse_entry(self.entry().read_text())
         self.assertIn('env RCLOL_CLEAN_ON_EXIT=0', entry['Exec'])
-        for name in ('darling-league-client.desktop', 'darling-riot-client.desktop'):
+        for name in ('darling-league-client.desktop', 'darling-league-game.desktop',
+                     'darling-riot-client.desktop'):
             self.assertTrue(self.window_entry(name).is_file(), name)
 
     def test_update_keeps_installed_flags_when_the_defaults_are_accepted(self):
@@ -394,6 +398,7 @@ exit 1
         self.assertIn('Window entries only help GNOME', result.stdout)
         self.assertIn('they will be removed', result.stdout)
         self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertFalse(self.window_entry('darling-league-game.desktop').exists())
         self.assertFalse(self.window_entry('darling-riot-client.desktop').exists())
 
     def test_remove_keeps_the_handler_and_foreign_files(self):
@@ -405,6 +410,7 @@ exit 1
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.entry().exists())
         self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertFalse(self.window_entry('darling-league-game.desktop').exists())
         self.assertTrue(foreign.is_file())
         self.assertTrue(self.handler().is_file())
         # A second run finds nothing left to do.
@@ -545,6 +551,14 @@ exit 1
         self.assertIn('env RCLOL_REGION=NA RCLOL_LOCALE=en_US', entry['Exec'])
         self.assertEqual(entry['Exec'].count('RCLOL_REGION='), 1)
         self.assertNotIn('RCLOL_LOCALE=pt_BR', entry['Exec'])
+
+    def test_flag_reference_lists_the_idle_stop_timeout(self):
+        self.fake_repo()
+        result = self.run_sourced('show_flag_reference')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(line for line in result.stdout.splitlines()
+                    if 'RCLOL_STOP_AFTER_CLIENT_SECONDS=N' in line)
+        self.assertIn('default: 60', line)
 
     def test_flag_reference_recommends_pcore_affinity_on_a_hybrid_cpu(self):
         self.fake_repo()

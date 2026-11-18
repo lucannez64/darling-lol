@@ -31,11 +31,14 @@ LEGACY_SVG_MARKERS = ('id="goldGrad"', 'M172 108 L242 108')
 # Opt-in window-association entries (--window-entries / DARLING_LOL_WINDOW_ENTRIES=1).
 # GNOME matches a window to an application by StartupWMClass, so a hidden entry
 # per client window class gives those windows a proper name and icon in the
-# Activities overview and the dash.  They carry third-party product names, so
-# they are never created unless the user asks, and the default launcher stays
-# neutral.  Each tuple is (file name, display name, WM_CLASS).
+# Activities overview and the dash.  The game runs in its own window with the
+# LeagueofLegends class, so it gets an entry too.  They carry third-party
+# product names, so they are never created unless the user asks, and the
+# default launcher stays neutral.  Each tuple is (file name, display name,
+# WM_CLASS).
 WINDOW_ENTRIES = (
     ("darling-league-client.desktop", "League of Legends", "LeagueClientUx"),
+    ("darling-league-game.desktop", "League of Legends", "LeagueofLegends"),
     ("darling-riot-client.desktop", "Riot Client", "Riot Client"),
 )
 WINDOW_ENTRY_KEYWORDS = "LoL;League;League of Legends;Riot;"

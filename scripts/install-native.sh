@@ -249,8 +249,8 @@ Options:
                       A prefix that already ran the client keeps its saved
                       language unless RCLOL_LOCALE is exported at launch.
       --window-entries  Also create hidden desktop entries that name and icon the
-                      League and Riot Client windows in the GNOME overview
-                      (off by default; the launcher itself stays neutral)
+                      League client, game and Riot Client windows in the GNOME
+                      overview (off by default; the launcher itself stays neutral)
   -h, --help          Show this help
 
 Environment:

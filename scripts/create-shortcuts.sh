@@ -2,11 +2,11 @@
 #
 # Create, update or remove the Darling-LoL desktop shortcuts interactively:
 # the launcher shortcut with a custom name, the hidden window entries that
-# name and icon the League and Riot Client windows, the launch region and
-# language derived from the system locale, custom launch flags (environment
-# variables) baked into the Exec line, and whether the shortcut runs on the
-# host or re-enters a Toolbox container. The work itself is done by
-# build/runtime/tools/desktop-entry.py, the same helper the non-interactive
+# name and icon the League client, game and Riot Client windows, the launch
+# region and language derived from the system locale, custom launch flags
+# (environment variables) baked into the Exec line, and whether the shortcut
+# runs on the host or re-enters a Toolbox container. The work itself is done
+# by build/runtime/tools/desktop-entry.py, the same helper the non-interactive
 # scripts/create-desktop-entry.sh and the installer use.
 
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
@@ -112,8 +112,8 @@ Options:
   --toolbox NAME     Run the shortcut through the given Toolbox container;
                      an empty value runs it on the host
   --window-entries   Also create the hidden entries that name and icon the
-                     League and Riot Client windows in the GNOME overview
-                     (GNOME only; the question is skipped elsewhere)
+                     League client, game and Riot Client windows in the GNOME
+                     overview (GNOME only; the question is skipped elsewhere)
   --env VAR=VALUE    Launch flag written into the Exec line; repeatable.
                      When given, the flags replace the automatic
                      RCLOL_REGION/RCLOL_LOCALE pair offered from the
@@ -348,7 +348,7 @@ choose_window_entries() {
     return 0
   fi
   while true; do
-    read -r -p "${CYAN}${ICON_INFO}${RESET} Name and icon the League and Riot Client windows in the GNOME overview? [Y/n]: " reply ||
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Name and icon the League client, game and Riot Client windows in the GNOME overview? [Y/n]: " reply ||
       fail 'No input received while choosing the window entries.'
     case ${reply,,} in
       ''|y|yes) WINDOW_ENTRIES=1; return 0 ;;
@@ -464,6 +464,7 @@ show_flag_reference() {
   printf '  RCLOL_RECOVER_HIDDEN_CLIENT=1     Recover a hidden client at launch\n'
   printf '  RCLOL_CLEAN_STALE_HELPERS=1       Remove orphaned in-game helpers at launch\n'
   printf '  RCLOL_CLEAN_ON_EXIT=0             Keep the runtime running after the clients exit\n'
+  printf '  RCLOL_STOP_AFTER_CLIENT_SECONDS=N  Stop the runtime N seconds after the last window closes (default: 60)\n'
   printf '  RCLOL_DISCORD_RPC=0               Disable the Discord Rich Presence links\n'
   printf '  RCLOL_FILTER_HOST_ENV=1           Remove host desktop-session variables at launch\n'
   printf '  RCLOL_FINISH_LEAGUE_LOAD=0        Disable the League load finish workaround\n'
@@ -683,7 +684,7 @@ summarize() {
     printf '%sTarget: the host%s\n' "$DIM" "$RESET"
   fi
   if (( WINDOW_ENTRIES )); then
-    printf '%sWindow entries: League of Legends, Riot Client%s\n' "$DIM" "$RESET"
+    printf '%sWindow entries: League of Legends (client and game), Riot Client%s\n' "$DIM" "$RESET"
   else
     printf '%sWindow entries: no%s\n' "$DIM" "$RESET"
   fi

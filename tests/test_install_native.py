@@ -824,6 +824,39 @@ create_desktop_entry
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(arguments[1:], ['--window-entries'])
 
+    def test_window_entries_create_the_game_window_entry(self):
+        # install-native delegates the hidden entries to the rendered helper;
+        # the game window (WM_CLASS LeagueofLegends) must get one too.
+        with tempfile.TemporaryDirectory(prefix='install-native-window-entries-') as folder:
+            repo = Path(folder) / 'repo'
+            home = Path(folder) / 'home'
+            home.mkdir()
+            tools = repo / 'build/runtime/tools'
+            tools.mkdir(parents=True)
+            helper = (ROOT / 'tools/desktop-entry.py').read_text()
+            (tools / 'desktop-entry.py').write_text(
+                helper.replace('@PROJECT_ROOT@', str(repo))
+                      .replace('@HOST_HOME@', str(home)))
+            for icon in ('darling-lol.svg', 'darling-lol.png'):
+                shutil.copy2(ROOT / icon, repo / icon)
+            snippet = f'''
+source "$INSTALLER"
+TARGET_DIR="{repo}"
+TOOLBOX_NAME="darling-lol"
+INSIDE_TOOLBOX=0
+WINDOW_ENTRIES=1
+create_desktop_entry
+'''
+            result = run_sourced(snippet, HOME=str(home))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            applications = home / '.local/share/applications'
+            for name in ('darling-league-client.desktop', 'darling-league-game.desktop',
+                         'darling-riot-client.desktop'):
+                self.assertTrue((applications / name).is_file(), name)
+            game = (applications / 'darling-league-game.desktop').read_text()
+            self.assertIn('StartupWMClass=LeagueofLegends', game)
+            self.assertIn('Icon=darling-launcher', game)
+
     def test_toolbox_install_forwards_container_and_window_entries(self):
         result, arguments, _ = self.create_entry(inside_toolbox=1, name='my-box', window_entries=1)
         self.assertEqual(result.returncode, 0, result.stderr)
