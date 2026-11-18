@@ -311,9 +311,13 @@
       "revision": "3cfffcf2c5b5900169c964facdf42cc05c23005c",
       "repository": "https://github.com/darlinghq/darling-security.git",
       "patch": "patches/security.patch",
-      "modified_files": 16,
+      "modified_files": 19,
       "new_files": [
-        "OSX/libsecurity_codesigning/lib/rclol_signing_trace.h"
+        "OSX/libsecurity_codesigning/lib/rclol_signing_trace.h",
+        "OSX/sec/Security/DarlingKeychain.h",
+        "OSX/sec/Security/DarlingKeychain.m",
+        "OSX/sec/Security/DarlingP256.c",
+        "OSX/sec/Security/DarlingP256.h"
       ]
     },
     {

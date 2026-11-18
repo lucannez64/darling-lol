@@ -10367,7 +10367,7 @@ new file mode 100644
 +}
 +#endif
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 5c924b34d..54f134873 100644
+index 5c924b34d..14db90612 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -119,6 +119,13 @@ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_
@@ -10384,6 +10384,27 @@ index 5c924b34d..54f134873 100644
  add_definitions(-target ${APPLE_TARGET_TRIPLET_PRIMARY})
  include(darling_lib)
  include(darling_static_lib)
+@@ -237,6 +244,12 @@ if (COMPONENT_system)
+ 	add_subdirectory(external/swift)
+ endif()
+ 
++# Security's software EC keys use the OpenSSL libcrypto dylib.
++if (COMPONENT_cli OR COMPONENT_dev_gui_common)
++	set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "cli_gui_common")
++	add_subdirectory(external/openssl/src)
++endif()
++
+ if (COMPONENT_cli)
+ 	set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "cli")
+ 
+@@ -244,7 +257,6 @@ if (COMPONENT_cli)
+ 	add_subdirectory(external/libutil)
+ 	add_subdirectory(xtrace)
+ 	add_subdirectory(external/libxslt)
+-	add_subdirectory(external/openssl/src)
+ 	add_subdirectory(external/nghttp2)
+ 	add_subdirectory(external/passwordserver_sasl)
+ 	add_subdirectory(external/curl)
 diff --git a/src/libelfloader/wrapgen/wrapgen.cpp b/src/libelfloader/wrapgen/wrapgen.cpp
 index 7079e613e..397ec6de0 100644
 --- a/src/libelfloader/wrapgen/wrapgen.cpp
