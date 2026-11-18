@@ -79,12 +79,16 @@ exit 1
         stub.chmod(0o755)
         return str(bin_dir)
 
-    def run_script(self, *args, path=None, input=None, desktop='X-Unknown'):
+    def run_script(self, *args, path=None, input=None, desktop='X-Unknown', lang='C'):
         env = {**os.environ,
                'HOME': str(self.home),
                # Desktop discovery (xdg-user-dir) must not read the caller's
                # configuration and write shortcuts into their real folders.
-               'XDG_CONFIG_HOME': str(self.home / '.config')}
+               'XDG_CONFIG_HOME': str(self.home / '.config'),
+               # Deterministic locale: 'C' is not a locale the Riot Client
+               # ships, so the region/locale question is skipped unless a test
+               # asks for a supported one.
+               'LC_ALL': lang, 'LC_MESSAGES': lang, 'LANG': lang}
         # Deterministic session: only XDG_CURRENT_DESKTOP=GNOME may create the
         # window entries by default or ask the window-entries question.
         env['XDG_CURRENT_DESKTOP'] = desktop
@@ -96,6 +100,19 @@ exit 1
                 capture_output=True, text=True, env=env, check=False,
                 cwd=str(self.repo))
         return self.run_pty(args, env, input)
+
+    def run_sourced(self, snippet, **overrides):
+        """Source the script in a subshell and run a snippet of it."""
+        env = {**os.environ,
+               'HOME': str(self.home),
+               'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
+               **overrides}
+        return subprocess.run(
+            ['/bin/bash', '-c',
+             f'source "{self.repo}/scripts/create-shortcuts.sh"\n{snippet}'],
+            capture_output=True, text=True, env=env, check=False,
+            cwd=str(self.repo))
 
     def run_pty(self, args, env, input):
         """Run the script on a pty and feed the answers line by line.
@@ -463,6 +480,105 @@ exit 1
         result = self.run_script('--yes', '--create', '--remove')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Only one action', result.stderr)
+
+    def test_create_adds_the_system_region_and_locale_by_default(self):
+        self.fake_repo()
+        result = self.run_script(
+            '--create', lang='pt_BR.UTF-8',
+            # name, flags (no), region/locale (Enter accepts the default),
+            # toolbox (host), summary (yes).
+            input='\n\n\n\ny\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            'Use your system region and language (BR, pt_BR) for the launch? [Y/n]',
+            result.stdout)
+        entry = parse_entry(self.entry().read_text())
+        self.assertIn('env RCLOL_REGION=BR RCLOL_LOCALE=pt_BR', entry['Exec'])
+        self.assertIn('Launch flags: RCLOL_REGION=BR RCLOL_LOCALE=pt_BR',
+                      result.stdout)
+
+    def test_create_can_decline_the_system_region_and_locale(self):
+        self.fake_repo()
+        result = self.run_script(
+            '--create', lang='pt_BR.UTF-8',
+            # name, flags (no), region/locale (n), toolbox (host), summary (yes).
+            input='\n\nn\n\ny\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry(self.entry().read_text())
+        self.assertNotIn('env ', entry['Exec'])
+        self.assertIn('Launch flags: none', result.stdout)
+
+    def test_create_with_yes_uses_the_system_region_and_locale(self):
+        self.fake_repo()
+        result = self.run_script('--yes', '--create', lang='pt_BR.UTF-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Using the system region and language: BR / pt_BR.', result.stdout)
+        entry = parse_entry(self.entry().read_text())
+        self.assertIn('env RCLOL_REGION=BR RCLOL_LOCALE=pt_BR', entry['Exec'])
+
+    def test_an_unsupported_system_locale_adds_no_flags(self):
+        self.fake_repo()
+        result = self.run_script('--yes', '--create', lang='C')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('not one the Riot Client ships', result.stdout)
+        entry = parse_entry(self.entry().read_text())
+        self.assertNotIn('env ', entry['Exec'])
+
+    def test_explicit_env_flags_replace_the_system_region_and_locale(self):
+        self.fake_repo()
+        result = self.run_script(
+            '--yes', '--create', '--env', 'RCLOL_CLEAN_ON_EXIT=0',
+            lang='pt_BR.UTF-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry(self.entry().read_text())
+        self.assertIn('env RCLOL_CLEAN_ON_EXIT=0', entry['Exec'])
+        self.assertNotIn('RCLOL_REGION', entry['Exec'])
+
+    def test_update_keeps_installed_region_and_locale_flags(self):
+        self.fake_repo()
+        self.assertEqual(self.run_script(
+            '--yes', '--create', '--env', 'RCLOL_REGION=NA',
+            '--env', 'RCLOL_LOCALE=en_US', lang='pt_BR.UTF-8').returncode, 0)
+        result = self.run_script('--yes', '--update', lang='pt_BR.UTF-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry(self.entry().read_text())
+        self.assertIn('env RCLOL_REGION=NA RCLOL_LOCALE=en_US', entry['Exec'])
+        self.assertEqual(entry['Exec'].count('RCLOL_REGION='), 1)
+        self.assertNotIn('RCLOL_LOCALE=pt_BR', entry['Exec'])
+
+    def test_flag_reference_recommends_pcore_affinity_on_a_hybrid_cpu(self):
+        self.fake_repo()
+        cpus = self.root / 'cpu_core_cpus'
+        cpus.write_text('0-3\n')
+        result = self.run_sourced('show_flag_reference',
+                                  DARLING_LOL_PCORE_CPUS=str(cpus))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(line for line in result.stdout.splitlines()
+                    if 'DSERVER_PCORE_AFFINITY=1' in line)
+        self.assertIn('(recommended)', line)
+
+    def test_flag_reference_omits_the_pcore_recommendation_elsewhere(self):
+        self.fake_repo()
+        cpus = self.root / 'cpu_core_cpus'
+        cpus.write_text('')
+        for path in (cpus, self.root / 'no-such-file'):
+            with self.subTest(path=path):
+                result = self.run_sourced('show_flag_reference',
+                                          DARLING_LOL_PCORE_CPUS=str(path))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                line = next(line for line in result.stdout.splitlines()
+                            if 'DSERVER_PCORE_AFFINITY=1' in line)
+                self.assertNotIn('(recommended)', line)
+
+    def test_the_locale_list_matches_the_one_configure_uses(self):
+        self.fake_repo()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('rclol_common', ROOT / 'scripts/common.py')
+        common = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(common)
+        result = self.run_sourced('printf "%s\\n" "${LOCALES[*]}"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), list(common.LOCALES))
 
 
 if __name__ == '__main__':
