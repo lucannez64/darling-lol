@@ -21,3 +21,6 @@ __pycache__/
 lockfile
 core
 core.*
+
+# User-provided launcher icon for create-shortcuts.sh --icon; never versioned.
+/custom-icon.*
