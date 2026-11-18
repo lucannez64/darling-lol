@@ -742,14 +742,15 @@ index 0000000..dad11d5
 +#endif
 diff --git a/OSX/sec/Security/DarlingKeychain.m b/OSX/sec/Security/DarlingKeychain.m
 new file mode 100644
-index 00000000..7f610c40
+index 00000000..36140c78
 --- /dev/null
 +++ b/OSX/sec/Security/DarlingKeychain.m
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,485 @@
 +#import <Foundation/Foundation.h>
 +#include <Security/SecKey.h>
 +#include <Security/SecItemPriv.h>
 +#include <Security/SecAccessControlPriv.h>
++#include <libaks_acl_cf_keys.h>
 +
 +#include <errno.h>
 +#include <fcntl.h>
@@ -775,8 +776,8 @@ index 00000000..7f610c40
 +{
 +    if (keyItem)
 +        return @[S(kSecAttrKeyClass), S(kSecAttrKeyType), S(kSecAttrKeySizeInBits),
-+                 S(kSecAttrApplicationLabel), S(kSecAttrApplicationTag)];
-+    return @[S(kSecAttrService), S(kSecAttrAccount)];
++                 S(kSecAttrApplicationLabel), S(kSecAttrApplicationTag), S(kSecAttrAccessGroup)];
++    return @[S(kSecAttrService), S(kSecAttrAccount), S(kSecAttrAccessGroup)];
 +}
 +
 +static BOOL isBoolean(id value)
@@ -792,7 +793,7 @@ index 00000000..7f610c40
 +               [value isEqual:S(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)] ||
 +               [value isEqual:S(kSecAttrAccessibleWhenUnlockedThisDeviceOnly)];
 +    if ([name isEqual:S(kSecAttrLabel)] || [name isEqual:S(kSecAttrDescription)] ||
-+        [name isEqual:S(kSecAttrComment)])
++        [name isEqual:S(kSecAttrComment)] || [name isEqual:S(kSecAttrAccessGroup)])
 +        return [value isKindOfClass:[NSString class]];
 +    if ([name isEqual:S(kSecAttrSynchronizable)])
 +        return value == (id)kCFBooleanFalse;
@@ -819,8 +820,11 @@ index 00000000..7f610c40
 +
 +static BOOL itemMatches(NSDictionary *item, NSDictionary *filters)
 +{
-+    for (NSString *name in filters)
++    for (NSString *name in filters) {
++        /* An item stored without a group sits in the caller's default group. */
++        if ([name isEqual:S(kSecAttrAccessGroup)] && !item[name]) continue;
 +        if (![item[name] isEqual:filters[name]]) return NO;
++    }
 +    return YES;
 +}
 +
@@ -1035,10 +1039,16 @@ index 00000000..7f610c40
 +{
 +    if (CFGetTypeID((CFTypeRef)value) != SecAccessControlGetTypeID())
 +        return nil;
-+    NSDictionary *constraints = (NSDictionary *)SecAccessControlGetConstraints((SecAccessControlRef)value);
++    SecAccessControlRef control = (SecAccessControlRef)value;
++    if (SecAccessControlGetRequirePassword(control))
++        return nil;
++    NSDictionary *constraints = (NSDictionary *)SecAccessControlGetConstraints(control);
++    /* Without an unconditional default, operations the object omits are forbidden. */
++    if (constraints[S(kAKSKeyOpDefaultAcl)] != (id)kCFBooleanTrue)
++        return nil;
 +    for (id operation in constraints)
 +        if (constraints[operation] != (id)kCFBooleanTrue) return nil;
-+    return (id)SecAccessControlGetProtection((SecAccessControlRef)value);
++    return (id)SecAccessControlGetProtection(control);
 +}
 +
 +static BOOL softwareP256Key(CFTypeRef ref)
@@ -1079,9 +1089,6 @@ index 00000000..7f610c40
 +            if ((!add && !find) || !isBoolean(value)) return errSecParam;
 +            continue;
 +        }
-+        /* One implicit access group: the attribute neither stores nor filters. */
-+        if ([name isEqual:S(kSecAttrAccessGroup)] && [value isKindOfClass:[NSString class]])
-+            continue;
 +        /* Every item is local, so "any" places no constraint on a search. */
 +        if (!add && [name isEqual:S(kSecAttrSynchronizable)] &&
 +            [value isEqual:S(kSecAttrSynchronizableAny)])
@@ -1130,6 +1137,8 @@ index 00000000..7f610c40
 +    BOOL all = NO;
 +    OSStatus parsed = parseQuery(operation, query, keyItem, filters, &all);
 +    if (parsed != errSecSuccess) return errSecParam;
++    /* macOS does not return the data of several passwords in one call. */
++    if (all && !keyItem && query[S(kSecReturnData)] == (id)kCFBooleanTrue) return errSecParam;
 +    filters[S(kSecClass)] = keyItem ? S(kSecClassKey) : S(kSecClassGenericPassword);
 +
 +    NSMutableDictionary *item = nil;

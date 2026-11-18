@@ -199,6 +199,23 @@ static void exerciseQueryForms(NSMutableDictionary *cases, NSString *identifier)
     }
     record(cases, @"forms.access_control_generate", key != NULL, error ? CFErrorGetCode(error) : 0);
     if (error) CFRelease(error);
+    error = NULL;
+    if (key) CFRelease(key);
+
+    /* An application-password requirement cannot be enforced, so the store must not take it. */
+    control = SecAccessControlCreateWithFlags(NULL, kSecAttrAccessibleWhenUnlocked,
+                                              kSecAccessControlApplicationPassword, NULL);
+    key = NULL;
+    if (control) {
+        generate[S(kSecPrivateKeyAttrs)] = @{S(kSecAttrIsPermanent): @YES,
+            S(kSecAttrApplicationTag): data([identifier stringByAppendingString:@".password-acl"]),
+            S(kSecAttrAccessControl): (id)control};
+        key = SecKeyCreateRandomKey((CFDictionaryRef)generate, &error);
+        CFRelease(control);
+    }
+    record(cases, @"forms.password_acl_declined", control && !key,
+           error ? CFErrorGetCode(error) : 0);
+    if (error) CFRelease(error);
     if (key) CFRelease(key);
 
     for (NSData *wanted in @[tag, aclTag]) {
@@ -230,6 +247,25 @@ static void exerciseQueryForms(NSMutableDictionary *cases, NSString *identifier)
     query[S(kSecReturnData)] = @YES;
     fetchPassword(cases, @"forms.password_fetch", query, tag);
 
+    /* The access group limits searches and deletes, and is part of the identity. */
+    NSMutableDictionary *other = [NSMutableDictionary dictionaryWithDictionary:identity];
+    other[S(kSecAttrAccessGroup)] = @"org.darling.keychain-compat.other";
+    checkStatus(cases, @"forms.other_group_missing",
+                SecItemCopyMatching((CFDictionaryRef)other, NULL), errSecItemNotFound);
+    checkStatus(cases, @"forms.other_group_delete_missing",
+                SecItemDelete((CFDictionaryRef)other), errSecItemNotFound);
+    NSMutableDictionary *otherAdd = [NSMutableDictionary dictionaryWithDictionary:other];
+    otherAdd[S(kSecValueData)] = aclTag;
+    checkStatus(cases, @"forms.other_group_add", SecItemAdd((CFDictionaryRef)otherAdd, NULL), errSecSuccess);
+    checkStatus(cases, @"forms.other_group_delete", SecItemDelete((CFDictionaryRef)other), errSecSuccess);
+    fetchPassword(cases, @"forms.password_kept", query, tag);
+
+    /* macOS does not return the data of several passwords in one call. */
+    NSMutableDictionary *every = [NSMutableDictionary dictionaryWithDictionary:query];
+    every[S(kSecMatchLimit)] = S(kSecMatchLimitAll);
+    checkStatus(cases, @"forms.match_all_data",
+                SecItemCopyMatching((CFDictionaryRef)every, NULL), errSecParam);
+
     /* Outside the store: the stock status must come back, not a parameter error. */
     query[S(kSecReturnPersistentRef)] = @YES;
     OSStatus status = SecItemCopyMatching((CFDictionaryRef)query, NULL);
@@ -257,7 +293,7 @@ static void exerciseSecureEnclave(NSMutableDictionary *cases)
     SecKeyRef key = SecKeyCreateRandomKey((CFDictionaryRef)attributes, &error);
     NSInteger code = error ? CFErrorGetCode(error) : 0;
     record(cases, @"secure_enclave.unavailable",
-           !key && (code == errSecNotAvailable || code == errSecUnimplemented), code);
+           !key && code == errSecNotAvailable, code);
     if (key) CFRelease(key);
     if (error) CFRelease(error);
 }
