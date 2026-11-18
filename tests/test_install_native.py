@@ -1224,6 +1224,18 @@ finish
         self.assertIn('To install Riot Client later (EUW):', result.stdout)
         self.assertIn('./scripts/installer.sh euw', result.stdout)
 
+    def test_the_finish_mentions_the_shortcut_manager(self):
+        # With a ready shortcut the manual blocks are hidden, so the mention
+        # also carries the separating blank line.
+        ready = self.finish_snippet(riot_offer_rc=1, desktop_offer_rc=0)
+        self.assertIn('To manage the shortcuts and icons later:', ready.stdout)
+        self.assertIn('./scripts/create-shortcuts.sh', ready.stdout)
+        declined = self.finish_snippet(riot_offer_rc=1, desktop_offer_rc=1)
+        self.assertIn('To manage the shortcuts and icons later:', declined.stdout)
+        self.assertIn('./scripts/create-shortcuts.sh', declined.stdout)
+        self.assertLess(declined.stdout.index('./scripts/installer.sh euw'),
+                        declined.stdout.index('./scripts/create-shortcuts.sh'))
+
 
 class ConfigureProjectTests(unittest.TestCase):
     def test_configure_project_passes_the_selected_region_and_locale(self):

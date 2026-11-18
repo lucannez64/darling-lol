@@ -1117,6 +1117,13 @@ finish() {
     printf 'To install Riot Client later (%s):\n' "$region"
     printf '  ./scripts/installer.sh %s\n\n' "${region,,}"
   fi
+
+  # One-line pointer to the interactive shortcut manager: renaming the
+  # shortcut, the window entries, launch flags, a Toolbox or host target and
+  # a custom icon (custom-icon.* via --icon).
+  if (( shortcut_ready )); then printf '\n'; fi
+  printf 'To manage the shortcuts and icons later:\n'
+  printf '  ./scripts/create-shortcuts.sh\n'
 }
 
 main() {
