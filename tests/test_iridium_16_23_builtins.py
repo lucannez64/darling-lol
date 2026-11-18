@@ -106,6 +106,40 @@ entry:
 !4 = !{i32 1, !"air.threadgroup_position_in_grid"}
 """
 
+# The 16.23 blur kernels' pattern: a threadgroup tile written per thread, a threadgroup barrier,
+# then a neighbour read. threadgroup_barrier(mem_flags::mem_threadgroup) is air.wg.barrier(2, 1).
+COMPUTE_THREADGROUP_AIR = r"""
+target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
+target triple = "air64-apple-macosx14.0.0"
+
+%struct.tile = type { [64 x <2 x float>] }
+@tile = internal unnamed_addr addrspace(3) global %struct.tile zeroinitializer, align 8
+@sink = internal global <2 x float> zeroinitializer
+
+define void @cs_tile(<3 x i32> %tid) {
+entry:
+  %x = extractelement <3 x i32> %tid, i32 0
+  %i = zext i32 %x to i64
+  %slot = getelementptr inbounds %struct.tile, ptr addrspace(3) @tile, i64 0, i32 0, i64 %i
+  store <2 x float> <float 1.0, float 2.0>, ptr addrspace(3) %slot, align 8
+  tail call void @air.wg.barrier(i32 2, i32 1)
+  %nx = xor i32 %x, 1
+  %n = zext i32 %nx to i64
+  %neighbour = getelementptr inbounds %struct.tile, ptr addrspace(3) @tile, i64 0, i32 0, i64 %n
+  %v = load <2 x float>, ptr addrspace(3) %neighbour, align 8
+  store <2 x float> %v, ptr @sink, align 8
+  ret void
+}
+
+declare void @air.wg.barrier(i32, i32)
+
+!air.kernel = !{!0}
+!0 = !{ptr @cs_tile, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.thread_position_in_threadgroup"}
+"""
+
 
 def pinned_revision():
     manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
@@ -127,20 +161,28 @@ def metallib(bitcode, name):
     return header + functions + bitcode
 
 
-def spirv_builtins(module):
-    """Return BuiltIn IDs decorated by OpDecorate (opcode 71, decoration 11)."""
+def spirv_instructions(module):
+    """Yield (opcode, operands) for every instruction of a SPIR-V module."""
     words = struct.unpack(f'<{len(module) // 4}I', module)
     assert words[0] == 0x07230203, 'not a SPIR-V module'
-    found = set()
     index = 5
     while index < len(words):
         opcode, count = words[index] & 0xffff, words[index] >> 16
         assert count > 0 and index + count <= len(words), f'invalid SPIR-V word count {count} at word {index}'
-        operands = words[index + 1:index + count]
-        if opcode == 71 and len(operands) >= 3 and operands[1] == 11:
-            found.add(operands[2])
+        yield opcode, words[index + 1:index + count]
         index += count
-    return found
+
+
+def spirv_builtins(module):
+    """Return BuiltIn IDs decorated by OpDecorate (opcode 71, decoration 11)."""
+    return {operands[2] for opcode, operands in spirv_instructions(module)
+            if opcode == 71 and len(operands) >= 3 and operands[1] == 11}
+
+
+def spirv_constants(module):
+    """Map the result IDs of 32-bit OpConstant (opcode 43) to their values."""
+    return {operands[1]: operands[2] for opcode, operands in spirv_instructions(module)
+            if opcode == 43 and len(operands) == 3}
 
 
 def prerequisites():
@@ -173,13 +215,17 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
             'SPIRV::BuiltinID::LocalInvocationId',
             'SPIRV::BuiltinID::WorkgroupId',
             'SPIRVOp::UConvert',
+            'StorageClass::Workgroup',
+            '"air.wg.barrier"',
+            'SPIRVOp::ControlBarrier',
         ):
             self.assertIn(token, added)
 
     @unittest.skipIf(SKIP, SKIP)
     def test_translates_base_vertex_base_instance_and_compute_thread_positions(self):
         # 4424/4425 BaseVertex/BaseInstance, 26 WorkgroupId, 27 LocalInvocationId
-        expected = {'vs_base': {4424, 4425}, 'cs_pos': {26, 27}, 'cs_pos16': {26, 27}, 'cs_pos3': {26, 27}}
+        expected = {'vs_base': {4424, 4425}, 'cs_pos': {26, 27}, 'cs_pos16': {26, 27}, 'cs_pos3': {26, 27},
+                    'cs_tile': {27}}
         with tempfile.TemporaryDirectory() as folder:
             work = Path(folder)
             tree = work / 'indium'
@@ -206,7 +252,7 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
             (work / 'in').mkdir()
             (work / 'out').mkdir()
             for name, ir in (('vs_base', VERTEX_AIR), ('cs_pos', COMPUTE_AIR), ('cs_pos16', COMPUTE_16BIT_AIR),
-                             ('cs_pos3', COMPUTE_VEC3_AIR)):
+                             ('cs_pos3', COMPUTE_VEC3_AIR), ('cs_tile', COMPUTE_THREADGROUP_AIR)):
                 ll, bc = work / f'{name}.ll', work / f'{name}.bc'
                 ll.write_text(ir)
                 subprocess.run([llvm_as, str(ll), '-o', str(bc)], check=True)
@@ -224,6 +270,15 @@ class Iridium1623BuiltinsTests(unittest.TestCase):
                                             str(work / 'out' / f'{name}.bin.spv')],
                                            capture_output=True, text=True)
                     self.assertEqual(check.returncode, 0, f'{name}: {check.stdout}{check.stderr}')
+
+            # threadgroup tile: an OpVariable (59) in Workgroup storage (4), and OpControlBarrier (224)
+            # with Workgroup (2) execution/memory scopes and AcquireRelease|WorkgroupMemory (0x108)
+            tile = (work / 'out' / 'cs_tile.bin.spv').read_bytes()
+            instructions = list(spirv_instructions(tile))
+            self.assertTrue(any(opcode == 59 and operands[2] == 4 for opcode, operands in instructions))
+            constants = spirv_constants(tile)
+            barriers = [[constants.get(operand) for operand in operands] for opcode, operands in instructions if opcode == 224]
+            self.assertEqual(barriers, [[2, 2, 0x108]])
 
 
 if __name__ == '__main__':
