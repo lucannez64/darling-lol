@@ -237,6 +237,139 @@ class RuntimeMarkerTests(unittest.TestCase):
         self.assertFalse(supervisor.runtime_alive(self.prefix, self.proc))
 
 
+class ContainerTests(unittest.TestCase):
+    """Toolbox container detection and the host-side stop."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.marker = self.root / '.toolboxenv'
+        self.containerenv = self.root / '.containerenv'
+        self.marker.touch()
+
+    def metadata(self):
+        return supervisor.container_metadata(self.marker, self.containerenv)
+
+    def test_toolbox_container_is_identified(self):
+        self.containerenv.write_text(
+            'engine="podman-5.8.9"\n'
+            'name="darling-lol"\n'
+            'id="612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356"\n')
+        self.assertEqual(self.metadata(), (
+            'darling-lol',
+            '612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356'))
+
+    def test_missing_toolbox_marker_is_ignored(self):
+        self.containerenv.write_text('name="outer"\nid="abc123"\n')
+        self.marker.unlink()
+        self.assertIsNone(self.metadata())
+
+    def test_missing_metadata_is_ignored(self):
+        self.assertIsNone(self.metadata())
+
+    def test_non_hexadecimal_id_is_refused(self):
+        self.containerenv.write_text('name="darling-lol"\nid="abc; reboot"\n')
+        self.assertIsNone(self.metadata())
+
+    def test_missing_name_falls_back_to_the_id(self):
+        self.containerenv.write_text('id="abc123"\n')
+        self.assertEqual(self.metadata(), ('abc123', 'abc123'))
+
+    def test_shell_parent_names_an_interactive_session(self):
+        fake_process(self.root, 10, comm='bash')
+        fake_process(self.root, 20, ppid=10)
+        self.assertTrue(supervisor.started_by_shell(self.root, 20))
+
+    def test_conmon_parent_names_the_exec_session(self):
+        fake_process(self.root, 10, comm='conmon')
+        fake_process(self.root, 20, ppid=10)
+        self.assertFalse(supervisor.started_by_shell(self.root, 20))
+
+    def test_unreadable_parent_is_not_an_interactive_session(self):
+        self.assertFalse(supervisor.started_by_shell(self.root, 99))
+
+    def stop(self, result=None, error=None):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            if error is not None:
+                raise error
+            return result(command)
+        out = io.StringIO()
+        stopped = supervisor.stop_container(('darling-lol', 'abc123'), run=run, out=out)
+        return stopped, calls, out.getvalue()
+
+    def test_stop_targets_the_host_user_scope(self):
+        stopped, calls, output = self.stop(lambda command: subprocess.CompletedProcess(command, 0))
+        self.assertTrue(stopped)
+        self.assertEqual(calls, [['systemctl', '--user', '--no-block', 'stop',
+                                  'libpod-abc123.scope']])
+        self.assertIn('stopping Toolbox container darling-lol', output)
+
+    def test_stop_killed_with_the_scope_counts_as_queued(self):
+        stopped, _calls, output = self.stop(
+            lambda command: subprocess.CompletedProcess(command, -signal.SIGTERM))
+        self.assertTrue(stopped)
+        self.assertNotIn('could not stop', output)
+
+    def test_failed_stop_reports_the_manual_command(self):
+        stopped, _calls, output = self.stop(
+            lambda command: subprocess.CompletedProcess(command, 1))
+        self.assertFalse(stopped)
+        self.assertIn("podman stop darling-lol", output)
+
+    def test_unavailable_systemctl_reports_the_manual_command(self):
+        stopped, _calls, output = self.stop(error=OSError('missing'))
+        self.assertFalse(stopped)
+        self.assertIn("podman stop darling-lol", output)
+
+
+class ToolboxSessionTests(unittest.TestCase):
+    """A Toolbox container is stopped only for the session that owns it."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prefix = self.root / '.darling'
+        self.prefix.mkdir()
+        self.proc = self.root / 'proc'
+        self.proc.mkdir()
+        self.container = ('darling-lol', 'abc123')
+
+    def run_supervisor(self, container=None, runtime_at_start=None, remaining=None):
+        remaining = [] if remaining is None else remaining
+        with mock.patch.object(supervisor, 'cleanup', return_value=remaining), \
+             mock.patch.object(supervisor, 'stop_container') as stop:
+            code = supervisor.run_supervised(
+                ['true'], self.prefix, None, proc_root=self.proc, poll=0,
+                run=lambda *_a, **_k: None, kill=lambda *_a: None,
+                sleep=lambda _s: None, out=io.StringIO(),
+                runtime_at_start=runtime_at_start, container=container)
+        return code, stop
+
+    def test_owned_session_stops_the_container(self):
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        self.assertEqual(stop.call_args.args[0], self.container)
+
+    def test_attached_session_leaves_the_container_running(self):
+        code, stop = self.run_supervisor(container=self.container,
+                                         runtime_at_start='running')
+        self.assertEqual(code, 0)
+        stop.assert_not_called()
+
+    def test_failed_cleanup_still_stops_the_container(self):
+        code, stop = self.run_supervisor(container=self.container, remaining=[1234])
+        self.assertEqual(code, 1)
+        stop.assert_called_once()
+
+    def test_native_session_stops_nothing(self):
+        _code, stop = self.run_supervisor()
+        stop.assert_not_called()
+
+
 class SupervisorModeTests(unittest.TestCase):
     """run_supervised must not end a runtime that another session started."""
 

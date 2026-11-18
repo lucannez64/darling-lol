@@ -354,6 +354,7 @@ show_flag_reference() {
   printf '  RCLOL_RECOVER_HIDDEN_CLIENT=1     Recover a hidden client at launch\n'
   printf '  RCLOL_CLEAN_STALE_HELPERS=1       Remove orphaned in-game helpers at launch\n'
   printf '  RCLOL_CLEAN_ON_EXIT=0             Keep the runtime running after the clients exit\n'
+  printf '  RCLOL_STOP_TOOLBOX=0              Keep the Toolbox container running after the session\n'
   printf '  RCLOL_DISCORD_RPC=0               Disable the Discord Rich Presence links\n'
   printf '  RCLOL_FILTER_HOST_ENV=1           Remove host desktop-session variables at launch\n'
   printf '  RCLOL_FINISH_LEAGUE_LOAD=0        Disable the League load finish workaround\n'

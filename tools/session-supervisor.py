@@ -40,6 +40,13 @@ log shows UX_PROCESS_BOOTSTRAP_COMPLETE without "Ux reports successful load"
 (PUT /riotclient/ux-load-complete), and LeagueClient hides the splash itself.
 RCLOL_FINISH_LEAGUE_LOAD=0 turns this off.
 
+Toolbox: when the project is installed with `--toolbox`, the launcher runs
+inside a Fedora Toolbox container that `toolbox run` leaves running after the
+command exits. The supervisor therefore stops its own host container as the
+last cleanup step, once the guest session is gone. A container started from an
+interactive `toolbox enter` shell is left alone, because the shell that runs
+the launcher would end with it. RCLOL_STOP_TOOLBOX=0 turns this off.
+
 Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
 alone when the launcher exits.
 
@@ -64,6 +71,13 @@ CLIENT_CLASSES = ('leagueclientux', 'riot client')
 POLL_SECONDS = 2.0
 TERM_GRACE = 5.0
 KILL_GRACE = 5.0
+# Toolbox leaves the first marker inside its containers; Podman writes the
+# engine metadata, including the container ID that names its systemd scope, to
+# the second one. A shell that started the launcher means `toolbox enter`: the
+# container belongs to that interactive session, not to this launch.
+TOOLBOX_MARKER = Path('/run/.toolboxenv')
+CONTAINER_ENV = Path('/run/.containerenv')
+INTERACTIVE_SHELLS = ('bash', 'dash', 'fish', 'ksh', 'sh', 'zsh')
 
 
 def log(message, out=sys.stdout):
@@ -331,6 +345,73 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
     else:
         log('guest session stopped', out)
     return remaining
+
+
+def container_metadata(marker=TOOLBOX_MARKER, containerenv=CONTAINER_ENV):
+    """(name, id) of the Toolbox container hosting this process, or None.
+
+    Only a Toolbox container qualifies: `/run/.containerenv` exists in every
+    Podman container, but a native install inside an ordinary container must
+    not stop it. The ID is validated as hexadecimal because it becomes part of
+    a systemd unit name.
+    """
+    try:
+        if not marker.exists():
+            return None
+        lines = containerenv.read_text(errors='replace').splitlines()
+    except OSError:
+        return None
+    values = {}
+    for line in lines:
+        key, separator, value = line.partition('=')
+        if separator:
+            values[key.strip()] = value.strip().strip('"')
+    container_id = values.get('id', '').lower()
+    if not container_id or any(char not in '0123456789abcdef' for char in container_id):
+        return None
+    return values.get('name') or container_id, container_id
+
+
+def started_by_shell(proc_root=Path('/proc'), pid=None):
+    """True when a shell launched this process, as `toolbox enter` does.
+
+    `toolbox run` starts the launcher as the container's exec command, so the
+    supervisor is the direct child of the exec session. A shell parent means a
+    human owns the container: stopping it would close that shell too.
+    """
+    info = process_info(proc_root / str(os.getpid() if pid is None else pid))
+    if info is None or info[1] <= 1:
+        return False
+    names = command_names(proc_root / str(info[1]))
+    return bool(names) and os.path.basename(names[0]) in INTERACTIVE_SHELLS
+
+
+def stop_container(container, run=subprocess.run, out=sys.stdout, timeout=10):
+    """Stop this session's Toolbox container as the last cleanup step.
+
+    `podman stop` is unavailable inside the Toolbox image, and the container
+    lives in a host systemd user scope named after its ID. `--no-block` queues
+    the stop and returns: the scope contains this process, so the supervisor
+    ends with the container.
+    """
+    name, container_id = container
+    unit = 'libpod-%s.scope' % container_id
+    try:
+        result = run(['systemctl', '--user', '--no-block', 'stop', unit],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as error:
+        log('could not stop Toolbox container %s (%s); stop it with '
+            "'podman stop %s'" % (name, error, name), out)
+        return False
+    # A signal status means the queued stop already reached this process.
+    status = getattr(result, 'returncode', 0)
+    if status > 0:
+        log('could not stop Toolbox container %s (systemctl exited with %d); '
+            "stop it with 'podman stop %s'" % (name, status, name), out)
+        return False
+    log('stopping Toolbox container %s' % name, out)
+    return True
 
 
 def newest_guest_log(directory, pattern='*.log'):
@@ -647,12 +728,13 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
                    own_namespace=None, runtime_at_start=None, guest_log=None,
-                   league_exit=None, league_load=None):
+                   league_exit=None, league_load=None, container=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
     while a session is alive attaches to that server, and must not shut it down
-    when its own loader exits.
+    when its own loader exits. `container` names the Toolbox container to stop
+    after that cleanup; it stays None for a native session.
     """
     if not clean:
         os.execvp(command[0], command)
@@ -757,6 +839,10 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                             own_namespace=own_namespace, note=note)
     if stop:
         log('interrupted by signal %d' % stop[0], out)
+    if owns_runtime and container is not None:
+        # The container outlives `toolbox run`; stop it only after the guest
+        # session is gone, and never when another session owns this runtime.
+        stop_container(container, run=run, out=out)
     # A surviving guest process is a failed cleanup, not a clean exit.
     return (status or 1) if remaining else status
 
@@ -798,9 +884,12 @@ def main(argv=None):
     if not command:
         parser.error('a command is required after --')
     clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT', '1') != '0'
+    container = None
+    if os.environ.get('RCLOL_STOP_TOOLBOX', '1') != '0' and not started_by_shell():
+        container = container_metadata()
     return run_supervised(command, prefix, args.darling, stop_after=max(0, args.stop_after),
                           clean=clean, runtime_at_start=args.runtime_at_start,
-                          guest_log=args.guest_log)
+                          guest_log=args.guest_log, container=container)
 
 
 if __name__ == '__main__':
