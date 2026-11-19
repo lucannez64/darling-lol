@@ -58,6 +58,7 @@ typedef int cpu_threadtype_t;
 #define HOST_SHIM_MACH_MACH_INIT_H
 #include <stdint.h>
 typedef int kern_return_t;
+#define KERN_SUCCESS 0
 typedef unsigned int mach_port_t;
 typedef unsigned int mach_port_name_t;
 typedef mach_port_t ipc_space_t;
@@ -122,6 +123,8 @@ host_env = {key: value for key, value in os.environ.items()
 subprocess.run([str(binary)], check=True, env=host_env)
 subprocess.run([str(binary), "affinity"], check=True, env=host_env)
 subprocess.run([str(binary), "no-detect"], check=True, env=host_env)
+# A failed host_info RPC must not zero the memory of the caller's reply.
+subprocess.run([str(binary), "rpc-fail"], check=True, env=host_env)
 Path(flag).unlink(missing_ok=True)
 Path(flag).write_text("")
 try:

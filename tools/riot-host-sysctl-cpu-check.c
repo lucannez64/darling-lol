@@ -141,8 +141,11 @@ static void sentinel_reply(struct host_basic_info* reply) {
     reply->max_mem = SENTINEL_MEMORY;
 }
 // The raw darlingserver reply (libsyscall wraps host_info() around it).
+static int rpc_fail = 0; // the next raw RPCs fail without touching the buffer
 kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count) {
     (void)host; (void)itype;
+    if (rpc_fail)
+        return 5; // KERN_FAILURE
     sentinel_reply(hinfo);
     *count = HOST_BASIC_INFO_COUNT;
     return 0;
@@ -525,6 +528,33 @@ int main(int argc, char** argv) {
         }
     } else if (strcmp(mode, "no-detect") == 0) {
         failDetection = 1;
+    }
+
+    if (strcmp(mode, "rpc-fail") == 0) {
+        // Our own RPC fails: the caller's successful reply keeps its memory,
+        // and the next call retries the RPC.
+        struct host_basic_info reply;
+        sentinel_reply(&reply);
+        reply.max_mem = 7ULL << 30;
+        reply.memory_size = 0x7fffffffu;
+        rpc_fail = 1;
+        darling_host_basic_info_present(&reply, HOST_BASIC_INFO_COUNT);
+        rpc_fail = 0;
+        if (reply.max_mem != (7ULL << 30) || reply.memory_size != 0x7fffffffu) {
+            fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=failed RPC overwrote memory max_mem=%llu memory_size=%u\n",
+                    (unsigned long long)reply.max_mem, reply.memory_size);
+            return 1;
+        }
+        sentinel_reply(&reply);
+        reply.max_mem = 7ULL << 30;
+        darling_host_basic_info_present(&reply, HOST_BASIC_INFO_COUNT);
+        if (reply.max_mem != SENTINEL_MEMORY) {
+            fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=RPC not retried after a failure (max_mem=%llu)\n",
+                    (unsigned long long)reply.max_mem);
+            return 1;
+        }
+        printf("HOST_SYSCTL_CPU pass=1 mode=rpc-fail\n");
+        return 0;
     }
 
     // The first use of the cached host info must come through host_info, as

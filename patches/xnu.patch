@@ -2842,7 +2842,7 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..3f7ae99 100644
+index f273989..5f25283 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,13 +9,19 @@
@@ -2962,7 +2962,7 @@ index f273989..3f7ae99 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,10 +132,19 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +132,98 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -2983,13 +2983,20 @@ index f273989..3f7ae99 100644
  static const struct host_basic_info* gethostinfo(void)
  {
  	static struct host_basic_info hinfo;
-@@ -69,13 +155,68 @@ static const struct host_basic_info* gethostinfo(void)
++	static int host_answered; // the RPC succeeded; until then it is retried
+ 
+-	if (!hinfo.avail_cpus)
++	if (!hinfo.avail_cpus || !host_answered)
+ 	{
+ 		mach_msg_type_number_t hcount = HOST_BASIC_INFO_COUNT;
  		mach_port_t hself;
  
  		hself = mach_host_self();
 -		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
-+		_kernelrpc_host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
++		host_answered = _kernelrpc_host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount) == KERN_SUCCESS;
  		mach_port_deallocate(mach_task_self(), hself);
++		if (!host_answered)
++			hinfo.max_mem = 0; // unknown, not "no memory"
 +		host_real_mem = hinfo.max_mem;
 +
 +		// Keep the emulated MacBookPro16,1 hw.model, but report the host's real
@@ -3039,21 +3046,25 @@ index f273989..3f7ae99 100644
 +
 +	out->max_cpus = hinfo->max_cpus;
 +	out->avail_cpus = hinfo->avail_cpus;
-+	out->memory_size = (natural_t) (memory > 0x80000000ULL ? 0x80000000ULL : memory);
++	// memory is 0 only when neither the profile nor our own RPC gave a size:
++	// keep the caller's successful reply then.
++	if (memory != 0)
++		out->memory_size = (natural_t) (memory > 0x80000000ULL ? 0x80000000ULL : memory);
 +	if (count >= HOST_BASIC_INFO_COUNT)
 +	{
 +		out->physical_cpu = hinfo->physical_cpu;
 +		out->physical_cpu_max = hinfo->physical_cpu_max;
 +		out->logical_cpu = hinfo->logical_cpu;
 +		out->logical_cpu_max = hinfo->logical_cpu_max;
-+		out->max_mem = memory;
++		if (memory != 0)
++			out->max_mem = memory;
 +	}
 +}
 +
  sysctl_handler(handle_availcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -83,6 +224,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +231,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3067,7 +3078,7 @@ index f273989..3f7ae99 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +259,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +266,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3085,7 +3096,7 @@ index f273989..3f7ae99 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +328,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +335,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3150,7 +3161,7 @@ index f273989..3f7ae99 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +393,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +400,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }

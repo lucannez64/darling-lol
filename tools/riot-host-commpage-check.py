@@ -106,7 +106,10 @@ def main():
         SHIM.replace('#endif\n', '\n'.join(b for b in bits if not b.split()[1] == 'kUP') + '\n#endif\n'))
     (folder / 'main.c').write_text(MAIN)
     binary = folder / 'commpage-check'
+    flag = folder / 'fixed-cpu-count.flag'
+    flag.unlink(missing_ok=True)
     subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wno-unused-function',
+                    f'-DRCLOL_FIXED_CPU_FLAG="{flag}"',
                     '-I', str(folder / 'include'), '-I', str(args.source),
                     str(args.source / 'commpage.c'), str(folder / 'main.c'),
                     '-o', str(binary)], check=True)
@@ -123,6 +126,23 @@ def main():
           f'logical={got[3]} memory={got[4]}')
     if got != want:
         failures.append(f'compat: got {got}, want {want}')
+
+    # Not a plain decimal number: the host's size stays, as in xnu.
+    got = run(binary, dict(base, RCLOL_PLATFORM_PROFILE='compat',
+                           RCLOL_MEMORY_BYTES=f'{profile_memory}junk'))
+    print(f'COMMPAGE mode=compat-bad-memory memory={got[4]}')
+    if got[4] != host_memory():
+        failures.append(f'compat-bad-memory: got memory {got[4]}, want host {host_memory()}')
+
+    # The A/B opt-out flag wins over compat: the old fixed 8s, as in xnu.
+    flag.write_text('')
+    try:
+        got = run(binary, dict(base, RCLOL_PLATFORM_PROFILE='compat'))
+    finally:
+        flag.unlink(missing_ok=True)
+    print(f'COMMPAGE mode=compat-optout ncpus={got[0]} active={got[1]} physical={got[2]} logical={got[3]}')
+    if got[:4] != (8, 8, 8, 8):
+        failures.append(f'compat-optout: got {got[:4]}, want (8, 8, 8, 8)')
 
     got = run(binary, base)
     online = os.cpu_count()
