@@ -1,0 +1,83 @@
+name: rc-attestation-ground-truth
+
+# Issue #31: under Darling, Riot Client 143 logs keypairSupported:false /
+# InitialCheckAttestationSupportFailed while 141 logged keypairSupported:true.
+# This boots the unmodified clients on real macOS runners (no account, no login,
+# no game, self-update off) and keeps their logs, plus a probe of the platform
+# APIs an attestation check can depend on. Clients come from Riot's public CDN.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "ci/rc143-attestation-*"
+
+permissions:
+  contents: read
+
+jobs:
+  boot:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, macos-15-intel]
+        release:
+          - { name: rc143.0.13, id: 9CFEB4637BB6028C }
+          - { name: rc141.0.7, id: 42E1358C87FB3ABC }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      OUT: ${{ github.workspace }}/out
+      APP: /Users/Shared/Riot Games/Riot Client.app
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Probe platform attestation facilities
+        run: |
+          mkdir -p "$OUT"
+          clang -fobjc-arc -Wall -framework Foundation -framework Security \
+            -framework DeviceCheck -framework LocalAuthentication \
+            -o attestation_support tests/security/probe/attestation_support.m
+          ./attestation_support | tee "$OUT/probe.json"
+          { sw_vers; uname -a; sysctl hw.model machdep.cpu.brand_string;
+            system_profiler SPiBridgeDataType SPHardwareDataType 2>/dev/null; } > "$OUT/host.txt" 2>&1 || true
+
+      - name: Fetch Riot Client ${{ matrix.release.name }}
+        run: |
+          python3 -m pip install --quiet zstandard
+          sudo mkdir -p "/Users/Shared/Riot Games"
+          sudo chown "$USER" "/Users/Shared/Riot Games"
+          python3 tools/rman-fetch.py \
+            "https://ks-foundation.secure.dyn.riotcdn.net/channels/public/releases/${{ matrix.release.id }}.manifest" \
+            "$APP"
+          sed -i '' 's/^enable_self_update:.*/enable_self_update: false/' "$APP/Contents/Resources/system.yaml"
+          grep -n '^enable_self_update' "$APP/Contents/Resources/system.yaml"
+
+      - name: Boot the client and wait for the key-pair state
+        run: |
+          LOGS="$HOME/Library/Logs/Riot Games/Riot Client"
+          "$APP/Contents/MacOS/RiotClientServices" --log-dir="$LOGS" > "$OUT/stdout.txt" 2>&1 &
+          pid=$!
+          deadline=$((SECONDS + 150))
+          while [ $SECONDS -lt $deadline ]; do
+            if grep -rqaE '"keypairSupported"|KeyPairAccountSLI' "$LOGS" 2>/dev/null; then
+              # Let the lifecycle events that follow the first one land.
+              end=$((SECONDS + 20)); while [ $SECONDS -lt $end ]; do kill -0 $pid 2>/dev/null || break; sleep 1; done
+              break
+            fi
+            kill -0 $pid 2>/dev/null || break
+            sleep 2
+          done
+          pkill -f "Riot Client.app" || true
+          cp -R "$LOGS" "$OUT/logs" 2>/dev/null || true
+          {
+            grep -rhaE 'Running Riot Client version' "$OUT/logs" || true
+            grep -rhaoE '"(attestationState|keypairSupported)":("[A-Za-z]+"|true|false)' "$OUT/logs" | sort | uniq -c || true
+            grep -rhaE 'KeyPairAccountSLI|Attestation not supported|vanguard_attestation' "$OUT/logs" | cut -c1-600 || true
+          } | tee "$OUT/summary.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: rc-attestation-${{ matrix.os }}-${{ matrix.release.name }}
+          path: out/
