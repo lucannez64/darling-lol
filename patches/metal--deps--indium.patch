@@ -171,16 +171,19 @@ index 900d03a..611b287 100644
  	};
  
 diff --git a/private-include/indium/blit-command-encoder.private.hpp b/private-include/indium/blit-command-encoder.private.hpp
-index d6e71b2..ae31d39 100644
+index d6e71b2..934c63f 100644
 --- a/private-include/indium/blit-command-encoder.private.hpp
 +++ b/private-include/indium/blit-command-encoder.private.hpp
-@@ -19,21 +19,28 @@ namespace Indium {
+@@ -19,21 +19,31 @@ namespace Indium {
  		std::shared_ptr<PrivateDevice> _privateDevice;
  		BlitPassDescriptor _descriptor;
  
 -		void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size);
 +		// destination textures that need presentation synchronization (drawables)
 +		std::vector<std::shared_ptr<Texture>> _readWriteTextures;
++
++		// Metal keeps blit operands alive until the command buffer completes, so callers may release them right after encoding
++		std::vector<std::shared_ptr<void>> _keepAlive;
 +
 +		void noteDestination(const std::shared_ptr<Texture>& destination);
 +
@@ -1757,7 +1760,7 @@ index 8d00405..754b5b9 100644
  };
  
 diff --git a/src/indium/blit-command-encoder.cpp b/src/indium/blit-command-encoder.cpp
-index e58f0ba..89930f7 100644
+index e58f0ba..3e7c168 100644
 --- a/src/indium/blit-command-encoder.cpp
 +++ b/src/indium/blit-command-encoder.cpp
 @@ -1,8 +1,10 @@
@@ -1771,7 +1774,7 @@ index e58f0ba..89930f7 100644
  
  Indium::BlitCommandEncoder::~BlitCommandEncoder() {};
  
-@@ -17,14 +19,27 @@ Indium::PrivateBlitCommandEncoder::PrivateBlitCommandEncoder(std::shared_ptr<Pri
+@@ -17,14 +19,29 @@ Indium::PrivateBlitCommandEncoder::PrivateBlitCommandEncoder(std::shared_ptr<Pri
  	_descriptor(descriptor)
  	{};
  
@@ -1794,6 +1797,8 @@ index e58f0ba..89930f7 100644
  
 -void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, size_t sourceOffset, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t size) {
 +void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t size) {
++	_keepAlive.push_back(source);
++	_keepAlive.push_back(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
 -	auto privateSource = std::dynamic_pointer_cast<PrivateBuffer>(source);
 -	auto privateDest = std::dynamic_pointer_cast<PrivateBuffer>(destination);
@@ -1802,12 +1807,14 @@ index e58f0ba..89930f7 100644
  
  	VkBufferCopy info {};
  
-@@ -37,18 +52,28 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+@@ -37,18 +54,30 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
  	DynamicVK::vkCmdCopyBuffer(cmdbuf->commandBuffer(), privateSource->buffer(), privateDest->buffer(), 1, &info);
  };
  
 -void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options) {
 +void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Buffer>& source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options) {
++	_keepAlive.push_back(source);
++	_keepAlive.push_back(destination);
 +	noteDestination(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
 -	auto privateSource = std::dynamic_pointer_cast<PrivateBuffer>(source);
@@ -1836,7 +1843,7 @@ index e58f0ba..89930f7 100644
  
  	// first, transition the image to the optimal layout for transfer destinations
  	VkImageMemoryBarrier barrier {};
-@@ -71,9 +96,9 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+@@ -71,9 +100,9 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
  
  	// now encode the copy
  	VkBufferImageCopy copyInfo {};
@@ -1849,12 +1856,14 @@ index e58f0ba..89930f7 100644
  	copyInfo.imageSubresource.aspectMask = aspect;
  	copyInfo.imageSubresource.mipLevel = destinationLevel;
  	copyInfo.imageSubresource.baseArrayLayer = destinationSlice;
-@@ -95,18 +120,17 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+@@ -95,18 +124,19 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
  	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
  };
  
 -void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options) {
 +void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, const std::shared_ptr<Buffer>& destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options) {
++	_keepAlive.push_back(source);
++	_keepAlive.push_back(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
 -	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
 -	auto privateDest = std::dynamic_pointer_cast<PrivateBuffer>(destination);
@@ -1872,7 +1881,7 @@ index e58f0ba..89930f7 100644
  
  	// first, transition the image to the optimal layout for transfer sources
  	VkImageMemoryBarrier barrier {};
-@@ -129,9 +153,9 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+@@ -129,9 +159,9 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
  
  	// now encode the copy
  	VkBufferImageCopy copyInfo {};
@@ -1885,12 +1894,14 @@ index e58f0ba..89930f7 100644
  	copyInfo.imageSubresource.aspectMask = aspect;
  	copyInfo.imageSubresource.mipLevel = sourceLevel;
  	copyInfo.imageSubresource.baseArrayLayer = sourceSlice;
-@@ -153,10 +177,11 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+@@ -153,10 +183,13 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
  	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
  };
  
 -void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size) {
 +void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, const std::shared_ptr<Texture>& destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size) {
++	_keepAlive.push_back(source);
++	_keepAlive.push_back(destination);
 +	noteDestination(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
 -	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
@@ -1900,12 +1911,14 @@ index e58f0ba..89930f7 100644
  
  	auto aspect = pixelFormatToVkImageAspectFlags(privateSource->pixelFormat());
  
-@@ -231,10 +256,10 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+@@ -231,10 +264,12 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
  	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, sizeof(barriers) / sizeof(*barriers), barriers);
  };
  
 -void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, std::shared_ptr<Texture> destination) {
 +void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, const std::shared_ptr<Texture>& destination) {
++	_keepAlive.push_back(source);
++	_keepAlive.push_back(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
 -	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
 -	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
@@ -1914,7 +1927,7 @@ index e58f0ba..89930f7 100644
  	size_t sourceMipLevel = SIZE_MAX;
  	size_t destMipLevel = SIZE_MAX;
  
-@@ -282,18 +307,18 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, st
+@@ -282,18 +317,19 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, st
  	copy(source, 0, sourceMipLevel, Origin { 0, 0, 0 }, destination, 0, destMipLevel, Origin { 0, 0, 0 }, sliceCount, mipCount, Size { source->width() / divisor, source->height() / divisor, source->depth() / divisor });
  };
  
@@ -1931,25 +1944,27 @@ index e58f0ba..89930f7 100644
  
 -void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffer, Range<size_t> range, uint8_t value) {
 +void Indium::PrivateBlitCommandEncoder::fillBuffer(const std::shared_ptr<Buffer>& buffer, Range<size_t> range, uint8_t value) {
++	_keepAlive.push_back(buffer);
  	auto cmdbuf = _privateCommandBuffer.lock();
 -	auto privateBuffer = std::dynamic_pointer_cast<PrivateBuffer>(buffer);
 +	auto* privateBuffer = dynamic_cast<PrivateBuffer*>(buffer.get());
  	uint32_t value32 =
  		((uint32_t)value << 24) |
  		((uint32_t)value << 16) |
-@@ -314,8 +339,9 @@ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffe
+@@ -314,8 +350,10 @@ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffe
  	DynamicVK::vkCmdFillBuffer(cmdbuf->commandBuffer(), privateBuffer->buffer(), range.start, range.length, value32);
  };
  
 -void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_ptr<Texture> texture) {
 -	auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(texture);
 +void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(const std::shared_ptr<Texture>& texture) {
++	_keepAlive.push_back(texture);
 +	noteDestination(texture);
 +	auto* privateTexture = dynamic_cast<PrivateTexture*>(texture.get());
  	auto cmdbuf = _privateCommandBuffer.lock();
  
  	auto aspect = pixelFormatToVkImageAspectFlags(privateTexture->pixelFormat());
-@@ -439,5 +465,5 @@ void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_pt
+@@ -439,5 +477,5 @@ void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_pt
  };
  
  void Indium::PrivateBlitCommandEncoder::endEncoding() {
