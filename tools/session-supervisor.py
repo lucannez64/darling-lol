@@ -86,6 +86,8 @@ INTERACTIVE_SHELLS = ('bash', 'dash', 'fish', 'ksh', 'sh', 'zsh')
 # directory and hold a lock for their lifetime, so only the last one stops it.
 SESSION_PREFIX = 'session-'
 REGISTRY_LOCK = 'registry.lock'
+STOP_REQUESTED = 'stop-requested'
+STOP_QUEUED = 'stop-queued'
 TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
@@ -461,8 +463,45 @@ def stop_container(container, run=subprocess.run, out=sys.stdout, timeout=10):
 
 def session_registry(container_id, base=None):
     """Directory where the sessions sharing one Toolbox container register."""
-    root = Path(tempfile.gettempdir()) if base is None else Path(base)
-    return root / ('darling-lol-%d' % os.getuid()) / container_id
+    root = Path('/run/user') / str(os.getuid()) if base is None else Path(base)
+    return root / 'darling-lol-toolbox' / container_id
+
+
+def in_container_scope(proc, unit):
+    try:
+        return any(line.startswith('0::') and unit in Path(line[3:]).parts
+                   for line in (proc / 'cgroup').read_text().splitlines())
+    except OSError:
+        return False
+
+
+def toolbox_idle(container_id, proc_root):
+    """Require our own Podman scope, with no other work apart from Toolbx init."""
+    unit = 'libpod-%s.scope' % container_id
+    if not in_container_scope(proc_root / 'self', unit):
+        return False
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
+            continue
+        if not in_container_scope(proc, unit):
+            continue
+        info = process_info(proc)
+        if info is not None and info[0] in ('Z', 'X'):
+            continue
+        args = command_line(proc)
+        if args and Path(args[0]).name == 'toolbox' and 'init-container' in args[1:]:
+            continue
+        # Other supervisors serialize through the registry. A finisher can
+        # still be returning its status after it removes its registration.
+        if (len(args) > 1 and Path(args[0]).name.startswith('python')
+                and Path(args[1]).name == 'session-supervisor.py'):
+            continue
+        return False
+    return True
+
+
+class ContainerStopping(Exception):
+    """A previous supervisor already queued a stop for this instance."""
 
 
 class ContainerSessions:
@@ -472,9 +511,9 @@ class ContainerSessions:
     the same container. Each supervisor registers before starting its child
     and holds an advisory lock on its own file for the session's lifetime, so
     the session that ends last is the one that stops the container. The final
-    stop decision takes the registry lock, which keeps a new session from
-    registering between that check and the queued stop. A crashed session
-    leaves a file without a holder; the next decision removes it.
+    stop decision and unregistering use the same lock. A finished runtime
+    owner can authorize the last attached session to stop the container.
+    The mount namespace identifies a running instance across container restarts.
     """
 
     def __init__(self, container_id, base=None):
@@ -486,9 +525,19 @@ class ContainerSessions:
         """Register this session; False when the registry is unusable."""
         handle = None
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
+            self.directory.parent.mkdir(mode=0o700, exist_ok=True)
+            self.directory.mkdir(mode=0o700, exist_ok=True)
             with open(self.directory / REGISTRY_LOCK, 'a+') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                namespace = os.readlink('/proc/self/ns/mnt')
+                queued = self.directory / STOP_QUEUED
+                if queued.exists():
+                    if queued.read_text() == namespace:
+                        raise ContainerStopping
+                    queued.unlink()
+                pending = self.directory / STOP_REQUESTED
+                if pending.exists() and not self.active_sessions():
+                    pending.unlink()
                 handle = tempfile.NamedTemporaryFile(
                     prefix=SESSION_PREFIX, dir=str(self.directory), delete=False)
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -499,18 +548,32 @@ class ContainerSessions:
         self.handle, self.path = handle, Path(handle.name)
         return True
 
-    def finish(self, container, run=subprocess.run, out=sys.stdout):
+    def finish(self, container, *, request_stop, stoppable, proc_root,
+               run=subprocess.run, out=sys.stdout):
         """Stop `container` only when no other session is still using it."""
         if self.path is None:
             return False
         try:
             with open(self.directory / REGISTRY_LOCK, 'a+') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                self.release()
+                pending = self.directory / STOP_REQUESTED
+                if request_stop:
+                    pending.touch()
                 if self.active_sessions():
-                    log('another session is still active in Toolbox container '
-                        '%s; leaving it running' % container[0], out)
                     return False
-                return stop_container(container, run=run, out=out)
+                if not pending.exists():
+                    return False
+                pending.unlink()
+                if not stoppable or not toolbox_idle(container[1], proc_root):
+                    log('leaving Toolbox container %s running' % container[0], out)
+                    return False
+                queued = self.directory / STOP_QUEUED
+                queued.write_text(os.readlink('/proc/self/ns/mnt'))
+                if stop_container(container, run=run, out=out):
+                    return True
+                queued.unlink()
+                return False
         except OSError as error:
             log('could not read the Toolbox session registry (%s); leaving the '
                 "container running; stop it with 'podman stop %s'"
@@ -527,7 +590,7 @@ class ContainerSessions:
                 continue
             try:
                 fd = os.open(entry, os.O_RDONLY)
-            except OSError:
+            except FileNotFoundError:
                 continue
             try:
                 try:
@@ -891,11 +954,21 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     sessions = None
     if container is not None:
         sessions = ContainerSessions(container[1], base=session_base)
-        if not sessions.register():
+        try:
+            registered = sessions.register()
+        except ContainerStopping:
+            log('Toolbox container %s is stopping; retry the launch' % container[0], out)
+            return 1
+        if not registered:
             log('could not register this session for Toolbox container %s; '
                 'it will be left running' % container[0], out)
     namespace = None
-    child = subprocess.Popen(command, start_new_session=True)
+    try:
+        child = subprocess.Popen(command, start_new_session=True)
+    except OSError:
+        if sessions is not None:
+            sessions.release()
+        raise
     def signal_child(signum):
         try:
             if os.getpgid(child.pid) != child.pid:
@@ -994,12 +1067,8 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     if stop:
         log('interrupted by signal %d' % stop[0], out)
     if sessions is not None:
-        if owns_runtime and stoppable:
-            # The container outlives `toolbox run`; stop it only after the
-            # guest session is gone, and only when no other session uses it.
-            sessions.finish(container, run=run, out=out)
-        else:
-            sessions.release()
+        sessions.finish(container, request_stop=owns_runtime and stoppable,
+                        stoppable=stoppable, proc_root=proc_root, run=run, out=out)
     # A surviving guest process is a failed cleanup, not a clean exit.
     return (status or 1) if remaining else status
 

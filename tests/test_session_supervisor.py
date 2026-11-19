@@ -1,5 +1,6 @@
 """Session supervisor: attribution, idle decisions and scoped cleanup."""
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 import io
 import os
 from pathlib import Path
@@ -366,6 +367,8 @@ class ToolboxSessionTests(unittest.TestCase):
         self.proc = self.root / 'proc'
         self.proc.mkdir()
         self.container = ('darling-lol', 'abc123')
+        (self.proc / 'self').mkdir()
+        (self.proc / 'self/cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
         self.handlers = {signum: signal.getsignal(signum)
                          for signum in supervisor.TERMINATION_SIGNALS}
         self.addCleanup(self.restore_handlers)
@@ -425,6 +428,75 @@ class ToolboxSessionTests(unittest.TestCase):
         code, stop = self.run_supervisor(container=self.container)
         self.assertEqual(code, 0)
         stop.assert_called_once()
+
+    def test_last_attached_session_inherits_shutdown_request(self):
+        attached = self.other_session()
+        _code, stop = self.run_supervisor(container=self.container,
+                                          runtime_at_start='stopped')
+        stop.assert_not_called()
+        with mock.patch.object(supervisor, 'stop_container', return_value=True) as stop:
+            self.assertTrue(attached.finish(
+                self.container, request_stop=False, stoppable=True,
+                proc_root=self.proc, out=io.StringIO()))
+        stop.assert_called_once()
+
+    def test_simultaneous_finishers_queue_one_stop(self):
+        sessions = [self.other_session() for _ in range(2)]
+        barrier = threading.Barrier(2, timeout=5)
+
+        def finish(session):
+            barrier.wait()
+            return session.finish(self.container, request_stop=True, stoppable=True,
+                                  proc_root=self.proc, out=io.StringIO())
+
+        with mock.patch.object(supervisor, 'stop_container', return_value=True) as stop:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                self.assertCountEqual(pool.map(finish, sessions), [True, False])
+        stop.assert_called_once()
+
+    def test_new_session_cannot_start_after_shutdown_is_queued(self):
+        self.run_supervisor(container=self.container)
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 1)
+        stop.assert_not_called()
+
+    def test_stopped_container_can_register_again_after_restart(self):
+        self.run_supervisor(container=self.container)
+        marker = supervisor.session_registry('abc123', self.root) / supervisor.STOP_QUEUED
+        marker.write_text('mnt:[former]')
+        self.other_session()
+        self.assertFalse(marker.exists())
+
+    def test_scope_with_interactive_shell_is_left_running(self):
+        shell = fake_process(self.proc, 12345, comm='bash')
+        (shell / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope/exec\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_scope_ignores_toolbox_init_and_other_containers(self):
+        init = fake_process(self.proc, 12345, comm='toolbox')
+        (init / 'cmdline').write_bytes(b'/usr/bin/toolbox\0init-container\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        other = fake_process(self.proc, 12346, comm='bash')
+        (other / 'cgroup').write_text('0::/user.slice/libpod-other.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_unknown_scope_is_left_running(self):
+        (self.proc / 'self/cgroup').write_text('0::/user.slice\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_last_attached_opt_out_clears_deferred_shutdown(self):
+        attached = self.other_session()
+        self.run_supervisor(container=self.container, runtime_at_start='stopped')
+        with mock.patch.object(supervisor, 'stop_container') as stop:
+            self.assertFalse(attached.finish(
+                self.container, request_stop=False, stoppable=False,
+                proc_root=self.proc, out=io.StringIO()))
+        stop.assert_not_called()
+        pending = supervisor.session_registry('abc123', self.root) / supervisor.STOP_REQUESTED
+        self.assertFalse(pending.exists())
 
     def test_opt_out_session_never_stops_the_container(self):
         code, stop = self.run_supervisor(container=self.container, stoppable=False)
