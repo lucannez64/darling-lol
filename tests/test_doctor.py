@@ -34,6 +34,8 @@ def facts(**overrides):
         'psr': '0',
         'core_limit': '0',
         'environment': {},
+        'trace_env': [],
+        'switches': {'diagnostic': [], 'tuning': []},
         'tools': {},
     }
     base.update(overrides)
@@ -115,6 +117,75 @@ class CheckTests(unittest.TestCase):
             facts(prefix_state={'pid': 0, 'state': 'absent', 'stale_markers': 2}))[0], 'ok')
         self.assertEqual(doctor.check_stale_markers(
             facts(prefix_state={'pid': 0, 'state': 'absent', 'stale_markers': 10}))[0], 'warn')
+
+
+INTEL = {'card': 'card0', 'driver': 'i915', 'vendor_id': '0x8086', 'device_id': '0xa7a0', 'name': 'Iris Xe'}
+NVIDIA = {'card': 'card1', 'driver': 'nvidia', 'vendor_id': '0x10de', 'device_id': '0x2860', 'name': 'RTX 4070'}
+PRIME = {'__NV_PRIME_RENDER_OFFLOAD': '1', '__VK_LAYER_NV_optimus': 'NVIDIA_only',
+         '__GLX_VENDOR_LIBRARY_NAME': 'nvidia'}
+
+
+class HybridAndSwitchTests(unittest.TestCase):
+    def test_single_gpu_is_ok(self):
+        self.assertEqual(doctor.check_hybrid(facts())[0], 'ok')
+        self.assertEqual(doctor.check_hybrid(facts(gpus=[NVIDIA]))[0], 'ok')
+
+    def test_hybrid_without_offload_warns(self):
+        status, message = doctor.check_hybrid(facts(gpus=[INTEL, NVIDIA]))
+        self.assertEqual(status, 'warn')
+        self.assertIn('prime-run', message)
+
+    def test_hybrid_with_full_prime_offload_is_ok(self):
+        self.assertEqual(doctor.check_hybrid(facts(gpus=[INTEL, NVIDIA], environment=PRIME))[0], 'ok')
+
+    def test_partial_prime_offload_warns(self):
+        partial = {'__NV_PRIME_RENDER_OFFLOAD': '1'}
+        status, message = doctor.check_hybrid(facts(gpus=[INTEL, NVIDIA], environment=partial))
+        self.assertEqual(status, 'warn')
+        self.assertIn('__VK_LAYER_NV_optimus', message)
+
+    def test_metal_gpu_alone_splits_the_hybrid_path(self):
+        data = facts(gpus=[INTEL, NVIDIA], environment=PRIME,
+                     switches={'diagnostic': ['metal-gpu'], 'tuning': []})
+        status, message = doctor.check_hybrid(data)
+        self.assertEqual(status, 'warn')
+        self.assertIn('/tmp/metal-gpu', message)
+
+    def test_switches_report_diagnostics_before_tuning(self):
+        self.assertEqual(doctor.check_switches(facts())[0], 'ok')
+        traced = facts(switches={'diagnostic': ['rclol-input-trace'], 'tuning': ['rclol-core-isolation']})
+        status, message = doctor.check_switches(traced)
+        self.assertEqual(status, 'warn')
+        self.assertIn('/tmp/rclol-input-trace', message)
+        self.assertNotIn('core-isolation', message)
+        tuned = facts(switches={'diagnostic': [], 'tuning': ['rclol-core-isolation']})
+        self.assertIn('/tmp/rclol-core-isolation', doctor.check_switches(tuned)[1])
+        env = facts(trace_env=['RCLOL_GPU_DIRECT_TRACE'])
+        self.assertIn('RCLOL_GPU_DIRECT_TRACE', doctor.check_switches(env)[1])
+
+    def test_active_switches_reads_guest_and_host_tmp(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            guest = root / 'prefix/private/tmp'
+            guest.mkdir(parents=True)
+            host = root / 'host-tmp'
+            host.mkdir()
+            (guest / 'rclol-input-trace').write_text('')
+            (guest / 'metal-submit-batch-us').write_text('2000')
+            (guest / 'unrelated').write_text('')
+            (host / 'rclol-core-isolation').write_text('')
+            self.assertEqual(doctor.active_switches(root / 'prefix', host),
+                             {'diagnostic': ['rclol-input-trace'],
+                              'tuning': ['metal-submit-batch-us', 'rclol-core-isolation']})
+
+    def test_gather_names_trace_variables_without_values(self):
+        with tempfile.TemporaryDirectory() as folder:
+            env = {'RCLOL_INPUT_TRACE': '1', 'RCLOL_REGION': 'EUW', 'RCLOL_AUDIO_TRACE': '',
+                   'DARLING_METAL_DEVICE_LOG': '1'}
+            data = doctor.gather(prefix=Path(folder), env=env, host_tmp=Path(folder),
+                                 which=lambda name: None)
+            self.assertEqual(data['trace_env'], ['DARLING_METAL_DEVICE_LOG', 'RCLOL_INPUT_TRACE'])
+            self.assertEqual(doctor.report(data, [])['trace_env'], data['trace_env'])
 
 
 class PrefixStateTests(unittest.TestCase):

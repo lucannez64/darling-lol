@@ -48,7 +48,31 @@ ENV_ALLOWLIST = (
     'RCLOL_HIDE_LEAGUE_SPLASH',
     'DPREFIX',
     'DARLING_WORKSPACE',
+    # PRIME render offload (docs/TROUBLESHOOTING.md, hybrid graphics laptops).
+    '__NV_PRIME_RENDER_OFFLOAD',
+    '__VK_LAYER_NV_optimus',
+    '__GLX_VENDOR_LIBRARY_NAME',
+    'DRI_PRIME',
 )
+# Variables that only add tracing. Left set, they slow the client or change its
+# behaviour (the input trace once made the game see stray clicks), so the
+# doctor names them; their values are never collected.
+TRACE_ENV = re.compile(r'^(?:RCLOL_[A-Z0-9_]*(?:TRACE|DEBUG|DUMP)[A-Z0-9_]*|DARLING_METAL_DEVICE_LOG)$')
+# Opt-in switch files. Guest files live in the prefix's /private/tmp, which
+# Darling empties when it starts; host files are read by the game process at
+# start (docs/SETUP.md, "Game-process switches").
+GUEST_DIAGNOSTIC_SWITCHES = ('rclol-input-trace', 'metal-debug-waits', 'metal-gpu')
+GUEST_TUNING_SWITCHES = (
+    'metal-present-dispatch-wait', 'metal-deferred-blit', 'metal-worker-lease',
+    'metal-skip-cpu-devices', 'metal-all-devices', 'metal-no-drawable-vram',
+    'metal-no-lazy-wakeup', 'metal-submit-batch-us', 'metal-submit-batch-max',
+)
+HOST_TUNING_SWITCHES = (
+    'rclol-no-local-mutex', 'rclol-no-local-condvars', 'rclol-no-local-semaphores',
+    'rclol-core-isolation', 'rclol-region-pace-us', 'rclol-rpc-spin-us',
+)
+DISCRETE_DRIVERS = ('nvidia', 'nouveau')
+INTEGRATED_DRIVERS = ('i915', 'xe', 'amdgpu', 'radeon')
 
 
 def read_text(path, default=''):
@@ -196,7 +220,21 @@ def runtime_dir(env=None):
     return next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
 
 
-def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys'), which=None):
+def active_switches(prefix, host_tmp=Path('/tmp')):
+    """Names of the opt-in switch files that exist now, by kind."""
+    guest_tmp = Path(prefix) / 'private/tmp'
+
+    def present(folder, names):
+        return [name for name in names if (folder / name).exists()]
+
+    return {
+        'diagnostic': present(guest_tmp, GUEST_DIAGNOSTIC_SWITCHES),
+        'tuning': present(guest_tmp, GUEST_TUNING_SWITCHES) + present(host_tmp, HOST_TUNING_SWITCHES),
+    }
+
+
+def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys'), which=None,
+           host_tmp=Path('/tmp')):
     """Collect facts once; checks below only interpret them and stay testable."""
     env = dict(os.environ if env is None else env)
     which = which or shutil.which
@@ -245,7 +283,9 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'psr': read_text(sys_root / 'module/i915/parameters/enable_psr').strip(),
         'core_limit': _core_limit(),
         'environment': {key: env[key] for key in ENV_ALLOWLIST if key in env},
-        'tools': {name: which(name) for name in ('xprop', 'xdpyinfo', 'vulkaninfo', 'dmesg', 'coredumpctl')},
+        'trace_env': sorted(key for key, value in env.items() if value and TRACE_ENV.match(key)),
+        'switches': active_switches(prefix, host_tmp),
+        'tools':{name: which(name) for name in ('xprop', 'xdpyinfo', 'vulkaninfo', 'dmesg', 'coredumpctl')},
     }
 
 
@@ -294,6 +334,43 @@ def check_gpu(facts):
     if any(gpu['driver'] == 'nouveau' for gpu in gpus):
         return 'warn', ', '.join(described) + '; nouveau has limited Vulkan support'
     return 'ok', ', '.join(described)
+
+
+def check_hybrid(facts):
+    drivers = {gpu['driver'] for gpu in facts['gpus']}
+    if not (drivers & set(DISCRETE_DRIVERS) and drivers & set(INTEGRATED_DRIVERS)):
+        return 'ok', 'Single GPU vendor'
+    environment = facts['environment']
+    offload = environment.get('__NV_PRIME_RENDER_OFFLOAD') == '1' or environment.get('DRI_PRIME')
+    guide = 'see docs/TROUBLESHOOTING.md, "Hybrid graphics laptops"'
+    if 'metal-gpu' in facts.get('switches', {}).get('diagnostic', ()):
+        return 'warn', ('/tmp/metal-gpu moves only Vulkan; with two GPUs, OpenGL stays on the other one and '
+                        'frames cannot be presented. Remove it and use PRIME offload; ' + guide)
+    if not offload:
+        return 'warn', ('Hybrid graphics without PRIME offload in this environment: Vulkan and OpenGL can '
+                        'land on different GPUs (black window or stuck at 93%%). If you start the launcher '
+                        'with prime-run, run the doctor the same way; %s' % guide)
+    if environment.get('__NV_PRIME_RENDER_OFFLOAD') == '1' and (
+            environment.get('__VK_LAYER_NV_optimus') != 'NVIDIA_only'
+            or environment.get('__GLX_VENDOR_LIBRARY_NAME') != 'nvidia'):
+        return 'warn', ('PRIME offload is only partly set: Vulkan and OpenGL need __VK_LAYER_NV_optimus='
+                        'NVIDIA_only and __GLX_VENDOR_LIBRARY_NAME=nvidia too (prime-run sets all three); '
+                        + guide)
+    return 'ok', 'Hybrid graphics with PRIME offload'
+
+
+def check_switches(facts):
+    switches = facts.get('switches', {})
+    diagnostic = [('/tmp/' + name) for name in switches.get('diagnostic', ())]
+    diagnostic += facts.get('trace_env', [])
+    tuning = [('/tmp/' + name) for name in switches.get('tuning', ())]
+    if diagnostic:
+        return 'warn', ('Diagnostic switches are on: %s. They add tracing and can slow or change input; '
+                        'remove them unless you are collecting a trace' % ', '.join(diagnostic))
+    if tuning:
+        return 'warn', ('Non-default tuning files are present: %s. Remove them to compare against the '
+                        'defaults (docs/SETUP.md)' % ', '.join(tuning))
+    return 'ok', 'No diagnostic or tuning switches'
 
 
 def check_vulkan(facts):
@@ -370,8 +447,10 @@ CHECKS = (
     ('disk', 'Disk space', check_disk),
     ('gpu', 'GPU driver', check_gpu),
     ('vulkan', 'Vulkan driver', check_vulkan),
+    ('hybrid', 'Hybrid graphics', check_hybrid),
     ('session', 'Display session', check_session),
     ('hud', 'Overlay layer', check_hud),
+    ('switches', 'Diagnostic switches', check_switches),
     ('core', 'Core dumps', check_core_dumps),
     ('psr', 'Panel self-refresh', check_psr),
     ('prefix', 'Darling prefix', check_prefix),
@@ -442,6 +521,8 @@ def report(facts, results, redact=True):
         'prefix': '<prefix>' if redact else prefix,
         'redacted': redact,
         'environment': environment,
+        'trace_env': facts.get('trace_env', []),
+        'switches': facts.get('switches', {}),
         'checks': checks,
     }
 
