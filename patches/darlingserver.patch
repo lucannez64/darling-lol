@@ -650,6 +650,59 @@ index 458e659..2e33f20 100644
  			}
  			// wait until it's read
  			if (!dtape_semaphore_down_simple(kqchan->waiter_read_semaphore)) {
+diff --git a/duct-tape/src/locks.c b/duct-tape/src/locks.c
+index 69bdf24..48199cd 100644
+--- a/duct-tape/src/locks.c
++++ b/duct-tape/src/locks.c
+@@ -98,41 +98,48 @@ bool dtape_mutex_try_lock(dtape_mutex_t* mutex) {
+ 	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
+ 
+ 	if (!thread) {
+ 		dtape_log_warning("Trying to lock mutex without an active thread!");
+ 		// see lck_mtx_lock()
+ 		if (libsimple_lock_try_lock(&mutex->dtape_queue_lock)) {
+ 			if (mutex->dtape_owner == 0) {
+ 				return TRUE;
+ 			}
+ 			libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 		}
+ 		return FALSE;
+ 	}
+ 
+ 	dtape_mutex_assert(mutex, false);
+ 
++	// the owner may only be examined with the queue lock held: a holder without an active thread
++	// (see lck_mtx_lock()) owns the mutex by holding the queue lock, while the owner field stays 0
++	if (!libsimple_lock_try_lock(&mutex->dtape_queue_lock)) {
++		return FALSE;
++	}
++
+ 	if (mutex->dtape_owner == 0 || mutex->dtape_owner == (uintptr_t)xthread) {
+ 		// lock successfully acquired
+ 		mutex->dtape_owner = (uintptr_t)xthread;
+ 		libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+ 		return TRUE;
+ 	}
+ 
+ 	// lock not acquired
++	libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 	return FALSE;
+ };
+ 
+ void dtape_mutex_unlock(dtape_mutex_t* mutex) {
+ 	thread_t xcurr_thread = current_thread();
+ 	dtape_thread_t* curr_thread = dtape_thread_for_xnu_thread(xcurr_thread);
+ 
+ 	if (!curr_thread) {
+ 		dtape_log_warning("Trying to unlock mutex without an active thread!");
+ 		// see lck_mtx_lock()
+ 		return libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 	}
+ 
+ 	dtape_mutex_assert(mutex, true);
+ 
+ 	libsimple_lock_lock(&mutex->dtape_queue_lock);
 diff --git a/duct-tape/src/memory.c b/duct-tape/src/memory.c
 index 3114947..20cd162 100644
 --- a/duct-tape/src/memory.c
