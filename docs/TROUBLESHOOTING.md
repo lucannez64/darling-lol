@@ -494,6 +494,16 @@ tree running. The supervisor:
   prefix or a host process is never touched.
 - shuts the runtime down after the loader exits normally. If a second launch
   attached to a runtime that was already running, that runtime is left alone.
+- stops the Toolbox container when the launcher was started by `toolbox run`
+  (a menu entry or `toolbox run -c <container> ...`). `toolbox run` leaves the
+  container running after its command exits, and `podman stop` is unavailable
+  inside the container, so the supervisor stops the container's host systemd
+  user scope after the guest session is gone. If multiple Darling-LoL sessions
+  share the container, the runtime owner can pass the shutdown request to the
+  last eligible session. The supervisor leaves the container running when an
+  interactive `toolbox enter` shell or other work remains in that scope, or
+  when it cannot verify the scope. Set `RCLOL_STOP_TOOLBOX=0` on a launch to
+  keep the container running when that session finishes last.
 - leaves everything as it was with `RCLOL_CLEAN_ON_EXIT=0`, which is the old
   `exec` behaviour.
 

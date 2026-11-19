@@ -1,5 +1,6 @@
 """Session supervisor: attribution, idle decisions and scoped cleanup."""
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 import io
 import os
 from pathlib import Path
@@ -21,10 +22,10 @@ spec.loader.exec_module(supervisor)
 
 
 def fake_process(root, pid, ppid=1, state='S', comm='mldr', environ=b'', ns=None,
-                 uid=None):
+                 uid=None, start_ticks=100):
     proc = root / str(pid)
     (proc / 'ns').mkdir(parents=True)
-    fields = [state, str(ppid)] + ['0'] * 17 + ['100']
+    fields = [state, str(ppid)] + ['0'] * 17 + [str(start_ticks)]
     (proc / 'stat').write_text('%d (%s) %s\n' % (pid, comm, ' '.join(fields)))
     (proc / 'comm').write_text(comm + '\n')
     (proc / 'cmdline').write_bytes(comm.encode() + b'\0')
@@ -235,6 +236,333 @@ class RuntimeMarkerTests(unittest.TestCase):
     def test_zombie_server_is_not_a_runtime(self):
         self.server(state='Z')
         self.assertFalse(supervisor.runtime_alive(self.prefix, self.proc))
+
+
+class ContainerTests(unittest.TestCase):
+    """Toolbox container detection and the host-side stop."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.marker = self.root / '.toolboxenv'
+        self.containerenv = self.root / '.containerenv'
+        self.marker.touch()
+        self.handlers = {signum: signal.getsignal(signum)
+                         for signum in supervisor.TERMINATION_SIGNALS}
+        self.addCleanup(self.restore_handlers)
+
+    def restore_handlers(self):
+        for signum, handler in self.handlers.items():
+            signal.signal(signum, handler)
+
+    def metadata(self):
+        return supervisor.container_metadata(self.marker, self.containerenv)
+
+    def test_toolbox_container_is_identified(self):
+        self.containerenv.write_text(
+            'engine="podman-5.8.9"\n'
+            'name="darling-lol"\n'
+            'id="612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356"\n')
+        self.assertEqual(self.metadata(), (
+            'darling-lol',
+            '612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356'))
+
+    def test_missing_toolbox_marker_is_ignored(self):
+        self.containerenv.write_text('name="outer"\nid="abc123"\n')
+        self.marker.unlink()
+        self.assertIsNone(self.metadata())
+
+    def test_missing_metadata_is_ignored(self):
+        self.assertIsNone(self.metadata())
+
+    def test_non_hexadecimal_id_is_refused(self):
+        self.containerenv.write_text('name="darling-lol"\nid="abc; reboot"\n')
+        self.assertIsNone(self.metadata())
+
+    def test_missing_name_falls_back_to_the_id(self):
+        self.containerenv.write_text('id="abc123"\n')
+        self.assertEqual(self.metadata(), ('abc123', 'abc123'))
+
+    def test_shell_parent_names_an_interactive_session(self):
+        fake_process(self.root, 10, comm='bash')
+        fake_process(self.root, 20, ppid=10)
+        self.assertTrue(supervisor.started_by_shell(self.root, 20))
+
+    def test_login_shell_hyphen_is_not_part_of_the_name(self):
+        proc = fake_process(self.root, 10, comm='bash')
+        (proc / 'cmdline').write_bytes(b'-bash\0')
+        fake_process(self.root, 20, ppid=10)
+        self.assertTrue(supervisor.started_by_shell(self.root, 20))
+
+    def test_conmon_parent_names_the_exec_session(self):
+        fake_process(self.root, 10, comm='conmon')
+        fake_process(self.root, 20, ppid=10)
+        self.assertFalse(supervisor.started_by_shell(self.root, 20))
+
+    def test_unreadable_parent_is_not_an_interactive_session(self):
+        self.assertFalse(supervisor.started_by_shell(self.root, 99))
+
+    def stop(self, result=None, error=None):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            if error is not None:
+                raise error
+            return result(command)
+        out = io.StringIO()
+        stopped = supervisor.stop_container(('darling-lol', 'abc123'), run=run, out=out)
+        return stopped, calls, out.getvalue()
+
+    def test_stop_targets_the_host_user_scope(self):
+        stopped, calls, output = self.stop(lambda command: subprocess.CompletedProcess(command, 0))
+        self.assertTrue(stopped)
+        self.assertEqual(calls, [['systemctl', '--user', '--no-block', 'stop',
+                                  'libpod-abc123.scope']])
+        self.assertIn('stopping Toolbox container darling-lol', output)
+
+    def test_signaled_systemctl_does_not_count_as_queued(self):
+        stopped, _calls, output = self.stop(
+            lambda command: subprocess.CompletedProcess(command, -signal.SIGKILL))
+        self.assertFalse(stopped)
+        self.assertIn('could not stop', output)
+
+    def test_failed_stop_reports_the_manual_command(self):
+        stopped, _calls, output = self.stop(
+            lambda command: subprocess.CompletedProcess(command, 1))
+        self.assertFalse(stopped)
+        self.assertIn("podman stop darling-lol", output)
+
+    def test_unavailable_systemctl_reports_the_manual_command(self):
+        stopped, _calls, output = self.stop(error=OSError('missing'))
+        self.assertFalse(stopped)
+        self.assertIn("podman stop darling-lol", output)
+
+    def test_queued_stop_cannot_kill_the_supervisor_early(self):
+        def run(command, **_kwargs):
+            # The queued scope stop also signals the supervisor.
+            os.kill(os.getpid(), signal.SIGTERM)
+            return subprocess.CompletedProcess(command, 0)
+
+        stopped = supervisor.stop_container(('darling-lol', 'abc123'),
+                                            run=run, out=io.StringIO())
+        self.assertTrue(stopped)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
+    def test_failed_stop_restores_the_signal_handlers(self):
+        self.stop(lambda command: subprocess.CompletedProcess(command, 1))
+        self.assertEqual(signal.getsignal(signal.SIGTERM),
+                         self.handlers[signal.SIGTERM])
+
+
+class ToolboxSessionTests(unittest.TestCase):
+    """A Toolbox container is stopped only for the last session that uses it."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prefix = self.root / '.darling'
+        self.prefix.mkdir()
+        self.proc = self.root / 'proc'
+        self.proc.mkdir()
+        self.container = ('darling-lol', 'abc123')
+        (self.proc / 'self').mkdir()
+        (self.proc / 'self/cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        self.toolbox_init()
+        self.handlers = {signum: signal.getsignal(signum)
+                         for signum in supervisor.TERMINATION_SIGNALS}
+        self.addCleanup(self.restore_handlers)
+
+    def restore_handlers(self):
+        for signum, handler in self.handlers.items():
+            signal.signal(signum, handler)
+
+    def toolbox_init(self, start_ticks=100):
+        init = fake_process(self.proc, 12345, comm='toolbox', start_ticks=start_ticks)
+        (init / 'cmdline').write_bytes(b'/usr/bin/toolbox\0init-container\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        return init
+
+    def run_supervisor(self, container=None, runtime_at_start=None, remaining=None,
+                       stoppable=True):
+        remaining = [] if remaining is None else remaining
+        with mock.patch.object(supervisor, 'cleanup', return_value=remaining), \
+             mock.patch.object(supervisor, 'stop_container') as stop:
+            code = supervisor.run_supervised(
+                ['true'], self.prefix, None, proc_root=self.proc, poll=0,
+                run=lambda *_a, **_k: None, kill=lambda *_a: None,
+                sleep=lambda _s: None, out=io.StringIO(),
+                runtime_at_start=runtime_at_start, container=container,
+                stoppable=stoppable, session_base=self.root)
+        return code, stop
+
+    def other_session(self, container_id='abc123'):
+        session = supervisor.ContainerSessions(container_id, base=self.root, proc_root=self.proc)
+        self.assertTrue(session.register())
+        self.addCleanup(session.release)
+        return session
+
+    def test_owned_session_stops_the_container(self):
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        self.assertEqual(stop.call_args.args[0], self.container)
+
+    def test_attached_session_leaves_the_container_running(self):
+        code, stop = self.run_supervisor(container=self.container,
+                                         runtime_at_start='running')
+        self.assertEqual(code, 0)
+        stop.assert_not_called()
+
+    def test_failed_cleanup_still_stops_the_container(self):
+        code, stop = self.run_supervisor(container=self.container, remaining=[1234])
+        self.assertEqual(code, 1)
+        stop.assert_called_once()
+
+    def test_native_session_stops_nothing(self):
+        _code, stop = self.run_supervisor()
+        stop.assert_not_called()
+
+    def test_shared_container_survives_while_another_session_is_active(self):
+        self.other_session()
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_not_called()
+
+    def test_last_session_stops_the_shared_container(self):
+        other = self.other_session()
+        other.release()
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_called_once()
+
+    def test_last_attached_session_inherits_shutdown_request(self):
+        attached = self.other_session()
+        _code, stop = self.run_supervisor(container=self.container,
+                                          runtime_at_start='stopped')
+        stop.assert_not_called()
+        with mock.patch.object(supervisor, 'stop_container', return_value=True) as stop:
+            self.assertTrue(attached.finish(
+                self.container, request_stop=False, stoppable=True,
+                out=io.StringIO()))
+        stop.assert_called_once()
+
+    def test_simultaneous_finishers_queue_one_stop(self):
+        sessions = [self.other_session() for _ in range(2)]
+        barrier = threading.Barrier(2, timeout=5)
+
+        def finish(session):
+            barrier.wait()
+            return session.finish(self.container, request_stop=True, stoppable=True,
+                                  out=io.StringIO())
+
+        with mock.patch.object(supervisor, 'stop_container', return_value=True) as stop:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                self.assertCountEqual(pool.map(finish, sessions), [True, False])
+        stop.assert_called_once()
+
+    def test_new_session_cannot_start_after_shutdown_is_queued(self):
+        self.run_supervisor(container=self.container)
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 1)
+        stop.assert_not_called()
+
+    def test_failed_scope_stop_allows_a_new_session(self):
+        session = self.other_session()
+        with mock.patch.object(supervisor, 'stop_container', return_value=False):
+            self.assertFalse(session.finish(self.container, request_stop=True,
+                                            stoppable=True, out=io.StringIO()))
+        self.other_session()
+
+    def test_stopped_container_can_register_again_after_restart(self):
+        self.run_supervisor(container=self.container)
+        marker = supervisor.session_registry('abc123', self.root) / supervisor.STOP_QUEUED
+        self.assertEqual(marker.read_text(), '12345:100')
+        shutil.rmtree(self.proc / '12345')
+        self.toolbox_init(start_ticks=200)
+        self.other_session()
+        self.assertFalse(marker.exists())
+
+    def test_legacy_mount_namespace_marker_is_discarded(self):
+        self.run_supervisor(container=self.container)
+        marker = supervisor.session_registry('abc123', self.root) / supervisor.STOP_QUEUED
+        marker.write_text('mnt:[4026533541]')
+        self.other_session()
+        self.assertFalse(marker.exists())
+
+    def test_unknown_toolbox_instance_is_left_running(self):
+        shutil.rmtree(self.proc / '12345')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_scope_with_interactive_shell_is_left_running(self):
+        shell = fake_process(self.proc, 12346, comm='bash')
+        (shell / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope/exec\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_scope_ignores_toolbox_init_and_other_containers(self):
+        other = fake_process(self.proc, 12346, comm='bash')
+        (other / 'cgroup').write_text('0::/user.slice/libpod-other.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_unknown_scope_is_left_running(self):
+        (self.proc / 'self/cgroup').write_text('0::/user.slice\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_last_attached_opt_out_clears_deferred_shutdown(self):
+        attached = self.other_session()
+        self.run_supervisor(container=self.container, runtime_at_start='stopped')
+        with mock.patch.object(supervisor, 'stop_container') as stop:
+            self.assertFalse(attached.finish(
+                self.container, request_stop=False, stoppable=False,
+                out=io.StringIO()))
+        stop.assert_not_called()
+        pending = supervisor.session_registry('abc123', self.root) / supervisor.STOP_REQUESTED
+        self.assertFalse(pending.exists())
+
+    def test_opt_out_session_never_stops_the_container(self):
+        code, stop = self.run_supervisor(container=self.container, stoppable=False)
+        self.assertEqual(code, 0)
+        stop.assert_not_called()
+
+    def test_stale_registration_does_not_block_the_stop(self):
+        directory = supervisor.session_registry('abc123', self.root)
+        directory.mkdir(parents=True)
+        (directory / 'session-stale').write_text('')
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_called_once()
+
+    def test_finished_session_unregisters(self):
+        self.run_supervisor(container=self.container)
+        directory = supervisor.session_registry('abc123', self.root)
+        leftovers = [entry.name for entry in directory.iterdir()
+                     if entry.name.startswith(supervisor.SESSION_PREFIX)]
+        self.assertEqual(leftovers, [])
+
+    def test_other_container_does_not_block_the_stop(self):
+        self.other_session('different-container')
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_called_once()
+
+    def test_queued_stop_keeps_the_child_status(self):
+        def run(command, **_kwargs):
+            if command[:1] == ['systemctl']:
+                # The queued scope stop also signals the supervisor.
+                os.kill(os.getpid(), signal.SIGTERM)
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(supervisor, 'cleanup', return_value=[]):
+            code = supervisor.run_supervised(
+                ['sh', '-c', 'exit 3'], self.prefix, None, proc_root=self.proc,
+                poll=0, run=run, kill=lambda *_a: None, sleep=lambda _s: None,
+                out=io.StringIO(), container=self.container,
+                session_base=self.root)
+        self.assertEqual(code, 3)
 
 
 class SupervisorModeTests(unittest.TestCase):

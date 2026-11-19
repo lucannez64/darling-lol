@@ -95,6 +95,7 @@ FLAGS = (
     ("RCLOL_GAMEMODE", "`auto`", "run under `gamemoderun` when installed; `0` disables"),
     ("RCLOL_CLEAN_ON_EXIT", "`1`", "`0` keeps the runtime running after the clients exit"),
     ("RCLOL_STOP_AFTER_CLIENT_SECONDS", "`60`", "stop after the last client window with no game"),
+    ("RCLOL_STOP_TOOLBOX", "`1`", "`0` leaves the Toolbox container running after the session"),
     ("RCLOL_CDN_IPV4_ONLY", "`1`", "`0` keeps the upstream IPv6 resolver behavior"),
     ("RCLOL_RECOVER_STALE_CLIENT", "`0`", "opt-in recovery of a windowless client tree"),
     ("RCLOL_RECOVER_HIDDEN_CLIENT", "`0`", "opt-in recovery of a hidden default-prefix session"),
