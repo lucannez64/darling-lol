@@ -58,6 +58,7 @@ typedef int cpu_threadtype_t;
 #define HOST_SHIM_MACH_MACH_INIT_H
 #include <stdint.h>
 typedef int kern_return_t;
+#define KERN_SUCCESS 0
 typedef unsigned int mach_port_t;
 typedef unsigned int mach_port_name_t;
 typedef mach_port_t ipc_space_t;
@@ -76,10 +77,13 @@ typedef unsigned int mach_msg_type_number_t;
 typedef integer_t* host_info_t;
 typedef int host_flavor_t;
 #define HOST_BASIC_INFO 1
-#define HOST_BASIC_INFO_COUNT 8
+typedef unsigned int natural_t;
+/* The real XNU layout (osfmk/mach/host_info.h): packed to 4, 12 integers. */
+#pragma pack(push, 4)
 struct host_basic_info {
-    integer_t avail_cpus;
     integer_t max_cpus;
+    integer_t avail_cpus;
+    natural_t memory_size;
     cpu_type_t cpu_type;
     cpu_subtype_t cpu_subtype;
     cpu_threadtype_t cpu_threadtype;
@@ -89,6 +93,8 @@ struct host_basic_info {
     integer_t logical_cpu_max;
     uint64_t max_mem;
 };
+#pragma pack(pop)
+#define HOST_BASIC_INFO_COUNT ((mach_msg_type_number_t)(sizeof(struct host_basic_info) / sizeof(integer_t)))
 #endif
 """)
 
@@ -107,22 +113,35 @@ subprocess.run(["cc", "-std=gnu11", "-O2", "-Wall", "-Wno-unused-function",
                 *[str(source) for source in sources], "-o", str(binary)], check=True)
 print("Built", binary)
 
+# The profile is read from /proc/self/environ, so it has to be in the
+# environment at exec; the host modes run without it.
+import os
+host_env = {key: value for key, value in os.environ.items()
+            if key not in ("RCLOL_PLATFORM_PROFILE", "RCLOL_CPU_BRAND", "RCLOL_MEMORY_BYTES")}
+
 # Each mode is its own process: the topology probe caches once per process.
-subprocess.run([str(binary)], check=True)
-subprocess.run([str(binary), "affinity"], check=True)
-subprocess.run([str(binary), "no-detect"], check=True)
+subprocess.run([str(binary)], check=True, env=host_env)
+subprocess.run([str(binary), "affinity"], check=True, env=host_env)
+subprocess.run([str(binary), "no-detect"], check=True, env=host_env)
+# A failed host_info RPC must not zero the memory of the caller's reply.
+subprocess.run([str(binary), "rpc-fail"], check=True, env=host_env)
 Path(flag).unlink(missing_ok=True)
 Path(flag).write_text("")
 try:
-    subprocess.run([str(binary), "optout"], check=True)
+    subprocess.run([str(binary), "optout"], check=True, env=host_env)
 finally:
     Path(flag).unlink(missing_ok=True)
 
-# machdep.cpu.*: the host's own view, then the compat profile. The profile is
-# read from /proc/self/environ, so it has to be in the environment at exec.
-import os
-compat_env = {key: value for key, value in os.environ.items()
-              if key not in ("RCLOL_PLATFORM_PROFILE", "RCLOL_CPU_BRAND")}
+# The compat profile: i7-9750H counts (6/12) whatever the host has, also with
+# a restricted affinity mask, and the profile's 16 GiB in host_info.
+profile_env = dict(host_env, RCLOL_PLATFORM_PROFILE="compat",
+                   RCLOL_CPU_BRAND="Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz",
+                   RCLOL_MEMORY_BYTES=str(16 << 30))
+subprocess.run([str(binary), "compat"], check=True, env=profile_env)
+subprocess.run([str(binary), "compat-affinity"], check=True, env=profile_env)
+
+# machdep.cpu.*: the host's own view, then the compat profile.
+compat_env = dict(host_env)
 subprocess.run([str(binary), "machdep"], check=True, env=compat_env)
 compat_env["RCLOL_PLATFORM_PROFILE"] = "compat"
 compat_env["RCLOL_CPU_BRAND"] = "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"

@@ -53,8 +53,11 @@ class SystemProfileTests(unittest.TestCase):
     def test_guest_sysctls_use_the_launcher_values(self):
         xnu = (ROOT / 'patches/xnu.patch').read_text()
         self.assertIn('getenv("RCLOL_CPU_BRAND")', xnu)
-        self.assertIn('getenv("RCLOL_MEMORY_BYTES")', xnu)
-        self.assertIn('__simple_atoi(memory, NULL)', xnu)
+        # host_info runs this from dyld before libc exists: a raw environ read,
+        # never getenv() (that crashed launchd at boot).
+        self.assertIn('darling_environ_value("RCLOL_MEMORY_BYTES")', xnu)
+        self.assertIn('darling_configured_memory_bytes()', xnu)
+        self.assertNotIn('getenv("RCLOL_MEMORY_BYTES")', xnu)
 
     def test_install_runtime_preserves_an_existing_profile(self):
         installer = (ROOT / 'scripts/install-runtime.sh').read_text()
