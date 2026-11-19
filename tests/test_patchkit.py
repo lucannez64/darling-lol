@@ -23,7 +23,7 @@ def _git(repo: Path, *args: str) -> str:
     env["GIT_COMMITTER_NAME"] = "Test"
     env["GIT_COMMITTER_EMAIL"] = "test@example.invalid"
     res = subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", "-c", "commit.gpgsign=false", "-C", str(repo), *args],
         env=env,
         text=True,
         capture_output=True,
@@ -173,6 +173,19 @@ class PatchParsingTests(unittest.TestCase):
         )
         self.assertEqual(patchkit.verify_hunk_counts(patch, "sep.patch"), [])
 
+    def test_unquote_utf8_and_formfeed_in_hunk(self) -> None:
+        self.assertEqual(patchkit._unquote_git_path('"a/caf\\303\\251.h"'), "a/café.h")
+        patch = (
+            "diff --git a/ff.c b/ff.c\n"
+            "--- a/ff.c\n"
+            "+++ b/ff.c\n"
+            "@@ -1,2 +1,2 @@\n"
+            " \x0c/* page break */\n"
+            "-int a = 1;\n"
+            "+int a = 2;\n"
+        )
+        self.assertEqual(patchkit.verify_hunk_counts(patch, "ff.patch"), [])
+
 
 class StatusAndRespliceTests(unittest.TestCase):
     def test_status_classifies_applied_drifted_and_clean(self) -> None:
@@ -265,6 +278,60 @@ class StatusAndRespliceTests(unittest.TestCase):
             m = patchkit.load_manifest(project)
             self.assertEqual(m["components"][0]["modified_files"], 1)
 
+    def test_resplice_preserves_crlf_and_rejects_empty_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project, source, _rev = _make_fake_repo_and_project(Path(tmp))
+            comp_repo = source / "src/external/demo"
+
+            # Inject CRLF into beta.c section of patch and verify resplicing alpha.c keeps it intact.
+            patch_file = project / "patches/demo.patch"
+            raw = patch_file.read_bytes()
+            raw_crlf = raw.replace(b"return 20;\n", b"return 20;\r\n")
+            patch_file.write_bytes(raw_crlf)
+
+            (comp_repo / "alpha.c").write_text("int alpha(void) {\n    return 77;\n}\n", encoding="utf-8")
+            (comp_repo / ".dotfile").write_text("dot=1\n", encoding="utf-8")
+            rc = patchkit.main(
+                [
+                    "--root",
+                    str(project),
+                    "resplice",
+                    "demo",
+                    "alpha.c",
+                    ".dotfile",
+                    "--source",
+                    str(source),
+                    "--write",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            out_bytes = patch_file.read_bytes()
+            self.assertIn(b"return 20;\r\n", out_bytes)
+            self.assertIn(b"diff --git a/.dotfile b/.dotfile", out_bytes)
+
+            # Reverting every patched file must refuse to write an empty patch.
+            _git(comp_repo, "checkout", "--", "alpha.c", "beta.c")
+            (comp_repo / ".dotfile").unlink()
+            with self.assertRaises(patchkit.PatchkitError) as ctx:
+                patchkit.cmd_resplice(
+                    patchkit.build_parser().parse_args(
+                        [
+                            "--root",
+                            str(project),
+                            "resplice",
+                            "demo",
+                            "alpha.c",
+                            "beta.c",
+                            ".dotfile",
+                            "--source",
+                            str(source),
+                            "--write",
+                        ]
+                    )
+                )
+            self.assertIn("empty", str(ctx.exception))
+            self.assertEqual(patch_file.read_bytes(), out_bytes)
+
 
 class OverlayLedgerTests(unittest.TestCase):
     def test_install_blocks_when_darling_running(self) -> None:
@@ -334,6 +401,45 @@ class OverlayLedgerTests(unittest.TestCase):
             self.assertEqual(dest1.read_bytes(), b"original-bytes")
             self.assertFalse(dest2.exists())
             self.assertEqual(patchkit.overlay_status(ledger), [])
+
+    def test_reinstall_same_target_preserves_original_backup_and_blocks_name_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            ledger = base / "ledger.json"
+            backups = base / "backups"
+
+            dest = base / "prefix/libone.dylib"
+            dest.parent.mkdir(parents=True)
+            dest.write_bytes(b"v0-original")
+
+            v1 = base / "v1.dylib"
+            v2 = base / "v2.dylib"
+            v1.write_bytes(b"v1-patched")
+            v2.write_bytes(b"v2-patched")
+
+            patchkit.overlay_install(
+                v1, dest, name="libone", ledger_path=ledger, backup_dir=backups,
+                min_free_mb=0, process_checker=lambda: [],
+            )
+            patchkit.overlay_install(
+                v2, dest, name="libone", ledger_path=ledger, backup_dir=backups,
+                min_free_mb=0, process_checker=lambda: [],
+            )
+            self.assertEqual(dest.read_bytes(), b"v2-patched")
+
+            # Reusing the same name for a different target must fail.
+            other_dest = base / "prefix/libother.dylib"
+            with self.assertRaises(patchkit.PatchkitError):
+                patchkit.overlay_install(
+                    v2, other_dest, name="libone", ledger_path=ledger, backup_dir=backups,
+                    min_free_mb=0, process_checker=lambda: [],
+                )
+
+            # Rolling back restores v0-original, NOT v1-patched.
+            patchkit.overlay_rollback(
+                name="libone", rollback_all=False, ledger_path=ledger, process_checker=lambda: []
+            )
+            self.assertEqual(dest.read_bytes(), b"v0-original")
 
 
 if __name__ == "__main__":

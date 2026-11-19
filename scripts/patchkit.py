@@ -33,6 +33,8 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -42,9 +44,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 sys.dont_write_bytecode = True
 
@@ -126,11 +128,17 @@ def save_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
     atomic_write_text(path, json.dumps(manifest, indent=2) + "\n")
 
 
+def read_text_exact(path: Path) -> str:
+    """Read UTF-8 text without translating CRLF/LF line endings."""
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".patchkit-")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
         os.replace(tmp_name, path)
     except BaseException:
@@ -139,6 +147,18 @@ def atomic_write_text(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+@contextlib.contextmanager
+def _file_lock(lock_path: Path) -> Iterator[None]:
+    """Serialize read-modify-write sequences with an advisory flock."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def sha256_file(path: Path) -> str:
@@ -169,10 +189,65 @@ class PatchSection:
         return self.old_path if self.is_deleted else self.new_path
 
 
+def _split_lf_keepends(text: str) -> list[str]:
+    """Split text strictly on LF, preserving CRLF and control characters (\v, \f)."""
+    if not text:
+        return []
+    parts = text.split("\n")
+    out = [p + "\n" for p in parts[:-1]]
+    if parts[-1]:
+        out.append(parts[-1])
+    return out
+
+
+def _split_lf_lines(text: str) -> list[str]:
+    """Split text strictly on LF, stripping only a trailing CR per line."""
+    lines = _split_lf_keepends(text)
+    out: list[str] = []
+    for ln in lines:
+        if ln.endswith("\n"):
+            ln = ln[:-1]
+        if ln.endswith("\r"):
+            ln = ln[:-1]
+        out.append(ln)
+    return out
+
+
 def _unquote_git_path(raw: str) -> str:
+    """Decode Git C-quoted path escapes to raw bytes first, then UTF-8."""
     if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
         inner = raw[1:-1]
-        return bytes(inner, "utf-8").decode("unicode_escape")
+        buf = bytearray()
+        i = 0
+        simple = {
+            "a": 0x07,
+            "b": 0x08,
+            "f": 0x0C,
+            "n": 0x0A,
+            "r": 0x0D,
+            "t": 0x09,
+            "v": 0x0B,
+            "\\": ord("\\"),
+            '"': ord('"'),
+        }
+        while i < len(inner):
+            ch = inner[i]
+            if ch == "\\" and i + 1 < len(inner):
+                nxt = inner[i + 1]
+                if nxt in "01234567" and i + 3 < len(inner) and all(c in "01234567" for c in inner[i + 1 : i + 4]):
+                    buf.append(int(inner[i + 1 : i + 4], 8) & 0xFF)
+                    i += 4
+                    continue
+                if nxt in simple:
+                    buf.append(simple[nxt])
+                    i += 2
+                    continue
+                buf.extend(nxt.encode("utf-8"))
+                i += 2
+                continue
+            buf.extend(ch.encode("utf-8"))
+            i += 1
+        return os.fsdecode(bytes(buf))
     return raw
 
 
@@ -232,7 +307,7 @@ def _parse_diff_git_header(line: str) -> tuple[str, str]:
 
 def split_patch_sections(patch_text: str) -> tuple[str, list[PatchSection]]:
     """Split a unified git patch into (preamble, [PatchSection, ...])."""
-    lines = patch_text.splitlines(keepends=True)
+    lines = _split_lf_keepends(patch_text)
     preamble_lines: list[str] = []
     raw_sections: list[list[str]] = []
     current: list[str] | None = None
@@ -290,7 +365,7 @@ def verify_hunk_counts(patch_text: str, label: str = "<patch>") -> list[str]:
     for sec in sections:
         if sec.is_binary:
             continue
-        lines = sec.text.splitlines()
+        lines = _split_lf_lines(sec.text)
         i = 0
         # Advance past file header to first hunk.
         while i < len(lines) and not lines[i].startswith("@@ "):
@@ -378,7 +453,7 @@ def manifest_drift(manifest: dict[str, Any], root: Path = ROOT) -> list[dict[str
                 {"component": comp["path"], "patch": comp["patch"], "error": "patch file missing"}
             )
             continue
-        actual_mod, actual_new = patch_file_inventory(patch_path.read_text(encoding="utf-8"))
+        actual_mod, actual_new = patch_file_inventory(read_text_exact(patch_path))
         exp_mod = comp.get("modified_files")
         exp_new = comp.get("new_files")
         issues: list[str] = []
@@ -440,7 +515,8 @@ def _expected_patched_tree(repo: Path, revision: str, patch_text: str) -> str | 
         res = git_run(
             ["git", "-C", str(repo), "apply", "--cached", "--whitespace=nowarn", "-"],
             env=env,
-            input_data=patch_text,
+            input_data=patch_text.encode("utf-8"),
+            text=False,
         )
         if res.returncode != 0:
             return None
@@ -453,7 +529,7 @@ def inspect_component_status(
 ) -> dict[str, Any]:
     """Classify one component checkout and its patch file."""
     patch_path = root / comp["patch"]
-    patch_raw = patch_path.read_text(encoding="utf-8") if patch_path.is_file() else ""
+    patch_raw = read_text_exact(patch_path) if patch_path.is_file() else ""
     hunk_errors = verify_hunk_counts(patch_raw, comp["patch"]) if patch_raw else [f"{comp['patch']}: missing"]
     patch_rendered = render(patch_raw) if patch_raw else ""
 
@@ -472,6 +548,7 @@ def inspect_component_status(
     rev = git_run(["git", "-C", str(repo), "rev-parse", "HEAD"])
     if rev.returncode != 0:
         info["state"] = "error"
+        info["error"] = rev.stderr.strip() or "git rev-parse HEAD failed"
         return info
     actual_rev = rev.stdout.strip()
     info["actual_rev"] = actual_rev
@@ -481,11 +558,20 @@ def inspect_component_status(
 
     # Determine files touched by patch and files currently dirty in repo.
     _, sections = split_patch_sections(patch_rendered)
-    patch_paths = {s.canonical_path for s in sections}
+    patch_paths = {s.canonical_path for s in sections} | {
+        s.old_path for s in sections if s.old_path and not s.is_new
+    }
 
-    porcelain = git_run(["git", "-C", str(repo), "status", "--porcelain", "-z"])
+    porcelain = git_run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all", "-z"]
+    )
+    if porcelain.returncode != 0:
+        info["state"] = "error"
+        info["error"] = porcelain.stderr.strip() or "git status failed"
+        return info
+
     dirty_paths: set[str] = set()
-    if porcelain.returncode == 0 and porcelain.stdout:
+    if porcelain.stdout:
         entries = porcelain.stdout.split("\0")
         i = 0
         while i < len(entries):
@@ -495,7 +581,9 @@ def inspect_component_status(
                 rel = entry[3:]
                 dirty_paths.add(rel)
                 if code[0] in ("R", "C") or code[1] in ("R", "C"):
-                    i += 1  # skip rename source
+                    if i + 1 < len(entries) and entries[i + 1]:
+                        dirty_paths.add(entries[i + 1])
+                    i += 1
             i += 1
 
     if not dirty_paths:
@@ -513,8 +601,8 @@ def inspect_component_status(
         env = git_environment(Path(tmp) / "index")
         git_run(["git", "-C", str(repo), "read-tree", expected_tree], env=env, check=True)
         # Update only the relevant paths from working tree to compare exact contents.
-        existing = [p for p in check_paths if (repo / p).exists()]
-        removed = [p for p in check_paths if not (repo / p).exists()]
+        existing = [p for p in check_paths if os.path.lexists(repo / p)]
+        removed = [p for p in check_paths if not os.path.lexists(repo / p)]
         if existing:
             git_run(
                 ["git", "-C", str(repo), "update-index", "--add", "--replace", "-z", "--stdin"],
@@ -535,6 +623,10 @@ def inspect_component_status(
             ["git", "-C", str(repo), "diff", "--cached", "--name-only", expected_tree],
             env=env,
         )
+        if diff.returncode != 0:
+            info["state"] = "error"
+            info["error"] = diff.stderr.strip() or "git diff --cached failed"
+            return info
         drifted = [line for line in diff.stdout.splitlines() if line]
         if not drifted:
             info["state"] = "applied"
@@ -548,7 +640,7 @@ def inspect_component_status(
 
 
 def diff_single_file_against_head(
-    repo: Path, revision: str, rel_path: str, *, context: int = 3
+    repo: Path, revision: str, rel_path: str, *, context: int = 3, allow_missing: bool = False
 ) -> str:
     """Produce a clean unified git diff for ONE file relative to revision.
 
@@ -568,7 +660,7 @@ def diff_single_file_against_head(
             == 0
         )
 
-        if full_path.exists():
+        if os.path.lexists(full_path):
             git_run(
                 ["git", "-C", str(repo), "update-index", "--add", "--replace", "--", rel_path],
                 env=env,
@@ -580,6 +672,8 @@ def diff_single_file_against_head(
                 env=env,
                 check=True,
             )
+        elif allow_missing:
+            return ""
         else:
             raise PatchkitError(f"{rel_path}: neither in {revision[:12]} nor in working tree")
 
@@ -592,6 +686,7 @@ def diff_single_file_against_head(
                 str(repo),
                 "diff",
                 "--cached",
+                "--binary",
                 "--no-ext-diff",
                 "--no-color",
                 f"-U{context}",
@@ -600,10 +695,13 @@ def diff_single_file_against_head(
                 rel_path,
             ],
             env=env,
+            text=False,
         )
         if res.returncode != 0:
-            raise PatchkitError(f"git diff failed for {rel_path}: {res.stderr.strip()}")
-        return res.stdout
+            raise PatchkitError(
+                f"git diff failed for {rel_path}: {res.stderr.decode('utf-8', errors='replace').strip()}"
+            )
+        return res.stdout.decode("utf-8")
 
 
 def splice_sections(
@@ -622,6 +720,23 @@ def splice_sections(
 
     actions: list[str] = []
     for sec in sections:
+        is_rename = (not sec.is_new) and (not sec.is_deleted) and (sec.old_path != sec.new_path)
+        if is_rename and ((sec.old_path in remaining) ^ (sec.new_path in remaining)):
+            raise PatchkitError(
+                f"cannot resplice only one side of rename {sec.old_path} -> {sec.new_path}; "
+                "pass both old and new paths"
+            )
+        if is_rename and sec.old_path in remaining and sec.new_path in remaining:
+            for side in (sec.old_path, sec.new_path):
+                new_text = remaining.pop(side)
+                if new_text:
+                    if not new_text.endswith("\n"):
+                        new_text += "\n"
+                    out_chunks.append(new_text)
+                    actions.append(f"updated {side}")
+                else:
+                    actions.append(f"removed {side} (matches upstream)")
+            continue
         key = sec.canonical_path
         if key in remaining:
             new_text = remaining.pop(key)
@@ -663,23 +778,38 @@ def verify_round_trip(
             apply_res = git_run(
                 ["git", "-C", str(repo), "apply", "--cached", "--whitespace=nowarn", "-"],
                 env=env,
-                input_data=render(patch_text),
+                input_data=render(patch_text).encode("utf-8"),
+                text=False,
             )
             if apply_res.returncode != 0:
+                stderr = apply_res.stderr.decode("utf-8", errors="replace").strip()
                 raise PatchkitError(
-                    f"respliced patch does not apply cleanly to {revision[:12]}:\n{apply_res.stderr.strip()}"
+                    f"respliced patch does not apply cleanly to {revision[:12]}:\n{stderr}"
                 )
         tree = git_run(["git", "-C", str(repo), "write-tree"], env=env, check=True).stdout.strip()
         for rel in check_files:
             disk_path = repo / rel
+            ls_res = git_run(
+                ["git", "-C", str(repo), "ls-tree", tree, "--", rel],
+                env=env,
+            )
+            tree_mode = ls_res.stdout.split()[0] if ls_res.returncode == 0 and ls_res.stdout.strip() else None
             blob_res = git_run(
                 ["git", "-C", str(repo), "cat-file", "blob", f"{tree}:{rel}"],
                 env=env,
                 text=False,
             )
-            if disk_path.exists():
-                if blob_res.returncode != 0:
-                    raise PatchkitError(f"round-trip failed: {rel} missing after patch apply")
+            if disk_path.is_symlink():
+                if tree_mode != "120000" or blob_res.returncode != 0:
+                    raise PatchkitError(
+                        f"round-trip failed: {rel} symlink mode mismatch (got {tree_mode!r})"
+                    )
+                expected_target = os.fsencode(os.readlink(disk_path))
+                if blob_res.stdout != expected_target:
+                    raise PatchkitError(f"round-trip symlink target mismatch for {rel}")
+            elif os.path.lexists(disk_path):
+                if blob_res.returncode != 0 or tree_mode == "120000":
+                    raise PatchkitError(f"round-trip failed: {rel} missing or wrong type after patch apply")
                 disk_bytes = disk_path.read_bytes()
                 if blob_res.stdout != disk_bytes:
                     raise PatchkitError(
@@ -764,43 +894,83 @@ def overlay_install(
         )
 
     entry_name = name or dest.name
-    ledger = load_ledger(ledger_path)
-    backup_path: Path | None = None
-    had_original = dest.exists()
-    if had_original:
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        backup_path = (backup_dir / f"{entry_name}.{stamp}.bak").resolve()
-        shutil.copy2(dest, backup_path)
+    lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
+    with _file_lock(lock_path):
+        ledger = load_ledger(ledger_path)
+        prev = ledger.get("entries", {}).get(entry_name)
+        if prev is not None and Path(prev["target"]).resolve() != dest:
+            raise PatchkitError(
+                f"overlay name {entry_name!r} is already recorded for {prev['target']}; "
+                "roll it back first or choose a different --name"
+            )
 
-    # Atomic copy into destination directory.
-    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=".overlay-")
-    os.close(fd)
-    try:
-        shutil.copy2(src, tmp_name)
-        os.replace(tmp_name, dest)
-    except BaseException:
+        # Preserve original recovery state across repeated upgrades of the same target.
+        if prev is not None:
+            had_original = bool(prev.get("had_original"))
+            backup_path = Path(prev["backup"]) if prev.get("backup") else None
+        else:
+            backup_path = None
+            had_original = dest.exists()
+            if had_original:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+                backup_path = (backup_dir / f"{entry_name}.{stamp}.bak").resolve()
+                shutil.copy2(dest, backup_path)
+
+        # Keep an immediate pre-install snapshot so we can undo dest if save_ledger fails.
+        pre_install_tmp: str | None = None
+        existed_before_install = dest.exists()
+        if existed_before_install:
+            pfd, pre_install_tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".overlay-pre-")
+            os.close(pfd)
+            shutil.copy2(dest, pre_install_tmp)
+
+        fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=".overlay-")
+        os.close(fd)
         try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+            shutil.copy2(src, tmp_name)
+            os.replace(tmp_name, dest)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            if pre_install_tmp:
+                try:
+                    os.unlink(pre_install_tmp)
+                except OSError:
+                    pass
+            raise
 
-    head_res = git_run(["git", "-C", str(root), "rev-parse", "HEAD"])
-    commit = head_res.stdout.strip() if head_res.returncode == 0 else "unknown"
-    record = {
-        "name": entry_name,
-        "source": str(src),
-        "target": str(dest),
-        "sha256": sha256_file(dest),
-        "source_commit": commit,
-        "had_original": had_original,
-        "backup": str(backup_path) if backup_path else None,
-        "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    ledger["entries"][entry_name] = record
-    save_ledger(ledger_path, ledger)
-    return record
+        head_res = git_run(["git", "-C", str(root), "rev-parse", "HEAD"])
+        commit = head_res.stdout.strip() if head_res.returncode == 0 else "unknown"
+        record = {
+            "name": entry_name,
+            "source": str(src),
+            "target": str(dest),
+            "sha256": sha256_file(dest),
+            "source_commit": commit,
+            "had_original": had_original,
+            "backup": str(backup_path) if backup_path else None,
+            "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        ledger["entries"][entry_name] = record
+        try:
+            save_ledger(ledger_path, ledger)
+        except BaseException:
+            # Recover destination to pre-install state so disk and ledger never diverge.
+            if pre_install_tmp and os.path.exists(pre_install_tmp):
+                os.replace(pre_install_tmp, dest)
+            elif not existed_before_install:
+                dest.unlink(missing_ok=True)
+            raise
+        finally:
+            if pre_install_tmp and os.path.exists(pre_install_tmp):
+                try:
+                    os.unlink(pre_install_tmp)
+                except OSError:
+                    pass
+        return record
 
 
 def overlay_rollback(
@@ -822,41 +992,44 @@ def overlay_rollback(
                 "close them first or pass --allow-running"
             )
 
-    ledger = load_ledger(ledger_path)
-    entries = ledger.get("entries", {})
-    targets = list(entries.keys()) if rollback_all else [name]
-    restored: list[str] = []
+    lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
+    with _file_lock(lock_path):
+        ledger = load_ledger(ledger_path)
+        entries = ledger.get("entries", {})
+        targets = list(entries.keys()) if rollback_all else [name]
+        restored: list[str] = []
 
-    for key in targets:
-        if key not in entries:
-            raise PatchkitError(f"overlay not in ledger: {key}")
-        rec = entries[key]
-        dest = Path(rec["target"])
-        backup = Path(rec["backup"]) if rec.get("backup") else None
-        if rec.get("had_original"):
-            if not backup or not backup.is_file():
-                raise PatchkitError(f"backup missing for {key}: {backup}")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=".overlay-rb-")
-            os.close(fd)
-            try:
-                shutil.copy2(backup, tmp_name)
-                os.replace(tmp_name, dest)
-            except BaseException:
+        for key in targets:
+            if key not in entries:
+                raise PatchkitError(f"overlay not in ledger: {key}")
+            rec = entries[key]
+            dest = Path(rec["target"])
+            backup = Path(rec["backup"]) if rec.get("backup") else None
+            if rec.get("had_original"):
+                if not backup or not backup.is_file():
+                    raise PatchkitError(f"backup missing for {key}: {backup}")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=".overlay-rb-")
+                os.close(fd)
                 try:
-                    os.unlink(tmp_name)
-                except OSError:
-                    pass
-                raise
-            restored.append(f"restored {key} -> {dest}")
-        else:
-            if dest.exists():
-                dest.unlink()
-            restored.append(f"removed {key} ({dest}, had no prior file)")
-        del entries[key]
+                    shutil.copy2(backup, tmp_name)
+                    os.replace(tmp_name, dest)
+                except BaseException:
+                    try:
+                        os.unlink(tmp_name)
+                    except OSError:
+                        pass
+                    raise
+                restored.append(f"restored {key} -> {dest}")
+            else:
+                if dest.exists():
+                    dest.unlink()
+                restored.append(f"removed {key} ({dest}, had no prior file)")
+            del entries[key]
+            # Persist after each item so a later failure never leaves restored items stale.
+            save_ledger(ledger_path, ledger)
 
-    save_ledger(ledger_path, ledger)
-    return restored
+        return restored
 
 
 def overlay_status(ledger_path: Path) -> list[dict[str, Any]]:
@@ -908,6 +1081,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             details = f"drifted: {preview}{extra}"
         elif r["state"] == "wrong-rev":
             details = f"got {r.get('actual_rev', '')[:12]} want {r['expected_rev'][:12]}"
+        elif r["state"] == "error":
+            details = r.get("error", "git error")
         print(f"{r['component']:32s} {r['state']:13s} {hunk_col:7s} {details}")
 
     if drifts:
@@ -929,11 +1104,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if not patch_path.is_file():
             errors.append(f"{comp['patch']}: file missing")
             continue
-        text = patch_path.read_text(encoding="utf-8")
+        text = read_text_exact(patch_path)
         errors.extend(verify_hunk_counts(text, comp["patch"]))
-        numstat = git_run(["git", "apply", "--numstat", "-"], input_data=text)
+        numstat = git_run(["git", "apply", "--numstat", "-"], input_data=text.encode("utf-8"), text=False)
         if numstat.returncode != 0:
-            errors.append(f"{comp['patch']}: git apply --numstat failed: {numstat.stderr.strip()}")
+            stderr = numstat.stderr.decode("utf-8", errors="replace").strip()
+            errors.append(f"{comp['patch']}: git apply --numstat failed: {stderr}")
 
     drifts = manifest_drift(manifest, root)
     for d in drifts:
@@ -987,9 +1163,14 @@ def cmd_sync_manifest(args: argparse.Namespace) -> int:
 
     if not args.write:
         print(f"Dry-run: {len(drifts)} component(s) out of sync. Pass --write to update upstream/manifest.json.")
-        return 0
+        return 1 if any("error" in d for d in drifts) else 0
 
-    by_path = {d["component"]: d for d in drifts if "error" not in d}
+    unresolved = [d for d in drifts if "error" in d]
+    if unresolved:
+        names = ", ".join(d["patch"] for d in unresolved)
+        raise PatchkitError(f"cannot sync manifest with missing patch file(s): {names}")
+
+    by_path = {d["component"]: d for d in drifts}
     for comp in manifest["components"]:
         upd = by_path.get(comp["path"])
         if not upd:
@@ -1019,39 +1200,54 @@ def cmd_resplice(args: argparse.Namespace) -> int:
         )
 
     patch_path = root / comp["patch"]
-    original_patch = patch_path.read_text(encoding="utf-8") if patch_path.is_file() else ""
+    lock_path = patch_path.with_suffix(patch_path.suffix + ".lock")
+    with _file_lock(lock_path):
+        original_patch = read_text_exact(patch_path) if patch_path.is_file() else ""
+        _, existing_sections = split_patch_sections(original_patch)
+        patched_paths = {s.canonical_path for s in existing_sections} | {
+            s.old_path for s in existing_sections if s.old_path
+        }
 
-    replacements: dict[str, str] = {}
-    normalized_files: list[str] = []
-    for raw_file in args.files:
-        rel = raw_file.strip().lstrip("./")
-        normalized_files.append(rel)
-        replacements[rel] = diff_single_file_against_head(
-            repo, comp["revision"], rel, context=args.context
-        )
+        replacements: dict[str, str] = {}
+        normalized_files: list[str] = []
+        for raw_file in args.files:
+            rel = raw_file.strip().removeprefix("./")
+            normalized_files.append(rel)
+            replacements[rel] = diff_single_file_against_head(
+                repo,
+                comp["revision"],
+                rel,
+                context=args.context,
+                allow_missing=(rel in patched_paths),
+            )
 
-    new_patch, actions = splice_sections(original_patch, replacements)
-    verify_round_trip(repo, comp["revision"], new_patch, normalized_files)
+        new_patch, actions = splice_sections(original_patch, replacements)
+        if not new_patch.strip():
+            raise PatchkitError(
+                f"resplice would leave {comp['patch']} empty (which validate.py rejects); "
+                "patch left unchanged"
+            )
+        verify_round_trip(repo, comp["revision"], new_patch, normalized_files)
 
-    for act in actions:
-        print(f"  {act}")
-    print(f"Round-trip verified byte-for-byte against {comp['revision'][:12]} for {len(normalized_files)} file(s).")
+        for act in actions:
+            print(f"  {act}")
+        print(f"Round-trip verified byte-for-byte against {comp['revision'][:12]} for {len(normalized_files)} file(s).")
 
-    if not args.write:
-        print(f"Dry-run: pass --write to update {comp['patch']}")
-        return 0
+        if not args.write:
+            print(f"Dry-run: pass --write to update {comp['patch']}")
+            return 0
 
-    atomic_write_text(patch_path, new_patch)
-    print(f"Wrote {comp['patch']}")
+        atomic_write_text(patch_path, new_patch)
+        print(f"Wrote {comp['patch']}")
 
-    if args.sync_manifest:
-        actual_mod, actual_new = patch_file_inventory(new_patch)
-        if "modified_files" in comp:
-            comp["modified_files"] = actual_mod
-        if "new_files" in comp:
-            comp["new_files"] = actual_new
-        save_manifest(manifest, root)
-        print(f"Synced upstream/manifest.json for {comp['path']} (modified={actual_mod}, new={len(actual_new)})")
+        if args.sync_manifest:
+            actual_mod, actual_new = patch_file_inventory(new_patch)
+            if "modified_files" in comp:
+                comp["modified_files"] = actual_mod
+            if "new_files" in comp:
+                comp["new_files"] = actual_new
+            save_manifest(manifest, root)
+            print(f"Synced upstream/manifest.json for {comp['path']} (modified={actual_mod}, new={len(actual_new)})")
     return 0
 
 
@@ -1101,6 +1297,16 @@ def cmd_overlay(args: argparse.Namespace) -> int:
     raise PatchkitError(f"unknown overlay command: {args.overlay_cmd}")
 
 
+def _positive_int(raw: str) -> int:
+    try:
+        val = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer: {raw!r}") from exc
+    if val <= 0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {val}")
+    return val
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Patch-stack and overlay manager for darling-lol.")
     parser.add_argument("--root", type=Path, default=ROOT, help="darling-lol repository root")
@@ -1127,7 +1333,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_resplice.add_argument("component", help="Component path, leaf name, or patch stem (e.g. darlingserver, indium)")
     p_resplice.add_argument("files", nargs="+", help="File path(s) relative to the component root")
     p_resplice.add_argument("--source", type=Path, default=ROOT / "build/darling-src")
-    p_resplice.add_argument("--context", type=int, default=3, help="Unified diff context lines (default: 3)")
+    p_resplice.add_argument("--context", type=_positive_int, default=3, help="Unified diff context lines (default: 3)")
     p_resplice.add_argument("--write", action="store_true", help="Write the updated patch file")
     p_resplice.add_argument("--sync-manifest", action="store_true", help="Also sync upstream/manifest.json")
     p_resplice.set_defaults(func=cmd_resplice)
