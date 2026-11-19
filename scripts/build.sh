@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
-repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$repo"
+# The physical path, not the one the script was reached through: CMake records
+# the logical $PWD in every target's flags, so building the same checkout once
+# through a symlink (~/dev -> ~/Development) and once without rewrote all of
+# them and recompiled everything.
+repo=$(CDPATH= cd -P -- "$(dirname -- "$0")/.." && pwd -P)
+cd -P "$repo"
 # Refuse before the long fetch and build when the host cannot build or run the result.
 # Runs before configure.py so an old interpreter gets this message, not a traceback.
 [ "${RCLOL_SKIP_PREFLIGHT:-0}" = 1 ] || python3 scripts/preflight.py
