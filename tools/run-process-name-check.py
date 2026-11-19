@@ -33,6 +33,8 @@ NAME = 'process-name-probe-long-executable'
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument('--kernel', type=Path, help='libsystem_kernel.dylib to test instead of the installed one')
+parser.add_argument('--runtime', type=Path, help='user runtime directory to test '
+                    '(default: <prefix>/Users/<guest user> from build/config.json)')
 args = parser.parse_args()
 
 out = root / 'build/process-name-check'
@@ -52,12 +54,17 @@ subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FL
 subprocess.run(['clang', '-target', 'x86_64-apple-macosx11.0', '-fuse-ld=lld', '-nostdlib',
                 '-isysroot', sdk, str(out / 'probe.o'), '-lSystem', '-o', str(probe)], check=True)
 
-runtime = Path.home() / '.darling/Users' / config.get('guest_user', os.environ['USER'])
+runtime = (args.runtime or Path(config.get('prefix', Path.home() / '.darling')) / 'Users'
+           / config.get('guest_user', os.environ['USER'])).resolve()
 libraries = runtime / 'RuntimeLibraries'
 work = Path(tempfile.mkdtemp(prefix='run-', dir=out))
 if args.kernel:
     libraries = work / 'RuntimeLibraries'
-    shutil.copytree(runtime / 'RuntimeLibraries', libraries, symlinks=True)
+    if (runtime / 'RuntimeLibraries').is_dir():
+        shutil.copytree(runtime / 'RuntimeLibraries', libraries, symlinks=True)
+    else:
+        # A runtime without overlays still tests the candidate against the bare SDK.
+        libraries.mkdir()
     shutil.copy2(args.kernel, libraries / 'libsystem_kernel.dylib')
 
 env = {k: os.environ[k] for k in ('PATH', 'HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR',
