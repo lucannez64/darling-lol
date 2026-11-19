@@ -169,7 +169,7 @@ git pull
 
 For a Toolbox install, run these commands from the host. The updater detects the recorded container and runs the update inside it.
 
-`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
+`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. Background steps log their output by default. Pass `--verbose` to stream all output to the terminal. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
 
 A built runtime can also be shipped without the toolchain via `tools/runtime-package.py`: see [prebuilt runtime overlays](docs/PACKAGING.md).
 
