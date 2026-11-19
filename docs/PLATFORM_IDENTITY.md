@@ -219,6 +219,14 @@ PCIe and VRAM from `compat.gpu.vram` (4096 by default); an Intel card is reporte
 as `Intel UHD Graphics 630` on bus Built-In with shared memory. NVIDIA cards keep
 host-derived names in both profiles. The profiler uses the PCI ID database and
 can fall back to `NVIDIA Graphics`; Metal uses the Vulkan device name, so the
-two names may differ. `RCLOL_GPU_*`
+two names may differ. IOKit also publishes a synthetic `IOPCIDevice` with the
+same `vendor-id`/`device-id` values and an `IOGraphicsAccelerator2` child whose
+registry ID matches `-[MTLDevice registryID]`, so Metal and Dawn resolve the GPU
+without the host driver having to publish anything in the guest registry. When
+the host has more than one card and `/tmp/metal-gpu`/`METAL_INDIUM_GPU` does not
+single one out, or when the selector may name a software device, iokitd
+publishes no GPU entry instead of presenting another GPU's IDs, and Dawn falls
+back to the Metal device name.
+`RCLOL_GPU_*`
 variables are the launcher-to-guest handoff; `RCLOL_SYSTEM_ROOT` is a test-only
 host-root override.

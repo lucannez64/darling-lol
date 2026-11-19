@@ -1,5 +1,8 @@
 #import <Foundation/Foundation.h>
 #include "IORegistryEntry.h"
+#include "IOService.h"
+#include "IOGraphicsAccelerator.h"
+#include "IOGraphicsAcceleratorIds.h"
 #include "PlatformIdentity.h"
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOKitKeys.h>
@@ -62,6 +65,59 @@ static void checkProperties(Fixture& fixture) {
     memset(key, 'x', sizeof(key)); length = sizeof(buffer);
     assert(is_io_registry_entry_get_property_bytes(fixture.port(), key, buffer, &length) == kIOReturnBadArgument && length == 0);
 }
+struct ServiceFixture : IOService {
+    NSDictionary* matchingDictionary() override {
+        return @{@"IOProviderClass": @"ServiceFixture", @"IOClass": @"ServiceFixture"};
+    }
+};
+
+static void checkGpuRegistry() {
+    ServiceFixture service;
+    uint64_t natural = service.id();
+    assert(service.matches(@{@"IORegistryEntryID": @(natural)}));
+    assert(!service.matches(@{@"IORegistryEntryID": @(natural + 1)}));
+    assert(!service.matches(@{@"IORegistryEntryID": @"not a number"}));
+    assert(service.assignId(0x100000777ULL));
+    IORegistryEntry* found = IORegistryEntry::findById(0x100000777ULL);
+    assert(found == &service);
+    found->release();
+
+    IOGraphicsAccelerator::registerSelf(ServiceRegistry::instance());
+    IORegistryEntry* gpu = IORegistryEntry::findById(kIOGraphicsAcceleratorRegistryID);
+    IOGraphicsAcceleratorIds::PciId expected = IOGraphicsAcceleratorIds::acceleratorIds();
+    // An unknown identity publishes no entry, so Dawn falls back to the Metal
+    // device name instead of reading vendor 0.
+    if (expected.vendor == 0 && expected.device == 0) {
+        assert(gpu == nullptr);
+        return;
+    }
+    assert(gpu && !strcmp(gpu->className(), "IOGraphicsAccelerator2"));
+    auto parents = gpu->getParents(kIOServicePlane);
+    assert(parents.size() == 1 && !strcmp((*parents.begin())->className(), "IOPCIDevice"));
+    NSData* vendor = (*parents.begin())->getProperties()[@"vendor-id"];
+    NSData* device = (*parents.begin())->getProperties()[@"device-id"];
+    assert([vendor length] == 4 && [device length] == 4);
+    uint32_t vendorId = 0, deviceId = 0;
+    memcpy(&vendorId, [vendor bytes], 4);
+    memcpy(&deviceId, [device bytes], 4);
+    // The entry must describe the device Metal selected: never another card's
+    // IDs. Passthrough values are checked against the host identity, so any
+    // vendor works; the two compatibility substitutions are validated separately.
+    assert(vendorId == expected.vendor && deviceId == expected.device);
+    bool known = false;
+    for (const auto& card : IOGraphicsAcceleratorIds::hostCards())
+        known = known || (card.vendor == vendorId && card.device == deviceId);
+    known = known || (vendorId == 0x1002 && deviceId == 0x7340);
+    known = known || (vendorId == 0x8086 && deviceId == 0x3e9b);
+    assert(known);
+    assert(vendorId != 0);
+    gpu->release();
+
+    // The pinned ID is exclusive, so no later entry can steal the accelerator's.
+    ServiceFixture other;
+    assert(!other.assignId(kIOGraphicsAcceleratorRegistryID));
+}
+
 static void checkIdentity() {
     NSString* uuid = @"00112233-4455-4677-8899-AABBCCDDEEFF";
     auto* valid = DarlingPlatformIdentity::properties(@{@"schema": @1, @"properties": @{@"model": @"ExampleModel1,1", @"provisioning_UDID": uuid, @"IOPlatformUUID": uuid, @"IOPlatformSerialNumber": @"SUPPLIED"}});
@@ -162,7 +218,7 @@ int main() {
         assert(IORegistryEntry::fromPath("OwnedPlane:/Child/Deleted") == deleted.get());
         deleted.reset();
         assert(!IORegistryEntry::fromPath("OwnedPlane:/Child/Deleted"));
-        checkProperties(fixture); checkIdentity();
+        checkProperties(fixture); checkIdentity(); checkGpuRegistry();
         struct Serializable : IORegistryEntry {
             NSDictionary* getProperties() override { return @{@"text": @"value", @"data": [NSData dataWithBytes:"abc" length:3], @"number": @123, @"array": @[@YES, @"x"]}; }
         } serializable;
@@ -195,7 +251,7 @@ int main() {
                 CFTypeRef decoded = IOCFUnserializeWithSize(bytes, count, kCFAllocatorDefault, 0, &error);
                 assert(decoded && !error && [(NSDictionary*)decoded isEqual:serializable.getProperties()]);
                 CFRelease(decoded); vm_deallocate(mach_task_self(), (vm_address_t)bytes, count);
-                puts("REGISTRY_COMPAT paths=1 planes=1 graph_lifetime=1 cycles=1 ool_roundtrips=1000 ipc_roundtrips=100 property_bounds=1 numeric_widths=1 serialization=1 identity_schema=1 pass=1");
+                puts("REGISTRY_COMPAT paths=1 planes=1 graph_lifetime=1 cycles=1 ool_roundtrips=1000 ipc_roundtrips=100 property_bounds=1 numeric_widths=1 serialization=1 identity_schema=1 gpu_registry=1 pass=1");
                 fflush(stdout);
                 _Exit(0);
             }
