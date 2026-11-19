@@ -51,6 +51,35 @@ SENSITIVE = re.compile(
     r'auth(?:orization)?|credential|cookie|session|bearer)')
 URL_USERINFO = re.compile(r'(://[^/:@\s]+:)[^/@\s]+@')
 
+# Client and diagnostic logs that reporters were asked for one at a time.
+# Each entry: bundle folder, directory below the prefix (may hold one glob
+# component), file pattern searched recursively, newest files to keep.
+LEAGUE_LOGS = 'Applications/League of Legends.app/Contents/LoL/Logs'
+CLIENT_LOG_SOURCES = (
+    ('riot-client', 'Users/*/Library/Logs/Riot Games/Riot Client', '*.log', 2),
+    ('league-client', LEAGUE_LOGS + '/LeagueClient Logs', '*_LeagueClient.log', 1),
+    ('league-client', LEAGUE_LOGS + '/LeagueClient Logs', '*_LeagueClientUx.log', 1),
+    ('game', LEAGUE_LOGS + '/GameLogs', '*r3dlog*', 1),
+)
+# Guest /tmp is the prefix's private/tmp; Darling empties it on start, so these
+# describe the current or last session.
+GUEST_TMP_LOGS = ('metal-device.log', 'metal-errors.log', 'metal-trace.log', 'metal-validation.log',
+                  'lolsig.log', 'rclol-input-trace.log', 'rclol-game-decisions.log')
+HOST_TMP_LOGS = ('lolsig.log', 'rclol-game-decisions.log', 'rclol-cpuid-trace.log')
+CLIENT_LOG_TAIL_LINES = 3000
+# Riot logs carry session tokens, account ids and e-mail addresses. These are
+# masked even with --no-redact, which only keeps paths and names.
+LOG_SECRETS = (
+    (re.compile(r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*'), '<jwt>'),
+    (re.compile(r'(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}'), r'\1 <redacted>'),
+    (re.compile(r'(?i)(["\']?\b(?:[a-z_-]*token|password|passwd|secret|api[_-]?key|authorization|cookie|'
+                r'ssid|clid|csid|tdid|sub|puuid|account_?id|summoner_?id|game_?name|tag_?line|'
+                r'email|username)\b["\']?\s*[:=]\s*)("[^"]*"|\'[^\']*\'|[^\s,;&}\]]+)'),
+     r'\1"<redacted>"'),
+    (re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'), '<email>'),
+    (re.compile(r'(://[^/:@\s]+:)[^/@\s]+@'), r'\1<redacted>@'),
+)
+
 
 def read_tail(path, limit=LOG_TAIL_LINES):
     """Return the last lines without holding the whole log in memory."""
@@ -233,6 +262,54 @@ def scrub(text, home=None, username=None, hostname=None):
 LABEL = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 
 
+def mask_log_secrets(text):
+    for pattern, replacement in LOG_SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def newest_files(prefix, directory, pattern, count):
+    """The newest `count` files matching pattern below prefix/directory."""
+    found = []
+    for folder in Path(prefix).glob(directory):
+        try:
+            found.extend(path for path in folder.rglob(pattern) if path.is_file())
+        except OSError:
+            continue
+    found.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return found[:count]
+
+
+def client_logs(prefix, host_tmp=Path('/tmp'), limit=CLIENT_LOG_TAIL_LINES):
+    """Riot/League client, game and guest diagnostic log tails, secrets masked.
+
+    Returns {bundle name: text} plus a list of what was looked for and missing,
+    so a reporter's bundle says which logs did not exist rather than leaving
+    the maintainer to ask for them.
+    """
+    entries, missing = {}, []
+    for folder, directory, pattern, count in CLIENT_LOG_SOURCES:
+        paths = newest_files(prefix, directory, pattern, count)
+        if not paths:
+            missing.append('%s/%s' % (directory, pattern))
+        for path in paths:
+            text, error = read_tail(path, limit)
+            stamp = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(path.stat().st_mtime))
+            header = '# %s (modified %s, last %d lines)\n' % (path.name, stamp, limit)
+            entries['logs/%s/%s.tail' % (folder, path.name)] = header + (
+                mask_log_secrets(text) if text is not None else '# unavailable: %s\n' % error)
+    for folder, root, names in (('guest-tmp', Path(prefix) / 'private/tmp', GUEST_TMP_LOGS),
+                                ('host-tmp', Path(host_tmp), HOST_TMP_LOGS)):
+        for name in names:
+            path = root / name
+            if not path.is_file():
+                continue
+            text, error = read_tail(path, limit)
+            entries['logs/%s/%s.tail' % (folder, name)] = (
+                mask_log_secrets(text) if text is not None else '# unavailable: %s\n' % error)
+    return entries, missing
+
+
 def bundle_name(label=None):
     if label is not None and (not LABEL.match(label) or label in ('.', '..')):
         raise ValueError('label may contain only letters, digits, dot, underscore and dash')
@@ -252,7 +329,8 @@ def default_launch_log(env):
 
 
 def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_processes=False,
-          proc_root=Path('/proc'), which=None, env=None):
+          proc_root=Path('/proc'), which=None, env=None, include_client_logs=True,
+          host_tmp=Path('/tmp')):
     """Write the bundle and return its path and manifest."""
     env = dict(os.environ if env is None else env)
     which = which or shutil.which
@@ -262,7 +340,7 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
     archive = out_dir / bundle_name(label)
     launch_log = Path(launch_log).expanduser() if launch_log else default_launch_log(env)
 
-    facts = doctor.gather(prefix=prefix, env=env, proc_root=proc_root, which=which)
+    facts = doctor.gather(prefix=prefix, env=env, proc_root=proc_root, which=which, host_tmp=host_tmp)
     checks = doctor.run_checks(facts)
     rows = process_snapshot(proc_root)
     relevant = relevant_processes(rows)
@@ -281,6 +359,10 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
         'display.txt': display_state(which, env),
         'coredumps.txt': coredumps(which),
     }
+    missing_logs = []
+    if include_client_logs:
+        extra, missing_logs = client_logs(prefix, host_tmp)
+        entries.update(extra)
     if redact:
         workspace = facts.get('workspace', '')
 
@@ -309,6 +391,8 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
             'included': 'all' if all_processes else 'runtime-client-zombies',
         },
         'files': sorted(entries),
+        'client_logs': ('included' if include_client_logs else 'omitted (--no-client-logs)'),
+        'client_logs_missing': missing_logs,
     }
     if redact:
         manifest['host']['distro'] = scrub(facts['host']['distro'], username=env.get('USER'))
@@ -318,6 +402,7 @@ def build(prefix, out_dir, launch_log=None, label=None, redact=True, all_process
         (root / 'logs').mkdir()
         (root / 'report.json').write_text(json.dumps(manifest, indent=2) + '\n')
         for name, text in entries.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
             (root / name).write_text(text)
         (root / 'README.txt').write_text(readme(manifest))
         with tarfile.open(archive, 'w:gz') as tar:
@@ -359,8 +444,16 @@ What is inside:
 - logs/kernel.txt: graphics-related kernel messages
 - display.txt: monitors and windows (or an explanation when unavailable)
 - coredumps.txt: recent systemd-coredump entries, if any
+- logs/riot-client, logs/league-client, logs/game: tails of the newest Riot
+  Client, LeagueClient/LeagueClientUx and game (r3dlog) logs
+- logs/guest-tmp, logs/host-tmp: Metal, signal, input-trace and game-switch
+  logs from /tmp, when they exist
+  (report.json lists the client logs that were looked for and not found;
+  --no-client-logs leaves all of these out)
 
-Environment variables are not collected. Credentials in command-line arguments
+Environment variables are not collected. Session tokens, account ids, game
+names and e-mail addresses in the client logs are masked, even with
+--no-redact. Credentials in command-line arguments
 (--token, --password, URL userinfo) are masked. Home directory, user name and
 host name are replaced with placeholders unless the bundle was created with
 --no-redact. The archive is mode 0600 and carries no owner metadata.
@@ -386,6 +479,8 @@ def main(argv=None):
     parser.add_argument('--all-processes', action='store_true',
                         help='include every process owned by this user, not only the runtime/client tree')
     parser.add_argument('--no-redact', action='store_true', help='keep the real home path, user and host name')
+    parser.add_argument('--no-client-logs', action='store_true',
+                        help='leave out the Riot/League client, game and /tmp diagnostic logs')
     parser.add_argument('--json', action='store_true', help='print the manifest')
     args = parser.parse_args(argv)
 
@@ -397,6 +492,7 @@ def main(argv=None):
             label=args.label,
             redact=not args.no_redact,
             all_processes=args.all_processes,
+            include_client_logs=not args.no_client_logs,
         )
     except ValueError as error:
         parser.error(str(error))

@@ -168,6 +168,8 @@ class BuildTests(unittest.TestCase):
         self.launch = self.root / 'launch.log'
         self.launch.write_text('launcher line\n')
         self.env = {'USER': 'joe', 'HOME': str(Path.home()), 'SECRET_TOKEN': 'do-not-publish'}
+        self.host_tmp = self.root / 'host-tmp'
+        self.host_tmp.mkdir()
         # The default launch log falls back to this checkout's build/; never read the real one.
         checkout = patch.object(crash_report, 'CHECKOUT', self.root / 'checkout')
         checkout.start()
@@ -178,7 +180,8 @@ class BuildTests(unittest.TestCase):
 
     def build(self, **overrides):
         options = dict(prefix=self.prefix, out_dir=self.out, launch_log=self.launch,
-                       proc_root=self.proc, which=lambda name: None, env=self.env)
+                       proc_root=self.proc, which=lambda name: None, env=self.env,
+                       host_tmp=self.host_tmp)
         options.update(overrides)
         return crash_report.build(**options)
 
@@ -251,6 +254,73 @@ class BuildTests(unittest.TestCase):
         with tarfile.open(archive) as tar:
             text = tar.extractfile('lol-report/logs/dserver.log.tail').read().decode()
         self.assertIn(str(Path.home()), text)
+
+    def add_client_logs(self):
+        riot = self.prefix / 'Users/joe/Library/Logs/Riot Games/Riot Client'
+        riot.mkdir(parents=True)
+        (riot / 'Riot Client.log').write_text(
+            'GET https://auth.test/userinfo Authorization: Bearer abcdefghijkl123456\n'
+            'session {"access_token": "synthetic-access", "puuid": "synthetic-puuid"}\n'
+            'id_token=eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4eHh4eHgifQ.c2lnbmF0dXJl\n'
+            'mail joe.reporter@example.test region=EUW\n')
+        old = riot / 'old.log'
+        old.write_text('old\n')
+        newer = riot / 'newer.log'
+        newer.write_text('newer\n')
+        os.utime(old, (1, 1))
+        lol = self.prefix / crash_report.LEAGUE_LOGS
+        (lol / 'LeagueClient Logs').mkdir(parents=True)
+        (lol / 'LeagueClient Logs/2026-11-15T23-39-46_731_LeagueClient.log').write_text('client line\n')
+        (lol / 'GameLogs/2026-11-15T23-40-00').mkdir(parents=True)
+        (lol / 'GameLogs/2026-11-15T23-40-00/2026-11-15T23-40-00_r3dlog.txt').write_text(
+            'Failed to compile shader\n')
+        guest_tmp = self.prefix / 'private/tmp'
+        guest_tmp.mkdir(parents=True)
+        (guest_tmp / 'metal-device.log').write_text('selected name: NVIDIA\n')
+        (self.host_tmp / 'rclol-game-decisions.log').write_text('local_semaphores=1\n')
+
+    def read_bundle(self, archive):
+        with tarfile.open(archive) as tar:
+            return {member.name: tar.extractfile(member).read().decode()
+                    for member in tar.getmembers() if member.isfile()}
+
+    def test_client_logs_are_collected(self):
+        self.add_client_logs()
+        archive, manifest = self.build()
+        files = self.read_bundle(archive)
+        self.assertIn('lol-report/logs/riot-client/Riot Client.log.tail', files)
+        self.assertIn('lol-report/logs/riot-client/newer.log.tail', files)
+        self.assertNotIn('lol-report/logs/riot-client/old.log.tail', files)
+        self.assertIn('client line', files[
+            'lol-report/logs/league-client/2026-11-15T23-39-46_731_LeagueClient.log.tail'])
+        self.assertIn('Failed to compile shader', files[
+            'lol-report/logs/game/2026-11-15T23-40-00_r3dlog.txt.tail'])
+        self.assertIn('NVIDIA', files['lol-report/logs/guest-tmp/metal-device.log.tail'])
+        self.assertIn('local_semaphores=1', files['lol-report/logs/host-tmp/rclol-game-decisions.log.tail'])
+        self.assertEqual(manifest['client_logs'], 'included')
+        self.assertEqual(manifest['client_logs_missing'],
+                         [crash_report.LEAGUE_LOGS + '/LeagueClient Logs/*_LeagueClientUx.log'])
+
+    def test_client_log_secrets_are_masked_even_without_redaction(self):
+        self.add_client_logs()
+        archive, _ = self.build(redact=False)
+        text = self.read_bundle(archive)['lol-report/logs/riot-client/Riot Client.log.tail']
+        for secret in ('abcdefghijkl123456', 'synthetic-access', 'synthetic-puuid',
+                       'eyJhbGciOiJSUzI1NiJ9', 'joe.reporter@example.test'):
+            self.assertNotIn(secret, text)
+        self.assertIn('region=EUW', text)
+        self.assertIn('https://auth.test/userinfo', text)
+
+    def test_client_logs_can_be_left_out(self):
+        self.add_client_logs()
+        archive, manifest = self.build(include_client_logs=False)
+        self.assertFalse(any('/riot-client/' in name or '-tmp/' in name
+                             for name in self.read_bundle(archive)))
+        self.assertIn('omitted', manifest['client_logs'])
+
+    def test_missing_client_logs_are_listed(self):
+        _, manifest = self.build()
+        self.assertEqual(len(manifest['client_logs_missing']), len(crash_report.CLIENT_LOG_SOURCES))
 
     def test_missing_logs_are_explained(self):
         archive, manifest = self.build(launch_log=None)

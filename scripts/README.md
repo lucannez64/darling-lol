@@ -34,6 +34,7 @@ sources in `tools/` and `scripts/`, never the generated copies.
 |---|---|
 | `validate.py` | Audit tracked source, rendered Python/shell syntax, pinned revisions and patches. |
 | `prepare.py` | Fetch pinned Darling sources and apply patches; `--check-only` validates applicability. |
+| `patchkit.py` | Patch-stack status, hunk/manifest verification, single-file resplice and overlay install/rollback ledger. |
 | `configure.py` | Render local paths, region and locale into `build/config.json` and `build/runtime/tools/*`. |
 | `agent-context.py` | Print the `AGENTS.md` index and verify its paths, scripts and launch flags still exist. |
 
