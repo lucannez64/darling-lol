@@ -2842,7 +2842,7 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..5554abd 100644
+index f273989..3f7ae99 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,13 +9,19 @@
@@ -2983,7 +2983,7 @@ index f273989..5554abd 100644
  static const struct host_basic_info* gethostinfo(void)
  {
  	static struct host_basic_info hinfo;
-@@ -69,13 +155,67 @@ static const struct host_basic_info* gethostinfo(void)
+@@ -69,13 +155,68 @@ static const struct host_basic_info* gethostinfo(void)
  		mach_port_t hself;
  
  		hself = mach_host_self();
@@ -3016,10 +3016,11 @@ index f273989..5554abd 100644
 +			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +		}
-+		extern char* getenv(const char*);
-+		const char* memory = getenv("RCLOL_MEMORY_BYTES");
-+		if (memory != NULL && memory[0] != '\0')
-+			hinfo.max_mem = __simple_atoi(memory, NULL);
++		// Not getenv(): host_info() reaches this before libc sets up environ
++		// (a NULL-environ getenv crashed launchd at boot).
++		unsigned long long memory = darling_configured_memory_bytes();
++		if (memory != 0)
++			hinfo.max_mem = memory;
  	}
  
  	return &hinfo;
@@ -3052,7 +3053,7 @@ index f273989..5554abd 100644
  sysctl_handler(handle_availcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -83,6 +223,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +224,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3066,7 +3067,7 @@ index f273989..5554abd 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +258,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +259,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3084,7 +3085,7 @@ index f273989..5554abd 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +327,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +328,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3149,7 +3150,7 @@ index f273989..5554abd 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +392,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +393,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -9851,10 +9852,10 @@ index a26ae39..0fb6d6a 100644
  	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
 new file mode 100644
-index 0000000..6533863
+index 0000000..5933eb2
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,54 @@
 +#ifndef DARLING_LOL_CPU_IDENTITY_H
 +#define DARLING_LOL_CPU_IDENTITY_H
 +
@@ -9903,13 +9904,18 @@ index 0000000..6533863
 +// owned by this module.
 +const char* darling_configured_cpu_brand(void);
 +
++// The profile's memory size from RCLOL_MEMORY_BYTES, or 0 when it is unset,
++// empty or not a number. Like the profile check, safe before the C library is
++// initialized (host_info can run that early, from any process including launchd).
++unsigned long long darling_configured_memory_bytes(void);
++
 +#endif // DARLING_LOL_CPU_IDENTITY_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
 new file mode 100644
-index 0000000..bfe2626
+index 0000000..b81f674
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,170 @@
 +// darling-lol: the shared compatibility CPU identity. See common/cpu_identity.h.
 +
 +#include <darling/emulation/common/cpu_identity.h>
@@ -10048,6 +10054,37 @@ index 0000000..bfe2626
 +		}
 +	}
 +	return state == 1 ? copy : 0;
++}
++
++unsigned long long darling_configured_memory_bytes(void)
++{
++	static unsigned long long bytes;
++	static int state = 0; // 0: not resolved, 1: resolved
++
++	if (state == 0)
++	{
++		const char* value = darling_environ_value("RCLOL_MEMORY_BYTES");
++		unsigned long long parsed = 0;
++
++		if (value != 0)
++		{
++			for (; *value >= '0' && *value <= '9'; ++value)
++			{
++				unsigned long long digit = (unsigned long long) (*value - '0');
++				if (parsed > (~0ULL - digit) / 10)
++				{
++					parsed = 0;
++					break;
++				}
++				parsed = parsed * 10 + digit;
++			}
++			if (*value != '\0')
++				parsed = 0;
++		}
++		bytes = parsed;
++		state = 1;
++	}
++	return bytes;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
 new file mode 100644

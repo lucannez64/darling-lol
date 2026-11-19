@@ -151,6 +151,23 @@ kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo
 // sysctl_hw.c: what libsyscall's host_info wrapper writes into a reply.
 void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count);
 
+// dyld calls host_info(HOST_BASIC_INFO) before libc exists, so nothing the
+// wrapper reaches may call getenv() (a NULL-environ getenv crashed launchd at
+// boot). This getenv interposes libc's and fails the check while forbidden.
+extern char** environ;
+static int forbid_getenv = 0;
+char* getenv(const char* name) {
+    if (forbid_getenv) {
+        fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=host_info path called getenv(\"%s\")\n", name);
+        exit(1);
+    }
+    size_t len = strlen(name);
+    for (char** entry = environ; entry != NULL && *entry != NULL; ++entry)
+        if (strncmp(*entry, name, len) == 0 && (*entry)[len] == '=')
+            return *entry + len + 1;
+    return NULL;
+}
+
 // A minimal sysctl tree whose "hw" node is the real one; sysctl_unspec.c
 // walks it for sysctlbyname (name -> oid).
 static const struct known_sysctl root_children[] = {
@@ -508,6 +525,16 @@ int main(int argc, char** argv) {
         }
     } else if (strcmp(mode, "no-detect") == 0) {
         failDetection = 1;
+    }
+
+    // The first use of the cached host info must come through host_info, as
+    // dyld's does, with getenv forbidden.
+    {
+        struct host_basic_info early;
+        sentinel_reply(&early);
+        forbid_getenv = 1;
+        darling_host_basic_info_present(&early, HOST_BASIC_INFO_COUNT);
+        forbid_getenv = 0;
     }
 
     struct expect e;
