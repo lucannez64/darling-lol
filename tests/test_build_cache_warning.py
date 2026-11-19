@@ -16,6 +16,7 @@ SH = shutil.which('sh')
 
 STUB = '''#!/bin/sh
 printf '%s\\n' "$*" >> "${BUILD_STUB_LOG:?}"
+printf '%s\\n' "$PWD" >> "${BUILD_STUB_LOG:?}.pwd"
 '''
 
 
@@ -78,6 +79,21 @@ class BuildCacheWarningTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('scripts/prepare.py --jobs 8', self.log.read_text())
             self.log.unlink()
+
+    def test_configures_with_the_physical_path_through_a_symlink(self):
+        # CMake records the logical $PWD in every target's flags, so a checkout
+        # built once through a symlink (~/dev -> ~/Development) and once
+        # without recompiled everything. Both routes must configure the same path.
+        link = self.repo.parent / 'link'
+        link.symlink_to(self.repo.name)
+        self.env['PWD'] = str(link)
+        result = subprocess.run(
+            [SH, str(link / 'scripts' / 'build.sh')],
+            capture_output=True, text=True, check=False, cwd=link, env=self.env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = set(Path(f'{self.log}.pwd').read_text().splitlines())
+        self.assertEqual(seen, {os.path.realpath(self.repo)})
 
     def test_ignores_notfound_and_relative_paths(self):
         self.write_cache('X:FILEPATH=X-NOTFOUND', 'Y:FILEPATH=relativo/p')

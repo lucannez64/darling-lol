@@ -931,6 +931,8 @@ rm -rf build/darling-src/build
 ./scripts/build.sh
 ```
 
+A checkout reached through a symlink (for example `~/dev` pointing at `~/Development`) is not a move: `scripts/build.sh` configures CMake with the checkout's physical path however it was started. It used the path it was reached through, and CMake writes that into every target's flags, so building once through the symlink and once without recompiled everything. The first build after this change does that one last time if the existing cache holds the symlinked path.
+
 Patches are rendered at `scripts/prepare.py` time, so `@PROJECT_ROOT@` in a patched file keeps the old path until it runs again. `./scripts/build.sh` and `./scripts/update.sh` both do that; do not run `prepare.py` by hand while the checkout has other edits in `build/darling-src`, because it refuses rather than resetting them.
 
 The opt-in RenderDoc capture bridge (`RCLOL_RENDERDOC_CAPTURE=1`) is a developer diagnostic, not part of the installer. It expects `build/renderdoc/capture-bridge.so` and a RenderDoc build under `build/renderdoc/`, and neither setup script creates them. Without those files the capture is skipped and the game runs normally; the absolute path baked into the Indium patch is refreshed by the same `prepare.py` run.
