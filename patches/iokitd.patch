@@ -3684,3 +3684,407 @@ index 0000000..6c87959
 +}
 +}
 +#endif
+diff --git a/src/IOGraphicsAccelerator.h b/src/IOGraphicsAccelerator.h
+new file mode 100644
+--- /dev/null
++++ b/src/IOGraphicsAccelerator.h
+@@ -0,0 +1,62 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef IOKITD_IOGRAPHICSACCELERATOR_H
++#define IOKITD_IOGRAPHICSACCELERATOR_H
++
++#include "IOService.h"
++#include "ServiceRegistry.h"
++#include <cstdint>
++
++// -[MTLDevice registryID] reports this value and Dawn resolves it through
++// IOServiceGetMatchingService(IORegistryEntryIDMatching(...)). Keep it in sync
++// with MTLDeviceInfo::kDefaultRegistryID in patches/metal.patch.
++static constexpr uint64_t kIOGraphicsAcceleratorRegistryID = 0x100000439ULL;
++
++// The synthetic GPU entry. macOS publishes an IOPCIDevice with vendor-id/device-id
++// properties and an accelerator child; Metal and Dawn walk that pair to identify the
++// GPU. The host's Vulkan driver publishes nothing in the guest IORegistry, so iokitd
++// stands one in with the host PCI IDs (or the compatibility IDs the rest of the system
++// reports). The accelerator ID is pinned because -[MTLDevice registryID] uses it as a
++// lookup key.
++class IOPCIDevice : public IOService
++{
++public:
++	IOPCIDevice(uint32_t vendor, uint32_t device);
++
++	const char* className() const override;
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++
++private:
++	uint32_t m_vendor;
++	uint32_t m_device;
++};
++
++class IOGraphicsAccelerator : public IOService
++{
++public:
++	const char* className() const override;
++	bool conformsTo(const char* className) override;
++	NSDictionary* matchingDictionary() override;
++
++	static void registerSelf(ServiceRegistry* targetServiceRegistry);
++};
++
++#endif
+diff --git a/src/IOGraphicsAccelerator.mm b/src/IOGraphicsAccelerator.mm
+new file mode 100644
+--- /dev/null
++++ b/src/IOGraphicsAccelerator.mm
+@@ -0,0 +1,227 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "IOGraphicsAccelerator.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSString.h>
++#include <dirent.h>
++#include <os/log.h>
++#include <unistd.h>
++#include <algorithm>
++#include <cctype>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++// The guest has no /sys; the host's is exposed under the system root.
++static constexpr const char* kHostDrmRoots[] = {
++	"/Volumes/SystemRoot/sys/class/drm",
++	"/sys/class/drm",
++};
++// Written by scripts/install-runtime.sh from tools/system.prop; the profile
++// chooses the compatibility GPU identity (or the host one).
++static constexpr const char* kSystemProfile = "/private/etc/darling-system.prop";
++
++static NSData* dataForWord(uint32_t word)
++{
++	return [NSData dataWithBytes: &word length: sizeof(word)];
++}
++
++static bool readPciId(const std::string& directory, const char* name, uint32_t* value)
++{
++	FILE* file = fopen((directory + "/" + name).c_str(), "r");
++	if (!file)
++		return false;
++
++	unsigned int parsed = 0;
++	bool ok = fscanf(file, "%x", &parsed) == 1;
++	fclose(file);
++	if (ok)
++		*value = parsed;
++	return ok;
++}
++
++static bool isCardName(const char* name)
++{
++	if (strncmp(name, "card", 4) != 0 || name[4] == '\0')
++		return false;
++	for (const char* c = name + 4; *c; c++)
++		if (!isdigit((unsigned char) *c))
++			return false;
++	return true;
++}
++
++static bool hostGpuIds(uint32_t* vendor, uint32_t* device)
++{
++	for (const char* root : kHostDrmRoots)
++	{
++		DIR* directory = opendir(root);
++		if (!directory)
++			continue;
++
++		std::vector<std::string> cards;
++		while (struct dirent* entry = readdir(directory))
++			if (isCardName(entry->d_name))
++				cards.emplace_back(entry->d_name);
++		closedir(directory);
++
++		// card0 first; the numbering is the driver's probe order.
++		std::sort(cards.begin(), cards.end(), [](const std::string& left, const std::string& right) {
++			return atoi(left.c_str() + 4) < atoi(right.c_str() + 4);
++		});
++
++		for (const std::string& card : cards)
++		{
++			std::string deviceDirectory = std::string(root) + "/" + card + "/device";
++			uint32_t foundVendor = 0, foundDevice = 0;
++			if (readPciId(deviceDirectory, "vendor", &foundVendor)
++			    && readPciId(deviceDirectory, "device", &foundDevice))
++			{
++				*vendor = foundVendor;
++				*device = foundDevice;
++				return true;
++			}
++		}
++	}
++	return false;
++}
++
++static bool compatProfile()
++{
++	FILE* file = fopen(kSystemProfile, "r");
++	// tools/system.prop ships compat as the default; a missing copy keeps it.
++	if (!file)
++		return true;
++
++	char line[256];
++	bool compat = true;
++	while (fgets(line, sizeof(line), file))
++		if (strncmp(line, "profile=", 8) == 0)
++			compat = strncmp(line + 8, "compat", 6) == 0;
++	fclose(file);
++	return compat;
++}
++
++// Matches what tools/darling-system_profiler.sh reports for SPDisplaysDataType:
++// the compatibility profile presents the MacBookPro16,1 AMD and Intel GPUs and
++// keeps the host identity for NVIDIA, so the game does not take another
++// vendor's driver path.
++static void acceleratorIds(uint32_t* vendor, uint32_t* device)
++{
++	uint32_t hostVendor = 0, hostDevice = 0;
++	// Without the host DRM card the vendor is unknown; publish zero so Dawn falls
++	// back to the Metal device name instead of guessing another vendor's paths.
++	if (!hostGpuIds(&hostVendor, &hostDevice))
++	{
++		*vendor = 0;
++		*device = 0;
++		return;
++	}
++	if (!compatProfile() || (hostVendor != 0x1002 && hostVendor != 0x8086))
++	{
++		*vendor = hostVendor;
++		*device = hostDevice;
++		return;
++	}
++	if (hostVendor == 0x8086)
++	{
++		*vendor = 0x8086;
++		*device = 0x3e9b;
++		return;
++	}
++	*vendor = 0x1002;
++	*device = 0x7340;
++}
++
++IOPCIDevice::IOPCIDevice(uint32_t vendor, uint32_t device)
++: m_vendor(vendor), m_device(device)
++{
++}
++
++const char* IOPCIDevice::className() const
++{
++	return "IOPCIDevice";
++}
++
++NSDictionary* IOPCIDevice::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @"IOPCIDevice",
++		@"IOClass": @"IOPCIDevice",
++	};
++}
++
++NSDictionary* IOPCIDevice::getProperties()
++{
++	// macOS publishes both IDs as four-byte little-endian data; Dawn reads them
++	// from the accelerator's parent entry with IORegistryEntrySearchCFProperty.
++	return @{
++		@"vendor-id": dataForWord(m_vendor),
++		@"device-id": dataForWord(m_device),
++	};
++}
++
++const char* IOGraphicsAccelerator::className() const
++{
++	return "IOGraphicsAccelerator2";
++}
++
++bool IOGraphicsAccelerator::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IOAccelerator") == 0
++	    || std::strcmp(className, "IOGraphicsAccelerator") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++NSDictionary* IOGraphicsAccelerator::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @[ @"IOAccelerator", @"IOGraphicsAccelerator2" ],
++		@"IOClass": @"IOGraphicsAccelerator2",
++	};
++}
++
++void IOGraphicsAccelerator::registerSelf(ServiceRegistry* targetServiceRegistry)
++{
++	static bool registered = false;
++
++	if (registered)
++		return;
++	registered = true;
++
++	IOGraphicsAccelerator* accelerator = new IOGraphicsAccelerator;
++	uint32_t vendor = 0, device = 0;
++	acceleratorIds(&vendor, &device);
++	IOPCIDevice* pciDevice = new IOPCIDevice(vendor, device);
++
++	pciDevice->registerInPlane(kIOServicePlane, "GFX0@0", IORegistryEntry::root());
++	targetServiceRegistry->registerService(pciDevice);
++
++	if (!accelerator->assignId(kIOGraphicsAcceleratorRegistryID))
++		os_log_error(OS_LOG_DEFAULT, "iokitd: registry ID 0x%llx is already in use",
++		             (unsigned long long) kIOGraphicsAcceleratorRegistryID);
++
++	accelerator->registerInPlane(kIOServicePlane, "IOAccelerator", pciDevice);
++	targetServiceRegistry->registerService(accelerator);
++}
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -41,6 +41,7 @@
+ 	src/PowerSources.mm
+ 	src/PowerAssertionsX11.mm
+ 	src/IOPlatformExpertDevice.mm
++	src/IOGraphicsAccelerator.mm
+ 	src/IOPMrootDomain.mm
+ 	src/IOInterestNotification.mm
+ 	src/LogindSleep.c
+diff --git a/src/IORegistryEntry.h b/src/IORegistryEntry.h
+--- a/src/IORegistryEntry.h
++++ b/src/IORegistryEntry.h
+@@ -32,6 +32,10 @@
+ 	static IORegistryEntry* findById(uint64_t id);
+ 	
+ 	void registerInPlane(const char* plane, const char* pathName, IORegistryEntry* parent);
++
++	// Pins the entry to an ID that another component already uses to address it.
++	// Refuses zero and IDs another live entry owns.
++	bool assignId(uint64_t id);
+ protected:
+ 	// The key is the plane name, e.g. kIOServicePlane (as declared in IOKit/IOKitKeys.h)
+ 	std::unordered_map<std::string, std::string> m_name;
+diff --git a/src/IORegistryEntry.mm b/src/IORegistryEntry.mm
+--- a/src/IORegistryEntry.mm
++++ b/src/IORegistryEntry.mm
+@@ -39,6 +39,29 @@
+ 		for (auto* parent : plane.second) parent->m_children[plane.first].erase(this);
+ 	for (auto& plane : m_children)
+ 		for (auto* child : plane.second) child->m_parents[plane.first].erase(this);
++}
++
++bool IORegistryEntry::assignId(uint64_t id)
++{
++	// Zero and the all-ones value are reserved in the kernel's ID space.
++	if (id == 0 || id == std::numeric_limits<uint64_t>::max())
++		return false;
++
++	std::unique_lock l(m_entriesByIdMutex);
++	auto existing = m_entriesById.find(id);
++	if (existing != m_entriesById.end() && existing->second != this)
++		return false;
++
++	if (m_id != id)
++	{
++		m_entriesById.erase(m_id);
++		m_id = id;
++		m_entriesById.emplace(m_id, this);
++	}
++	// Keep the allocator above a pinned ID so a later entry cannot take it.
++	if (m_nextId <= id)
++		m_nextId = id + 1;
++	return true;
+ }
+ 
+ IORegistryEntry* IORegistryEntry::findById(uint64_t id)
+diff --git a/src/IOService.mm b/src/IOService.mm
+--- a/src/IOService.mm
++++ b/src/IOService.mm
+@@ -24,6 +24,8 @@
+ #include <cstring>
+ #include <os/log.h>
+ #import <Foundation/NSArray.h>
++#import <Foundation/NSNumber.h>
++#include <IOKit/IOKitKeys.h>
+ 
+ extern "C" {
+ #include "iokitmigServer.h"
+@@ -43,6 +45,15 @@
+ 	{
+ 		NSObject* ourProp = ourProps[key];
+ 		NSObject* expectedValue = dict[key];
++
++		// IORegistryEntryIDMatching() addresses an entry by ID instead of by property.
++		if ([key isEqualToString: @kIORegistryEntryIDKey])
++		{
++			if (![expectedValue isKindOfClass: [NSNumber class]]
++			    || [expectedValue unsignedLongLongValue] != id())
++				return false;
++			continue;
++		}
+ 
+ 		if ([ourProp isKindOfClass:[NSArray class]])
+ 		{
+diff --git a/src/main.mm b/src/main.mm
+--- a/src/main.mm
++++ b/src/main.mm
+@@ -32,6 +32,7 @@
+ #include "IODisplayConnectX11.h"
+ #include "PowerAssertions.h"
+ #include "IOSurfaceRoot.h"
++#include "IOGraphicsAccelerator.h"
+ #include "IOPlatformExpertDevice.h"
+ #include "IOPMrootDomain.h"
+ 
+@@ -151,6 +152,7 @@
+ 	IORegistryEntry::root();
+ 	IODisplayConnectX11::discoverDevices(registry);
+ 	IOPlatformExpertDevice::registerSelf(registry);
++	IOGraphicsAccelerator::registerSelf(registry);
+ 	IOSurfaceRoot::registerSelf(registry);
+ 	IOPMrootDomain::registerSelf(registry);
+ }
