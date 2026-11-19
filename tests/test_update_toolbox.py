@@ -1,9 +1,4 @@
-"""Unit coverage for the Toolbox re-exec block in scripts/update.sh.
-
-The real update.sh runs in a temporary repo (only scripts/update.sh is needed:
-every re-exec path exits through the fake toolbox, and the remaining paths exit
-at the "No existing build" check), with a fake `toolbox` binary first on PATH.
-"""
+"""Exercise updater re-exec and step handling in a disposable checkout."""
 import os
 import shutil
 import subprocess
@@ -209,6 +204,48 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('Unknown option: --bogus', result.stderr)
         self.assertEqual(self.argv_lines(), [])
+
+    def stub(self, path, body):
+        path.write_text('#!/bin/sh\n' + body + '\n')
+        path.chmod(0o755)
+
+    def prepare_stub_update(self, build_exit=0):
+        (self.repo / 'build/darling-src/build').mkdir(parents=True)
+        self.write_native_marker()
+        self.stub(self.repo / 'scripts/build.sh',
+                  f'echo build-diagnostic >&2\nexit {build_exit}')
+        self.stub(self.repo / 'scripts/install-runtime.sh', 'echo overlay-ran')
+        self.stub(self.bindir / 'python3', 'exit 0')
+        self.stub(self.bindir / 'sudo', 'echo sudo-foreground')
+        # A privileged command must never go through the detachment wrapper.
+        self.stub(self.bindir / 'setsid',
+                  'if [ "$1" = sudo ]; then exit 97; fi\nexec "$@"')
+
+    def test_quiet_update_preserves_failure_and_its_saved_log(self):
+        self.prepare_stub_update(build_exit=23)
+        cache = self.home / '.cache'
+        result = self.run_update(XDG_CACHE_HOME=str(cache))
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn('build-diagnostic', result.stderr)
+        self.assertNotIn('sudo-foreground', result.stdout)
+        logs = list(cache.glob('darling-lol-update.*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertIn(f'Full log: {logs[0]}', result.stderr)
+
+    def test_quiet_update_streams_failure_if_cache_cannot_be_created(self):
+        self.prepare_stub_update(build_exit=23)
+        result = self.run_update(XDG_CACHE_HOME='/dev/null/no-cache')
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn('build-diagnostic', result.stderr)
+        self.assertIn('No update log was saved.', result.stderr)
+        self.assertNotIn('Full log:', result.stderr)
+
+    def test_quiet_update_keeps_sudo_in_the_foreground(self):
+        self.prepare_stub_update()
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('sudo-foreground', result.stdout)
+        self.assertIn('Log:', result.stdout)
 
 
 if __name__ == '__main__':

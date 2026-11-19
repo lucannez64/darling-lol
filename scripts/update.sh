@@ -2,7 +2,7 @@
 # Bring an existing build and installation up to date after `git pull`: re-apply the patches that changed
 # (prepare.py reverts the earlier version it finds applied), rebuild incrementally, and reinstall the base
 # runtime, and the per-user overrides. Run it after manually closing Riot/League.
-# Without arguments every step runs behind a progress spinner and its output is written to the update log;
+# Without arguments background steps use a progress spinner and an update log;
 # --verbose streams that output to the terminal instead.
 # Rootless callers must remain in their original namespace; the outer launcher
 # refuses a live prefix marker instead of trying to reconnect or stop a session.
@@ -12,7 +12,6 @@ cd "$repo"
 
 VERBOSE=0
 BG_PID=''
-SUDO_PID=''
 LOG=''
 
 usage() {
@@ -24,8 +23,8 @@ usage() {
 		'  -v, --verbose  Show the full output of every build and install step.' \
 		'  -h, --help     Show this help.' \
 		'' \
-		'Without --verbose each step shows a progress spinner and its output is' \
-		'written to the update log, which is printed when a step fails.'
+		'Without --verbose background steps use a progress spinner and a log.' \
+		'The privileged install keeps the terminal so sudo can authenticate.'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -134,9 +133,6 @@ cleanup() {
 		wait "$BG_PID" 2>/dev/null || true
 		BG_PID=''
 	fi
-	if [ -n "$SUDO_PID" ]; then
-		kill "$SUDO_PID" 2>/dev/null || true
-	fi
 	if [ -t 1 ]; then
 		printf '\033[?25h'
 	fi
@@ -144,24 +140,23 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # Created lazily: --verbose runs stream to the terminal and need no file.
 init_log() {
 	log_dir=${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}
-	LOG=$log_dir/darling-lol-update.log
-	if ! mkdir -p -- "$log_dir" 2>/dev/null; then
-		LOG=/dev/null
-		return 0
+	if mkdir -p -- "$log_dir" 2>/dev/null; then
+		LOG=$(mktemp -- "$log_dir/darling-lol-update.XXXXXXXX.log" 2>/dev/null) || LOG=''
 	fi
-	if ! ( : >>"$LOG" ) 2>/dev/null; then
-		LOG=/dev/null
-		return 0
-	fi
-	chmod 600 -- "$LOG" 2>/dev/null || true
 }
 
-# Run one update step. With --verbose the command keeps the terminal; otherwise
-# its output goes to the log behind a spinner, and a failure prints the tail.
+show_log() {
+	if [ -n "$LOG" ]; then
+		printf '\n%sLog: %s%s\n' "$DIM" "$LOG" "$RESET"
+	fi
+}
+
+# Run one update step. Privileged steps and steps without a log keep the terminal.
 run() {
 	description=$1
 	shift
@@ -169,7 +164,11 @@ run() {
 	spin=0
 	start=$(now_seconds)
 
-	if [ "$VERBOSE" = 1 ]; then
+	if [ -n "$LOG" ] && [ "$1" != sudo ]; then
+		printf '\n=== %s | %s ===\n' "$(date -Is 2>/dev/null || printf 'unknown time')" "$description" \
+			2>/dev/null >>"$LOG" || LOG=''
+	fi
+	if [ "$VERBOSE" = 1 ] || [ "$1" = sudo ] || [ -z "$LOG" ]; then
 		printf '\n%s%s %s%s\n' "$BOLD$CYAN" "$ICON_INFO" "$description" "$RESET"
 		"$@" || rc=$?
 	else
@@ -178,9 +177,6 @@ run() {
 		else
 			info "$description"
 		fi
-		init_log
-		printf '\n=== %s | %s ===\n' "$(date -Is 2>/dev/null || printf 'unknown time')" "$description" \
-			>>"$LOG" 2>/dev/null || LOG=/dev/null
 		# Keep the step in its own process group (and session) when setsid(1) is
 		# available so cancellation can stop everything it started.
 		if command -v setsid >/dev/null 2>&1; then
@@ -210,10 +206,12 @@ run() {
 
 	if [ "$rc" -ne 0 ]; then
 		printf '%s%s%s %s\n' "$RED" "$ICON_ERR" "$RESET" "$description" >&2
-		if [ "$VERBOSE" = 0 ]; then
+		if [ -n "$LOG" ] && [ "$1" != sudo ]; then
 			printf '\n%sLast log lines:%s\n' "$BOLD" "$RESET" >&2
 			tail -n 25 "$LOG" >&2 || true
 			printf '\nFull log: %s\n' "$LOG" >&2
+		elif [ "$VERBOSE" = 0 ] && [ -z "$LOG" ]; then
+			warning 'No update log was saved.'
 		fi
 		exit "$rc"
 	fi
@@ -228,24 +226,12 @@ run() {
 		"$((elapsed / 60))" "$((elapsed % 60))" "$RESET"
 }
 
-# Background steps cannot answer a sudo password prompt written to the log, so
-# authenticate first and refresh the timestamp while the update runs.
-keep_sudo_alive() {
-	if ! command -v sudo >/dev/null 2>&1; then
-		error 'sudo is required to install the system components.'
-		exit 1
+prepare_output() {
+	# A background job must not already lead its own group when setsid runs.
+	set +m
+	if [ "$VERBOSE" = 0 ]; then
+		init_log
 	fi
-	if ! sudo -v; then
-		error 'sudo authentication failed.'
-		exit 1
-	fi
-	(
-		while kill -0 "$$" 2>/dev/null; do
-			sudo -n true 2>/dev/null || exit 0
-			sleep 50
-		done
-	) &
-	SUDO_PID=$!
 }
 
 # Older setups shipped one serial and UUID shared by every install. Give a prefix that still
@@ -269,6 +255,7 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
 		;;
 	esac
 	mkdir -p build/nix-gcroots
+	prepare_output
 	printf '\n%s%sUpdating Darling-LoL%s\n' "$BOLD" "$CYAN" "$RESET"
 	run 'Rooting the Nix package closure' \
 		nix-store --realise "$package" --add-root "$repo/build/nix-gcroots/$(basename "$package")" --indirect
@@ -279,6 +266,7 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	run 'Recording the installed base runtime' python3 scripts/nix-state.py stamp-base
 	run 'Installing the user runtime' ./scripts/install-runtime.sh
 	replace_shared_identity
+	show_log
 	success 'Rootless update installed. In this shell use scripts/run.sh; otherwise exit this shell and start darling-lol.'
 	exit 0
 fi
@@ -365,17 +353,17 @@ for entry in Path('/proc').iterdir():
         raise SystemExit('A Riot Client or League process is running; exit the game and both clients, then run this again.')
 PY
 
-printf '\n%s%sUpdating Darling-LoL%s\n' "$BOLD" "$CYAN" "$RESET"
-if [ "$VERBOSE" = 0 ]; then
-	keep_sudo_alive
+if ! command -v sudo >/dev/null 2>&1; then
+	error 'sudo is required to install the system components.'
+	exit 1
 fi
+prepare_output
+printf '\n%s%sUpdating Darling-LoL%s\n' "$BOLD" "$CYAN" "$RESET"
 
 run 'Building Darling-LoL (this may take a while)' ./scripts/build.sh
 run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
 run 'Installing Darling system components' sudo cmake --install build/darling-src/build
 run 'Installing the user runtime' ./scripts/install-runtime.sh
 replace_shared_identity
-if [ "$VERBOSE" = 0 ] && [ -n "$LOG" ] && [ "$LOG" != /dev/null ]; then
-	printf '\n%sLog: %s%s\n' "$DIM" "$LOG" "$RESET"
-fi
+show_log
 success 'Update installed. Start Darling with: sh scripts/run.sh'
