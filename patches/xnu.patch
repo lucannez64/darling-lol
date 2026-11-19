@@ -149,16 +149,17 @@ index 207dae6..f5e96db 100644
  VISIBLE
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
 new file mode 100644
-index 0000000..8ae1665
+index 0000000..a608e09
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,289 @@
 +#ifndef DARLING_COMMON_CPU_TOPOLOGY_H
 +#define DARLING_COMMON_CPU_TOPOLOGY_H
 +
 +#include <stdbool.h>
 +
 +#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/cpu_identity.h>
 +#include <darling/emulation/common/simple.h>
 +#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 +
@@ -170,7 +171,8 @@ index 0000000..8ae1665
 + * hw.ncpu / hw.activecpu, so on this 6-core/12-thread host the game created 7
 + * workers where the same PC runs 12 threads under Windows. Report what the
 + * host really has instead, while the emulated hw.model identity stays
-+ * unchanged.
++ * unchanged. Under profile=compat the counts are the compat CPU's
++ * (common/cpu_identity.c) instead, so they agree with its brand and cpuid.
 + *
 + * Values are cached once per process. avail/active reflect the process's
 + * affinity mask (cgroup or taskset restrictions); max values reflect the
@@ -417,6 +419,21 @@ index 0000000..8ae1665
 +		struct darling_cpu_topology probe;
 +
 +		darling_cpu_topology_probe(&probe);
++
++		/*
++		 * The compat profile presents a MacBookPro16,1 with an i7-9750H, so its
++		 * counts are that part's 6 cores / 12 threads whatever the host has: a
++		 * 32-thread host reporting 32 logical CPUs next to an i7-9750H brand is
++		 * not a machine that exists. The opt-out flag still wins for A/B runs.
++		 */
++		if (!probe.fixed && darling_compat_profile_enabled())
++		{
++			const struct darling_cpu_identity* identity = darling_compat_cpu_identity();
++
++			probe.online = probe.available = identity->threads;
++			probe.physical_online = probe.physical_available = identity->cores;
++			probe.detected = true;
++		}
 +		cached = probe;
 +		__atomic_store_n(&decided, 1, __ATOMIC_RELEASE);
 +	}
@@ -2825,10 +2842,10 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..d8e6830 100644
+index f273989..5f25283 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-@@ -9,6 +9,9 @@
+@@ -9,13 +9,19 @@
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
  #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
  #include <darling/emulation/common/simple.h>
@@ -2838,7 +2855,10 @@ index f273989..d8e6830 100644
  #include <darling/emulation/common/string.h>
  
  extern kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name);
-@@ -16,6 +19,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
+-extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count);
++// The raw darlingserver reply; host_info() itself is wrapped in libsyscall/mach/host.c
++// to present the values below.
++extern kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count);
  
  /* Darling specific */
  enum {
@@ -2846,7 +2866,7 @@ index f273989..d8e6830 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +28,14 @@ enum {
+@@ -24,10 +30,14 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -2862,7 +2882,7 @@ index f273989..d8e6830 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +47,78 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +49,78 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -2942,7 +2962,7 @@ index f273989..d8e6830 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,10 +130,19 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +132,98 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -2963,10 +2983,20 @@ index f273989..d8e6830 100644
  static const struct host_basic_info* gethostinfo(void)
  {
  	static struct host_basic_info hinfo;
-@@ -71,6 +155,36 @@ static const struct host_basic_info* gethostinfo(void)
++	static int host_answered; // the RPC succeeded; until then it is retried
+ 
+-	if (!hinfo.avail_cpus)
++	if (!hinfo.avail_cpus || !host_answered)
+ 	{
+ 		mach_msg_type_number_t hcount = HOST_BASIC_INFO_COUNT;
+ 		mach_port_t hself;
+ 
  		hself = mach_host_self();
- 		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
+-		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
++		host_answered = _kernelrpc_host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount) == KERN_SUCCESS;
  		mach_port_deallocate(mach_task_self(), hself);
++		if (!host_answered)
++			hinfo.max_mem = 0; // unknown, not "no memory"
 +		host_real_mem = hinfo.max_mem;
 +
 +		// Keep the emulated MacBookPro16,1 hw.model, but report the host's real
@@ -2993,14 +3023,48 @@ index f273989..d8e6830 100644
 +			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +		}
-+		extern char* getenv(const char*);
-+		const char* memory = getenv("RCLOL_MEMORY_BYTES");
-+		if (memory != NULL && memory[0] != '\0')
-+			hinfo.max_mem = __simple_atoi(memory, NULL);
++		// Not getenv(): host_info() reaches this before libc sets up environ
++		// (a NULL-environ getenv crashed launchd at boot).
++		unsigned long long memory = darling_configured_memory_bytes();
++		if (memory != 0)
++			hinfo.max_mem = memory;
  	}
  
  	return &hinfo;
-@@ -83,6 +197,13 @@ sysctl_handler(handle_availcpu)
+ }
+ 
++// darling-lol: host_info(HOST_BASIC_INFO) must agree with hw.*: the reply from
++// darlingserver carries the host's real CPU counts and memory, which under
++// profile=compat contradict the i7-9750H / profile memory the sysctls report.
++// libsyscall's host_info wrapper calls this on every successful reply. The
++// legacy 32-bit memory_size saturates at 2 GiB, as XNU does.
++__attribute__((visibility("hidden")))
++void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count)
++{
++	const struct host_basic_info* hinfo = gethostinfo();
++	unsigned long long memory = hinfo->max_mem;
++
++	out->max_cpus = hinfo->max_cpus;
++	out->avail_cpus = hinfo->avail_cpus;
++	// memory is 0 only when neither the profile nor our own RPC gave a size:
++	// keep the caller's successful reply then.
++	if (memory != 0)
++		out->memory_size = (natural_t) (memory > 0x80000000ULL ? 0x80000000ULL : memory);
++	if (count >= HOST_BASIC_INFO_COUNT)
++	{
++		out->physical_cpu = hinfo->physical_cpu;
++		out->physical_cpu_max = hinfo->physical_cpu_max;
++		out->logical_cpu = hinfo->logical_cpu;
++		out->logical_cpu_max = hinfo->logical_cpu_max;
++		if (memory != 0)
++			out->max_mem = memory;
++	}
++}
++
+ sysctl_handler(handle_availcpu)
+ {
+ 	sysctl_handle_size(sizeof(int));
+@@ -83,6 +231,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3014,7 +3078,7 @@ index f273989..d8e6830 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +232,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +266,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3032,7 +3096,7 @@ index f273989..d8e6830 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +301,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +335,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3097,7 +3161,7 @@ index f273989..d8e6830 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +366,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +400,104 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -7745,13 +7809,45 @@ index 88658cb..83ce61c 100644
  	int *tsderrno = (int*)_os_tsd_get_direct(__TSD_ERRNO);
  	if (tsderrno) {
 diff --git a/libsyscall/mach/host.c b/libsyscall/mach/host.c
-index 6d977fd..ec68ce4 100644
+index 6d977fd..3eae2f0 100644
 --- a/libsyscall/mach/host.c
 +++ b/libsyscall/mach/host.c
-@@ -108,3 +108,61 @@ host_create_mach_voucher(mach_port_name_t host,
+@@ -108,3 +108,93 @@ host_create_mach_voucher(mach_port_name_t host,
  
  	return rv;
  }
++
++/*
++ * darling-lol: HOST_BASIC_INFO comes from darlingserver with the host's real
++ * CPU counts and memory. Present the same values as the hw.* sysctls instead
++ * (the compat profile's i7-9750H counts and memory size), so the two channels
++ * cannot disagree.
++ */
++extern kern_return_t
++_kernelrpc_host_info(host_t host, host_flavor_t flavor, host_info_t info,
++    mach_msg_type_number_t *count);
++
++extern void darling_host_basic_info_present(struct host_basic_info *out,
++    mach_msg_type_number_t count);
++
++/* max_cpus .. cpu_subtype: the legacy reply (kernel-private in host_info.h) */
++#ifndef HOST_BASIC_INFO_OLD_COUNT
++#define HOST_BASIC_INFO_OLD_COUNT ((mach_msg_type_number_t)5)
++#endif
++
++kern_return_t
++host_info(host_t host, host_flavor_t flavor, host_info_t info,
++    mach_msg_type_number_t *count)
++{
++	kern_return_t rv = _kernelrpc_host_info(host, flavor, info, count);
++
++	if (rv == KERN_SUCCESS && flavor == HOST_BASIC_INFO &&
++	    *count >= HOST_BASIC_INFO_OLD_COUNT) {
++		darling_host_basic_info_present((struct host_basic_info *)info, *count);
++	}
++
++	return rv;
++}
 +
 +/*
 + * darling-lol: HOST_VM_INFO64 comes from darlingserver with the host's real
@@ -9767,10 +9863,10 @@ index a26ae39..0fb6d6a 100644
  	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
 new file mode 100644
-index 0000000..254db21
+index 0000000..5933eb2
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,54 @@
 +#ifndef DARLING_LOL_CPU_IDENTITY_H
 +#define DARLING_LOL_CPU_IDENTITY_H
 +
@@ -9783,8 +9879,8 @@ index 0000000..254db21
 +// identity leaves) and the machdep.cpu.* / hw.cpufrequency sysctls agree.
 +//
 +// The SKU is a MacBookPro16,1 part: i7-9750H, Coffee Lake-H, 6 cores /
-+// 12 threads. Those counts match this host, so the profile does not have to
-+// invent a topology the scheduler does not have.
++// 12 threads. Under the profile every CPU count (hw.*, machdep.cpu.*_count,
++// host_info, the commpage) reports those 6/12, whatever the host has.
 +
 +#include <stdint.h>
 +
@@ -9819,13 +9915,18 @@ index 0000000..254db21
 +// owned by this module.
 +const char* darling_configured_cpu_brand(void);
 +
++// The profile's memory size from RCLOL_MEMORY_BYTES, or 0 when it is unset,
++// empty or not a number. Like the profile check, safe before the C library is
++// initialized (host_info can run that early, from any process including launchd).
++unsigned long long darling_configured_memory_bytes(void);
++
 +#endif // DARLING_LOL_CPU_IDENTITY_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
 new file mode 100644
-index 0000000..bfe2626
+index 0000000..b81f674
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,170 @@
 +// darling-lol: the shared compatibility CPU identity. See common/cpu_identity.h.
 +
 +#include <darling/emulation/common/cpu_identity.h>
@@ -9965,6 +10066,37 @@ index 0000000..bfe2626
 +	}
 +	return state == 1 ? copy : 0;
 +}
++
++unsigned long long darling_configured_memory_bytes(void)
++{
++	static unsigned long long bytes;
++	static int state = 0; // 0: not resolved, 1: resolved
++
++	if (state == 0)
++	{
++		const char* value = darling_environ_value("RCLOL_MEMORY_BYTES");
++		unsigned long long parsed = 0;
++
++		if (value != 0)
++		{
++			for (; *value >= '0' && *value <= '9'; ++value)
++			{
++				unsigned long long digit = (unsigned long long) (*value - '0');
++				if (parsed > (~0ULL - digit) / 10)
++				{
++					parsed = 0;
++					break;
++				}
++				parsed = parsed * 10 + digit;
++			}
++			if (*value != '\0')
++				parsed = 0;
++		}
++		bytes = parsed;
++		state = 1;
++	}
++	return bytes;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
 new file mode 100644
 index 0000000..ca3afa3
@@ -10006,10 +10138,28 @@ index 0000000..85e0663
 +	return ts.tv_sec * 1000000000L + ts.tv_nsec;
 +}
 diff --git a/osfmk/mach/mach_host.defs b/osfmk/mach/mach_host.defs
-index a1b55f5..03dab69 100644
+index a1b55f5..e6540d8 100644
 --- a/osfmk/mach/mach_host.defs
 +++ b/osfmk/mach/mach_host.defs
-@@ -236,10 +236,13 @@ routine host_lockgroup_info(
+@@ -86,8 +86,16 @@ subsystem
+ 
+ /*
+  *	Return information about this host.
++ *	darling-lol: the user side is wrapped in libsyscall/mach/host.c.
+  */
+-routine host_info(
++routine
++#ifdef KERNEL_SERVER
++host_info(
++#elif !KERNEL && !LIBSYSCALL_INTERFACE
++_kernelrpc_host_info(
++#else
++host_info(
++#endif
+ 		host		: host_t;
+ 		flavor		: host_flavor_t;
+ 	out	host_info_out	: host_info_t, CountInOut);
+@@ -236,10 +244,13 @@ routine host_lockgroup_info(
  
  /*
   *	Return 64-bit statistics from this host.

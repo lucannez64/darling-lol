@@ -38,6 +38,9 @@ RCODESIGN=${RCODESIGN:-$(command -v rcodesign 2>/dev/null || true)}
 if [ -z "$RCODESIGN" ] && [ -x "${HOME:-/nonexistent}/.local/bin/rcodesign" ]; then
 	RCODESIGN="$HOME/.local/bin/rcodesign"
 fi
+if [ -z "$RCODESIGN" ] && [ -x "${HOME:-/nonexistent}/.cargo/bin/rcodesign" ]; then
+	RCODESIGN="$HOME/.cargo/bin/rcodesign"
+fi
 LIPO=${LIPO:-$(command -v llvm-lipo 2>/dev/null || command -v lipo 2>/dev/null || true)}
 
 dry=0
@@ -99,7 +102,7 @@ if [ ! -f "$DCC" ] || [ ! -x "$DCC" ]; then
 	exit 2
 fi
 if [ -z "$RCODESIGN" ] || [ ! -x "$RCODESIGN" ]; then
-	echo "sign-darling-runtime.sh: rcodesign not found (install apple-codesign)" >&2
+	echo "sign-darling-runtime.sh: rcodesign not found; run tools/install-rcodesign.sh" >&2
 	exit 2
 fi
 if { [ "$trust" -eq 1 ] || { [ "$sdk_selected" -eq 1 ] && [ "$no_trust" -eq 0 ]; }; } &&
