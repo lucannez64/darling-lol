@@ -43,9 +43,11 @@ RCLOL_FINISH_LEAGUE_LOAD=0 turns this off.
 Toolbox: when the project is installed with `--toolbox`, the launcher runs
 inside a Fedora Toolbox container that `toolbox run` leaves running after the
 command exits. The supervisor therefore stops its own host container as the
-last cleanup step, once the guest session is gone. A container started from an
-interactive `toolbox enter` shell is left alone, because the shell that runs
-the launcher would end with it. RCLOL_STOP_TOOLBOX=0 turns this off.
+last cleanup step, once the guest session is gone. Sessions that share the
+container register with each other, so only the last one stops it. A container
+started from an interactive `toolbox enter` shell is left alone, because the
+shell that runs the launcher would end with it. RCLOL_STOP_TOOLBOX=0 turns this
+off.
 
 Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
 alone when the launcher exits.
@@ -56,11 +58,13 @@ Usage (from run-riot-client.sh):
         -- python3 exec-guest.py env ... darling ...
 """
 import argparse
+import fcntl
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -78,6 +82,11 @@ KILL_GRACE = 5.0
 TOOLBOX_MARKER = Path('/run/.toolboxenv')
 CONTAINER_ENV = Path('/run/.containerenv')
 INTERACTIVE_SHELLS = ('bash', 'dash', 'fish', 'ksh', 'sh', 'zsh')
+# Sessions that share one Toolbox container register below a per-container
+# directory and hold a lock for their lifetime, so only the last one stops it.
+SESSION_PREFIX = 'session-'
+REGISTRY_LOCK = 'registry.lock'
+TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 def log(message, out=sys.stdout):
@@ -383,7 +392,37 @@ def started_by_shell(proc_root=Path('/proc'), pid=None):
     if info is None or info[1] <= 1:
         return False
     names = command_names(proc_root / str(info[1]))
-    return bool(names) and os.path.basename(names[0]) in INTERACTIVE_SHELLS
+    if not names:
+        return False
+    # A login shell is exposed as `-bash` in argv[0]; the leading hyphen marks
+    # the login mode and is not part of the program name.
+    return os.path.basename(names[0]).lstrip('-') in INTERACTIVE_SHELLS
+
+
+def ignore_termination_signals():
+    """Ignore termination signals; return the handlers to restore.
+
+    A queued `systemctl --user stop` reaches every process in the container's
+    systemd scope, this supervisor included. Once the stop is queued, ignoring
+    those signals lets the supervisor exit normally, so its child's exit status
+    reaches the launcher instead of a signal status.
+    """
+    previous = {}
+    for signum in TERMINATION_SIGNALS:
+        try:
+            previous[signum] = signal.signal(signum, signal.SIG_IGN)
+        except (OSError, ValueError):
+            pass
+    return previous
+
+
+def restore_termination_signals(previous):
+    """Put back the handlers saved by ignore_termination_signals()."""
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, ValueError):
+            pass
 
 
 def stop_container(container, run=subprocess.run, out=sys.stdout, timeout=10):
@@ -392,26 +431,132 @@ def stop_container(container, run=subprocess.run, out=sys.stdout, timeout=10):
     `podman stop` is unavailable inside the Toolbox image, and the container
     lives in a host systemd user scope named after its ID. `--no-block` queues
     the stop and returns: the scope contains this process, so the supervisor
-    ends with the container.
+    ends with the container. Termination signals are ignored from the moment
+    the stop is queued, because the queued stop also signals this process;
+    otherwise it would die before returning the child's exit status. A stop
+    that was not queued restores the previous handlers.
     """
     name, container_id = container
     unit = 'libpod-%s.scope' % container_id
+    previous = ignore_termination_signals()
     try:
         result = run(['systemctl', '--user', '--no-block', 'stop', unit],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      timeout=timeout)
     except (OSError, subprocess.SubprocessError) as error:
+        restore_termination_signals(previous)
         log('could not stop Toolbox container %s (%s); stop it with '
             "'podman stop %s'" % (name, error, name), out)
         return False
     # A signal status means the queued stop already reached this process.
     status = getattr(result, 'returncode', 0)
     if status > 0:
+        restore_termination_signals(previous)
         log('could not stop Toolbox container %s (systemctl exited with %d); '
             "stop it with 'podman stop %s'" % (name, status, name), out)
         return False
     log('stopping Toolbox container %s' % name, out)
     return True
+
+
+def session_registry(container_id, base=None):
+    """Directory where the sessions sharing one Toolbox container register."""
+    root = Path(tempfile.gettempdir()) if base is None else Path(base)
+    return root / ('darling-lol-%d' % os.getuid()) / container_id
+
+
+class ContainerSessions:
+    """Registration of the sessions that share one Toolbox container.
+
+    `toolbox run` leaves the container running, but several launches can use
+    the same container. Each supervisor registers before starting its child
+    and holds an advisory lock on its own file for the session's lifetime, so
+    the session that ends last is the one that stops the container. The final
+    stop decision takes the registry lock, which keeps a new session from
+    registering between that check and the queued stop. A crashed session
+    leaves a file without a holder; the next decision removes it.
+    """
+
+    def __init__(self, container_id, base=None):
+        self.directory = session_registry(container_id, base)
+        self.path = None
+        self.handle = None
+
+    def register(self):
+        """Register this session; False when the registry is unusable."""
+        handle = None
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            with open(self.directory / REGISTRY_LOCK, 'a+') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                handle = tempfile.NamedTemporaryFile(
+                    prefix=SESSION_PREFIX, dir=str(self.directory), delete=False)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            if handle is not None:
+                handle.close()
+            return False
+        self.handle, self.path = handle, Path(handle.name)
+        return True
+
+    def finish(self, container, run=subprocess.run, out=sys.stdout):
+        """Stop `container` only when no other session is still using it."""
+        if self.path is None:
+            return False
+        try:
+            with open(self.directory / REGISTRY_LOCK, 'a+') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                if self.active_sessions():
+                    log('another session is still active in Toolbox container '
+                        '%s; leaving it running' % container[0], out)
+                    return False
+                return stop_container(container, run=run, out=out)
+        except OSError as error:
+            log('could not read the Toolbox session registry (%s); leaving the '
+                "container running; stop it with 'podman stop %s'"
+                % (error, container[0]), out)
+            return False
+        finally:
+            self.release()
+
+    def active_sessions(self):
+        """Registered sessions, other than this one, that still hold a lock."""
+        active = []
+        for entry in sorted(self.directory.iterdir()):
+            if entry == self.path or not entry.name.startswith(SESSION_PREFIX):
+                continue
+            try:
+                fd = os.open(entry, os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    active.append(entry.name)
+                else:
+                    try:
+                        entry.unlink()  # the session that owned it is gone
+                    except OSError:
+                        pass
+            finally:
+                os.close(fd)
+        return active
+
+    def release(self):
+        """Forget this session; leftovers are removed by the next check."""
+        handle, self.handle = self.handle, None
+        path, self.path = self.path, None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        if path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def newest_guest_log(directory, pattern='*.log'):
@@ -728,18 +873,27 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
                    own_namespace=None, runtime_at_start=None, guest_log=None,
-                   league_exit=None, league_load=None, container=None):
+                   league_exit=None, league_load=None, container=None,
+                   stoppable=True, session_base=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
     while a session is alive attaches to that server, and must not shut it down
-    when its own loader exits. `container` names the Toolbox container to stop
-    after that cleanup; it stays None for a native session.
+    when its own loader exits. `container` names the Toolbox container this
+    session shares, and `stoppable` says whether the container may be stopped
+    when this is the last session using it; both stay unused for a native
+    session.
     """
     if not clean:
         os.execvp(command[0], command)
     owns_runtime = (runtime_at_start == 'stopped' if runtime_at_start is not None
                     else not runtime_alive(prefix, proc_root))
+    sessions = None
+    if container is not None:
+        sessions = ContainerSessions(container[1], base=session_base)
+        if not sessions.register():
+            log('could not register this session for Toolbox container %s; '
+                'it will be left running' % container[0], out)
     namespace = None
     child = subprocess.Popen(command, start_new_session=True)
     def signal_child(signum):
@@ -839,10 +993,13 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                             own_namespace=own_namespace, note=note)
     if stop:
         log('interrupted by signal %d' % stop[0], out)
-    if owns_runtime and container is not None:
-        # The container outlives `toolbox run`; stop it only after the guest
-        # session is gone, and never when another session owns this runtime.
-        stop_container(container, run=run, out=out)
+    if sessions is not None:
+        if owns_runtime and stoppable:
+            # The container outlives `toolbox run`; stop it only after the
+            # guest session is gone, and only when no other session uses it.
+            sessions.finish(container, run=run, out=out)
+        else:
+            sessions.release()
     # A surviving guest process is a failed cleanup, not a clean exit.
     return (status or 1) if remaining else status
 
@@ -884,12 +1041,16 @@ def main(argv=None):
     if not command:
         parser.error('a command is required after --')
     clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT', '1') != '0'
-    container = None
-    if os.environ.get('RCLOL_STOP_TOOLBOX', '1') != '0' and not started_by_shell():
-        container = container_metadata()
+    # The registry keeps every session that shares the container visible, even
+    # when this one must not stop it (an interactive shell, or opt-out).
+    container = container_metadata()
+    stoppable = (container is not None
+                 and os.environ.get('RCLOL_STOP_TOOLBOX', '1') != '0'
+                 and not started_by_shell())
     return run_supervised(command, prefix, args.darling, stop_after=max(0, args.stop_after),
                           clean=clean, runtime_at_start=args.runtime_at_start,
-                          guest_log=args.guest_log, container=container)
+                          guest_log=args.guest_log, container=container,
+                          stoppable=stoppable)
 
 
 if __name__ == '__main__':

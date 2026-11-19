@@ -93,6 +93,16 @@ class DriftTests(unittest.TestCase):
         (self.root / 'AGENTS.md').write_text('')
         self.assertIn('does not list context path', self.errors())
 
+    def test_context_path_with_an_extra_suffix_is_reported(self):
+        (self.root / 'AGENTS.md').write_text(
+            'docs/demo.md.bak scripts/demo.sh RCLOL_DEMO\n')
+        self.assertIn('does not list context path: docs/demo.md', self.errors())
+
+    def test_script_path_with_an_extra_suffix_is_reported(self):
+        (self.root / 'AGENTS.md').write_text(
+            'docs/demo.md scripts/demo.sh.bak RCLOL_DEMO\n')
+        self.assertIn('does not list script: scripts/demo.sh', self.errors())
+
     def test_missing_script_is_reported(self):
         (self.root / 'scripts/demo.sh').unlink()
         self.assertIn('missing script', self.errors())
@@ -111,6 +121,16 @@ class DriftTests(unittest.TestCase):
     def test_flag_missing_from_sources_is_reported(self):
         (self.root / 'source.sh').write_text('')
         self.assertIn('documented flag is not read', self.errors())
+
+    def test_prefixed_flag_identifier_is_not_a_match(self):
+        (self.root / 'source.sh').write_text('RCLOL_DEMO_EXTRA=1\n')
+        self.assertIn('documented flag is not read by the project: RCLOL_DEMO',
+                      self.errors())
+
+    def test_flag_that_is_only_listed_as_a_prefix_is_reported(self):
+        (self.root / 'AGENTS.md').write_text(
+            'docs/demo.md scripts/demo.sh RCLOL_DEMO_EXTRA\n')
+        self.assertIn('does not list flag: RCLOL_DEMO', self.errors())
 
     def test_adapter_must_point_to_the_entrypoint(self):
         (self.root / 'CLAUDE.md').write_text('no entrypoint here\n')

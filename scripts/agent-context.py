@@ -8,6 +8,7 @@ project commands or touches the prefix.
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -161,6 +162,21 @@ def as_dict(reads=READS, scripts=SCRIPTS, flags=FLAGS, adapters=ADAPTERS):
     }
 
 
+def lists_path(text, path):
+    """True when `text` names `path` as a complete path.
+
+    A longer path that merely starts with the documented one, such as
+    `docs/demo.md.bak`, must not count as a reference.
+    """
+    return re.search(r'(?<![\w./-])%s(?![\w./-])' % re.escape(path),
+                     text) is not None
+
+
+def names_flag(text, name):
+    """True when `text` names `name` as a complete flag identifier."""
+    return re.search(r'(?<!\w)%s(?!\w)' % re.escape(name), text) is not None
+
+
 def check(root=ROOT, reads=READS, scripts=SCRIPTS, flags=FLAGS,
           adapters=ADAPTERS, sources=SOURCES):
     """Return a list of harness errors; an empty list means it is consistent."""
@@ -183,13 +199,13 @@ def check(root=ROOT, reads=READS, scripts=SCRIPTS, flags=FLAGS,
         for path in paths:
             if not (root / path).exists():
                 errors.append(f"missing context path for {topic}: {path}")
-            elif path not in text:
+            elif not lists_path(text, path):
                 errors.append(f"{ENTRYPOINT} does not list context path: {path}")
 
     for path, summary in scripts:
         if not (root / path).is_file():
             errors.append(f"missing script: {path}")
-        elif path not in text:
+        elif not lists_path(text, path):
             errors.append(f"{ENTRYPOINT} does not list script: {path}")
         if not summary.strip():
             errors.append(f"empty script summary: {path}")
@@ -202,9 +218,9 @@ def check(root=ROOT, reads=READS, scripts=SCRIPTS, flags=FLAGS,
             continue
         source_text += source.read_text(errors="ignore") + "\n"
     for name, _default, _effect in flags:
-        if name not in source_text:
+        if not names_flag(source_text, name):
             errors.append(f"documented flag is not read by the project: {name}")
-        if name not in text:
+        if not names_flag(text, name):
             errors.append(f"{ENTRYPOINT} does not list flag: {name}")
 
     return errors
