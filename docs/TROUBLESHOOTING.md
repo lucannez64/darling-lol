@@ -980,6 +980,8 @@ With the window visual and compositor draw buffer fixes (#22) and the RPC socket
 
 If the game window stays black on NVIDIA, check `metal-device.log` as described in [Check which GPU rendered](#check-which-gpu-rendered).
 
+If a match ends with `NVRM: Xid … 31 … MMU Fault` and 5 s frames ([#252](https://github.com/lucannez64/darling-lol/issues/252)), run one match with `INDIUM_POISON_FREED_MAPPINGS=1 ./scripts/run.sh` (or `darling shell touch /tmp/metal-poison-freed-mappings` before launching; works on AMD too): every resource gets its own allocation, a CPU write to freed Indium memory then crashes at that address instead of passing silently while the address stays reserved, and the guest `/tmp/indium-poison.log` lists each freed mapping with the code that created it, recycled handles, and semaphore destroys deferred because a signal was still pending. The crash is not guaranteed: a freed mapping logged `NOT-reserved` (the reservation failed) is not protected, and only the newest 16384 reservations are kept, so a match without a crash does not rule out a lifetime bug; check the log for `reserved-no-access` versus `NOT-reserved`. It is slower; do not keep it on.
+
 On an RTX 3060 with driver 615.78.08, a practice game rejected a Metal
 constant vertex layout (`stepFunction=Constant`, `stepRate=0`). Indium now
 maps this layout to a zero-stride Vulkan vertex binding, so every vertex reads

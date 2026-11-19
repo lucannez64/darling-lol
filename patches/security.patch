@@ -417,7 +417,7 @@ index f6d166e2..fb7ae819 100644
  #include <utilities/SecFileLocations.h>
  
 diff --git a/OSX/CMakeLists.txt b/OSX/CMakeLists.txt
-index 6d257de..cea33e3 100644
+index 6d257de..4b5a105 100644
 --- a/OSX/CMakeLists.txt
 +++ b/OSX/CMakeLists.txt
 @@ -55,6 +55,22 @@ endforeach()
@@ -463,7 +463,33 @@ index 6d257de..cea33e3 100644
  		COMMAND
  			${CMAKE_C_COMPILER} -E -Xpreprocessor -P -x objective-c -target ${APPLE_TARGET_TRIPLET_32BIT} ${EXP_IN_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/../Security.exp-in -o ${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
  	)
-@@ -312,6 +326,11 @@ if (BUILD_TARGET_64BIT)
+@@ -141,12 +155,17 @@ generate_sdk_framework(Security
+     HEADER "../darling/include/macOS/Security"
+ )
+ 
++set_property(SOURCE sec/Security/DarlingP256.c APPEND PROPERTY INCLUDE_DIRECTORIES
++    "${CMAKE_CURRENT_SOURCE_DIR}/../../openssl/src/include")
++
+ add_separated_framework(Security
+ 	CURRENT_VERSION
+ 	VERSION ${FRAMEWORK_VERSION}
+ 
+ 	SOURCES
+ 		lib/dummy.cpp
++		sec/Security/DarlingKeychain.m
++		sec/Security/DarlingP256.c
+ 		sec/Security/SecFramework.c
+ 		sec/Security/SecSharedCredential.c
+ 		# sec/Security/SecSharedCredential.m
+@@ -251,6 +270,7 @@ add_separated_framework(Security
+ 		LocalAuthentication # instead of coreauthd_client
+ 
+ 		coretls
++		crypto098
+ 		#coretls_cfhelpers # must be added as a circular library
+ 
+ 		#ctkclient_sep
+@@ -312,6 +332,11 @@ if (BUILD_TARGET_64BIT)
  		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
  	)
  
@@ -475,7 +501,7 @@ index 6d257de..cea33e3 100644
  	target_link_options(Security_${APPLE_ARCH_64BIT} PRIVATE
  		-Wl,-dead_strip
  		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_64BIT}.exp
-@@ -332,6 +351,11 @@ if (BUILD_TARGET_32BIT)
+@@ -332,6 +357,11 @@ if (BUILD_TARGET_32BIT)
  		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
  	)
  
@@ -487,3 +513,914 @@ index 6d257de..cea33e3 100644
  	target_link_options(Security_${APPLE_ARCH_32BIT} PRIVATE
  		-Wl,-dead_strip
  		-Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/Security.${APPLE_ARCH_32BIT}.exp
+diff --git a/OSX/libsecurity_keychain/lib/SecItem.cpp b/OSX/libsecurity_keychain/lib/SecItem.cpp
+index e5b078a..4611f88 100644
+--- a/OSX/libsecurity_keychain/lib/SecItem.cpp
++++ b/OSX/libsecurity_keychain/lib/SecItem.cpp
+@@ -58,6 +58,9 @@
+ #include <login/SessionAgentStatusCom.h>
+ #include <os/activity.h>
+ #include <CoreFoundation/CFPriv.h>
++#if defined(DARLING)
++#include "DarlingKeychain.h"
++#endif
+ 
+ 
+ const uint8_t kUUIDStringLength = 36;
+@@ -4869,6 +4872,10 @@ SecItemMergeResults(bool can_target_ios, OSStatus status_ios, CFTypeRef result_i
+ OSStatus
+ SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
+ {
++#if defined(DARLING)
++    if (DarlingKeychainHandles(query, DarlingKeychainFind))
++        return DarlingKeychainPerform(DarlingKeychainFind, query, NULL, result);
++#endif
+     os_activity_t activity = os_activity_create("SecItemCopyMatching", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+     os_activity_scope(activity);
+     os_release(activity);
+@@ -4921,6 +4928,10 @@ SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
+ OSStatus
+ SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result)
+ {
++#if defined(DARLING)
++    if (DarlingKeychainHandles(attributes, DarlingKeychainAdd))
++        return DarlingKeychainPerform(DarlingKeychainAdd, attributes, NULL, result);
++#endif
+     os_activity_t activity = os_activity_create("SecItemAdd", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+     os_activity_scope(activity);
+     os_release(activity);
+@@ -4973,6 +4984,10 @@ SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result)
+ OSStatus
+ SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate)
+ {
++#if defined(DARLING)
++    if (DarlingKeychainHandles(query, DarlingKeychainUpdate))
++        return DarlingKeychainPerform(DarlingKeychainUpdate, query, attributesToUpdate, NULL);
++#endif
+     os_activity_t activity = os_activity_create("SecItemUpdate", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+     os_activity_scope(activity);
+     os_release(activity);
+@@ -5050,6 +5065,10 @@ SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate)
+ OSStatus
+ SecItemDelete(CFDictionaryRef query)
+ {
++#if defined(DARLING)
++    if (DarlingKeychainHandles(query, DarlingKeychainDelete))
++        return DarlingKeychainPerform(DarlingKeychainDelete, query, NULL, NULL);
++#endif
+     os_activity_t activity = os_activity_create("SecItemDelete", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+     os_activity_scope(activity);
+     os_release(activity);
+diff --git a/OSX/sec/Security/SecECKey.m b/OSX/sec/Security/SecECKey.m
+index 5b343f6..19c246e 100644
+--- a/OSX/sec/Security/SecECKey.m
++++ b/OSX/sec/Security/SecECKey.m
+@@ -50,6 +50,9 @@
+ #include <corecrypto/ccsha2.h>
+ #include <corecrypto/ccrng.h>
+ #include <corecrypto/ccder_decode_eckey.h>
++#if defined(DARLING)
++#include "DarlingP256.h"
++#endif
+ 
+ #define kMaximumECKeySize 521
+ 
+@@ -145,6 +148,11 @@ static OSStatus SecECPublicKeyInit(SecKeyRef key,
+     {
+         ccec_const_cp_t cp = getCPForPublicSize(keyDataLength);
+         require_action_quiet(cp, errOut, err = errSecDecode);
++#if defined(DARLING)
++        if (ccec_cp_prime_bitlen(cp) == 256 &&
++            !DarlingP256Validate(keyData, keyDataLength))
++            return errSecDecode;
++#endif
+         err = (ccec_import_pub(cp, keyDataLength, keyData, pubkey)
+                ? errSecDecode : errSecSuccess);
+         break;
+@@ -184,7 +192,17 @@ static CFTypeRef SecECPublicKeyCopyOperationResult(SecKeyRef key, SecKeyOperatio
+         uint8_t *sig = (uint8_t *)CFDataGetBytePtr(in2);
+         ccec_pub_ctx_t pubkey = key->key;
+ 
+-        err = ccec_verify(pubkey, CFDataGetLength(in1), CFDataGetBytePtr(in1), sigLen, sig, &valid);
++#if defined(DARLING)
++        if (ccec_ctx_bitlen(pubkey) == 256) {
++            uint8_t bytes[DarlingP256PublicSize];
++            ccec_export_pub(pubkey, bytes);
++            int verified = DarlingP256Verify(bytes, CFDataGetBytePtr(in1), CFDataGetLength(in1),
++                                              sig, sigLen);
++            err = verified < 0 ? verified : 0;
++            valid = verified == 1;
++        } else
++#endif
++            err = ccec_verify(pubkey, CFDataGetLength(in1), CFDataGetBytePtr(in1), sigLen, sig, &valid);
+         if (err != 0) {
+             SecError(errSecVerifyFailed, error, CFSTR("EC signature verification failed (ccerr %d)"), err);
+             return NULL;
+@@ -449,6 +467,11 @@ static OSStatus SecECPrivateKeyInit(SecKeyRef key,
+     {
+         ccec_const_cp_t cp = getCPForPrivateSize(keyDataLength);
+         require_quiet(cp != NULL, abort);
++#if defined(DARLING)
++        if (ccec_cp_prime_bitlen(cp) == 256 &&
++            !DarlingP256Validate(keyData, keyDataLength))
++            return errSecDecode;
++#endif
+ 
+         ccec_ctx_init(cp, fullkey);
+         size_t pubSize = ccec_export_pub_size(ccec_ctx_pub(fullkey));
+@@ -485,6 +508,19 @@ static OSStatus SecECPrivateKeyInit(SecKeyRef key,
+             return errSecKeySizeNotAllowed;
+         }
+ 
++#if defined(DARLING)
++        if (keyLengthInBits == 256) {
++            uint8_t bytes[DarlingP256PrivateSize] = {0};
++            if (DarlingP256Generate(bytes) &&
++                !ccec_import_pub(cp, DarlingP256PublicSize, bytes, ccec_ctx_pub(fullkey)) &&
++                !ccn_read_uint(ccec_ctx_n(fullkey), ccec_ctx_k(fullkey),
++                               DarlingP256PrivateSize - DarlingP256PublicSize,
++                               bytes + DarlingP256PublicSize))
++                err = errSecSuccess;
++            cc_clear(sizeof(bytes), bytes);
++            break;
++        }
++#endif
+         if (!ccec_generate_key_fips(cp, ccrng_seckey, fullkey))
+             err = errSecSuccess;
+         break;
+@@ -511,7 +547,20 @@ static CFTypeRef SecECPrivateKeyCopyOperationResult(SecKeyRef key, SecKeyOperati
+                     // Perform x962 mode of signature.
+                     size_t size = ccec_sign_max_size(ccec_ctx_cp(fullkey));
+                     result = CFDataCreateMutableWithScratch(NULL, size);
+-                    int err = ccec_sign(fullkey, CFDataGetLength(in1), CFDataGetBytePtr(in1),
++                    int err;
++#if defined(DARLING)
++                    if (ccec_ctx_bitlen(fullkey) == 256) {
++                        uint8_t bytes[DarlingP256PrivateSize];
++                        ccec_export_pub(ccec_ctx_pub(fullkey), bytes);
++                        ccn_write_uint_padded(ccec_ctx_n(fullkey), ccec_ctx_k(fullkey),
++                                              DarlingP256PrivateSize - DarlingP256PublicSize,
++                                              bytes + DarlingP256PublicSize);
++                        err = DarlingP256Sign(bytes, CFDataGetBytePtr(in1), CFDataGetLength(in1),
++                                              CFDataGetMutableBytePtr((CFMutableDataRef)result), &size);
++                        cc_clear(sizeof(bytes), bytes);
++                    } else
++#endif
++                        err = ccec_sign(fullkey, CFDataGetLength(in1), CFDataGetBytePtr(in1),
+                                         &size, CFDataGetMutableBytePtr((CFMutableDataRef)result), ccrng_seckey);
+                     require_action_quiet(err == 0, out, (CFReleaseNull(result),
+                                                          SecError(errSecParam, error, CFSTR("%@: X962 signing failed (ccerr %d)"),
+diff --git a/OSX/sec/Security/SecKey.m b/OSX/sec/Security/SecKey.m
+index 723a8bb7..4b896f43 100644
+--- a/OSX/sec/Security/SecKey.m
++++ b/OSX/sec/Security/SecKey.m
+@@ -70,6 +70,9 @@
+ #include <libDER/asn1Types.h>
+ #include <libDER/DER_Keys.h>
+ #include <libDER/DER_Encode.h>
++#if defined(DARLING)
++#include "DarlingKeychain.h"
++#endif
+ 
+ CFDataRef SecKeyCopyPublicKeyHash(SecKeyRef key)
+ {
+@@ -272,6 +275,10 @@ static bool getBoolForKey(CFDictionaryRef dict, CFStringRef key, bool default_va
+ 
+ static OSStatus add_key(SecKeyRef key, CFMutableDictionaryRef dict) {
+ 	CFDictionarySetValue(dict, kSecValueRef, key);
++#if defined(DARLING)
++    if (DarlingKeychainHandles(dict, DarlingKeychainAdd))
++        return DarlingKeychainPerform(DarlingKeychainAdd, dict, NULL, NULL);
++#endif
+     CFDictionaryRef keyAttributes = SecKeyCopyAttributes(key);
+     if (keyAttributes != NULL && CFDictionaryContainsKey(keyAttributes, kSecAttrAccessControl)) {
+         // Avoid overriding ACL from the key with source ACL of the call; ACL of the key might be already processed during key generation and should be preferred to source unprocessed ACL.
+@@ -340,6 +347,12 @@ OSStatus SecKeyGeneratePair(CFDictionaryRef parameters,
+         require_quiet(ktype, errOut);
+ 
+         if (tokenID != NULL) {
++#if defined(DARLING)
++            if (CFEqual(tokenID, kSecAttrTokenIDSecureEnclave)) {
++                result = errSecNotAvailable;
++                goto errOut;
++            }
++#endif
+             result = SecCTKKeyGeneratePair(parameters, &pubKey, &privKey);
+         } else if (CFEqual(ktype, kSecAttrKeyTypeECSECPrimeRandom)) {
+             result = SecECKeyGeneratePair(parameters, &pubKey, &privKey);
+@@ -356,7 +369,13 @@ OSStatus SecKeyGeneratePair(CFDictionaryRef parameters,
+             require_noerr_quiet(result = add_key(pubKey, pubParams), errOut);
+         }
+         if (getBoolForKey(privParams, kSecAttrIsPermanent, CFDictionaryContainsKey(privParams, kSecAttrTokenID))) {
+-            require_noerr_quiet(result = add_key(privKey, privParams), errOut);
++            result = add_key(privKey, privParams);
++#if defined(DARLING)
++            // Do not leave the public half behind when the private half was not stored.
++            if (result != errSecSuccess && getBoolForKey(pubParams, kSecAttrIsPermanent, false))
++                DarlingKeychainForgetKey(pubKey);
++#endif
++            require_noerr_quiet(result, errOut);
+         }
+ 
+         if (publicKey) {
+diff --git a/OSX/sec/Security/DarlingKeychain.h b/OSX/sec/Security/DarlingKeychain.h
+new file mode 100644
+index 00000000..ab15449c
+--- /dev/null
++++ b/OSX/sec/Security/DarlingKeychain.h
+@@ -0,0 +1,28 @@
++#ifndef DARLING_KEYCHAIN_H
++#define DARLING_KEYCHAIN_H
++
++#include <Security/SecItem.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum {
++    DarlingKeychainAdd,
++    DarlingKeychainFind,
++    DarlingKeychainUpdate,
++    DarlingKeychainDelete,
++} DarlingKeychainOperation;
++
++bool DarlingKeychainHandles(CFDictionaryRef query, DarlingKeychainOperation operation);
++OSStatus DarlingKeychainPerform(DarlingKeychainOperation operation, CFDictionaryRef query,
++                                CFDictionaryRef changes, CFTypeRef *result);
++/* Removes a key this store holds; used to undo half of a failed key pair. */
++void DarlingKeychainForgetKey(SecKeyRef key);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/OSX/sec/Security/DarlingKeychain.m b/OSX/sec/Security/DarlingKeychain.m
+new file mode 100644
+index 00000000..e7d8b928
+--- /dev/null
++++ b/OSX/sec/Security/DarlingKeychain.m
+@@ -0,0 +1,497 @@
++#import <Foundation/Foundation.h>
++#include <Security/SecKey.h>
++#include <Security/SecItemPriv.h>
++#include <Security/SecAccessControlPriv.h>
++#include <libaks_acl_cf_keys.h>
++
++#include <errno.h>
++#include <fcntl.h>
++#include <pwd.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/file.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "DarlingKeychain.h"
++
++#define S(symbol) ((NSString *)(symbol))
++
++static const char storeName[] = "items-v1.plist";
++static const size_t storeLimit = 16 * 1024 * 1024;
++
++/* Internal parse result: the query needs a feature this store does not provide. */
++enum { unsupportedQuery = 1 };
++
++static NSArray *identityKeys(BOOL keyItem)
++{
++    if (keyItem)
++        return @[S(kSecAttrKeyClass), S(kSecAttrKeyType), S(kSecAttrKeySizeInBits),
++                 S(kSecAttrApplicationLabel), S(kSecAttrApplicationTag), S(kSecAttrAccessGroup)];
++    return @[S(kSecAttrService), S(kSecAttrAccount), S(kSecAttrAccessGroup)];
++}
++
++static BOOL isBoolean(id value)
++{
++    return value == (id)kCFBooleanTrue || value == (id)kCFBooleanFalse;
++}
++
++static BOOL validAttribute(NSString *name, id value, BOOL keyItem)
++{
++    if ([name isEqual:S(kSecAttrAccessible)])
++        return [value isEqual:S(kSecAttrAccessibleAfterFirstUnlock)] ||
++               [value isEqual:S(kSecAttrAccessibleWhenUnlocked)] ||
++               [value isEqual:S(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)] ||
++               [value isEqual:S(kSecAttrAccessibleWhenUnlockedThisDeviceOnly)];
++    if ([name isEqual:S(kSecAttrLabel)] || [name isEqual:S(kSecAttrDescription)] ||
++        [name isEqual:S(kSecAttrComment)] || [name isEqual:S(kSecAttrAccessGroup)])
++        return [value isKindOfClass:[NSString class]];
++    if ([name isEqual:S(kSecAttrSynchronizable)])
++        return value == (id)kCFBooleanFalse;
++    if (!keyItem) {
++        if ([name isEqual:S(kSecAttrService)] || [name isEqual:S(kSecAttrAccount)])
++            return [value isKindOfClass:[NSString class]];
++        if ([name isEqual:S(kSecAttrGeneric)])
++            return [value isKindOfClass:[NSData class]];
++        return NO;
++    }
++    if ([name isEqual:S(kSecAttrApplicationTag)] || [name isEqual:S(kSecAttrApplicationLabel)])
++        return [value isKindOfClass:[NSData class]];
++    if ([name isEqual:S(kSecAttrKeyType)])
++        return [value isEqual:S(kSecAttrKeyTypeECSECPrimeRandom)];
++    if ([name isEqual:S(kSecAttrKeySizeInBits)] || [name isEqual:S(kSecAttrEffectiveKeySize)])
++        return [value isEqual:@256];
++    if ([name isEqual:S(kSecAttrKeyClass)])
++        return [value isEqual:S(kSecAttrKeyClassPrivate)] || [value isEqual:S(kSecAttrKeyClassPublic)];
++    if ([name isEqual:S(kSecAttrCanSign)] || [name isEqual:S(kSecAttrCanVerify)] ||
++        [name isEqual:S(kSecAttrIsPermanent)])
++        return isBoolean(value);
++    return NO;
++}
++
++static BOOL itemMatches(NSDictionary *item, NSDictionary *filters)
++{
++    /* An explicit access group matches only items stored with that group. */
++    for (NSString *name in filters)
++        if (![item[name] isEqual:filters[name]]) return NO;
++    return YES;
++}
++
++static BOOL duplicateItems(NSArray *items, BOOL keyItem, NSDictionary *candidate)
++{
++    NSArray *fields = identityKeys(keyItem);
++    for (NSDictionary *item in items) {
++        if (![item[S(kSecClass)] isEqual:candidate[S(kSecClass)]]) continue;
++        if ([[item objectsForKeys:fields notFoundMarker:[NSNull null]]
++                isEqual:[candidate objectsForKeys:fields notFoundMarker:[NSNull null]]])
++            return YES;
++    }
++    return NO;
++}
++
++static int openDirectory(int base, const char *name, BOOL create)
++{
++    if (create && mkdirat(base, name, 0700) == -1 && errno != EEXIST)
++        return -1;
++    return openat(base, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++}
++
++static int openStore(BOOL create)
++{
++    struct passwd pwd, *account = NULL;
++    char buffer[4096];
++    if (getpwuid_r(geteuid(), &pwd, buffer, sizeof(buffer), &account) || !account ||
++        strncmp(pwd.pw_dir, "/Users/", 7) != 0)
++        return -1;
++    const char *user = pwd.pw_dir + 7;
++    if (!*user || strchr(user, '/') || !strcmp(user, ".") || !strcmp(user, ".."))
++        return -1;
++    /* Resolve every component inside the guest mount with no symlink traversal. */
++    const char *components[] = {"/Users", user, "Library", "Keychains", "Darling"};
++    int dir = AT_FDCWD;
++    for (size_t i = 0; i < sizeof(components) / sizeof(*components); ++i) {
++        int next = openDirectory(dir, components[i], create && i >= 2);
++        if (dir != AT_FDCWD) close(dir);
++        if (next < 0) return -1;
++        dir = next;
++    }
++    struct stat info;
++    if (fstat(dir, &info) != 0 || info.st_uid != geteuid() || (info.st_mode & 077) != 0) {
++        close(dir);
++        errno = EACCES;
++        return -1;
++    }
++    return dir;
++}
++
++static BOOL privateFile(int fd, struct stat *info)
++{
++    return fstat(fd, info) == 0 && S_ISREG(info->st_mode) && info->st_uid == geteuid()
++        && info->st_nlink == 1 && (info->st_mode & 077) == 0;
++}
++
++static int lockItems(int fd, int operation)
++{
++    int result;
++    do {
++        result = flock(fd, operation);
++    } while (result == -1 && errno == EINTR);
++    return result;
++}
++
++static BOOL transferAll(int fd, void *bytes, size_t size, BOOL writing)
++{
++    uint8_t *cursor = bytes;
++    while (size) {
++        ssize_t count = writing ? write(fd, cursor, size) : read(fd, cursor, size);
++        if (count < 0 && errno == EINTR) continue;
++        if (count <= 0) return NO;
++        cursor += count;
++        size -= count;
++    }
++    return YES;
++}
++
++static NSMutableArray *readItems(int dir, OSStatus *status)
++{
++    int fd = openat(dir, storeName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
++    if (fd < 0 && errno == ENOENT)
++        return [NSMutableArray array];
++    struct stat info;
++    if (fd < 0 || !privateFile(fd, &info) || info.st_size <= 0 || info.st_size > storeLimit) {
++        if (fd >= 0) close(fd);
++        *status = errSecNotAvailable;
++        return nil;
++    }
++    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)info.st_size];
++    BOOL read = transferAll(fd, [data mutableBytes], [data length], NO);
++    close(fd);
++    id items = read ? [NSPropertyListSerialization propertyListWithData:data
++        options:NSPropertyListMutableContainers format:NULL error:NULL] : nil;
++    if (![items isKindOfClass:[NSMutableArray class]]) {
++        *status = errSecDecode;
++        return nil;
++    }
++    for (id item in items) {
++        if (![item isKindOfClass:[NSDictionary class]] ||
++            ![item[S(kSecValueData)] isKindOfClass:[NSData class]]) {
++            *status = errSecDecode;
++            return nil;
++        }
++    }
++    return items;
++}
++
++static OSStatus writeItems(int dir, NSArray *items)
++{
++    NSData *data = [NSPropertyListSerialization dataWithPropertyList:items
++        format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
++    if (!data || [data length] > storeLimit)
++        return errSecDataTooLarge;
++
++    char name[32];
++    snprintf(name, sizeof(name), ".items-%08x%08x", arc4random(), arc4random());
++    int fd = openat(dir, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
++    if (fd < 0) return errSecNotAvailable;
++    BOOL ok = transferAll(fd, (void *)[data bytes], [data length], YES) && fsync(fd) == 0;
++    ok = close(fd) == 0 && ok;
++    if (ok && renameat(dir, name, dir, storeName) == 0)
++        return errSecSuccess;
++    unlinkat(dir, name, 0);
++    return errSecNotAvailable;
++}
++
++static OSStatus prepareItem(NSMutableDictionary *item, NSDictionary *query, BOOL keyItem)
++{
++    id payload = query[S(kSecValueData)];
++    CFTypeRef ref = (CFTypeRef)query[S(kSecValueRef)];
++    if (ref) {
++        if (!keyItem || payload || CFGetTypeID(ref) != SecKeyGetTypeID())
++            return errSecParam;
++        SecKeyRef key = (SecKeyRef)ref;
++        NSDictionary *attrs = [(NSDictionary *)SecKeyCopyAttributes(key) autorelease];
++        if (!attrs || attrs[S(kSecAttrTokenID)] ||
++            ![attrs[S(kSecAttrKeyType)] isEqual:S(kSecAttrKeyTypeECSECPrimeRandom)] ||
++            ![attrs[S(kSecAttrKeySizeInBits)] isEqual:@256])
++            return errSecParam;
++        for (NSString *name in @[S(kSecAttrKeyClass), S(kSecAttrKeyType), S(kSecAttrKeySizeInBits),
++                                 S(kSecAttrEffectiveKeySize), S(kSecAttrApplicationLabel)]) {
++            if (!attrs[name] || (item[name] && ![item[name] isEqual:attrs[name]]))
++                return errSecParam;
++            item[name] = attrs[name];
++        }
++        for (NSString *name in @[S(kSecAttrCanSign), S(kSecAttrCanVerify)]) {
++            if (!item[name] && attrs[name]) item[name] = attrs[name];
++        }
++        payload = [(NSData *)SecKeyCopyExternalRepresentation(key, NULL) autorelease];
++    }
++
++    if (![payload isKindOfClass:[NSData class]])
++        return errSecParam;
++    if (keyItem) {
++        // A SecKeyRef supplies the canonical key attributes and application label.
++        if (!ref) return errSecParam;
++        if (!item[S(kSecAttrApplicationTag)]) item[S(kSecAttrApplicationTag)] = [NSData data];
++        item[S(kSecAttrIsPermanent)] = @YES;
++    } else {
++        if (!item[S(kSecAttrService)]) item[S(kSecAttrService)] = @"";
++        if (!item[S(kSecAttrAccount)]) item[S(kSecAttrAccount)] = @"";
++    }
++    if (!item[S(kSecAttrAccessible)]) item[S(kSecAttrAccessible)] = S(kSecAttrAccessibleWhenUnlocked);
++    item[S(kSecAttrSynchronizable)] = @NO;
++    item[S(kSecValueData)] = payload;
++    return errSecSuccess;
++}
++
++static id makeResult(NSDictionary *item, NSDictionary *query, BOOL keyItem, OSStatus *status)
++{
++    BOOL attributes = query[S(kSecReturnAttributes)] == (id)kCFBooleanTrue;
++    BOOL data = query[S(kSecReturnData)] == (id)kCFBooleanTrue;
++    BOOL reference = query[S(kSecReturnRef)] == (id)kCFBooleanTrue;
++    NSMutableDictionary *values = [NSMutableDictionary dictionary];
++    if (attributes) {
++        [values addEntriesFromDictionary:item];
++        [values removeObjectForKey:S(kSecValueData)];
++    }
++    if (data) values[S(kSecValueData)] = item[S(kSecValueData)];
++    if (reference) {
++        if (!keyItem) {
++            *status = errSecParam;
++            return nil;
++        }
++        id keyClass = item[S(kSecAttrKeyClass)];
++        if (!validAttribute(S(kSecAttrKeyClass), keyClass, YES)) {
++            *status = errSecDecode;
++            return nil;
++        }
++        NSDictionary *params = @{S(kSecAttrKeyClass): keyClass,
++                                 S(kSecAttrKeyType): S(kSecAttrKeyTypeECSECPrimeRandom)};
++        SecKeyRef key = SecKeyCreateWithData((CFDataRef)item[S(kSecValueData)],
++                                            (CFDictionaryRef)params, NULL);
++        if (!key) {
++            *status = errSecDecode;
++            return nil;
++        }
++        values[S(kSecValueRef)] = [(id)key autorelease];
++    }
++    if (attributes || (data && reference)) return values;
++    if (reference) return values[S(kSecValueRef)];
++    return values[S(kSecValueData)];
++}
++
++/*
++ * The protection class of an access control object whose operations are all
++ * unconditionally allowed. Passcode, biometry and similar constraints are
++ * dictionaries; this store cannot enforce them.
++ */
++static id plainProtection(id value)
++{
++    if (CFGetTypeID((CFTypeRef)value) != SecAccessControlGetTypeID())
++        return nil;
++    SecAccessControlRef control = (SecAccessControlRef)value;
++    if (SecAccessControlGetRequirePassword(control))
++        return nil;
++    NSDictionary *constraints = (NSDictionary *)SecAccessControlGetConstraints(control);
++    /* Without an unconditional default, operations the object omits are forbidden. */
++    if (constraints[S(kAKSKeyOpDefaultAcl)] != (id)kCFBooleanTrue)
++        return nil;
++    for (id operation in constraints)
++        if (constraints[operation] != (id)kCFBooleanTrue) return nil;
++    return (id)SecAccessControlGetProtection(control);
++}
++
++static BOOL softwareP256Key(CFTypeRef ref)
++{
++    if (CFGetTypeID(ref) != SecKeyGetTypeID())
++        return NO;
++    NSDictionary *attrs = [(NSDictionary *)SecKeyCopyAttributes((SecKeyRef)ref) autorelease];
++    return attrs && !attrs[S(kSecAttrTokenID)] &&
++           [attrs[S(kSecAttrKeyType)] isEqual:S(kSecAttrKeyTypeECSECPrimeRandom)] &&
++           [attrs[S(kSecAttrKeySizeInBits)] isEqual:@256];
++}
++
++/*
++ * Collects the attribute filters of a query. Returns unsupportedQuery when the
++ * query needs something outside this store, so the caller can leave it to the
++ * stock Security path, and errSecParam for a malformed supported query.
++ */
++static OSStatus parseQuery(DarlingKeychainOperation operation, NSDictionary *query, BOOL keyItem,
++                           NSMutableDictionary *filters, BOOL *all)
++{
++    BOOL add = operation == DarlingKeychainAdd;
++    BOOL find = operation == DarlingKeychainFind;
++    for (NSString *key in query) {
++        NSString *name = key;
++        id value = query[key];
++        if ([name isEqual:S(kSecClass)] || [name isEqual:S(kSecUseDataProtectionKeychain)])
++            continue;
++        if (add && ([name isEqual:S(kSecValueRef)] || [name isEqual:S(kSecValueData)]))
++            continue;
++        if ([name isEqual:S(kSecMatchLimit)]) {
++            if (!find) return errSecParam;
++            *all = [value isEqual:S(kSecMatchLimitAll)];
++            if (!*all && ![value isEqual:S(kSecMatchLimitOne)]) return errSecParam;
++            continue;
++        }
++        if ([name isEqual:S(kSecReturnData)] || [name isEqual:S(kSecReturnRef)] ||
++            [name isEqual:S(kSecReturnAttributes)]) {
++            if ((!add && !find) || !isBoolean(value)) return errSecParam;
++            continue;
++        }
++        /* Every item is local, so "any" places no constraint on a search. */
++        if (!add && [name isEqual:S(kSecAttrSynchronizable)] &&
++            [value isEqual:S(kSecAttrSynchronizableAny)])
++            continue;
++        if ([name isEqual:S(kSecAttrAccessControl)]) {
++            value = plainProtection(value);
++            if (!value || filters[S(kSecAttrAccessible)]) return unsupportedQuery;
++            name = S(kSecAttrAccessible);
++        } else if ([name isEqual:S(kSecAttrAccessible)] && filters[name]) {
++            return unsupportedQuery;
++        }
++        if (!validAttribute(name, value, keyItem)) return unsupportedQuery;
++        filters[name] = value;
++    }
++    return errSecSuccess;
++}
++
++bool DarlingKeychainHandles(CFDictionaryRef query, DarlingKeychainOperation operation)
++{
++    if (!query || CFGetTypeID(query) != CFDictionaryGetTypeID() ||
++        CFDictionaryGetValue(query, kSecUseDataProtectionKeychain) != kCFBooleanTrue)
++        return false;
++    CFTypeRef itemClass = CFDictionaryGetValue(query, kSecClass);
++    CFTypeRef ref = CFDictionaryGetValue(query, kSecValueRef);
++    BOOL keyItem = !itemClass || CFEqual(itemClass, kSecClassKey);
++    if (!itemClass && !(operation == DarlingKeychainAdd && ref))
++        return false;
++    if (!keyItem && !CFEqual(itemClass, kSecClassGenericPassword))
++        return false;
++    /* Claim only what the store can answer; the rest keeps its stock status. */
++    @autoreleasepool {
++        if (keyItem && operation == DarlingKeychainAdd && ref && !softwareP256Key(ref))
++            return false;
++        BOOL all = NO;
++        return parseQuery(operation, (NSDictionary *)query, keyItem,
++                          [NSMutableDictionary dictionary], &all) != unsupportedQuery;
++    }
++}
++
++static OSStatus perform(DarlingKeychainOperation operation, NSDictionary *query,
++                        NSDictionary *changes, CFTypeRef *result)
++{
++    if (result) *result = NULL;
++    BOOL keyItem = !query[S(kSecClass)] || [query[S(kSecClass)] isEqual:S(kSecClassKey)];
++    NSMutableDictionary *filters = [NSMutableDictionary dictionary];
++    BOOL all = NO;
++    OSStatus parsed = parseQuery(operation, query, keyItem, filters, &all);
++    if (parsed != errSecSuccess) return errSecParam;
++    /* macOS does not return the data of several passwords in one call. */
++    if (all && !keyItem && query[S(kSecReturnData)] == (id)kCFBooleanTrue) return errSecParam;
++    filters[S(kSecClass)] = keyItem ? S(kSecClassKey) : S(kSecClassGenericPassword);
++
++    NSMutableDictionary *item = nil;
++    if (operation == DarlingKeychainAdd) {
++        item = filters;
++        OSStatus status = prepareItem(item, query, keyItem);
++        if (status != errSecSuccess) return status;
++    }
++    if (operation == DarlingKeychainUpdate) {
++        if (![changes isKindOfClass:[NSDictionary class]] || ![changes count]) return errSecParam;
++        for (NSString *name in changes) {
++            id value = changes[name];
++            if ([name isEqual:S(kSecValueData)]) {
++                if (keyItem || ![value isKindOfClass:[NSData class]]) return errSecParam;
++            } else if (!validAttribute(name, value, keyItem) ||
++                       (keyItem && ![name isEqual:S(kSecAttrLabel)] &&
++                        ![name isEqual:S(kSecAttrAccessible)])) {
++                return errSecParam;
++            }
++        }
++    }
++
++    BOOL add = operation == DarlingKeychainAdd;
++    BOOL find = operation == DarlingKeychainFind;
++    errno = EACCES;
++    int dir = openStore(add);
++    if (dir < 0) return !add && errno == ENOENT ? errSecItemNotFound : errSecNotAvailable;
++    int lock = openat(dir, ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600);
++    struct stat info;
++    OSStatus status = errSecNotAvailable;
++    id output = nil;
++    if (lock >= 0 && privateFile(lock, &info) && lockItems(lock, find ? LOCK_SH : LOCK_EX) == 0) {
++        status = errSecSuccess;
++        NSMutableArray *items = readItems(dir, &status);
++        if (items && add) {
++            if (duplicateItems(items, keyItem, item)) {
++                status = errSecDuplicateItem;
++            } else {
++                if (result) output = makeResult(item, query, keyItem, &status);
++                if (status == errSecSuccess) {
++                    [items addObject:item];
++                    status = writeItems(dir, items);
++                }
++            }
++        } else if (items) {
++            NSMutableArray *matches = [NSMutableArray array];
++            for (NSDictionary *entry in items) {
++                if (itemMatches(entry, filters)) {
++                    [matches addObject:entry];
++                    if (find && !all) break;
++                }
++            }
++            if (![matches count]) {
++                status = errSecItemNotFound;
++            } else if (find && result) {
++                NSMutableArray *values = [NSMutableArray array];
++                for (NSDictionary *match in matches) {
++                    id value = makeResult(match, query, keyItem, &status);
++                    if (status != errSecSuccess) break;
++                    if (value) [values addObject:value];
++                }
++                if ([values count]) output = all ? values : values[0];
++            } else if (!find) {
++                [items removeObjectsInArray:matches];
++                if (operation == DarlingKeychainUpdate) {
++                    for (NSDictionary *match in matches) {
++                        NSMutableDictionary *updated = [NSMutableDictionary dictionaryWithDictionary:match];
++                        [updated addEntriesFromDictionary:changes];
++                        if (duplicateItems(items, keyItem, updated)) {
++                            status = errSecDuplicateItem;
++                            break;
++                        }
++                        [items addObject:updated];
++                    }
++                }
++                if (status == errSecSuccess) status = writeItems(dir, items);
++            }
++        }
++    }
++    if (lock >= 0) close(lock);
++    close(dir);
++    if (status == errSecSuccess && result) *result = (CFTypeRef)[output retain];
++    return status;
++}
++
++void DarlingKeychainForgetKey(SecKeyRef key)
++{
++    @autoreleasepool {
++        NSDictionary *attrs = [(NSDictionary *)SecKeyCopyAttributes(key) autorelease];
++        id label = attrs[S(kSecAttrApplicationLabel)], keyClass = attrs[S(kSecAttrKeyClass)];
++        if (!label || !keyClass) return;
++        NSDictionary *query = @{S(kSecClass): S(kSecClassKey), S(kSecAttrKeyClass): keyClass,
++                                S(kSecAttrApplicationLabel): label,
++                                S(kSecUseDataProtectionKeychain): @YES};
++        if (DarlingKeychainHandles((CFDictionaryRef)query, DarlingKeychainDelete))
++            perform(DarlingKeychainDelete, query, nil, NULL);
++    }
++}
++
++OSStatus DarlingKeychainPerform(DarlingKeychainOperation operation, CFDictionaryRef query,
++                                CFDictionaryRef changes, CFTypeRef *result)
++{
++    @autoreleasepool {
++        return perform(operation, (NSDictionary *)query, (NSDictionary *)changes, result);
++    }
++}
+diff --git a/OSX/sec/Security/DarlingP256.h b/OSX/sec/Security/DarlingP256.h
+new file mode 100644
+index 0000000..bd23052
+--- /dev/null
++++ b/OSX/sec/Security/DarlingP256.h
+@@ -0,0 +1,18 @@
++#ifndef DARLING_P256_H
++#define DARLING_P256_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++enum { DarlingP256PublicSize = 65, DarlingP256PrivateSize = 97 };
++
++/* X9.63 uncompressed public point, followed by the scalar for a private key. */
++bool DarlingP256Generate(uint8_t *key);
++bool DarlingP256Validate(const uint8_t *key, size_t keyLength);
++int DarlingP256Sign(const uint8_t *key, const uint8_t *digest, size_t digestLength,
++                    uint8_t *signature, size_t *signatureLength);
++int DarlingP256Verify(const uint8_t *key, const uint8_t *digest, size_t digestLength,
++                      const uint8_t *signature, size_t signatureLength);
++
++#endif
+diff --git a/OSX/sec/Security/DarlingP256.c b/OSX/sec/Security/DarlingP256.c
+new file mode 100644
+index 0000000..5d587e1
+--- /dev/null
++++ b/OSX/sec/Security/DarlingP256.c
+@@ -0,0 +1,134 @@
++#include "DarlingP256.h"
++
++#include <limits.h>
++#include <pthread.h>
++#include <string.h>
++#include <corecrypto/cc.h>
++#include <openssl/ec.h>
++#include <openssl/ecdsa.h>
++#include <openssl/obj_mac.h>
++
++enum { scalarSize = DarlingP256PrivateSize - DarlingP256PublicSize };
++
++/* The bundled OpenSSL uses process-global state and legacy locking callbacks. */
++static pthread_mutex_t p256Lock = PTHREAD_MUTEX_INITIALIZER;
++
++static size_t exportPoint(const EC_KEY *key, uint8_t *point)
++{
++    return EC_POINT_point2oct(EC_KEY_get0_group(key), EC_KEY_get0_public_key(key),
++                             POINT_CONVERSION_UNCOMPRESSED, point, DarlingP256PublicSize, NULL);
++}
++
++/*
++ * Security also links a legacy OpenSSL archive whose BN_* symbols have a
++ * different ABI. Use the dylib's ECPrivateKey codecs to transfer the scalar
++ * without passing a BIGNUM across the two libraries.
++ */
++static bool importPrivate(EC_KEY **key, const uint8_t *bytes)
++{
++    /* RFC 5915 ECPrivateKey with the scalar and public point. */
++    uint8_t der[12 + scalarSize + DarlingP256PublicSize] = {
++        0x30, sizeof(der) - 2, 0x02, 0x01, 0x01, 0x04, scalarSize,
++        [7 + scalarSize] = 0xa1, 3 + DarlingP256PublicSize,
++        0x03, 1 + DarlingP256PublicSize, 0x00
++    };
++    memcpy(der + 7, bytes + DarlingP256PublicSize, scalarSize);
++    memcpy(der + 12 + scalarSize, bytes, DarlingP256PublicSize);
++    const uint8_t *cursor = der;
++    bool decoded = d2i_ECPrivateKey(key, &cursor, sizeof(der)) != NULL;
++    cc_clear(sizeof(der), der);
++    return decoded;
++}
++
++static bool importPublic(EC_KEY *key, const uint8_t *bytes)
++{
++    const EC_GROUP *group = EC_KEY_get0_group(key);
++    EC_POINT *point = EC_POINT_new(group);
++    bool valid = point && EC_POINT_oct2point(group, point, bytes, DarlingP256PublicSize, NULL)
++                       && EC_KEY_set_public_key(key, point);
++    EC_POINT_free(point);
++    return valid;
++}
++
++static EC_KEY *importKey(const uint8_t *bytes, size_t length)
++{
++    if ((length != DarlingP256PublicSize && length != DarlingP256PrivateSize) || bytes[0] != 4)
++        return NULL;
++
++    EC_KEY *key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
++    if (!key)
++        return NULL;
++    bool valid = length == DarlingP256PrivateSize ? importPrivate(&key, bytes)
++                                                 : importPublic(key, bytes);
++    if (!valid || EC_KEY_check_key(key) != 1) {
++        EC_KEY_free(key);
++        return NULL;
++    }
++    return key;
++}
++
++bool DarlingP256Generate(uint8_t *bytes)
++{
++    pthread_mutex_lock(&p256Lock);
++    EC_KEY *key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
++    bool success = key && EC_KEY_generate_key(key) == 1 &&
++                   exportPoint(key, bytes) == DarlingP256PublicSize;
++    if (success) {
++        EC_KEY_set_enc_flags(key, EC_PKEY_NO_PARAMETERS | EC_PKEY_NO_PUBKEY);
++        uint8_t der[7 + scalarSize];
++        uint8_t *cursor = der;
++        int length = i2d_ECPrivateKey(key, NULL);
++        success = length > 7 && length <= sizeof(der) && i2d_ECPrivateKey(key, &cursor) == length &&
++            der[0] == 0x30 && der[1] == length - 2 && der[2] == 0x02 && der[3] == 1 &&
++            der[4] == 1 && der[5] == 0x04 && der[6] == length - 7;
++        if (success) {
++            int padding = scalarSize - (length - 7);
++            memset(bytes + DarlingP256PublicSize, 0, padding);
++            memcpy(bytes + DarlingP256PublicSize + padding, der + 7, length - 7);
++        }
++        cc_clear(sizeof(der), der);
++    }
++    EC_KEY_free(key);
++    pthread_mutex_unlock(&p256Lock);
++    return success;
++}
++
++bool DarlingP256Validate(const uint8_t *bytes, size_t length)
++{
++    pthread_mutex_lock(&p256Lock);
++    EC_KEY *key = importKey(bytes, length);
++    bool valid = key != NULL;
++    EC_KEY_free(key);
++    pthread_mutex_unlock(&p256Lock);
++    return valid;
++}
++
++int DarlingP256Sign(const uint8_t *bytes, const uint8_t *digest, size_t digestLength,
++                    uint8_t *signature, size_t *signatureLength)
++{
++    pthread_mutex_lock(&p256Lock);
++    EC_KEY *key = importKey(bytes, DarlingP256PrivateSize);
++    unsigned int actualLength = 0;
++    bool success = key && digestLength <= INT_MAX && *signatureLength >= (size_t)ECDSA_size(key)
++        && ECDSA_sign(0, digest, (int)digestLength, signature, &actualLength, key) == 1;
++    EC_KEY_free(key);
++    pthread_mutex_unlock(&p256Lock);
++    if (!success)
++        return -1;
++    *signatureLength = actualLength;
++    return 0;
++}
++
++int DarlingP256Verify(const uint8_t *bytes, const uint8_t *digest, size_t digestLength,
++                      const uint8_t *signature, size_t signatureLength)
++{
++    if (digestLength > INT_MAX || signatureLength > INT_MAX)
++        return -1;
++    pthread_mutex_lock(&p256Lock);
++    EC_KEY *key = importKey(bytes, DarlingP256PublicSize);
++    int result = key ? ECDSA_verify(0, digest, (int)digestLength,
++                                   signature, (int)signatureLength, key) : -1;
++    EC_KEY_free(key);
++    pthread_mutex_unlock(&p256Lock);
++    return result;
++}

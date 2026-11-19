@@ -1211,7 +1211,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..88ec70f 100644
+index f58184a..a524710 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,34 @@
@@ -1364,7 +1364,7 @@ index f58184a..88ec70f 100644
  
  	[super dealloc];
  }
-@@ -153,12 +253,108 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +253,109 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1468,13 +1468,14 @@ index f58184a..88ec70f 100644
 +	try { pso = _device->newComputePipelineState(descriptor.asIndiumDescriptor, static_cast<Indium::PipelineOption>(options), nullptr); }
 +	catch (...) {
 +		MTLDebugPipelineFailure("computePipelineFailure");
-+		if (error) *error = MTLErrorFromCurrentException("newComputePipelineStateWithDescriptor");
++		NSError* err = MTLErrorFromCurrentException("newComputePipelineStateWithDescriptor");
++		if (error) *error = err;
 +		return nil;
 +	}
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +362,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +363,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1482,7 +1483,7 @@ index f58184a..88ec70f 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +380,13 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +381,14 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1491,13 +1492,14 @@ index f58184a..88ec70f 100644
 +	try { pso = _device->newComputePipelineState(((MTLFunctionInternal*)computeFunction).function, static_cast<Indium::PipelineOption>(options), nullptr); }
 +	catch (...) {
 +		MTLDebugPipelineFailure("computePipelineFailure");
-+		if (error) *error = MTLErrorFromCurrentException("newComputePipelineStateWithFunction");
++		NSError* err = MTLErrorFromCurrentException("newComputePipelineStateWithFunction");
++		if (error) *error = err;
 +		return nil;
 +	}
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +394,44 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +396,45 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1537,13 +1539,14 @@ index f58184a..88ec70f 100644
 +	catch (...) {
 +		MTLDebugPipelineFailure("renderPipelineFailure");
 +		MTLTraceCount("pipelineException");
-+		if (error) *error = MTLErrorFromCurrentException("newRenderPipelineStateWithDescriptor");
++		NSError* err = MTLErrorFromCurrentException("newRenderPipelineStateWithDescriptor");
++		if (error) *error = err;
 +		return nil;
 +	}
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +439,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +442,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1663,7 +1666,7 @@ index f58184a..88ec70f 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,8 +620,21 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,9 +623,33 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -1680,13 +1683,25 @@ index f58184a..88ec70f 100644
 +    try { lib = _device->newLibrary(bytes, length); }
 +    catch (...) {
 +        dispatch_release(mapped);
-+        if (error) *error = MTLErrorFromCurrentException("newLibraryWithData");
++        // build it even when error is NULL: it also logs the failure to /tmp/metal-errors.log
++        NSError* err = MTLErrorFromCurrentException("newLibraryWithData");
++        if (error) *error = err;
 +        return nil;
 +    }
 +    dispatch_release(mapped);
  	if (!lib) {
++		// logged even when error is NULL, like the exception path above
++		if (FILE* log = fopen("/tmp/metal-errors.log", "a")) {
++			fprintf(log, "newLibraryWithData: no library (%zu bytes of input)\n", length);
++			fclose(log);
++		}
++		if (error) {
++			*error = [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 3
++			                         userInfo: @{NSLocalizedDescriptionKey: @"Failed to load Metal library"}];
++		}
  		return nil;
  	}
+ 	return [[MTLLibraryInternal alloc] initWithLibrary: lib device: self];
 diff --git a/src/Metal/MTLLibrary.mm b/src/Metal/MTLLibrary.mm
 index 0feb46e..703c437 100644
 --- a/src/Metal/MTLLibrary.mm
@@ -3543,7 +3558,7 @@ diff --git a/include/Metal/MTLExceptionBridge.h b/include/Metal/MTLExceptionBrid
 new file mode 100644
 --- /dev/null
 +++ b/include/Metal/MTLExceptionBridge.h
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,26 @@
 +#pragma once
 +#import <Foundation/Foundation.h>
 +#include <cstdio>
@@ -3564,8 +3579,11 @@ new file mode 100644
 +		fprintf(log, "%s: %s\n", where, message.c_str());
 +		fclose(log);
 +	}
++	// nil for bytes that are not valid UTF-8, and a nil dictionary value would raise; the log keeps the raw message
++	NSString* text = [NSString stringWithUTF8String: message.c_str()];
++	if (!text) text = @"Metal backend error (message is not valid UTF-8)";
 +	return [NSError errorWithDomain: @"MTLLibraryErrorDomain" code: 3
-+	                       userInfo: @{NSLocalizedDescriptionKey: [NSString stringWithUTF8String: message.c_str()]}];
++	                       userInfo: @{NSLocalizedDescriptionKey: text}];
 +}
 diff --git a/include/Metal/MTLTrace.h b/include/Metal/MTLTrace.h
 new file mode 100644
