@@ -20,6 +20,11 @@ stops the session once a managed League/Riot window has been absent for N
 seconds and no game process is running. It is off by default and never stops
 when the window state cannot be read.
 
+Riot Client self-update: after updating itself the Riot Client launcher starts
+a new RiotClientServices with --restart-timestamp and exits 0, which ends the
+loader. While that relaunched client runs, the supervisor keeps the session
+instead of shutting the runtime down under it.
+
 A failed client exit is reported with its status, and, when --guest-log names
 the client's log directory, with the last available line of its newest log file, labelled as possibly historical. That
 turns a bare "runtime and guest processes are gone" into the reason the guest
@@ -71,6 +76,8 @@ from pathlib import Path
 SOCK_VARIABLE = b'__mldr_sockpath'
 SOCK_NAME = '.darlingserver.sock'
 GAME_NAME = 'LeagueofLegends'
+RIOT_CLIENT_NAME = 'RiotClientServices'
+RESTART_FLAG = '--restart-timestamp'
 CLIENT_CLASSES = ('leagueclientux', 'riot client')
 POLL_SECONDS = 2.0
 TERM_GRACE = 5.0
@@ -854,6 +861,25 @@ def session_members(prefix, namespace, proc_root=Path('/proc'), own_namespace=No
     return prefix_only(prefix, proc_root)
 
 
+def restarted_riot_client(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
+    """True when the Riot Client relaunched itself and the new process runs.
+
+    After a self-update the Riot Client launcher spawns a new
+    RiotClientServices with --restart-timestamp, then exits 0. The loader the
+    supervisor started exits with it, but the session lives on in that new
+    process.
+    """
+    for _pid, proc in session_members(prefix, namespace, proc_root, own_namespace):
+        info = process_info(proc)
+        if info is None or info[0] == 'Z':
+            continue
+        argv = command_line(proc)
+        if (any(os.path.basename(part) == RIOT_CLIENT_NAME for part in argv[:2])
+                and any(part.startswith(RESTART_FLAG) for part in argv[1:])):
+            return True
+    return False
+
+
 def league_game_present(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
     """True unless /proc proves no game runs; unknown counts as running."""
     if any(GAME_NAME in command_names(proc)
@@ -1004,8 +1030,27 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     if league_load is None:
         league_load = os.environ.get('RCLOL_FINISH_LEAGUE_LOAD', '1') != '0'
     load_watch = LeagueLoadWatch(prefix) if league_load else None
+    following = []
+
+    def session_running():
+        if child.poll() is None:
+            return True
+        # A Riot Client self-update ends the loader with status 0 and leaves
+        # the relaunched client running; stopping the runtime now would kill
+        # it and the player would have to launch twice.
+        if not owns_runtime or child.returncode != 0:
+            return False
+        if not restarted_riot_client(prefix, namespace or prefix_namespace(prefix, proc_root),
+                                     proc_root, own_namespace):
+            return False
+        if not following:
+            following.append(True)
+            log('Riot Client restarted itself after an update; '
+                'following the new client process', out)
+        return True
+
     try:
-        while child.poll() is None and not stop:
+        while session_running() and not stop:
             # Learn the guest namespace while the session runs: after a crash
             # the processes that still carry the socket may be the only proof.
             if namespace is None:
