@@ -31,11 +31,16 @@ LEGACY_SVG_MARKERS = ('id="goldGrad"', 'M172 108 L242 108')
 # Opt-in window-association entries (--window-entries / DARLING_LOL_WINDOW_ENTRIES=1).
 # GNOME matches a window to an application by StartupWMClass, so a hidden entry
 # per client window class gives those windows a proper name and icon in the
-# Activities overview and the dash.  They carry third-party product names, so
-# they are never created unless the user asks, and the default launcher stays
-# neutral.  Each tuple is (file name, display name, WM_CLASS).
+# Activities overview and the dash.  The game runs in its own window with the
+# LeagueofLegends class, so it gets an entry too.  They carry third-party
+# product names, so they are never created unless the user asks, and the
+# default launcher stays neutral.  Each tuple is (file name, display name,
+# WM_CLASS).
+GAME_ENTRY_NAME = "darling-league-game.desktop"
+GAME_ENTRY_MARKER = "X-Darling-LoL-WindowEntry=game"
 WINDOW_ENTRIES = (
     ("darling-league-client.desktop", "League of Legends", "LeagueClientUx"),
+    (GAME_ENTRY_NAME, "League of Legends", "LeagueofLegends"),
     ("darling-riot-client.desktop", "Riot Client", "Riot Client"),
 )
 WINDOW_ENTRY_KEYWORDS = "LoL;League;League of Legends;Riot;"
@@ -164,16 +169,22 @@ def exec_marker_variants() -> set[str]:
 
 
 def legacy_entry_owned(path: Path) -> bool:
-    """Return True when an entry's Exec runs this checkout's launcher scripts."""
+    """Recognize entries managed by this checkout."""
     markers = [str(PROJECT_ROOT / script) for script in (LEGACY_RUN_SCRIPT,
                                                          LAUNCH_SHORTCUT_SCRIPT)]
     variants = exec_marker_variants()
     try:
         # Ownership is the entry's Exec target.  The path in Name, Comment or any
         # other field proves nothing: a foreign file can mention this checkout.
-        commands = [line[5:].strip() for line in path.read_text(errors="ignore").splitlines()
-                    if line.startswith("Exec=")]
+        if path.name == GAME_ENTRY_NAME and path.is_symlink():
+            return False
+        lines = path.read_text(errors="ignore").splitlines()
+        if path.name == GAME_ENTRY_NAME and GAME_ENTRY_MARKER not in lines:
+            return False
+        commands = [line[5:].strip() for line in lines if line.startswith("Exec=")]
     except OSError:
+        if path.name == GAME_ENTRY_NAME:
+            return False
         # A dangling symlink still counts when it points at this checkout.
         try:
             return os.readlink(path) in markers
@@ -319,10 +330,8 @@ StartupNotify=false
 
     # Window-association entries.  Hidden from menus (NoDisplay) and never put on
     # the desktop: they only let the shell name and icon the client windows.
-    # Without the opt-in, remove the ones this project wrote earlier.  Either
-    # way a file that does not point at this checkout's launch script belongs to
-    # someone else: it is neither removed nor overwritten, and the conflict is
-    # reported.
+    # Without the opt-in, remove only entries owned by this checkout.
+    window_write_failed = False
     for file_name, display_name, wm_class in WINDOW_ENTRIES:
         window_file = apps_base / file_name
         if not window_entries:
@@ -333,10 +342,12 @@ StartupNotify=false
             print(f"Window entry {window_file} already exists and was not created by this "
                   "project; leaving it untouched.", file=sys.stderr)
             continue
-        # Replace an owned link itself; never write through it into the launcher.
-        if window_file.is_symlink():
-            window_file.unlink()
-        window_file.write_text(f"""[Desktop Entry]
+        marker = f"{GAME_ENTRY_MARKER}\n" if file_name == GAME_ENTRY_NAME else ""
+        try:
+            # Replace an owned link itself.
+            if window_file.is_symlink():
+                window_file.unlink()
+            window_file.write_text(f"""[Desktop Entry]
 Version=1.0
 Type=Application
 Name={display_name}
@@ -350,8 +361,12 @@ NoDisplay=true
 Categories=Game;
 StartupWMClass={wm_class}
 StartupNotify=false
-""")
-        os.chmod(window_file, 0o755)
+{marker}""")
+            os.chmod(window_file, 0o755)
+        except OSError as error:
+            print(f"Could not write window entry {window_file}: {error}", file=sys.stderr)
+            window_write_failed = True
+            continue
         print(f"Created window entry: {window_file}")
 
     # Link handler for sign-in: Google and other social sign-in finish in the host
@@ -382,7 +397,10 @@ StartupNotify=false
     # Refresh icon and desktop databases
     refresh_databases(apps_base, icons_base)
 
+    if window_write_failed:
+        return 1
     print("GNOME application launcher and icon installed successfully.")
+    return 0
 
 
 def refresh_databases(apps_base: Path, icons_base: Path) -> None:
@@ -524,4 +542,4 @@ if __name__ == "__main__":
     else:
         if arguments.remove_all:
             parser.error("--remove-all is only valid together with --remove")
-        main(arguments.toolbox, window_entries, arguments.name, arguments.env, icon)
+        sys.exit(main(arguments.toolbox, window_entries, arguments.name, arguments.env, icon))

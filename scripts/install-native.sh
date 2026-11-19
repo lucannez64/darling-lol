@@ -6,6 +6,7 @@ LOG="${XDG_CACHE_HOME:-$HOME/.cache}/darling-lol-install.log"
 TOOLBOX_NAME="${DARLING_LOL_TOOLBOX_NAME:-darling-lol}"
 
 readonly MIN_FREE_GIB=50
+readonly MIN_REINSTALL_FREE_GIB=5
 readonly MIN_FREE_GIB_CONTAINER=5
 # Minimum supported Fedora, also used as the toolbox image release on hosts
 # that cannot infer one (toolbox errors with "option '--release' is needed"
@@ -136,7 +137,8 @@ valid_region() {
 }
 
 normalize_locale() {
-  local value=${1//-/_}
+  # Keep the case conversion and ASCII ranges independent of the host locale.
+  local LC_ALL=C value=${1//-/_}
   if [[ $value =~ ^([A-Za-z]{2})_([A-Za-z]{2})$ ]]; then
     printf '%s_%s' "${BASH_REMATCH[1],,}" "${BASH_REMATCH[2]^^}"
     return 0
@@ -249,8 +251,8 @@ Options:
                       A prefix that already ran the client keeps its saved
                       language unless RCLOL_LOCALE is exported at launch.
       --window-entries  Also create hidden desktop entries that name and icon the
-                      League and Riot Client windows in the GNOME overview
-                      (off by default; the launcher itself stays neutral)
+                      League client, game and Riot Client windows in the GNOME
+                      overview (off by default; the launcher itself stays neutral)
   -h, --help          Show this help
 
 Environment:
@@ -504,6 +506,80 @@ detect_distribution() {
   esac
 }
 
+# Where the guest prefix lives: the configured one once build/config.json
+# exists, the default otherwise. The value is a JSON string, so decode its
+# escapes (configure.py writes non-ASCII paths as \uXXXX) before using it.
+darling_prefix_dir() {
+  local prefix='' config="$TARGET_DIR/build/config.json"
+  if [[ -r $config ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      prefix=$(python3 - "$config" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        config = json.load(handle)
+except (OSError, ValueError):
+    config = None
+prefix = config.get('prefix') if isinstance(config, dict) else None
+if isinstance(prefix, str):
+    sys.stdout.buffer.write(prefix.encode('utf-8', 'surrogateescape') + b'\n')
+PY
+)
+    else
+      # Python may not be installed yet on a first run; keep the historical
+      # literal extraction as a fallback for plain ASCII paths.
+      prefix=$(sed -n 's/^[[:space:]]*"prefix"[[:space:]]*:[[:space:]]*"\(.*\)".*$/\1/p' "$config" | head -n 1)
+    fi
+  fi
+  printf '%s\n' "${prefix:-$HOME/.darling}"
+}
+
+# Disk space already consumed by Darling on the target filesystem, in KiB.
+# A reinstall reuses (or replaces) the build tree, the guest prefix and the
+# installed system runtime, so counting them avoids demanding the full
+# MIN_FREE_GIB on top of an install that mostly already exists.
+darling_footprint_kib() {
+  local target_device path real other used_kib total=0 nested
+  local -a paths=("$TARGET_DIR/build" "$(darling_prefix_dir)" /usr/local/libexec/darling)
+  local -a candidates=() counted=()
+
+  target_device=$(df -Pk "$TARGET_DIR" | awk 'NR == 2 {print $1}')
+  for path in "${paths[@]}"; do
+    [[ -d $path ]] || continue
+    # Resolve an operand symlink so both the filesystem check and the usage
+    # measurement apply to the directory it points at.
+    real=$(realpath -e -- "$path" 2>/dev/null) || continue
+    # Space on another filesystem does not relieve this one.
+    [[ $(df -Pk "$real" 2>/dev/null | awk 'NR == 2 {print $1}') == "$target_device" ]] || continue
+    candidates+=("$real")
+  done
+
+  for real in "${candidates[@]}"; do
+    # Nested candidates are already included in an ancestor's usage, and
+    # duplicates are the same directory: only disjoint candidates add space.
+    nested=0
+    for other in "${candidates[@]}"; do
+      [[ $other != "$real" && $real == "$other"/* ]] && { nested=1; break; }
+    done
+    (( nested )) && continue
+    for other in "${counted[@]}"; do
+      [[ $other == "$real" ]] && { nested=1; break; }
+    done
+    (( nested )) && continue
+    # -D dereferences the operand itself but not symlinks found inside it,
+    # while -x keeps the measurement on the target filesystem.
+    used_kib=$(du -sxkD -- "$real" 2>/dev/null | awk '{print $1}')
+    [[ $used_kib =~ ^[0-9]+$ ]] || continue
+    counted+=("$real")
+    total=$(( total + used_kib ))
+  done
+  printf '%s\n' "$total"
+}
+
+gib_display() {
+  awk -v kib="$1" 'BEGIN { printf "%.1f", kib / 1024 / 1024 }'
+}
+
 preflight() {
   [[ $EUID -ne 0 ]] || fail 'Run as a regular user, not root.'
   [[ $(uname -m) == x86_64 ]] || fail 'Only x86_64 is supported.'
@@ -514,7 +590,7 @@ preflight() {
   fi
   command -v git >/dev/null 2>&1 || fail 'Git is required.'
 
-  local kernel_major kernel_minor free_kib
+  local kernel_major kernel_minor free_kib footprint_kib total_kib required_kib
   IFS=. read -r kernel_major kernel_minor _ < <(uname -r)
   kernel_minor=${kernel_minor%%[!0-9]*}
   (( kernel_major > 5 || (kernel_major == 5 && ${kernel_minor:-0} >= 14) )) ||
@@ -522,8 +598,17 @@ preflight() {
 
   free_kib=$(df -Pk "$TARGET_DIR" | awk 'NR == 2 {print $4}')
   [[ $free_kib =~ ^[0-9]+$ ]] || fail 'Could not determine available disk space.'
-  (( free_kib >= MIN_FREE_GIB * 1024 * 1024 )) ||
-    fail "At least ${MIN_FREE_GIB} GiB of free disk space is required."
+  (( free_kib >= MIN_REINSTALL_FREE_GIB * 1024 * 1024 )) ||
+    fail "At least ${MIN_REINSTALL_FREE_GIB} GiB must be free on the checkout filesystem for build and staging files: $(gib_display "$free_kib") GiB free."
+  # Existing Darling data (build tree, guest prefix, system runtime) on the
+  # target filesystem already occupies part of the required footprint.
+  required_kib=$(( MIN_FREE_GIB * 1024 * 1024 ))
+  if (( free_kib < required_kib )); then
+    footprint_kib=$(darling_footprint_kib)
+    total_kib=$(( free_kib + footprint_kib ))
+    (( total_kib >= required_kib )) ||
+      fail "At least ${MIN_FREE_GIB} GiB of disk space is required (free plus existing Darling-LoL data): $(gib_display "$free_kib") GiB free and $(gib_display "$footprint_kib") GiB already used by Darling-LoL."
+  fi
 
   local required_files=(
     scripts/preflight.py
