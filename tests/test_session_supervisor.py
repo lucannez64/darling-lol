@@ -247,6 +247,13 @@ class ContainerTests(unittest.TestCase):
         self.marker = self.root / '.toolboxenv'
         self.containerenv = self.root / '.containerenv'
         self.marker.touch()
+        self.handlers = {signum: signal.getsignal(signum)
+                         for signum in supervisor.TERMINATION_SIGNALS}
+        self.addCleanup(self.restore_handlers)
+
+    def restore_handlers(self):
+        for signum, handler in self.handlers.items():
+            signal.signal(signum, handler)
 
     def metadata(self):
         return supervisor.container_metadata(self.marker, self.containerenv)
@@ -278,6 +285,12 @@ class ContainerTests(unittest.TestCase):
 
     def test_shell_parent_names_an_interactive_session(self):
         fake_process(self.root, 10, comm='bash')
+        fake_process(self.root, 20, ppid=10)
+        self.assertTrue(supervisor.started_by_shell(self.root, 20))
+
+    def test_login_shell_hyphen_is_not_part_of_the_name(self):
+        proc = fake_process(self.root, 10, comm='bash')
+        (proc / 'cmdline').write_bytes(b'-bash\0')
         fake_process(self.root, 20, ppid=10)
         self.assertTrue(supervisor.started_by_shell(self.root, 20))
 
@@ -324,9 +337,25 @@ class ContainerTests(unittest.TestCase):
         self.assertFalse(stopped)
         self.assertIn("podman stop darling-lol", output)
 
+    def test_queued_stop_cannot_kill_the_supervisor_early(self):
+        def run(command, **_kwargs):
+            # The queued scope stop also signals the supervisor.
+            os.kill(os.getpid(), signal.SIGTERM)
+            return subprocess.CompletedProcess(command, 0)
+
+        stopped = supervisor.stop_container(('darling-lol', 'abc123'),
+                                            run=run, out=io.StringIO())
+        self.assertTrue(stopped)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
+    def test_failed_stop_restores_the_signal_handlers(self):
+        self.stop(lambda command: subprocess.CompletedProcess(command, 1))
+        self.assertEqual(signal.getsignal(signal.SIGTERM),
+                         self.handlers[signal.SIGTERM])
+
 
 class ToolboxSessionTests(unittest.TestCase):
-    """A Toolbox container is stopped only for the session that owns it."""
+    """A Toolbox container is stopped only for the last session that uses it."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -337,8 +366,16 @@ class ToolboxSessionTests(unittest.TestCase):
         self.proc = self.root / 'proc'
         self.proc.mkdir()
         self.container = ('darling-lol', 'abc123')
+        self.handlers = {signum: signal.getsignal(signum)
+                         for signum in supervisor.TERMINATION_SIGNALS}
+        self.addCleanup(self.restore_handlers)
 
-    def run_supervisor(self, container=None, runtime_at_start=None, remaining=None):
+    def restore_handlers(self):
+        for signum, handler in self.handlers.items():
+            signal.signal(signum, handler)
+
+    def run_supervisor(self, container=None, runtime_at_start=None, remaining=None,
+                       stoppable=True):
         remaining = [] if remaining is None else remaining
         with mock.patch.object(supervisor, 'cleanup', return_value=remaining), \
              mock.patch.object(supervisor, 'stop_container') as stop:
@@ -346,8 +383,15 @@ class ToolboxSessionTests(unittest.TestCase):
                 ['true'], self.prefix, None, proc_root=self.proc, poll=0,
                 run=lambda *_a, **_k: None, kill=lambda *_a: None,
                 sleep=lambda _s: None, out=io.StringIO(),
-                runtime_at_start=runtime_at_start, container=container)
+                runtime_at_start=runtime_at_start, container=container,
+                stoppable=stoppable, session_base=self.root)
         return code, stop
+
+    def other_session(self, container_id='abc123'):
+        session = supervisor.ContainerSessions(container_id, base=self.root)
+        self.assertTrue(session.register())
+        self.addCleanup(session.release)
+        return session
 
     def test_owned_session_stops_the_container(self):
         code, stop = self.run_supervisor(container=self.container)
@@ -368,6 +412,60 @@ class ToolboxSessionTests(unittest.TestCase):
     def test_native_session_stops_nothing(self):
         _code, stop = self.run_supervisor()
         stop.assert_not_called()
+
+    def test_shared_container_survives_while_another_session_is_active(self):
+        self.other_session()
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_not_called()
+
+    def test_last_session_stops_the_shared_container(self):
+        other = self.other_session()
+        other.release()
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_called_once()
+
+    def test_opt_out_session_never_stops_the_container(self):
+        code, stop = self.run_supervisor(container=self.container, stoppable=False)
+        self.assertEqual(code, 0)
+        stop.assert_not_called()
+
+    def test_stale_registration_does_not_block_the_stop(self):
+        directory = supervisor.session_registry('abc123', self.root)
+        directory.mkdir(parents=True)
+        (directory / 'session-stale').write_text('')
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_called_once()
+
+    def test_finished_session_unregisters(self):
+        self.run_supervisor(container=self.container)
+        directory = supervisor.session_registry('abc123', self.root)
+        leftovers = [entry.name for entry in directory.iterdir()
+                     if entry.name.startswith(supervisor.SESSION_PREFIX)]
+        self.assertEqual(leftovers, [])
+
+    def test_other_container_does_not_block_the_stop(self):
+        self.other_session('different-container')
+        code, stop = self.run_supervisor(container=self.container)
+        self.assertEqual(code, 0)
+        stop.assert_called_once()
+
+    def test_queued_stop_keeps_the_child_status(self):
+        def run(command, **_kwargs):
+            if command[:1] == ['systemctl']:
+                # The queued scope stop also signals the supervisor.
+                os.kill(os.getpid(), signal.SIGTERM)
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(supervisor, 'cleanup', return_value=[]):
+            code = supervisor.run_supervised(
+                ['sh', '-c', 'exit 3'], self.prefix, None, proc_root=self.proc,
+                poll=0, run=run, kill=lambda *_a: None, sleep=lambda _s: None,
+                out=io.StringIO(), container=self.container,
+                session_base=self.root)
+        self.assertEqual(code, 3)
 
 
 class SupervisorModeTests(unittest.TestCase):
