@@ -72,12 +72,27 @@ if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
     make -s -C "$repo/tools/dc-codesign" dc-codesign || \
       echo 'dc-codesign did not build (it needs the OpenSSL headers)' >&2
   fi
+  # Unsigned overlays are loaded into every Riot process (issue #31): fetch a
+  # pinned rcodesign when none is installed. An explicit RCODESIGN wins.
+  if [ -z "${RCODESIGN:-}" ] && rcodesign_path=$(sh "$repo/tools/install-rcodesign.sh"); then
+    export RCODESIGN="$rcodesign_path"
+  fi
   sign_args="--prefix --quiet"
   if [ -w /usr/local/libexec/darling ]; then
     sign_args="--sdk $sign_args"
   fi
   if ! sh "$repo/tools/sign-darling-runtime.sh" $sign_args; then
-    echo 'Runtime signing/trust-store update failed; the launcher may refuse hardened images.' >&2
+    cat >&2 <<'EOF'
+
+==================================================================
+ WARNING: the darling-lol runtime is NOT signed.
+ Riot's processes load these libraries unsigned, which a real Mac
+ never does. Fix the error above (usually: install rcodesign with
+ tools/install-rcodesign.sh or `cargo install apple-codesign`),
+ then run the update again before you play.
+==================================================================
+
+EOF
   fi
 fi
 # Mark this canonical prefix and configured guest ready only after validation.
