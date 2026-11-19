@@ -38,8 +38,13 @@ python3 scripts/validate.py                 # source audit; runs configure.py
 python3 -m unittest discover -s tests       # full host suite (what CI runs)
 python3 -m unittest discover -s tests -p 'test_desktop_entry.py'
 python3 scripts/preflight.py                # host/build prerequisites
-python3 scripts/prepare.py --check-only     # only when patches or pins change
+python3 scripts/prepare.py --check-only --source /path/to/darling-src
 ```
+
+Run the patch check when patches or pins change. Pass a prepared Darling
+checkout with the component revisions from `upstream/manifest.json`. On a
+fresh clone or after changing pins, use `scripts/prepare.py --source
+/path/to/new/darling-src` to prepare a separate checkout at those revisions.
 
 Most tests use temporary HOME/prefix fixtures and do not start Darling. Some
 compile C, C++ or Objective-C and need clang, c++, libxml2 and the Objective-C
@@ -175,5 +180,5 @@ guest probes; do not run the guest probes on your own.
 - [ ] Focused diff with tests.
 - [ ] `python3 scripts/validate.py` passes.
 - [ ] Relevant `unittest` files pass (full suite when feasible).
-- [ ] `python3 scripts/prepare.py --check-only` when a patch or pin changed.
+- [ ] `python3 scripts/prepare.py --check-only --source /path/to/darling-src` when a patch or pin changed.
 - [ ] No generated/local artifacts; commit signed off with `-s`.

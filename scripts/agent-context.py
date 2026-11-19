@@ -275,18 +275,19 @@ def check(root=ROOT, reads=READS, scripts=SCRIPTS, flags=FLAGS,
             errors.append(f"agent adapter does not point to {ENTRYPOINT}: {path}")
 
     if entrypoint_text is not None:
+        references = set(re.findall(r"[\w./-]+", text))
         for topic, _when, paths in reads:
             for path in paths:
                 if not (root / path).exists():
                     errors.append(f"missing context path for {topic}: {path}")
-                elif path not in text:
+                elif path not in references:
                     errors.append(
                         f"{ENTRYPOINT} does not list context path: {path}")
 
         for path, summary in scripts:
             if not (root / path).is_file():
                 errors.append(f"missing script: {path}")
-            elif path not in text:
+            elif path not in references:
                 errors.append(f"{ENTRYPOINT} does not list script: {path}")
             if not summary.strip():
                 errors.append(f"empty script summary: {path}")

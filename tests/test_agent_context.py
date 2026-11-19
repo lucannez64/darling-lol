@@ -100,6 +100,13 @@ class DriftTests(unittest.TestCase):
     def test_fixture_passes(self):
         self.assertEqual(self.check(), [])
 
+    def test_suffixed_paths_do_not_match(self):
+        guide = self.root / 'AGENTS.md'
+        guide.write_text(guide.read_text().replace('docs/demo.md', 'docs/demo.md.old')
+                         .replace('scripts/demo.sh', 'scripts/demo.sh.old'))
+        self.assertIn('does not list context path: docs/demo.md', self.errors())
+        self.assertIn('does not list script: scripts/demo.sh', self.errors())
+
     def test_missing_context_path_is_reported(self):
         (self.root / 'docs/demo.md').unlink()
         self.assertIn('missing context path', self.errors())
