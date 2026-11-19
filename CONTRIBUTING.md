@@ -3,6 +3,12 @@
 Thank you for improving `darling-lol`. The project is an unofficial
 interoperability effort; contributions must keep it in that scope.
 
+## Automated agents
+
+Coding agents start at [`AGENTS.md`](AGENTS.md), the canonical entrypoint with
+the on-demand reading index, script map, launch flags and required checks.
+`python3 scripts/agent-context.py --check` verifies that index.
+
 ## Before you start
 
 - Read [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) and
