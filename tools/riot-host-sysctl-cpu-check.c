@@ -127,20 +127,29 @@ struct linux_utsname* need_uname(void) {
 mach_port_t mach_host_self(void) { return 1; }
 mach_port_t mach_task_self(void) { return 1; }
 kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name) { (void)task; (void)name; return 0; }
-kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count) {
-    (void)host; (void)itype;
-    struct host_basic_info* reply = hinfo;
+#define SENTINEL_MEMORY (64ULL << 30) // "host" memory: 64 GiB
+static void sentinel_reply(struct host_basic_info* reply) {
     *reply = (struct host_basic_info) { 0 };
     reply->avail_cpus = 99;
     reply->max_cpus = 99;
+    reply->memory_size = 0x80000000u;
     reply->physical_cpu = 99;
     reply->physical_cpu_max = 99;
     reply->logical_cpu = 99;
     reply->logical_cpu_max = 99;
     reply->cpu_type = 7;
-    *count = 8; // the legacy reply size
+    reply->max_mem = SENTINEL_MEMORY;
+}
+// The raw darlingserver reply (libsyscall wraps host_info() around it).
+kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count) {
+    (void)host; (void)itype;
+    sentinel_reply(hinfo);
+    *count = HOST_BASIC_INFO_COUNT;
     return 0;
 }
+
+// sysctl_hw.c: what libsyscall's host_info wrapper writes into a reply.
+void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count);
 
 // A minimal sysctl tree whose "hw" node is the real one; sysctl_unspec.c
 // walks it for sysctlbyname (name -> oid).
@@ -478,7 +487,11 @@ int main(int argc, char** argv) {
     if (strcmp(mode, "machdep-compat") == 0)
         return machdep_mode(1);
 
-    if (strcmp(mode, "affinity") == 0) {
+    // compat / compat-affinity: RCLOL_PLATFORM_PROFILE=compat is in the
+    // environment (the build script sets it); every count is the i7-9750H's.
+    int compat = strcmp(mode, "compat") == 0 || strcmp(mode, "compat-affinity") == 0;
+
+    if (strcmp(mode, "affinity") == 0 || strcmp(mode, "compat-affinity") == 0) {
         // Restrict this process to the first four online CPUs.
         unsigned int online = file_count("/sys/devices/system/cpu/online");
         if (online < 4) {
@@ -500,6 +513,8 @@ int main(int argc, char** argv) {
     struct expect e;
     if (strcmp(mode, "no-detect") == 0 || strcmp(mode, "optout") == 0)
         e = (struct expect) { 8, 8, 8, 8, 8, 8 };
+    else if (compat)
+        e = (struct expect) { 12, 12, 12, 12, 6, 6 };
     else
         host_expectations(&e);
 
@@ -522,6 +537,37 @@ int main(int argc, char** argv) {
         strcmp(model_buf, "MacBookPro16,1") != 0) {
         fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=model changed to '%s'\n", model_buf);
         return 1;
+    }
+
+    // host_info(HOST_BASIC_INFO) must present exactly what hw.* reports, and
+    // the profile memory size (RCLOL_MEMORY_BYTES) instead of the host's.
+    const char* memory_env = getenv("RCLOL_MEMORY_BYTES");
+    unsigned long long memory = (memory_env && *memory_env) ? strtoull(memory_env, NULL, 10) : SENTINEL_MEMORY;
+    struct host_basic_info reply;
+    sentinel_reply(&reply);
+    darling_host_basic_info_present(&reply, HOST_BASIC_INFO_COUNT);
+    unsigned int memory_size = memory > 0x80000000ULL ? 0x80000000u : (unsigned int)memory;
+    if (reply.max_cpus != (int)e.ncpu || reply.avail_cpus != (int)e.active ||
+        reply.logical_cpu != (int)e.logical || reply.logical_cpu_max != (int)e.logical_max ||
+        reply.physical_cpu != (int)e.physical || reply.physical_cpu_max != (int)e.physical_max ||
+        reply.max_mem != memory || reply.memory_size != memory_size || reply.cpu_type != 7) {
+        fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=host_info max=%d avail=%d logical=%d/%d physical=%d/%d max_mem=%llu memory_size=%u cpu_type=%d\n",
+                reply.max_cpus, reply.avail_cpus, reply.logical_cpu, reply.logical_cpu_max,
+                reply.physical_cpu, reply.physical_cpu_max, (unsigned long long)reply.max_mem,
+                reply.memory_size, reply.cpu_type);
+        return 1;
+    }
+    // A legacy-sized reply gets only the legacy fields.
+    sentinel_reply(&reply);
+    darling_host_basic_info_present(&reply, 5);
+    if (reply.max_cpus != (int)e.ncpu || reply.physical_cpu != 99 || reply.max_mem != SENTINEL_MEMORY) {
+        fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=legacy host_info reply overwritten past its size\n");
+        return 1;
+    }
+
+    if (compat) {
+        require_value(find_machdep("core_count"), 6);
+        require_value(find_machdep("thread_count"), 12);
     }
 
     printf("HOST_SYSCTL_CPU pass=1 mode=%s ncpu=%d active=%d logicalcpu=%d logicalcpu_max=%d physicalcpu=%d physicalcpu_max=%d model=%s\n",
