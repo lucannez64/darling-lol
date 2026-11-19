@@ -54,6 +54,7 @@ SCRIPTS = (
     ("scripts/install-native.sh", "Install dependencies, build and install the runtime; native or `--toolbox`"),
     ("scripts/build.sh", "Preflight, configure, apply pinned patches and build incrementally"),
     ("scripts/prepare.py", "Fetch pinned Darling sources and apply patches; `--check-only` validates them"),
+    ("scripts/patchkit.py", "Patch-stack status, hunk/manifest verification, single-file resplice and overlay ledger"),
     ("scripts/configure.py", "Render local paths, region and locale into `build/config.json` and `build/runtime/tools/*`"),
     ("scripts/install-runtime.sh", "Install the paired per-user runtime overlays; never copies game files"),
     ("scripts/update.sh", "After `git pull`: re-apply changed patches, rebuild and reinstall the runtime"),
