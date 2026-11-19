@@ -247,6 +247,54 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('sudo-foreground', result.stdout)
         self.assertIn('Log:', result.stdout)
 
+    def test_quiet_update_surfaces_overlay_signing_warning(self):
+        self.prepare_stub_update()
+        self.stub(self.repo / 'scripts/install-runtime.sh',
+                  'echo "WARNING: the darling-lol runtime is NOT signed." >&2\nexit 0')
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('user runtime overlays were NOT signed', result.stderr)
+
+    def test_update_signs_non_writable_sdk_under_sudo(self):
+        self.prepare_stub_update()
+        sdk = self.home / 'readonly-sdk'
+        sdk.mkdir()
+        sdk.chmod(0o555)
+        self.addCleanup(sdk.chmod, 0o755)
+        (self.repo / 'tools/dc-codesign').mkdir(parents=True)
+        self.stub(self.repo / 'tools/dc-codesign/dc-codesign', 'exit 0')
+        self.stub(self.repo / 'tools/sign-darling-runtime.sh', 'exit 0')
+        rcodesign = self.home / '.local/bin/rcodesign'
+        rcodesign.parent.mkdir(parents=True)
+        self.stub(rcodesign, 'exit 0')
+        sudo_log = self.home / 'sudo.log'
+        self.stub(self.bindir / 'sudo',
+                  f'printf "%s\\n" "$*" >> "{sudo_log}"\n'
+                  'if [ "${FAKE_SUDO_SIGN_FAIL:-0}" = 1 ] && [ "$1" = env ]; then exit 1; fi\n'
+                  'exit 0')
+        # Exclude any host rcodesign from PATH so resolve_rcodesign exercises $HOME/.local/bin.
+        clean_path = os.pathsep.join(
+            entry for entry in self.env['PATH'].split(os.pathsep)
+            if not (Path(entry) / 'rcodesign').is_file()
+        )
+
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'),
+                                 DARLING_SDK_DIR=str(sdk), PATH=clean_path, RCODESIGN='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = sudo_log.read_text().splitlines()
+        self.assertTrue(
+            any(f'env RCODESIGN={rcodesign} sh {self.repo}/tools/sign-darling-runtime.sh --sdk --quiet' == line
+                for line in calls),
+            calls,
+        )
+
+        # A failing SDK sign warns prominently instead of staying silent.
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'),
+                                 DARLING_SDK_DIR=str(sdk), PATH=clean_path, RCODESIGN='',
+                                 FAKE_SUDO_SIGN_FAIL='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Base Darling SDK signing failed', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

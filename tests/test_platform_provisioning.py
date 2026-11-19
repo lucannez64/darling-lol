@@ -217,3 +217,53 @@ class ProvisioningChecks(unittest.TestCase):
             value = platform.provision(supplied)
             self.assertNotEqual(value['IOPlatformUUID'], platform.KNOWN_UUID)
             self.assertNotEqual(value['system-id'], known_id)
+
+    def test_normalize_system_version_updates_existing_prefix_without_touching_identity(self):
+        normalize = [sys.executable, str(SCRIPT), '--prefix', str(self.prefix),
+                     '--runtime-root', str(self.runtime), '--normalize-system-version', '--write']
+        # Missing prefix is not created.
+        result = subprocess.run(normalize, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.prefix.exists())
+
+        # Existing prefix with no identity files gets normalized SystemVersion.plist only.
+        target = self.prefix / 'System/Library/CoreServices/SystemVersion.plist'
+        target.parent.mkdir(parents=True)
+        stale = plistlib.dumps({'ProductName': 'macOS', 'ProductVersion': '11.7.4',
+                                'ProductBuildVersion': 'Darling'})
+        target.write_bytes(stale)
+        result = subprocess.run(normalize, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('saved', result.stdout)
+        self.assertEqual(target.with_name(target.name + '.before-platform-change').read_bytes(), stale)
+        self.assertEqual(plistlib.loads(target.read_bytes()),
+                         plistlib.loads(platform.normalize_system_version(self.metadata)))
+        self.assertFalse(platform.destination(self.prefix).exists())
+        self.assertFalse((self.prefix / 'private/etc/darling-smbios.conf').exists())
+
+        # Rerun is idempotent and leaves mtime untouched.
+        before_stat = (target.read_bytes(), target.stat().st_mtime_ns)
+        result = subprocess.run(normalize, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('unchanged', result.stdout)
+        self.assertEqual((target.read_bytes(), target.stat().st_mtime_ns), before_stat)
+
+        # Custom identity survives byte-for-byte while a stale plist is refreshed.
+        custom = {'IOPlatformSerialNumber': 'MY-SERIAL', 'model': 'CustomModel'}
+        platform.save(self.prefix, custom)
+        canonical = platform.destination(self.prefix)
+        before_id = canonical.read_bytes()
+        target.write_bytes(stale)
+        result = subprocess.run(normalize, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(canonical.read_bytes(), before_id)
+        self.assertEqual(plistlib.loads(target.read_bytes())['ProductBuildVersion'],
+                         platform.EMULATED_BUILD_VERSION)
+
+        # Rejects live prefix and conflicting flags.
+        (self.prefix / '.init.pid').write_text(str(os.getpid()))
+        live = subprocess.run(normalize, capture_output=True, text=True)
+        self.assertNotEqual(live.returncode, 0)
+        (self.prefix / '.init.pid').unlink()
+        conflict = subprocess.run([*normalize, '--provision'], capture_output=True, text=True)
+        self.assertNotEqual(conflict.returncode, 0)

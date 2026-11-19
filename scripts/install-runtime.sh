@@ -46,10 +46,14 @@ python3 build/runtime/tools/ensure-darling-root-certificates.py || \
   echo 'Darling system root store not installed; the launcher retries it' >&2
 python3 build/runtime/tools/stop-darling-runtime.py
 # Give a new prefix its own synthetic serial, MLB, UUID and ROM instead of the host-derived defaults.
-# Existing prefixes keep their identity; update.sh only replaces the old shared serial and UUID.
+# Existing prefixes keep their identity; update.sh only replaces the old shared serial and UUID,
+# while every existing prefix still gets its SystemVersion.plist aligned to the emulated macOS version.
 if [ -n "$new_prefix" ]; then
   python3 tools/configure-darling-platform.py --prefix "$prefix_dir" --provision --write || \
     echo 'Platform identity not provisioned; run tools/configure-darling-platform.py --provision --write' >&2
+else
+  python3 tools/configure-darling-platform.py --prefix "$prefix_dir" --normalize-system-version --write || \
+    echo 'SystemVersion.plist not normalized; run tools/configure-darling-platform.py --normalize-system-version --write' >&2
 fi
 sh build/runtime/tools/install-riot-presentation-runtime.sh
 sh build/runtime/tools/install-riot-gpu-runtime.sh
