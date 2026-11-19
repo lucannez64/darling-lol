@@ -75,7 +75,7 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`); run later update commands inside it (`toolbox enter darling-lol`, then `cd` to the checkout).
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`).
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, a native install runs a full `pacman -Syu` and asks first unless this is given.
 - `--region CODE`: Riot region (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`). Without it, an interactive install asks; with `--yes` or without a terminal it is the region of an explicit `--locale`, else `EUW`.
@@ -158,15 +158,16 @@ These window-management helpers are opt-in, off by default, and do not patch cli
 
 Exit the game and both clients first.
 
-**Nix users:** use `nix run --refresh github:lucannez64/darling-lol#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`. The commands below are for native and manual builds.
+**Nix users:** use `nix run --refresh github:lucannez64/darling-lol#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`.
 
-**Native / manual builds** (for a `--toolbox` install, run these inside the container):
+**Native, manual, and Toolbox builds**:
 
 ```bash
 git pull
 ./scripts/update.sh
-sh scripts/run.sh
 ```
+
+For a Toolbox install, run these commands from the host. The updater detects the recorded container and runs the update inside it.
 
 `update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
 

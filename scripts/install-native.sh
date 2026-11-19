@@ -137,7 +137,8 @@ valid_region() {
 }
 
 normalize_locale() {
-  local value=${1//-/_}
+  # Keep the case conversion and ASCII ranges independent of the host locale.
+  local LC_ALL=C value=${1//-/_}
   if [[ $value =~ ^([A-Za-z]{2})_([A-Za-z]{2})$ ]]; then
     printf '%s_%s' "${BASH_REMATCH[1],,}" "${BASH_REMATCH[2]^^}"
     return 0
@@ -250,8 +251,8 @@ Options:
                       A prefix that already ran the client keeps its saved
                       language unless RCLOL_LOCALE is exported at launch.
       --window-entries  Also create hidden desktop entries that name and icon the
-                      League and Riot Client windows in the GNOME overview
-                      (off by default; the launcher itself stays neutral)
+                      League client, game and Riot Client windows in the GNOME
+                      overview (off by default; the launcher itself stays neutral)
   -h, --help          Show this help
 
 Environment:
