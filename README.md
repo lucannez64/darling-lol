@@ -55,7 +55,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 - **GPU:** Working hardware Vulkan/OpenGL driver. AMD RADV and NVIDIA (proprietary and open modules) have been exercised; others are not validated. See [NVIDIA](docs/TROUBLESHOOTING.md#nvidia). Hybrid laptops usually render on the iGPU unless started with PRIME offload: see [hybrid graphics](docs/TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
 - **Tools:** Git + Git LFS (2.13+), Bash, curl, unzip, CMake 3.20+, Make, Clang/LLD, LLVM dev files (16+; 22/23 is what the Metal overlays are tested with), C/C++ compiler, Python 3.10+. Node.js only for offline JavaScript checks.
 - **Libs:** X11/XCB/SHM development files.
-- **Disk:** at least **50 GB** in total for Darling sources/build, Git LFS assets and the game. Space already used by a previous install (build tree, `~/.darling` prefix and system runtime) counts toward this minimum.
+- **Disk:** at least **50 GiB** in total for Darling sources/build, Git LFS assets and the game. Space already used by a previous install (build tree, `~/.darling` prefix and system runtime) counts toward this minimum only when it is on the same filesystem as the checkout.
 
 `scripts/build.sh` and `scripts/install-runtime.sh` run `scripts/preflight.py` first and stop on unsupported versions (`RCLOL_SKIP_PREFLIGHT=1` bypasses it). For other distributions, see the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff); `tools/env-check.sh` is a starting check (package names may need adapting).
 
@@ -63,7 +63,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 
 ## Automated Installation
 
-Installs dependencies, configures the build environment and compiles Darling-LoL. Requires at least **50 GiB** of disk space in total; a previous build/prefix already on disk counts toward it.
+Installs dependencies, configures the build environment and compiles Darling-LoL. Requires at least **50 GiB** of disk space in total; a previous build/prefix already on disk counts toward it only when it is on the same filesystem as the checkout.
 
 Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+. Hosts outside this list (for example Ubuntu 24.04 and its derivatives) can still install through a Fedora Toolbox container with `--toolbox`.
 

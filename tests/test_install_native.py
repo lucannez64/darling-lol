@@ -1,4 +1,5 @@
 """Unit and CLI coverage for scripts/install-native.sh."""
+import json
 import os
 import pty
 import shutil
@@ -751,6 +752,75 @@ class DiskSpaceTests(unittest.TestCase):
             result = run_sourced(f'source "$INSTALLER"\nTARGET_DIR="{repo}"\ndarling_prefix_dir')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), '/custom/prefix')
+
+    def test_a_unicode_escaped_prefix_resolves_to_the_existing_directory(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-unicode ') as folder:
+            repo = Path(folder, 'repo')
+            (repo / 'build').mkdir(parents=True)
+            prefix = Path(folder, 'prefixé')
+            prefix.mkdir()
+            config = json.dumps({'prefix': str(prefix)})
+            (repo / 'build/config.json').write_text(config)
+            # configure.py writes non-ASCII paths as JSON escapes.
+            self.assertIn('\\u00e9', config)
+            result = run_sourced(
+                'source "$INSTALLER"\n'
+                f'TARGET_DIR="{repo}"\n'
+                'prefix=$(darling_prefix_dir)\n'
+                '[[ -d $prefix ]] && printf "%s\\n" "$prefix"\n'
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(prefix))
+
+    def test_a_prefix_nested_in_the_build_tree_is_not_counted_twice(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-nested ') as folder:
+            repo = Path(folder, 'repo')
+            prefix = repo / 'build' / 'prefix'
+            prefix.mkdir(parents=True)
+            (repo / 'build/config.json').write_text(json.dumps({'prefix': str(prefix)}))
+            snippet = '\n'.join([
+                'source "$INSTALLER"',
+                'df() { printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n"',
+                '  "mock 1 1 1 1% /\\n"; }',
+                'du() { case "${@: -1}" in',
+                f'  "{repo}/build") printf "10\\t/x\\n" ;;',
+                f'  "{prefix}") printf "7\\t/x\\n" ;;',
+                '  *) printf "0\\t/x\\n" ;; esac; }',
+                f'TARGET_DIR="{repo}"',
+                f'HOME="{folder}/home"',
+                'darling_footprint_kib',
+            ])
+            result = run_sourced(snippet)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # The build tree already includes the prefix, so its 7 KiB is not
+            # added a second time.
+            self.assertEqual(result.stdout.strip(), '10')
+
+    def test_a_symlinked_prefix_counts_the_linked_directory_contents(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-symlink ') as folder:
+            repo = Path(folder, 'repo')
+            (repo / 'build').mkdir(parents=True)
+            target = Path(folder, 'real-prefix')
+            target.mkdir()
+            (target / 'payload').write_bytes(b'x' * (8 * 1024 * 1024))
+            link = Path(folder, 'prefix-link')
+            link.symlink_to(target, target_is_directory=True)
+            (repo / 'build/config.json').write_text(json.dumps({'prefix': str(link)}))
+            snippet = '\n'.join([
+                'source "$INSTALLER"',
+                'df() { case "$*" in *"/usr/local/libexec/darling"*)',
+                '  printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n'
+                '  other 1 1 1 1%% /\\n" ;;',
+                '  *) printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n'
+                '  mock 1 1 1 1%% /\\n" ;; esac; }',
+                f'TARGET_DIR="{repo}"',
+                f'HOME="{folder}/home"',
+                'darling_footprint_kib',
+            ])
+            result = run_sourced(snippet)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # The symlink itself is tiny; the linked prefix holds 8 MiB.
+            self.assertGreaterEqual(int(result.stdout.strip()), 8 * 1024)
 
 
 class ShowBannerTests(unittest.TestCase):

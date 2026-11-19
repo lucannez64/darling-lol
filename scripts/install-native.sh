@@ -505,11 +505,29 @@ detect_distribution() {
 }
 
 # Where the guest prefix lives: the configured one once build/config.json
-# exists, the default otherwise.
+# exists, the default otherwise. The value is a JSON string, so decode its
+# escapes (configure.py writes non-ASCII paths as \uXXXX) before using it.
 darling_prefix_dir() {
   local prefix='' config="$TARGET_DIR/build/config.json"
   if [[ -r $config ]]; then
-    prefix=$(sed -n 's/^[[:space:]]*"prefix"[[:space:]]*:[[:space:]]*"\(.*\)".*$/\1/p' "$config" | head -n 1)
+    if command -v python3 >/dev/null 2>&1; then
+      prefix=$(python3 - "$config" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        config = json.load(handle)
+except (OSError, ValueError):
+    config = None
+prefix = config.get('prefix') if isinstance(config, dict) else None
+if isinstance(prefix, str):
+    sys.stdout.buffer.write(prefix.encode('utf-8', 'surrogateescape') + b'\n')
+PY
+)
+    else
+      # Python may not be installed yet on a first run; keep the historical
+      # literal extraction as a fallback for plain ASCII paths.
+      prefix=$(sed -n 's/^[[:space:]]*"prefix"[[:space:]]*:[[:space:]]*"\(.*\)".*$/\1/p' "$config" | head -n 1)
+    fi
   fi
   printf '%s\n' "${prefix:-$HOME/.darling}"
 }
@@ -519,16 +537,38 @@ darling_prefix_dir() {
 # installed system runtime, so counting them avoids demanding the full
 # MIN_FREE_GIB on top of an install that mostly already exists.
 darling_footprint_kib() {
-  local target_device path used_kib total=0
+  local target_device path real other used_kib total=0 nested
   local -a paths=("$TARGET_DIR/build" "$(darling_prefix_dir)" /usr/local/libexec/darling)
+  local -a candidates=() counted=()
 
   target_device=$(df -Pk "$TARGET_DIR" | awk 'NR == 2 {print $1}')
   for path in "${paths[@]}"; do
     [[ -d $path ]] || continue
+    # Resolve an operand symlink so both the filesystem check and the usage
+    # measurement apply to the directory it points at.
+    real=$(realpath -e -- "$path" 2>/dev/null) || continue
     # Space on another filesystem does not relieve this one.
-    [[ $(df -Pk "$path" 2>/dev/null | awk 'NR == 2 {print $1}') == "$target_device" ]] || continue
-    used_kib=$(du -sxk "$path" 2>/dev/null | awk '{print $1}')
+    [[ $(df -Pk "$real" 2>/dev/null | awk 'NR == 2 {print $1}') == "$target_device" ]] || continue
+    candidates+=("$real")
+  done
+
+  for real in "${candidates[@]}"; do
+    # Nested candidates are already included in an ancestor's usage, and
+    # duplicates are the same directory: only disjoint candidates add space.
+    nested=0
+    for other in "${candidates[@]}"; do
+      [[ $other != "$real" && $real == "$other"/* ]] && { nested=1; break; }
+    done
+    (( nested )) && continue
+    for other in "${counted[@]}"; do
+      [[ $other == "$real" ]] && { nested=1; break; }
+    done
+    (( nested )) && continue
+    # -D dereferences the operand itself but not symlinks found inside it,
+    # while -x keeps the measurement on the target filesystem.
+    used_kib=$(du -sxkD -- "$real" 2>/dev/null | awk '{print $1}')
     [[ $used_kib =~ ^[0-9]+$ ]] || continue
+    counted+=("$real")
     total=$(( total + used_kib ))
   done
   printf '%s\n' "$total"
