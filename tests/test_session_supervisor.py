@@ -617,6 +617,86 @@ class SupervisorModeTests(unittest.TestCase):
         cleanup.assert_not_called()
 
 
+class RiotClientRestartTests(unittest.TestCase):
+    """Issue #269: a Riot Client self-update restart must not end the session."""
+
+    RESTARTED = (b'/Applications/Riot Client.app/Contents/MacOS/RiotClientServices\0'
+                 b'--app-root=/Applications/Riot Client.app\0'
+                 b'--restart-timestamp=514570138\0')
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prefix = self.root / '.darling'
+        self.prefix.mkdir()
+        self.proc = self.root / 'proc'
+        self.proc.mkdir()
+        self.ns = 'pid:[4026532000]'
+        self.environ = b'__mldr_sockpath=%s\0' % os.fsencode(self.prefix / '.darlingserver.sock')
+
+    def client(self, pid, cmdline, state='S'):
+        proc = fake_process(self.proc, pid, comm='mldr', state=state, ns=self.ns,
+                            environ=self.environ)
+        (proc / 'cmdline').write_bytes(cmdline)
+        return proc
+
+    def restarted(self):
+        return supervisor.restarted_riot_client(self.prefix, self.ns, self.proc,
+                                                'pid:[4026531000]')
+
+    def test_relaunched_client_is_recognised(self):
+        self.client(93, self.RESTARTED)
+        self.assertTrue(self.restarted())
+
+    def test_ordinary_client_is_not_a_restart(self):
+        self.client(31, b'/Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/'
+                        b'RiotClientServices\0--app-root=/Applications/Riot Client.app\0')
+        self.assertFalse(self.restarted())
+
+    def test_exited_restart_is_not_followed(self):
+        self.client(93, self.RESTARTED, state='Z')
+        self.assertFalse(self.restarted())
+
+    def test_other_program_with_the_flag_is_ignored(self):
+        self.client(93, b'/usr/bin/other\0--restart-timestamp=1\0')
+        self.assertFalse(self.restarted())
+
+    def supervise(self, command, polls_before_exit):
+        restarted = self.client(93, self.RESTARTED)
+        polls = []
+        output = io.StringIO()
+
+        def sleep(_seconds):
+            # Count only the polls made after the loader exited.
+            if 'restarted itself' not in output.getvalue():
+                return
+            polls.append(True)
+            if len(polls) == polls_before_exit:
+                shutil.rmtree(restarted)
+
+        with mock.patch.object(supervisor, 'cleanup', return_value=[]) as cleanup:
+            code = supervisor.run_supervised(
+                command, self.prefix, None, proc_root=self.proc, poll=0,
+                run=lambda *_a, **_k: None, kill=lambda *_a: None, sleep=sleep,
+                out=output, runtime_at_start='stopped', league_exit=False,
+                league_load=False)
+        return code, output.getvalue(), cleanup, polls
+
+    def test_session_follows_the_relaunched_client_before_cleanup(self):
+        code, output, cleanup, polls = self.supervise(['true'], 3)
+        self.assertEqual(code, 0)
+        self.assertIn('Riot Client restarted itself after an update', output)
+        self.assertGreaterEqual(len(polls), 3)
+        cleanup.assert_called_once()
+
+    def test_failed_loader_is_not_followed(self):
+        code, output, cleanup, _polls = self.supervise(['sh', '-c', 'exit 3'], 100)
+        self.assertEqual(code, 3)
+        self.assertNotIn('restarted itself', output)
+        cleanup.assert_called_once()
+
+
 class ExitStatusTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
