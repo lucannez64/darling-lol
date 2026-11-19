@@ -21,10 +21,21 @@ darling-lol --perf                  # frame pacing from the game's own logs
 
 The crash bundle contains the doctor checks, the runtime/client/zombie process
 table, the runtime and launcher log tails, graphics kernel messages, display
-state and recent core dumps. It does not collect environment variables, masks
-credential-shaped command-line values, and replaces your home directory, user
-name and host name unless you pass `--no-redact`. Log text itself is copied
-verbatim, so skim the bundle before sharing it. See
+state and recent core dumps. It also includes the tails of the newest Riot
+Client, LeagueClient/LeagueClientUx and game (`r3dlog`) logs, and the Metal,
+signal, input-trace and game-switch logs from `/tmp` when they exist;
+`report.json` lists the client logs it looked for and did not find. Pass
+`--no-client-logs` to leave all of those out. It does not collect environment
+variables, masks credential-shaped command-line values, masks session tokens,
+account ids, game names and e-mail addresses in the client logs (even with
+`--no-redact`), and replaces your home directory, user name and host name
+unless you pass `--no-redact`. Other log text is copied verbatim, so skim the
+bundle before sharing it.
+
+The doctor also warns about diagnostic switches left on (for example
+`/tmp/rclol-input-trace`, `/tmp/metal-debug-waits` or `RCLOL_*_TRACE`
+variables), non-default tuning files, and hybrid graphics started without
+complete PRIME offload variables. See
 [compatibility](COMPATIBILITY.md) for what the performance numbers mean and
 for verified machines.
 
