@@ -1582,6 +1582,46 @@ install_toolbox
             self.assertTrue((build / 'native-install').exists())
             self.assertFalse((build / 'toolbox-container').exists())
 
+    def test_sign_sdk_runtime_runs_sudo_with_resolved_rcodesign_and_warns_on_failure(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-sign ') as folder:
+            root = Path(folder)
+            sdk = root / 'sdk'
+            sdk.mkdir()
+            sdk.chmod(0o555)
+            try:
+                (root / 'tools/dc-codesign').mkdir(parents=True)
+                for rel in ('tools/dc-codesign/dc-codesign', 'tools/sign-darling-runtime.sh'):
+                    p = root / rel
+                    p.write_text('#!/bin/sh\nexit 0\n')
+                    p.chmod(0o755)
+                rcodesign = root / 'home/.local/bin/rcodesign'
+                rcodesign.parent.mkdir(parents=True)
+                rcodesign.write_text('#!/bin/sh\nexit 0\n')
+                rcodesign.chmod(0o755)
+                sudo_log = root / 'sudo.log'
+                clean_path = os.pathsep.join(
+                    entry for entry in os.environ.get('PATH', '').split(os.pathsep)
+                    if not (Path(entry) / 'rcodesign').is_file()
+                )
+                snippet = f'''
+source "$INSTALLER"
+TARGET_DIR="{root}"
+HOME="{root / 'home'}"
+DARLING_SDK_DIR="{sdk}"
+unset RCODESIGN
+sudo() {{ printf "%s\\n" "$*" >> "{sudo_log}"; return "${{FAKE_FAIL:-0}}"; }}
+sign_sdk_runtime
+FAKE_FAIL=1 sign_sdk_runtime
+'''
+                result = run_sourced(snippet, PATH=clean_path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = sudo_log.read_text().splitlines()
+                expected = f'env RCODESIGN={rcodesign} sh {root}/tools/sign-darling-runtime.sh --sdk --quiet'
+                self.assertEqual(calls, [expected, expected])
+                self.assertIn('Base Darling SDK signing failed', result.stderr)
+            finally:
+                sdk.chmod(0o755)
+
 
 if __name__ == '__main__':
     unittest.main()

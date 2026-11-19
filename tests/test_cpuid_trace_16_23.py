@@ -182,6 +182,127 @@ int main(void) {{
             subprocess.run(['cc', '-Wall', '-Wextra', str(src_path), '-o', str(exe_path)], check=True)
             subprocess.run([str(exe_path)], check=True)
 
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_compat_cpuid_leaf_encodings_and_log_gating(self):
+        src = cpuid_trace_source()
+        log_start = src.index('static int rclol_open_log(')
+        log_end = src.index('static void rclol_write_str(')
+        log_helpers = src[log_start:log_end]
+
+        spoof_start = src.index('static uint32_t rclol_brand_word(')
+        spoof_end = src.index('// ---------------------------------------------------------------------------\n// Signal-handler fast path')
+        spoof_helpers = src[spoof_start:spoof_end]
+
+        # Confirm diagnostic logging stays off unless the flag file is opened.
+        self.assertIn('static int g_log_enabled = 0;', src)
+        self.assertIn('if (ffd >= 0) {\n\t\tg_log_enabled = 1;', src)
+
+        harness = f"""
+#include <assert.h>
+#include <stdint.h>
+
+#define RCLOL_CPUID_LOG_PATH "/tmp/should-not-open"
+#define RCLOL_O_WRONLY 0x001
+#define RCLOL_O_CREAT  0x040
+#define RCLOL_O_APPEND 0x400
+#define __NR_openat    257
+#define __NR_write     1
+
+struct darling_cpu_identity {{
+    const char* brand;
+    uint32_t brand_len;
+    uint32_t signature;
+    uint32_t leaf1_edx;
+    uint32_t cores;
+    uint32_t threads;
+    uint32_t max_basic;
+    uint32_t max_ext;
+    uint32_t phys_bits;
+    uint32_t virt_bits;
+    uint32_t l2_kb;
+    uint32_t l3_kb;
+    uint32_t base_mhz;
+}};
+
+static const struct darling_cpu_identity k_id = {{
+    .brand = "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz",
+    .brand_len = 40,
+    .signature = 0x000906eau,
+    .leaf1_edx = 0xbfebfbffu,
+    .cores = 6,
+    .threads = 12,
+    .max_basic = 0x16u,
+    .max_ext = 0x80000008u,
+    .phys_bits = 39,
+    .virt_bits = 48,
+    .l2_kb = 256,
+    .l3_kb = 12288,
+    .base_mhz = 2600,
+}};
+
+static const struct darling_cpu_identity* rclol_identity(void) {{ return &k_id; }}
+
+static int g_log_enabled = 0;
+static int g_log_fd = -1;
+static int openat_calls = 0;
+
+static long rclol_sys(long nr, long a1, long a2, long a3, long a4, long a5, long a6) {{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    if (nr == __NR_openat) {{
+        openat_calls++;
+        return 42;
+    }}
+    return 0;
+}}
+
+{log_helpers}
+{spoof_helpers}
+
+int main(void) {{
+    // Without the diagnostic flag file, logging must never call openat().
+    assert(rclol_open_log() == -1);
+    rclol_write("hello", 5);
+    assert(openat_calls == 0);
+    assert(g_log_fd == -1);
+
+    // Enabling diagnostics opens the log lazily once.
+    g_log_enabled = 1;
+    assert(rclol_open_log() == 42);
+    assert(openat_calls == 1);
+    assert(rclol_open_log() == 42);
+    assert(openat_calls == 1);
+
+    // Leaf 1: Intel 1-based max addressable logical ID count (16 for 6c/12t), CLFLUSH 8.
+    uint32_t a = 0, b = 0x05000000u, c = 0x7ffafbbfu, d = 0;
+    rclol_cpuid_trace_spoof(1u, 0u, &a, &b, &c, &d);
+    assert(a == 0x000906eau);
+    assert(((b >> 24) & 0xffu) == 0x05u);
+    assert(((b >> 16) & 0xffu) == 16u);
+    assert(((b >> 8) & 0xffu) == 8u);
+    assert((b & 0xffu) == 0u);
+    assert(d == 0xbfebfbffu);
+
+    // Leaf 0x80000006: Intel L2 256 KiB, 4-way (0x4), 64-byte line (0x40); EAX/EBX/EDX zero.
+    a = 0xdeadbeefu; b = 0xdeadbeefu; c = 0xdeadbeefu; d = 0xdeadbeefu;
+    rclol_cpuid_trace_spoof(0x80000006u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && d == 0u);
+    assert(c == ((256u << 16) | 0x4040u));
+
+    // Leaf 0x80000008: Intel 39/48 address bits; EBX/ECX/EDX zero (no AMD feature/core bits).
+    a = 0xdeadbeefu; b = 0xdeadbeefu; c = 0xdeadbeefu; d = 0xdeadbeefu;
+    rclol_cpuid_trace_spoof(0x80000008u, 0u, &a, &b, &c, &d);
+    assert(a == 0x3027u);
+    assert(b == 0u && c == 0u && d == 0u);
+    return 0;
+}}
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            src_path = Path(folder) / 'cpuid_spoof_test.c'
+            exe_path = Path(folder) / 'cpuid_spoof_test'
+            src_path.write_text(harness)
+            subprocess.run(['cc', '-Wall', '-Wextra', str(src_path), '-o', str(exe_path)], check=True)
+            subprocess.run([str(exe_path)], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

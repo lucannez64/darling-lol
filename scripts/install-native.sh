@@ -1037,6 +1037,55 @@ install_user_runtime() {
     sh scripts/install-runtime.sh
 }
 
+resolve_rcodesign() {
+  if [[ -n ${RCODESIGN:-} && -x $RCODESIGN ]]; then
+    printf '%s\n' "$RCODESIGN"
+    return 0
+  fi
+  local found
+  found=$(command -v rcodesign 2>/dev/null || true)
+  if [[ -n $found && -x $found ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  local candidate
+  for candidate in "${HOME:-/nonexistent}/.local/bin/rcodesign" "${HOME:-/nonexistent}/.cargo/bin/rcodesign"; do
+    if [[ -x $candidate ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  if [[ -f $TARGET_DIR/tools/install-rcodesign.sh ]]; then
+    sh "$TARGET_DIR/tools/install-rcodesign.sh" 2>/dev/null || true
+  fi
+}
+
+# install-runtime.sh runs unprivileged, so a root-owned /usr/local/libexec/darling
+# cannot be signed there. Sign the base SDK under sudo, resolving rcodesign as the
+# user first so sudo's PATH/HOME reset cannot hide it.
+sign_sdk_runtime() {
+  local sdk_dir=${DARLING_SDK_DIR:-/usr/local/libexec/darling}
+  if [[ ! -x $TARGET_DIR/tools/sign-darling-runtime.sh || ! -d $sdk_dir || -w $sdk_dir ]]; then
+    return 0
+  fi
+  if [[ ! -x $TARGET_DIR/tools/dc-codesign/dc-codesign ]]; then
+    warning 'Base Darling SDK was NOT signed (dc-codesign is not built; install OpenSSL headers and re-run).'
+    return 0
+  fi
+  local rcodesign_bin
+  rcodesign_bin=$(resolve_rcodesign)
+  if [[ -z $rcodesign_bin || ! -x $rcodesign_bin ]]; then
+    warning 'Base Darling SDK was NOT signed (rcodesign not found; run tools/install-rcodesign.sh and re-run).'
+    return 0
+  fi
+  info 'Signing Darling system components'
+  if sudo env RCODESIGN="$rcodesign_bin" sh "$TARGET_DIR/tools/sign-darling-runtime.sh" --sdk --quiet; then
+    success 'Signing Darling system components'
+  else
+    warning "Base Darling SDK signing failed; re-run: sudo env RCODESIGN=\"$rcodesign_bin\" sh tools/sign-darling-runtime.sh --sdk"
+  fi
+}
+
 launcher_entry_uses_shortcut_script() {
   # 0 when the installed menu entry exists and already targets the
   # auto-installing launcher script. A missing entry is not ready, so the
@@ -1274,7 +1323,16 @@ main() {
   run 'Building Darling-LoL (this may take a while)' compile_project
   ensure_no_active_session
   run 'Installing Darling system components' install_system_components
+  local log_lines_before=0
+  if [[ -n ${LOG:-} && -r $LOG ]]; then
+    log_lines_before=$(wc -l <"$LOG" 2>/dev/null || printf '0')
+  fi
   run 'Installing the user runtime' install_user_runtime
+  if (( ! VERBOSE )) && [[ -n ${LOG:-} && -r $LOG ]] &&
+    tail -n "+$((log_lines_before + 1))" "$LOG" 2>/dev/null | grep -q 'WARNING: the darling-lol runtime is NOT signed\.'; then
+    warning "The user runtime overlays were NOT signed; see $LOG for details."
+  fi
+  sign_sdk_runtime
 
   # Record the install mode only now that every step above succeeded: a
   # cancelled confirmation or a failed preflight/build must leave any previous

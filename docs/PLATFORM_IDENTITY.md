@@ -124,7 +124,11 @@ after installing, `scripts/update.sh` runs
 `configure-darling-platform.py --replace-known-defaults --write`, which
 provisions the prefix only if its saved identity still contains the shared
 serial or UUID below. Prefixes without saved identity files, or whose saved
-values are all custom, are left byte-for-byte unchanged.
+values are all custom, keep their identity files byte-for-byte unchanged.
+On existing prefixes, `scripts/install-runtime.sh` also runs
+`configure-darling-platform.py --normalize-system-version --write` so
+`System/Library/CoreServices/SystemVersion.plist` stays aligned to the emulated
+macOS version and build without creating or altering identity overrides.
 
 Missing serials use 12 characters and missing MLBs use 17 characters, sampled
 with Python's `secrets` module from `0123456789ABCDEFGHJKLMNPQRSTUVWXYZ` (Base-34).

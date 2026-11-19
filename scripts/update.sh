@@ -242,6 +242,59 @@ replace_shared_identity() {
 		warning 'Could not replace the shared platform identity; run tools/configure-darling-platform.py --provision --write'
 }
 
+warn_if_runtime_unsigned() {
+	if [ "$VERBOSE" = 0 ] && [ -n "$LOG" ] && [ -r "$LOG" ] &&
+		grep -q 'WARNING: the darling-lol runtime is NOT signed\.' "$LOG" 2>/dev/null; then
+		warning "The user runtime overlays were NOT signed; see $LOG for details."
+	fi
+}
+
+resolve_rcodesign() {
+	if [ -n "${RCODESIGN:-}" ] && [ -x "$RCODESIGN" ]; then
+		printf '%s\n' "$RCODESIGN"
+		return 0
+	fi
+	found=$(command -v rcodesign 2>/dev/null || true)
+	if [ -n "$found" ] && [ -x "$found" ]; then
+		printf '%s\n' "$found"
+		return 0
+	fi
+	for candidate in "${HOME:-/nonexistent}/.local/bin/rcodesign" "${HOME:-/nonexistent}/.cargo/bin/rcodesign"; do
+		if [ -x "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+	if [ -f "$repo/tools/install-rcodesign.sh" ]; then
+		sh "$repo/tools/install-rcodesign.sh" 2>/dev/null || true
+	fi
+}
+
+# install-runtime.sh runs unprivileged, so a root-owned /usr/local/libexec/darling
+# cannot be signed there. Sign the base SDK and refresh the trust store under sudo,
+# resolving rcodesign as the user first so sudo's PATH/HOME reset cannot hide it.
+sign_sdk_runtime() {
+	sdk_dir=${DARLING_SDK_DIR:-/usr/local/libexec/darling}
+	if [ ! -x "$repo/tools/sign-darling-runtime.sh" ] || [ ! -d "$sdk_dir" ] || [ -w "$sdk_dir" ]; then
+		return 0
+	fi
+	if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
+		warning 'Base Darling SDK was NOT signed (dc-codesign is not built; install OpenSSL headers and re-run update.sh).'
+		return 0
+	fi
+	rcodesign_bin=$(resolve_rcodesign)
+	if [ -z "$rcodesign_bin" ] || [ ! -x "$rcodesign_bin" ]; then
+		warning 'Base Darling SDK was NOT signed (rcodesign not found; run tools/install-rcodesign.sh and re-run update.sh).'
+		return 0
+	fi
+	printf '\n%s%s Signing Darling system components%s\n' "$BOLD$CYAN" "$ICON_INFO" "$RESET"
+	if sudo env RCODESIGN="$rcodesign_bin" sh "$repo/tools/sign-darling-runtime.sh" --sdk --quiet; then
+		success 'Signing Darling system components'
+	else
+		warning "Base Darling SDK signing failed; re-run: sudo env RCODESIGN=\"$rcodesign_bin\" sh tools/sign-darling-runtime.sh --sdk"
+	fi
+}
+
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	python3 scripts/nix-idle.py
 	# Initial setup and upgrades use the same supported user-owned install path.
@@ -265,6 +318,7 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	run 'Installing Darling system components' cmake --install build/darling-src/build
 	run 'Recording the installed base runtime' python3 scripts/nix-state.py stamp-base
 	run 'Installing the user runtime' ./scripts/install-runtime.sh
+	warn_if_runtime_unsigned
 	replace_shared_identity
 	show_log
 	success 'Rootless update installed. In this shell use scripts/run.sh; otherwise exit this shell and start darling-lol.'
@@ -364,6 +418,8 @@ run 'Building Darling-LoL (this may take a while)' ./scripts/build.sh
 run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
 run 'Installing Darling system components' sudo cmake --install build/darling-src/build
 run 'Installing the user runtime' ./scripts/install-runtime.sh
+warn_if_runtime_unsigned
+sign_sdk_runtime
 replace_shared_identity
 show_log
 success 'Update installed. Start Darling with: sh scripts/run.sh'

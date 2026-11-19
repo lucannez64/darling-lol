@@ -1935,7 +1935,7 @@ new file mode 100644
 index 0000000..2d3bdde
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,828 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2072,6 +2072,7 @@ index 0000000..2d3bdde
 +};
 +static struct rclol_site g_sites[RCLOL_MAX_SITES];
 +static int g_site_count = 0;
++static int g_log_enabled = 0;
 +static int g_log_fd = -1;
 +
 +// ---------------------------------------------------------------------------
@@ -2084,6 +2085,8 @@ index 0000000..2d3bdde
 +
 +static int rclol_open_log(void)
 +{
++	if (!g_log_enabled)
++		return -1;
 +	if (g_log_fd >= 0)
 +		return g_log_fd;
 +	long fd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) RCLOL_CPUID_LOG_PATH,
@@ -2238,6 +2241,16 @@ index 0000000..2d3bdde
 +	return value;
 +}
 +
++/* Intel CPUID.01H:EBX[23:16] is the 1-based maximum addressable logical
++ * processor ID count (power of two >= threads; 16 for 6c/12t i7-9750H). */
++static uint32_t rclol_max_logical_ids(uint32_t threads)
++{
++	uint32_t count = 1u;
++	while (count < threads && count < 128u)
++		count <<= 1;
++	return count;
++}
++
 +void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
 +	uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx)
 +{
@@ -2253,8 +2266,8 @@ index 0000000..2d3bdde
 +		break;
 +	case 0x00000001u:
 +		*eax = id->signature;
-+		/* Brand index 0, CLFLUSH line size 8 (64 bytes), full thread count. */
-+		*ebx = (*ebx & 0xff000000u) | ((id->threads - 1) << 16) | (8u << 8);
++		/* Brand index 0, CLFLUSH line size 8 (64 bytes), 1-based max logical IDs. */
++		*ebx = (*ebx & 0xff000000u) | (rclol_max_logical_ids(id->threads) << 16) | (8u << 8);
 +		/* The identity part's feature word. It is a superset of the host's
 +		 * (the host AMD leaf 1 EDX lacks only DS, SS and TM), so nothing the
 +		 * host really has is lost. machdep.cpu.features reports the same
@@ -2283,16 +2296,24 @@ index 0000000..2d3bdde
 +		break;
 +	}
 +	case 0x80000006u:
-+		*ecx = ((id->l2_kb & 0xffffu) << 16) | 0x4001u;
-+		*edx = (((id->l3_kb / 512u) & 0x3fffu) << 18) | 0x0000f001u;
++		/* Intel Extended L2 Cache Features: EAX/EBX/EDX are 0; ECX holds
++		 * L2 size in KiB (bits 31:16), 4-way associativity (0x4 in bits
++		 * 15:12) and 64-byte line size (0x40 in bits 7:0). */
++		*eax = 0;
++		*ebx = 0;
++		*ecx = ((id->l2_kb & 0xffffu) << 16) | 0x4040u;
++		*edx = 0;
 +		break;
 +	case 0x80000007u:
 +		*edx &= 0x00000100u; /* invariant TSC only */
 +		break;
 +	case 0x80000008u:
++		/* Intel Virtual/Physical Address Sizes: EBX is extended feature flags
++		 * (0 on Coffee Lake-H), and ECX/EDX are reserved (0). */
 +		*eax = (id->phys_bits & 0xffu) | ((id->virt_bits & 0xffu) << 8);
-+		*ebx = (id->cores - 1) | ((id->threads - 1) << 8);
++		*ebx = 0;
 +		*ecx = 0;
++		*edx = 0;
 +		break;
 +	default:
 +		break;
@@ -2340,21 +2361,23 @@ index 0000000..2d3bdde
 +	r->rip += 2;  // skip the two-byte `0f a2`
 +
 +	unsigned long n = site->hits++;
-+	if (n < RCLOL_LOG_FIRST_N) {
-+		char line[192];
-+		__simple_snprintf(line, sizeof(line),
-+			"cpuid t=%llu tid=%ld site=0x%lx off=0x%lx in[eax=0x%x ecx=0x%x] "
-+			"out[eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x] n=%lu\n",
-+			rclol_monotonic_ns(), rclol_gettid(), cookie,
-+			cookie - RCLOL_IMAGE_TEXT_BASE, in_eax, in_ecx,
-+			oa, ob, oc, od, n);
-+		rclol_write_str(line);
-+	} else if (n == RCLOL_LOG_FIRST_N) {
-+		char line[96];
-+		__simple_snprintf(line, sizeof(line),
-+			"cpuid-trace: site=0x%lx reached %d hits; counting only from here\n",
-+			cookie, RCLOL_LOG_FIRST_N);
-+		rclol_write_str(line);
++	if (g_log_enabled) {
++		if (n < RCLOL_LOG_FIRST_N) {
++			char line[192];
++			__simple_snprintf(line, sizeof(line),
++				"cpuid t=%llu tid=%ld site=0x%lx off=0x%lx in[eax=0x%x ecx=0x%x] "
++				"out[eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x] n=%lu\n",
++				rclol_monotonic_ns(), rclol_gettid(), cookie,
++				cookie - RCLOL_IMAGE_TEXT_BASE, in_eax, in_ecx,
++				oa, ob, oc, od, n);
++			rclol_write_str(line);
++		} else if (n == RCLOL_LOG_FIRST_N) {
++			char line[96];
++			__simple_snprintf(line, sizeof(line),
++				"cpuid-trace: site=0x%lx reached %d hits; counting only from here\n",
++				cookie, RCLOL_LOG_FIRST_N);
++			rclol_write_str(line);
++		}
 +	}
 +
 +	return true;
@@ -2662,6 +2685,7 @@ index 0000000..2d3bdde
 +	if (ffd < 0 && !compat)
 +		return;
 +	if (ffd >= 0) {
++		g_log_enabled = 1;
 +		long got = rclol_sys(__NR_read, ffd, (long) contents, (long) sizeof(contents) - 1, 0, 0, 0);
 +		rclol_sys(__NR_close, ffd, 0, 0, 0, 0, 0);
 +		if (got < 0)
