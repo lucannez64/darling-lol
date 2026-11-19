@@ -22,10 +22,10 @@ spec.loader.exec_module(supervisor)
 
 
 def fake_process(root, pid, ppid=1, state='S', comm='mldr', environ=b'', ns=None,
-                 uid=None):
+                 uid=None, start_ticks=100):
     proc = root / str(pid)
     (proc / 'ns').mkdir(parents=True)
-    fields = [state, str(ppid)] + ['0'] * 17 + ['100']
+    fields = [state, str(ppid)] + ['0'] * 17 + [str(start_ticks)]
     (proc / 'stat').write_text('%d (%s) %s\n' % (pid, comm, ' '.join(fields)))
     (proc / 'comm').write_text(comm + '\n')
     (proc / 'cmdline').write_bytes(comm.encode() + b'\0')
@@ -321,11 +321,11 @@ class ContainerTests(unittest.TestCase):
                                   'libpod-abc123.scope']])
         self.assertIn('stopping Toolbox container darling-lol', output)
 
-    def test_stop_killed_with_the_scope_counts_as_queued(self):
+    def test_signaled_systemctl_does_not_count_as_queued(self):
         stopped, _calls, output = self.stop(
-            lambda command: subprocess.CompletedProcess(command, -signal.SIGTERM))
-        self.assertTrue(stopped)
-        self.assertNotIn('could not stop', output)
+            lambda command: subprocess.CompletedProcess(command, -signal.SIGKILL))
+        self.assertFalse(stopped)
+        self.assertIn('could not stop', output)
 
     def test_failed_stop_reports_the_manual_command(self):
         stopped, _calls, output = self.stop(
@@ -369,6 +369,7 @@ class ToolboxSessionTests(unittest.TestCase):
         self.container = ('darling-lol', 'abc123')
         (self.proc / 'self').mkdir()
         (self.proc / 'self/cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        self.toolbox_init()
         self.handlers = {signum: signal.getsignal(signum)
                          for signum in supervisor.TERMINATION_SIGNALS}
         self.addCleanup(self.restore_handlers)
@@ -376,6 +377,12 @@ class ToolboxSessionTests(unittest.TestCase):
     def restore_handlers(self):
         for signum, handler in self.handlers.items():
             signal.signal(signum, handler)
+
+    def toolbox_init(self, start_ticks=100):
+        init = fake_process(self.proc, 12345, comm='toolbox', start_ticks=start_ticks)
+        (init / 'cmdline').write_bytes(b'/usr/bin/toolbox\0init-container\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        return init
 
     def run_supervisor(self, container=None, runtime_at_start=None, remaining=None,
                        stoppable=True):
@@ -391,7 +398,7 @@ class ToolboxSessionTests(unittest.TestCase):
         return code, stop
 
     def other_session(self, container_id='abc123'):
-        session = supervisor.ContainerSessions(container_id, base=self.root)
+        session = supervisor.ContainerSessions(container_id, base=self.root, proc_root=self.proc)
         self.assertTrue(session.register())
         self.addCleanup(session.release)
         return session
@@ -437,7 +444,7 @@ class ToolboxSessionTests(unittest.TestCase):
         with mock.patch.object(supervisor, 'stop_container', return_value=True) as stop:
             self.assertTrue(attached.finish(
                 self.container, request_stop=False, stoppable=True,
-                proc_root=self.proc, out=io.StringIO()))
+                out=io.StringIO()))
         stop.assert_called_once()
 
     def test_simultaneous_finishers_queue_one_stop(self):
@@ -447,7 +454,7 @@ class ToolboxSessionTests(unittest.TestCase):
         def finish(session):
             barrier.wait()
             return session.finish(self.container, request_stop=True, stoppable=True,
-                                  proc_root=self.proc, out=io.StringIO())
+                                  out=io.StringIO())
 
         with mock.patch.object(supervisor, 'stop_container', return_value=True) as stop:
             with ThreadPoolExecutor(max_workers=2) as pool:
@@ -460,23 +467,41 @@ class ToolboxSessionTests(unittest.TestCase):
         self.assertEqual(code, 1)
         stop.assert_not_called()
 
+    def test_failed_scope_stop_allows_a_new_session(self):
+        session = self.other_session()
+        with mock.patch.object(supervisor, 'stop_container', return_value=False):
+            self.assertFalse(session.finish(self.container, request_stop=True,
+                                            stoppable=True, out=io.StringIO()))
+        self.other_session()
+
     def test_stopped_container_can_register_again_after_restart(self):
         self.run_supervisor(container=self.container)
         marker = supervisor.session_registry('abc123', self.root) / supervisor.STOP_QUEUED
-        marker.write_text('mnt:[former]')
+        self.assertEqual(marker.read_text(), '12345:100')
+        shutil.rmtree(self.proc / '12345')
+        self.toolbox_init(start_ticks=200)
         self.other_session()
         self.assertFalse(marker.exists())
 
+    def test_legacy_mount_namespace_marker_is_discarded(self):
+        self.run_supervisor(container=self.container)
+        marker = supervisor.session_registry('abc123', self.root) / supervisor.STOP_QUEUED
+        marker.write_text('mnt:[4026533541]')
+        self.other_session()
+        self.assertFalse(marker.exists())
+
+    def test_unknown_toolbox_instance_is_left_running(self):
+        shutil.rmtree(self.proc / '12345')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
     def test_scope_with_interactive_shell_is_left_running(self):
-        shell = fake_process(self.proc, 12345, comm='bash')
+        shell = fake_process(self.proc, 12346, comm='bash')
         (shell / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope/exec\n')
         _code, stop = self.run_supervisor(container=self.container)
         stop.assert_not_called()
 
     def test_scope_ignores_toolbox_init_and_other_containers(self):
-        init = fake_process(self.proc, 12345, comm='toolbox')
-        (init / 'cmdline').write_bytes(b'/usr/bin/toolbox\0init-container\0')
-        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
         other = fake_process(self.proc, 12346, comm='bash')
         (other / 'cgroup').write_text('0::/user.slice/libpod-other.scope\n')
         _code, stop = self.run_supervisor(container=self.container)
@@ -493,7 +518,7 @@ class ToolboxSessionTests(unittest.TestCase):
         with mock.patch.object(supervisor, 'stop_container') as stop:
             self.assertFalse(attached.finish(
                 self.container, request_stop=False, stoppable=False,
-                proc_root=self.proc, out=io.StringIO()))
+                out=io.StringIO()))
         stop.assert_not_called()
         pending = supervisor.session_registry('abc123', self.root) / supervisor.STOP_REQUESTED
         self.assertFalse(pending.exists())

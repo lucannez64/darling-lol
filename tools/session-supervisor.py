@@ -450,9 +450,8 @@ def stop_container(container, run=subprocess.run, out=sys.stdout, timeout=10):
         log('could not stop Toolbox container %s (%s); stop it with '
             "'podman stop %s'" % (name, error, name), out)
         return False
-    # A signal status means the queued stop already reached this process.
     status = getattr(result, 'returncode', 0)
-    if status > 0:
+    if status != 0:
         restore_termination_signals(previous)
         log('could not stop Toolbox container %s (systemctl exited with %d); '
             "stop it with 'podman stop %s'" % (name, status, name), out)
@@ -475,11 +474,13 @@ def in_container_scope(proc, unit):
         return False
 
 
-def toolbox_idle(container_id, proc_root):
-    """Require our own Podman scope, with no other work apart from Toolbx init."""
+def toolbox_state(container_id, proc_root):
+    """Return the live Toolbx init identity and whether its scope is idle."""
     unit = 'libpod-%s.scope' % container_id
     if not in_container_scope(proc_root / 'self', unit):
-        return False
+        return None, False
+    instance = None
+    idle = True
     for proc in proc_root.iterdir():
         if not proc.name.isdigit() or int(proc.name) == os.getpid():
             continue
@@ -489,15 +490,18 @@ def toolbox_idle(container_id, proc_root):
         if info is not None and info[0] in ('Z', 'X'):
             continue
         args = command_line(proc)
-        if args and Path(args[0]).name == 'toolbox' and 'init-container' in args[1:]:
+        if (info is not None and args and Path(args[0]).name == 'toolbox'
+                and 'init-container' in args[1:]):
+            # Both the mount namespace inode and PID can be reused at restart.
+            instance = '%s:%d' % (proc.name, info[2])
             continue
         # Other supervisors serialize through the registry. A finisher can
         # still be returning its status after it removes its registration.
         if (len(args) > 1 and Path(args[0]).name.startswith('python')
                 and Path(args[1]).name == 'session-supervisor.py'):
             continue
-        return False
-    return True
+        idle = False
+    return instance, idle
 
 
 class ContainerStopping(Exception):
@@ -513,11 +517,13 @@ class ContainerSessions:
     the session that ends last is the one that stops the container. The final
     stop decision and unregistering use the same lock. A finished runtime
     owner can authorize the last attached session to stop the container.
-    The mount namespace identifies a running instance across container restarts.
+    The Toolbx init PID and start time identify each running instance.
     """
 
-    def __init__(self, container_id, base=None):
+    def __init__(self, container_id, base=None, proc_root=Path('/proc')):
+        self.container_id = container_id
         self.directory = session_registry(container_id, base)
+        self.proc_root = proc_root
         self.path = None
         self.handle = None
 
@@ -529,10 +535,12 @@ class ContainerSessions:
             self.directory.mkdir(mode=0o700, exist_ok=True)
             with open(self.directory / REGISTRY_LOCK, 'a+') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                namespace = os.readlink('/proc/self/ns/mnt')
                 queued = self.directory / STOP_QUEUED
                 if queued.exists():
-                    if queued.read_text() == namespace:
+                    instance, _idle = toolbox_state(self.container_id, self.proc_root)
+                    if instance is None:
+                        return False
+                    if queued.read_text() == instance:
                         raise ContainerStopping
                     queued.unlink()
                 pending = self.directory / STOP_REQUESTED
@@ -548,7 +556,7 @@ class ContainerSessions:
         self.handle, self.path = handle, Path(handle.name)
         return True
 
-    def finish(self, container, *, request_stop, stoppable, proc_root,
+    def finish(self, container, *, request_stop, stoppable,
                run=subprocess.run, out=sys.stdout):
         """Stop `container` only when no other session is still using it."""
         if self.path is None:
@@ -565,11 +573,12 @@ class ContainerSessions:
                 if not pending.exists():
                     return False
                 pending.unlink()
-                if not stoppable or not toolbox_idle(container[1], proc_root):
+                instance, idle = toolbox_state(self.container_id, self.proc_root)
+                if not stoppable or instance is None or not idle:
                     log('leaving Toolbox container %s running' % container[0], out)
                     return False
                 queued = self.directory / STOP_QUEUED
-                queued.write_text(os.readlink('/proc/self/ns/mnt'))
+                queued.write_text(instance)
                 if stop_container(container, run=run, out=out):
                     return True
                 queued.unlink()
@@ -953,7 +962,7 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                     else not runtime_alive(prefix, proc_root))
     sessions = None
     if container is not None:
-        sessions = ContainerSessions(container[1], base=session_base)
+        sessions = ContainerSessions(container[1], base=session_base, proc_root=proc_root)
         try:
             registered = sessions.register()
         except ContainerStopping:
@@ -1066,9 +1075,12 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                             own_namespace=own_namespace, note=note)
     if stop:
         log('interrupted by signal %d' % stop[0], out)
-    if sessions is not None:
+    if sessions is not None and sessions.path is not None:
+        # A different finisher can stop the scope as soon as we unregister.
+        # This process has finished its work and is about to return the status.
+        ignore_termination_signals()
         sessions.finish(container, request_stop=owns_runtime and stoppable,
-                        stoppable=stoppable, proc_root=proc_root, run=run, out=out)
+                        stoppable=stoppable, run=run, out=out)
     # A surviving guest process is a failed cleanup, not a clean exit.
     return (status or 1) if remaining else status
 
