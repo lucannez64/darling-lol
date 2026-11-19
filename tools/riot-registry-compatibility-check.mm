@@ -84,6 +84,13 @@ static void checkGpuRegistry() {
 
     IOGraphicsAccelerator::registerSelf(ServiceRegistry::instance());
     IORegistryEntry* gpu = IORegistryEntry::findById(kIOGraphicsAcceleratorRegistryID);
+    IOGraphicsAcceleratorIds::PciId expected = IOGraphicsAcceleratorIds::acceleratorIds();
+    // An unknown identity publishes no entry, so Dawn falls back to the Metal
+    // device name instead of reading vendor 0.
+    if (expected.vendor == 0 && expected.device == 0) {
+        assert(gpu == nullptr);
+        return;
+    }
     assert(gpu && !strcmp(gpu->className(), "IOGraphicsAccelerator2"));
     auto parents = gpu->getParents(kIOServicePlane);
     assert(parents.size() == 1 && !strcmp((*parents.begin())->className(), "IOPCIDevice"));
@@ -93,19 +100,17 @@ static void checkGpuRegistry() {
     uint32_t vendorId = 0, deviceId = 0;
     memcpy(&vendorId, [vendor bytes], 4);
     memcpy(&deviceId, [device bytes], 4);
-    // The entry must describe the device Metal selected, or stay unknown: never
-    // another card's IDs. Passthrough values are checked against the host
-    // identity, so any vendor works; the two compatibility substitutions are
-    // validated separately.
-    IOGraphicsAcceleratorIds::PciId expected = IOGraphicsAcceleratorIds::acceleratorIds();
+    // The entry must describe the device Metal selected: never another card's
+    // IDs. Passthrough values are checked against the host identity, so any
+    // vendor works; the two compatibility substitutions are validated separately.
     assert(vendorId == expected.vendor && deviceId == expected.device);
-    bool known = vendorId == 0 && deviceId == 0;
+    bool known = false;
     for (const auto& card : IOGraphicsAcceleratorIds::hostCards())
         known = known || (card.vendor == vendorId && card.device == deviceId);
     known = known || (vendorId == 0x1002 && deviceId == 0x7340);
     known = known || (vendorId == 0x8086 && deviceId == 0x3e9b);
     assert(known);
-    assert(vendorId != 0 || deviceId == 0);
+    assert(vendorId != 0);
     gpu->release();
 
     // The pinned ID is exclusive, so no later entry can steal the accelerator's.

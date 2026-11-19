@@ -3756,7 +3756,7 @@ new file mode 100644
 index 0000000..df7fcbf
 --- /dev/null
 +++ b/src/IOGraphicsAccelerator.mm
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,110 @@
 +/*
 + This file is part of Darling.
 +
@@ -3847,8 +3847,14 @@ index 0000000..df7fcbf
 +		return;
 +	registered = true;
 +
-+	IOGraphicsAccelerator* accelerator = new IOGraphicsAccelerator;
++	// An unknown identity publishes nothing. Dawn trusts any entry it finds for
++	// -[MTLDevice registryID] and reads missing or zero IDs as vendor 0; with no
++	// entry it falls back to the Metal device name, as before this entry existed.
 +	IOGraphicsAcceleratorIds::PciId ids = IOGraphicsAcceleratorIds::acceleratorIds();
++	if (ids.vendor == 0 && ids.device == 0)
++		return;
++
++	IOGraphicsAccelerator* accelerator = new IOGraphicsAccelerator;
 +	IOPCIDevice* pciDevice = new IOPCIDevice(ids.vendor, ids.device);
 +
 +	pciDevice->registerInPlane(kIOServicePlane, "GFX0@0", IORegistryEntry::root());
@@ -3866,7 +3872,7 @@ new file mode 100644
 index 0000000..50c039f
 --- /dev/null
 +++ b/src/IOGraphicsAcceleratorIds.h
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,301 @@
 +/*
 + This file is part of Darling.
 +
@@ -4095,11 +4101,12 @@ index 0000000..50c039f
 +// The selector names a Vulkan device, not a card, so only a unique vendor hint
 +// can be mapped back. A numeric selector counts Vulkan devices, and the
 +// loader's order need not match the driver's card order, so it stays unknown;
-+// two cards of the hinted vendor stay unknown as well.
++// two cards of the hinted vendor stay unknown as well. A single card is only
++// unambiguous without a selector: one can still name a software device.
 +inline bool cardForSelector(const std::vector<PciId>& cards, const std::string& selector,
 +                            PciId* selected)
 +{
-+	if (cards.size() == 1)
++	if (cards.size() == 1 && selector.empty())
 +	{
 +		*selected = cards.front();
 +		return true;

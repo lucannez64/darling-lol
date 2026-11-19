@@ -85,6 +85,18 @@ class IokitGpuRegistryTests(unittest.TestCase):
         self.assertIn('IOGraphicsAcceleratorIds::acceleratorIds()', accelerator)
         self.assertIn('dataForWord(m_vendor)', accelerator)
 
+    def test_unknown_identity_publishes_no_entry(self):
+        # Dawn trusts any entry it finds and reads zero IDs as vendor 0; only a
+        # missing entry makes it fall back to the Metal device name.
+        accelerator = added_lines('src/IOGraphicsAccelerator.mm')
+        body = accelerator.split('void IOGraphicsAccelerator::registerSelf', 1)[1]
+        guard = body.index('if (ids.vendor == 0 && ids.device == 0)\n\t\treturn;')
+        self.assertLess(guard, body.index('new IOGraphicsAccelerator'))
+        self.assertLess(guard, body.index('new IOPCIDevice'))
+        self.assertLess(guard, body.index('registerService'))
+        probe = (ROOT / 'tools/riot-registry-compatibility-check.mm').read_text()
+        self.assertIn('assert(gpu == nullptr);', probe)
+
     def test_selection_follows_metal_and_keeps_unknown_unknown(self):
         source = added_lines(IDS)
         # The same selector sources Indium uses, and no unconditional card0.
@@ -253,9 +265,13 @@ int main()
         # Two cards of the hinted vendor stay unknown.
         dual = self.card('dual', ('0x10de', '0x10de'), ('0x1f91', '0x1f92'))
         self.assertEqual(self.run_ids(dual, prop, selector='nvidia')[1:], (0, 0))
-        # A single card is unambiguous even when the selector is nonsense.
+        # A single card is unambiguous only without a selector: '1' or
+        # 'llvmpipe' can name the software device listed after it.
         single = self.card('single', ('0x10de',), ('0x1f91',))
-        self.assertEqual(self.run_ids(single, prop, selector='1')[1:], (0x10de, 0x1f91))
+        self.assertEqual(self.run_ids(single, prop)[1:], (0x10de, 0x1f91))
+        self.assertEqual(self.run_ids(single, prop, selector='1')[1:], (0, 0))
+        self.assertEqual(self.run_ids(single, prop, selector='llvmpipe')[1:], (0, 0))
+        self.assertEqual(self.run_ids(single, prop, selector='nvidia')[1:], (0x10de, 0x1f91))
 
 
 if __name__ == '__main__':
