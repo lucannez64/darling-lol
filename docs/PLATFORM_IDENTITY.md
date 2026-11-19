@@ -222,7 +222,10 @@ can fall back to `NVIDIA Graphics`; Metal uses the Vulkan device name, so the
 two names may differ. IOKit also publishes a synthetic `IOPCIDevice` with the
 same `vendor-id`/`device-id` values and an `IOGraphicsAccelerator2` child whose
 registry ID matches `-[MTLDevice registryID]`, so Metal and Dawn resolve the GPU
-without the host driver having to publish anything in the guest registry.
+without the host driver having to publish anything in the guest registry. When
+the host has more than one card and `/tmp/metal-gpu`/`METAL_INDIUM_GPU` does not
+single one out, the entry keeps the IDs unset instead of presenting another
+GPU's, and Dawn falls back to the Metal device name.
 `RCLOL_GPU_*`
 variables are the launcher-to-guest handoff; `RCLOL_SYSTEM_ROOT` is a test-only
 host-root override.

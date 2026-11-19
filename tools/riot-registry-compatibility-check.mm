@@ -2,6 +2,7 @@
 #include "IORegistryEntry.h"
 #include "IOService.h"
 #include "IOGraphicsAccelerator.h"
+#include "IOGraphicsAcceleratorIds.h"
 #include "PlatformIdentity.h"
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOKitKeys.h>
@@ -92,8 +93,19 @@ static void checkGpuRegistry() {
     uint32_t vendorId = 0, deviceId = 0;
     memcpy(&vendorId, [vendor bytes], 4);
     memcpy(&deviceId, [device bytes], 4);
-    assert(vendorId == 0 || vendorId == 0x1002 || vendorId == 0x8086 || vendorId == 0x10de);
-    assert(vendorId == 0 || deviceId != 0);
+    // The entry must describe the device Metal selected, or stay unknown: never
+    // another card's IDs. Passthrough values are checked against the host
+    // identity, so any vendor works; the two compatibility substitutions are
+    // validated separately.
+    IOGraphicsAcceleratorIds::PciId expected = IOGraphicsAcceleratorIds::acceleratorIds();
+    assert(vendorId == expected.vendor && deviceId == expected.device);
+    bool known = vendorId == 0 && deviceId == 0;
+    for (const auto& card : IOGraphicsAcceleratorIds::hostCards())
+        known = known || (card.vendor == vendorId && card.device == deviceId);
+    known = known || (vendorId == 0x1002 && deviceId == 0x7340);
+    known = known || (vendorId == 0x8086 && deviceId == 0x3e9b);
+    assert(known);
+    assert(vendorId != 0 || deviceId == 0);
     gpu->release();
 
     // The pinned ID is exclusive, so no later entry can steal the accelerator's.

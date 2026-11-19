@@ -186,7 +186,8 @@
         "src/HostPowerInhibit.h",
         "src/PlatformIdentity.h",
         "src/IOGraphicsAccelerator.h",
-        "src/IOGraphicsAccelerator.mm"
+        "src/IOGraphicsAccelerator.mm",
+        "src/IOGraphicsAcceleratorIds.h"
       ]
     },
     {
