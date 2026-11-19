@@ -7907,13 +7907,20 @@ index 6d977fd..3eae2f0 100644
 +	return rv;
 +}
 diff --git a/libsyscall/os/tsd.h b/libsyscall/os/tsd.h
-index 6619381..78d90df 100644
+index 6619381..52567f9 100644
 --- a/libsyscall/os/tsd.h
 +++ b/libsyscall/os/tsd.h
-@@ -63,6 +63,22 @@ static __inline__ unsigned int
- _os_cpu_number(void)
+@@ -58,11 +58,27 @@
+ 
+ extern void _thread_set_tsd_base(void *tsd_base);
+ 
++#ifdef DARLING
+ __attribute__((always_inline))
+ static __inline__ unsigned int
+-_os_cpu_number(void)
++_os_cpu_number_host(void)
  {
- #ifdef DARLING
+-#ifdef DARLING
 +#if defined(__x86_64__)
 +	/* Linux keeps (node << 12) | cpu in IA32_TSC_AUX, which RDTSCP returns without entering the kernel: this is
 +	 * what the kernel's own vDSO getcpu does. The syscall below costs ~470 ns and libmalloc asks for the CPU
@@ -7933,6 +7940,54 @@ index 6619381..78d90df 100644
  	extern int __linux_syscall(int nr, ...);
  
  	unsigned int cpu_num = 0;
+@@ -73,6 +89,47 @@ _os_cpu_number(void)
+ 	}
+ 
+ 	return cpu_num;
++}
++
++#if defined(__x86_64__) || defined(__i386__)
++/* _COMM_PAGE_LOGICAL_CPUS (osfmk/i386/cpu_capabilities.h), spelled out so this header stays self-contained. */
++#if defined(__x86_64__)
++#define __DARLING_COMM_PAGE_LOGICAL_CPUS 0x00007fffffe00036ULL
++#else
++#define __DARLING_COMM_PAGE_LOGICAL_CPUS 0xffff0036UL
++#endif
++
++/* darling-lol: the host CPU number folded into the CPU count the guest is told.
++ *
++ * libdispatch (continuation heap magazines), libmalloc (nano blocks) and
++ * libmalloc's magazines size per-CPU arrays from the commpage's logical CPU
++ * count and index them with this number, some without a bounds check. Under
++ * profile=compat the commpage says 12 (i7-9750H) and the /tmp/rclol-fixed-cpu-count
++ * opt-out says 8, while the host may have more: a 16-thread host returned CPU
++ * 12-15 and every guest process faulted in _dispatch_alloc_continuation_alloc
++ * at boot. Two host CPUs that share a slot only share a magazine, which every
++ * consumer already tolerates after a migration. */
++__attribute__((always_inline))
++static __inline__ unsigned int
++_os_cpu_number_fold(unsigned int cpu)
++{
++	unsigned int count = *(volatile uint8_t *)(uintptr_t)__DARLING_COMM_PAGE_LOGICAL_CPUS;
++	if (__builtin_expect(cpu >= count, 0) && count != 0) {
++		cpu %= count;
++	}
++	return cpu;
++}
++#else
++#define _os_cpu_number_fold(cpu) (cpu)
++#endif
++#endif // DARLING
++
++__attribute__((always_inline))
++static __inline__ unsigned int
++_os_cpu_number(void)
++{
++#ifdef DARLING
++	return _os_cpu_number_fold(_os_cpu_number_host());
+ #else // !DARLING
+ #if defined(__arm__)
+ 	uintptr_t p;
 diff --git a/libsyscall/wrappers/__commpage_gettimeofday.c b/libsyscall/wrappers/__commpage_gettimeofday.c
 index ccd2b33..1a1a7c6 100644
 --- a/libsyscall/wrappers/__commpage_gettimeofday.c

@@ -23,10 +23,10 @@ index 28eb2ef..c2c0435 100644
  	return _os_cpu_number();
  #endif
 diff --git a/src/malloc.c b/src/malloc.c
-index c6c2a5a..b882aba 100644
+index c6c2a5a..f1b6399 100644
 --- a/src/malloc.c
 +++ b/src/malloc.c
-@@ -23,6 +23,38 @@
+@@ -23,6 +23,41 @@
  
  #include "internal.h"
  
@@ -55,8 +55,11 @@ index c6c2a5a..b882aba 100644
 +    }
 +    if (function && function != (void*)-1) {
 +        unsigned cpu = 0;
++        // The host's CPU number, folded into the count the commpage reports
++        // (see _os_cpu_number_fold in os/tsd.h): the nano allocator indexes
++        // its per-CPU blocks with it unchecked.
 +        if (((int (*)(unsigned*, unsigned*, void*))function)(&cpu, 0, 0) == 0)
-+            return cpu;
++            return _os_cpu_number_fold(cpu);
 +    }
 +    return _os_cpu_number();
 +}
