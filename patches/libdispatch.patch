@@ -25,3 +25,30 @@ index 336c657..9c15faa 100644
  			dcic->dcic_tq = dch->do_targetq;
  			return false;
  		}
+diff --git a/src/shims/tsd.h b/src/shims/tsd.h
+index ff4729e..c46684f 100644
+--- a/src/shims/tsd.h
++++ b/src/shims/tsd.h
+@@ -355,7 +355,21 @@ _dispatch_cpu_number(void)
+ 	pthread_cpu_number_np(&n);
+ 	return (unsigned int)n;
+ #elif __has_include(<os/tsd.h>)
+-	return _os_cpu_number();
++	/*
++	 * darling-lol: the per-CPU continuation magazines (2 MiB each) are sized
++	 * from hw.logicalcpu_max, so a larger number indexes past the mapped
++	 * heap. profile=compat presents the i7-9750H's 12 logical CPUs while the
++	 * host may run this thread on CPU 12 or 13, and a commpage from an older
++	 * mldr can still carry the host's count, so share a magazine instead of
++	 * trusting the number.
++	 */
++	unsigned int cpu = _os_cpu_number();
++	unsigned int ncpu = (unsigned int)dispatch_hw_config(logical_cpus);
++
++	if (__builtin_expect(ncpu != 0 && cpu >= ncpu, 0)) {
++		cpu %= ncpu;
++	}
++	return cpu;
+ #elif defined(__x86_64__) || defined(__i386__)
+ 	struct { uintptr_t p1, p2; } p;
+ 	__asm__("sidt %[p]" : [p] "=&m" (p));

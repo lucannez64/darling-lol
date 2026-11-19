@@ -200,7 +200,7 @@
       "revision": "380f03c180b80d940134fb35783ddc714784a53a",
       "repository": "https://github.com/darlinghq/darling-libdispatch.git",
       "patch": "patches/libdispatch.patch",
-      "modified_files": 1,
+      "modified_files": 2,
       "new_files": []
     },
     {
