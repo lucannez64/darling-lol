@@ -6,6 +6,7 @@ LOG="${XDG_CACHE_HOME:-$HOME/.cache}/darling-lol-install.log"
 TOOLBOX_NAME="${DARLING_LOL_TOOLBOX_NAME:-darling-lol}"
 
 readonly MIN_FREE_GIB=50
+readonly MIN_REINSTALL_FREE_GIB=5
 readonly MIN_FREE_GIB_CONTAINER=5
 # Minimum supported Fedora, also used as the toolbox image release on hosts
 # that cannot infer one (toolbox errors with "option '--release' is needed"
@@ -596,13 +597,17 @@ preflight() {
 
   free_kib=$(df -Pk "$TARGET_DIR" | awk 'NR == 2 {print $4}')
   [[ $free_kib =~ ^[0-9]+$ ]] || fail 'Could not determine available disk space.'
+  (( free_kib >= MIN_REINSTALL_FREE_GIB * 1024 * 1024 )) ||
+    fail "At least ${MIN_REINSTALL_FREE_GIB} GiB must be free on the checkout filesystem for build and staging files: $(gib_display "$free_kib") GiB free."
   # Existing Darling data (build tree, guest prefix, system runtime) on the
   # target filesystem already occupies part of the required footprint.
-  footprint_kib=$(darling_footprint_kib)
-  total_kib=$(( free_kib + footprint_kib ))
   required_kib=$(( MIN_FREE_GIB * 1024 * 1024 ))
-  (( total_kib >= required_kib )) ||
-    fail "At least ${MIN_FREE_GIB} GiB of disk space is required (free plus existing Darling-LoL data): $(gib_display "$free_kib") GiB free and $(gib_display "$footprint_kib") GiB already used by Darling-LoL."
+  if (( free_kib < required_kib )); then
+    footprint_kib=$(darling_footprint_kib)
+    total_kib=$(( free_kib + footprint_kib ))
+    (( total_kib >= required_kib )) ||
+      fail "At least ${MIN_FREE_GIB} GiB of disk space is required (free plus existing Darling-LoL data): $(gib_display "$free_kib") GiB free and $(gib_display "$footprint_kib") GiB already used by Darling-LoL."
+  fi
 
   local required_files=(
     scripts/preflight.py

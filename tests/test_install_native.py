@@ -730,6 +730,16 @@ class DiskSpaceTests(unittest.TestCase):
         result = self.run_preflight(free_kib=60 * self.GIB_KIB)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_existing_data_cannot_replace_free_space_for_staging(self):
+        result = self.run_preflight(free_kib=0, prefix_kib=55 * self.GIB_KIB)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('At least 5 GiB must be free', result.stderr)
+
+    def test_reinstall_with_five_gib_free_and_enough_existing_data(self):
+        result = self.run_preflight(free_kib=5 * self.GIB_KIB,
+                                    prefix_kib=45 * self.GIB_KIB)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_the_shortfall_is_reported_when_existing_data_is_too_small(self):
         result = self.run_preflight(free_kib=30 * self.GIB_KIB,
                                     prefix_kib=1 * self.GIB_KIB)
