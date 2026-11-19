@@ -44,10 +44,11 @@ jobs:
 
       - name: Fetch Riot Client ${{ matrix.release.name }}
         run: |
-          python3 -m pip install --quiet zstandard
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet zstandard
           sudo mkdir -p "/Users/Shared/Riot Games"
           sudo chown "$USER" "/Users/Shared/Riot Games"
-          python3 tools/rman-fetch.py \
+          "$RUNNER_TEMP/venv/bin/python" tools/rman-fetch.py \
             "https://ks-foundation.secure.dyn.riotcdn.net/channels/public/releases/${{ matrix.release.id }}.manifest" \
             "$APP"
           sed -i '' 's/^enable_self_update:.*/enable_self_update: false/' "$APP/Contents/Resources/system.yaml"
