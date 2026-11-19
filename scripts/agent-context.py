@@ -8,6 +8,7 @@ project commands or touches the prefix.
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -124,6 +125,95 @@ SOURCES = (
     "patches/darlingserver.patch",
 )
 
+MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(\s*<?([^)>\s]+)>?(?:\s+[^)]*)?\)")
+AGENT_IMPORT = re.compile(r"(?<![\w`])@([\w./-]+)")
+FLAG_ROW = re.compile(
+    r"^\|\s*`([A-Za-z0-9_]+)`\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*$",
+    re.MULTILINE,
+)
+COMMENT_LINE = re.compile(r"^\s*(?:#|//|/\*|\*|<!--)")
+
+
+def _resolve_target(base, target):
+    """Resolve a link target relative to the file that contains it."""
+    target = target.split("#", 1)[0].strip()
+    if not target or "://" in target or target.startswith("mailto:"):
+        return None
+    path = Path(target)
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
+def _points_to_entrypoint(adapter, text, root):
+    """Return True when the adapter links to or imports the root AGENTS.md."""
+    expected = (root / ENTRYPOINT).resolve()
+    targets = MARKDOWN_LINK.findall(text) + AGENT_IMPORT.findall(text)
+    return any(_resolve_target(adapter.parent, target) == expected
+               for target in targets)
+
+
+def _read_utf8(path, errors, label, display=None):
+    """Read a repository text file, reporting decoding failures with its path."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        errors.append(f"{label} is not valid UTF-8: {display or path}")
+        return None
+
+
+def _code_without_comments(text, path):
+    """Drop comment-only lines so prose mentions are not mistaken for reads."""
+    lines = []
+    patch = path.suffix == ".patch"
+    for line in text.splitlines():
+        code = line
+        if patch:
+            if code.startswith("-"):
+                continue
+            if code[:1] in "+ ":
+                code = code[1:]
+        if COMMENT_LINE.match(code):
+            continue
+        lines.append(code)
+    return "\n".join(lines)
+
+
+def _reads_flag(name, text):
+    """Return True when text reads or assigns the exact environment variable."""
+    escaped = re.escape(name)
+    patterns = (
+        rf"\$\{{?{escaped}(?![A-Za-z0-9_])",
+        rf"(?m)^\s*(?:export\s+|local\s+|readonly\s+)?{escaped}=",
+        rf"[\(\[]\s*['\"]{escaped}['\"]",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _flag_entries(markdown):
+    """Return the launch-flag table entries from a Markdown index."""
+    marker = "## Launch flags"
+    if marker not in markdown:
+        return []
+    section = markdown.split(marker, 1)[1]
+    return [(match.group(1), match.group(2).strip(), match.group(3).strip())
+            for match in FLAG_ROW.finditer(section)]
+
+
+def _check_flag_entries(label, entries, flags, errors):
+    """Compare one exported flag table with the canonical flag definitions."""
+    expected = list(flags)
+    expected_names = {name for name, _default, _effect in expected}
+    present_names = {name for name, _default, _effect in entries}
+    for name, default, effect in expected:
+        if name not in present_names:
+            errors.append(f"{label} does not list flag: {name}")
+        elif (name, default, effect) not in entries:
+            errors.append(f"{label} has an out-of-date entry for flag: {name}")
+    for name, _default, _effect in entries:
+        if name not in expected_names:
+            errors.append(f"{label} lists unexpected flag: {name}")
+
 
 def render(reads=READS, scripts=SCRIPTS, flags=FLAGS):
     """Return the context index as Markdown."""
@@ -166,8 +256,11 @@ def check(root=ROOT, reads=READS, scripts=SCRIPTS, flags=FLAGS,
     errors = []
     entrypoint = root / ENTRYPOINT
     text = ""
+    entrypoint_text = None
     if entrypoint.is_file():
-        text = entrypoint.read_text(errors="ignore")
+        entrypoint_text = _read_utf8(
+            entrypoint, errors, "entrypoint", ENTRYPOINT)
+        text = entrypoint_text or ""
     else:
         errors.append(f"missing entrypoint: {ENTRYPOINT}")
 
@@ -175,36 +268,52 @@ def check(root=ROOT, reads=READS, scripts=SCRIPTS, flags=FLAGS,
         adapter = root / path
         if not adapter.is_file():
             errors.append(f"missing agent adapter: {path}")
-        elif "AGENTS.md" not in adapter.read_text(errors="ignore"):
+            continue
+        adapter_text = _read_utf8(adapter, errors, "agent adapter", path)
+        if adapter_text is not None and not _points_to_entrypoint(
+                adapter, adapter_text, root):
             errors.append(f"agent adapter does not point to {ENTRYPOINT}: {path}")
 
-    for topic, _when, paths in reads:
-        for path in paths:
-            if not (root / path).exists():
-                errors.append(f"missing context path for {topic}: {path}")
+    if entrypoint_text is not None:
+        for topic, _when, paths in reads:
+            for path in paths:
+                if not (root / path).exists():
+                    errors.append(f"missing context path for {topic}: {path}")
+                elif path not in text:
+                    errors.append(
+                        f"{ENTRYPOINT} does not list context path: {path}")
+
+        for path, summary in scripts:
+            if not (root / path).is_file():
+                errors.append(f"missing script: {path}")
             elif path not in text:
-                errors.append(f"{ENTRYPOINT} does not list context path: {path}")
+                errors.append(f"{ENTRYPOINT} does not list script: {path}")
+            if not summary.strip():
+                errors.append(f"empty script summary: {path}")
 
-    for path, summary in scripts:
-        if not (root / path).is_file():
-            errors.append(f"missing script: {path}")
-        elif path not in text:
-            errors.append(f"{ENTRYPOINT} does not list script: {path}")
-        if not summary.strip():
-            errors.append(f"empty script summary: {path}")
+        _check_flag_entries(ENTRYPOINT, _flag_entries(text), flags, errors)
 
-    source_text = ""
+    source_text = []
     for path in sources:
         source = root / path
         if not source.is_file():
             errors.append(f"missing flag source: {path}")
             continue
-        source_text += source.read_text(errors="ignore") + "\n"
+        source_body = _read_utf8(source, errors, "flag source", path)
+        if source_body is not None:
+            source_text.append(_code_without_comments(source_body, source))
+    source_code = "\n".join(source_text)
+
+    _check_flag_entries("rendered Markdown index",
+                        _flag_entries(render(reads, scripts, flags)),
+                        flags, errors)
+    json_flags = [(item["name"], item["default"], item["effect"])
+                  for item in as_dict(reads, scripts, flags, adapters)["flags"]]
+    _check_flag_entries("JSON index", json_flags, flags, errors)
+
     for name, _default, _effect in flags:
-        if name not in source_text:
+        if not _reads_flag(name, source_code):
             errors.append(f"documented flag is not read by the project: {name}")
-        if name not in text:
-            errors.append(f"{ENTRYPOINT} does not list flag: {name}")
 
     return errors
 

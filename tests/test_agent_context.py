@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -47,6 +48,17 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(agent_context.main(['--check']), 0)
         self.assertIn('PASS: agent harness', output.getvalue())
 
+    def test_check_command_reports_diagnostics(self):
+        output = io.StringIO()
+        error = io.StringIO()
+        with mock.patch.object(agent_context, 'check',
+                               return_value=['broken reference']):
+            with contextlib.redirect_stdout(output), \
+                    contextlib.redirect_stderr(error):
+                self.assertEqual(agent_context.main(['--check']), 1)
+        self.assertIn('error: broken reference', error.getvalue())
+        self.assertNotIn('PASS', output.getvalue())
+
     def test_json_command_is_valid_json(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -64,9 +76,13 @@ class DriftTests(unittest.TestCase):
         (self.root / 'docs/demo.md').write_text('demo\n')
         (self.root / 'scripts/demo.sh').write_text('#!/bin/sh\n')
         (self.root / 'source.sh').write_text('RCLOL_DEMO=1\n')
-        (self.root / 'CLAUDE.md').write_text('Read AGENTS.md\n')
+        (self.root / 'CLAUDE.md').write_text(
+            'Read [AGENTS.md](AGENTS.md)\n')
         (self.root / 'AGENTS.md').write_text(
-            'docs/demo.md scripts/demo.sh RCLOL_DEMO\n')
+            'docs/demo.md scripts/demo.sh RCLOL_DEMO\n\n'
+            '## Launch flags\n\n'
+            '| Variable | Default | Effect |\n|---|---|---|\n'
+            '| `RCLOL_DEMO` | 1 | demo |\n')
 
     def check(self):
         return agent_context.check(
@@ -112,9 +128,95 @@ class DriftTests(unittest.TestCase):
         (self.root / 'source.sh').write_text('')
         self.assertIn('documented flag is not read', self.errors())
 
+    def test_longer_identifier_does_not_satisfy_a_flag(self):
+        (self.root / 'source.sh').write_text('RCLOL_DEMO_EXTRA=1\n')
+        self.assertIn('documented flag is not read', self.errors())
+
+    def test_comment_only_mention_does_not_satisfy_a_flag(self):
+        (self.root / 'source.sh').write_text('# RCLOL_DEMO=1\n')
+        self.assertIn('documented flag is not read', self.errors())
+
+    def test_guide_must_list_every_flag(self):
+        (self.root / 'AGENTS.md').write_text('docs/demo.md scripts/demo.sh\n')
+        self.assertIn('AGENTS.md does not list flag: RCLOL_DEMO', self.errors())
+
+    def test_guide_flag_default_must_match(self):
+        (self.root / 'AGENTS.md').write_text(
+            'docs/demo.md scripts/demo.sh RCLOL_DEMO\n\n'
+            '## Launch flags\n\n'
+            '| Variable | Default | Effect |\n|---|---|---|\n'
+            '| `RCLOL_DEMO` | 0 | demo |\n')
+        self.assertIn('out-of-date entry for flag: RCLOL_DEMO', self.errors())
+
+    def test_guide_flag_effect_must_match(self):
+        (self.root / 'AGENTS.md').write_text(
+            'docs/demo.md scripts/demo.sh RCLOL_DEMO\n\n'
+            '## Launch flags\n\n'
+            '| Variable | Default | Effect |\n|---|---|---|\n'
+            '| `RCLOL_DEMO` | 1 | different |\n')
+        self.assertIn('out-of-date entry for flag: RCLOL_DEMO', self.errors())
+
+    def test_rendered_markdown_flag_defaults_are_checked(self):
+        with mock.patch.object(
+                agent_context, 'render',
+                return_value='## Launch flags\n\n'
+                             '| `RCLOL_DEMO` | 0 | demo |\n'):
+            self.assertIn('rendered Markdown index has an out-of-date entry',
+                          self.errors())
+
+    def test_json_flag_defaults_are_checked(self):
+        with mock.patch.object(
+                agent_context, 'as_dict',
+                return_value={'flags': [
+                    {'name': 'RCLOL_DEMO', 'default': '0', 'effect': 'demo'},
+                ]}):
+            self.assertIn('JSON index has an out-of-date entry', self.errors())
+
     def test_adapter_must_point_to_the_entrypoint(self):
         (self.root / 'CLAUDE.md').write_text('no entrypoint here\n')
         self.assertIn('does not point to AGENTS.md', self.errors())
+
+    def test_adapter_links_are_resolved_relative_to_the_adapter(self):
+        (self.root / 'AGENTS.md').write_text('')
+        (self.root / 'sub').mkdir()
+        (self.root / 'sub/CLAUDE.md').write_text(
+            'Read [AGENTS.md](AGENTS.md)\n')
+        errors = agent_context.check(
+            root=self.root,
+            reads=(),
+            scripts=(),
+            flags=(),
+            adapters=('sub/CLAUDE.md',),
+            sources=(),
+        )
+        self.assertIn('does not point to AGENTS.md', '\n'.join(errors))
+
+    def test_adapter_parent_link_reaches_the_entrypoint(self):
+        (self.root / 'AGENTS.md').write_text('')
+        (self.root / 'sub').mkdir()
+        (self.root / 'sub/CLAUDE.md').write_text(
+            'Read [AGENTS.md](../AGENTS.md)\n')
+        errors = agent_context.check(
+            root=self.root,
+            reads=(),
+            scripts=(),
+            flags=(),
+            adapters=('sub/CLAUDE.md',),
+            sources=(),
+        )
+        self.assertEqual(errors, [])
+
+    def test_claude_import_is_supported(self):
+        (self.root / 'CLAUDE.md').write_text('@AGENTS.md\n')
+        self.assertEqual(self.check(), [])
+
+    def test_invalid_utf8_entrypoint_reports_its_path(self):
+        (self.root / 'AGENTS.md').write_bytes(b'\xff\xfe')
+        self.assertIn('not valid UTF-8: AGENTS.md', self.errors())
+
+    def test_invalid_utf8_source_reports_its_path(self):
+        (self.root / 'source.sh').write_bytes(b'\xff\xfe')
+        self.assertIn('flag source is not valid UTF-8: source.sh', self.errors())
 
     def test_missing_entrypoint_is_reported(self):
         (self.root / 'AGENTS.md').unlink()

@@ -38,7 +38,7 @@ python3 scripts/validate.py                 # source audit; runs configure.py
 python3 -m unittest discover -s tests       # full host suite (what CI runs)
 python3 -m unittest discover -s tests -p 'test_desktop_entry.py'
 python3 scripts/preflight.py                # host/build prerequisites
-python3 scripts/prepare.py --check-only     # only when patches changed
+python3 scripts/prepare.py --check-only     # only when patches or pins change
 ```
 
 Most tests use temporary HOME/prefix fixtures and do not start Darling. Some
