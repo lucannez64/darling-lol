@@ -164,11 +164,21 @@ run() {
 	spin=0
 	start=$(now_seconds)
 
-	if [ -n "$LOG" ] && [ "$1" != sudo ]; then
+	if [ -n "$LOG" ]; then
 		printf '\n=== %s | %s ===\n' "$(date -Is 2>/dev/null || printf 'unknown time')" "$description" \
 			2>/dev/null >>"$LOG" || LOG=''
 	fi
-	if [ "$VERBOSE" = 1 ] || [ "$1" = sudo ] || [ -z "$LOG" ]; then
+	if [ "$VERBOSE" = 0 ] && [ "$1" = sudo ] && [ -n "$LOG" ]; then
+		# Ask for the password on the terminal first, then log the quiet step.
+		# The step must not use setsid: sudo's cached credentials are per tty.
+		sudo -v || exit $?
+		shift
+		set -- sudo -n "$@"
+		nosetsid=1
+	else
+		nosetsid=0
+	fi
+	if [ "$VERBOSE" = 1 ] || { [ "$1" = sudo ] && [ "$nosetsid" = 0 ]; } || [ -z "$LOG" ]; then
 		printf '\n%s%s %s%s\n' "$BOLD$CYAN" "$ICON_INFO" "$description" "$RESET"
 		"$@" || rc=$?
 	else
@@ -179,7 +189,7 @@ run() {
 		fi
 		# Keep the step in its own process group (and session) when setsid(1) is
 		# available so cancellation can stop everything it started.
-		if command -v setsid >/dev/null 2>&1; then
+		if [ "$nosetsid" = 0 ] && command -v setsid >/dev/null 2>&1; then
 			setsid "$@" >>"$LOG" 2>&1 &
 		else
 			"$@" >>"$LOG" 2>&1 &
@@ -206,7 +216,7 @@ run() {
 
 	if [ "$rc" -ne 0 ]; then
 		printf '%s%s%s %s\n' "$RED" "$ICON_ERR" "$RESET" "$description" >&2
-		if [ -n "$LOG" ] && [ "$1" != sudo ]; then
+		if [ -n "$LOG" ] && { [ "$1" != sudo ] || [ "$nosetsid" = 1 ]; }; then
 			printf '\n%sLast log lines:%s\n' "$BOLD" "$RESET" >&2
 			tail -n 25 "$LOG" >&2 || true
 			printf '\nFull log: %s\n' "$LOG" >&2

@@ -240,12 +240,29 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('No update log was saved.', result.stderr)
         self.assertNotIn('Full log:', result.stderr)
 
-    def test_quiet_update_keeps_sudo_in_the_foreground(self):
+    def test_quiet_update_logs_sudo_output_after_terminal_auth(self):
         self.prepare_stub_update()
-        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'))
+        sudo_log = self.home / 'sudo-argv.log'
+        self.stub(self.bindir / 'sudo',
+                  f'printf "%s\\n" "$*" >> "{sudo_log}"\n'
+                  '[ "$1" = -v ] || echo sudo-install-output')
+        cache = self.home / '.cache'
+        result = self.run_update(XDG_CACHE_HOME=str(cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('sudo-install-output', result.stdout)
+        self.assertIn('Log:', result.stdout)
+        logs = list(cache.glob('darling-lol-update.*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertIn('sudo-install-output', logs[0].read_text())
+        calls = sudo_log.read_text().splitlines()
+        self.assertEqual(calls[0], '-v')
+        self.assertIn('-n cmake --install build/darling-src/build', calls)
+
+    def test_verbose_update_streams_sudo_output(self):
+        self.prepare_stub_update()
+        result = self.run_update('--verbose')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('sudo-foreground', result.stdout)
-        self.assertIn('Log:', result.stdout)
 
     def test_quiet_update_surfaces_overlay_signing_warning(self):
         self.prepare_stub_update()
