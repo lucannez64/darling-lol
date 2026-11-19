@@ -8758,18 +8758,88 @@ index f5ba615..53d04ad 100644
  	if (shell_pid != -1)
  		kill(shell_pid, SIGKILL);
 diff --git a/src/startup/mldr/commpage.c b/src/startup/mldr/commpage.c
-index d9a7aea96..cc76f7a85 100644
+index d9a7aea96..bfb6ce45d 100644
 --- a/src/startup/mldr/commpage.c
 +++ b/src/startup/mldr/commpage.c
-@@ -12,6 +12,7 @@
+@@ -12,6 +12,12 @@
  // Include commpage definitions
  #define PRIVATE
  #include <i386/cpu_capabilities.h>
 +#include "commpage-cpu-caps.h"
++
++/* darling-lol: the A/B opt-out flag (host path); host checks override it. */
++#ifndef RCLOL_FIXED_CPU_FLAG
++#define RCLOL_FIXED_CPU_FLAG "/tmp/rclol-fixed-cpu-count"
++#endif
  
  static const char* SIGNATURE32 = "commpage 32-bit";
  static const char* SIGNATURE64 = "commpage 64-bit";
-@@ -84,74 +85,26 @@ void commpage_setup(bool _64bit)
+@@ -60,6 +66,24 @@ void commpage_setup(bool _64bit)
+ 	logcpus = (uint8_t*)CGET(_COMM_PAGE_LOGICAL_CPUS);
+ 	*physcpus = *logcpus = *ncpus;
+ 
++	// darling-lol: profile=compat presents a MacBookPro16,1 with an i7-9750H
++	// (6 cores / 12 threads, xnu common/cpu_identity.c). Every guest process
++	// can read these bytes without a syscall, so they must agree with the hw.*
++	// sysctls and host_info whatever the host has.
++	// The /tmp/rclol-fixed-cpu-count A/B opt-out wins, as in xnu's
++	// cpu_topology.h: the old fixed 8 logical / 8 physical everywhere.
++	const char* profile = getenv("RCLOL_PLATFORM_PROFILE");
++	const bool compat_profile = profile != NULL && strcmp(profile, "compat") == 0;
++	if (access(RCLOL_FIXED_CPU_FLAG, F_OK) == 0)
++	{
++		*ncpus = *nactivecpus = *logcpus = *physcpus = 8;
++	}
++	else if (compat_profile)
++	{
++		*ncpus = *nactivecpus = *logcpus = 12;
++		*physcpus = 6;
++	}
++
+ 	// I'm not sure if Linux has separate page sizes for kernel and user space.
+ 	// Apple's code uses left shift logical (1 << user_page_shift) to get the page size value.
+ 	// Since it's very unlikely that the page size won't be a power of 2, we can use __builtin_ctzl()
+@@ -71,6 +95,10 @@ void commpage_setup(bool _64bit)
+ 	my_caps = get_cpu_caps();
+ 	if (*ncpus == 1)
+ 		my_caps |= kUP;
++	// darling-lol: _COMM_PAGE_NCPUS is byte 2 of the capabilities word, which
++	// Apple's libc reads as kNumCPUs (bits 16-23). Writing the word without it
++	// left NCPUS at 0 on every profile.
++	my_caps |= ((uint64_t) *ncpus) << kNumCPUsShift;
+ 
+ 	*cpu_caps = (uint32_t) my_caps;
+ 	*cpu_caps64 = my_caps;
+@@ -79,79 +107,55 @@ void commpage_setup(bool _64bit)
+ 	{
+ 		uint64_t* memsize = (uint64_t*)CGET(_COMM_PAGE_MEMORY_SIZE);
+ 		*memsize = si.totalram * si.mem_unit;
++
++		// The profile's memory size, as hw.memsize reports it.
++		// Same rule as xnu's darling_configured_memory_bytes(): decimal digits
++		// only, no overflow, otherwise the host's size stays.
++		const char* memory = getenv("RCLOL_MEMORY_BYTES");
++		if (compat_profile && memory != NULL)
++		{
++			unsigned long long bytes = 0;
++			const char* p = memory;
++			for (; *p >= '0' && *p <= '9'; ++p)
++			{
++				unsigned long long digit = (unsigned long long) (*p - '0');
++				if (bytes > (~0ULL - digit) / 10)
++				{
++					bytes = 0;
++					break;
++				}
++				bytes = bytes * 10 + digit;
++			}
++			if (*p != '\0')
++				bytes = 0;
++			if (bytes != 0)
++				*memsize = bytes;
++		}
+ 	}
+ }
  
  uint64_t get_cpu_caps(void)
  {
