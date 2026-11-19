@@ -111,9 +111,28 @@ spin_line() {
 	printf '\r%s%s%s %s' "$CYAN" "$char" "$RESET" "$2"
 }
 
+# The running step's process-group ID, but only when it leads its own group, so
+# cleanup never signals the caller's group through a bogus negative PID.
+step_group() {
+	pgid=$(ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ')
+	case "$pgid" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$pgid" = "$1" ] || return 1
+	printf '%s' "$pgid"
+}
+
 cleanup() {
 	if [ -n "$BG_PID" ]; then
-		kill "$BG_PID" 2>/dev/null || true
+		# Stop the compilers and installers the step started too, not just its
+		# direct child, then reap the child so it does not linger as a zombie.
+		if group=$(step_group "$BG_PID"); then
+			kill -TERM -"$group" 2>/dev/null || true
+		else
+			kill -TERM "$BG_PID" 2>/dev/null || true
+		fi
+		wait "$BG_PID" 2>/dev/null || true
+		BG_PID=''
 	fi
 	if [ -n "$SUDO_PID" ]; then
 		kill "$SUDO_PID" 2>/dev/null || true
@@ -134,7 +153,7 @@ init_log() {
 		LOG=/dev/null
 		return 0
 	fi
-	if ! : >>"$LOG" 2>/dev/null; then
+	if ! ( : >>"$LOG" ) 2>/dev/null; then
 		LOG=/dev/null
 		return 0
 	fi
@@ -162,7 +181,13 @@ run() {
 		init_log
 		printf '\n=== %s | %s ===\n' "$(date -Is 2>/dev/null || printf 'unknown time')" "$description" \
 			>>"$LOG" 2>/dev/null || LOG=/dev/null
-		"$@" >>"$LOG" 2>&1 &
+		# Keep the step in its own process group (and session) when setsid(1) is
+		# available so cancellation can stop everything it started.
+		if command -v setsid >/dev/null 2>&1; then
+			setsid "$@" >>"$LOG" 2>&1 &
+		else
+			"$@" >>"$LOG" 2>&1 &
+		fi
 		BG_PID=$!
 
 		if [ "$spin" = 1 ]; then
