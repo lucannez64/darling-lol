@@ -16,7 +16,6 @@ LAUNCHER_ENTRY="${HOME:-}/.local/share/applications/darling-launcher.desktop"
 
 readonly DEFAULT_NAME='Darling Launcher'
 readonly DEFAULT_TOOLBOX='darling-lol'
-readonly DEFAULT_REGION='EUW'
 # Locales the Riot Client ships; keep in sync with LOCALES in
 # scripts/install-native.sh and scripts/common.py (tests/test_create_shortcuts.py
 # compares the list with the one configure.py uses).
@@ -411,6 +410,7 @@ region_for_country() {
   local country=${1:-}
 
   case "$country" in
+    DE|ES|FR|GB|IT) printf 'EUW' ;;
     BR) printf 'BR' ;;
     US|CA) printf 'NA' ;;
     MX|GT|BZ|SV|HN|NI|CR|PA|DO|PR|CU|HT|JM|TT|BB|BS) printf 'LAN' ;;
@@ -426,16 +426,7 @@ region_for_country() {
 }
 
 region_for_locale() {
-  local locale=${1:-}
-  local country='' region
-
-  [[ $locale == *_* ]] && country=${locale#*_}
-
-  if region=$(region_for_country "$country"); then
-    printf '%s' "$region"
-    return 0
-  fi
-  printf '%s' "$DEFAULT_REGION"
+  region_for_country "${1#*_}"
 }
 
 # The darlingserver affinity switch only helps a hybrid Intel CPU whose
@@ -548,7 +539,7 @@ choose_flags() {
 # take the default. Explicit flags win: --env, or an installed
 # RCLOL_REGION/RCLOL_LOCALE that an update keeps, skip the question.
 choose_region_locale() {
-  local flag locale region reply
+  local flag locale region reply prompt
   if (( ENV_FLAGS_EXPLICIT )); then
     return 0
   fi
@@ -561,29 +552,38 @@ choose_region_locale() {
     info 'The system locale is not one the Riot Client ships; not adding RCLOL_REGION/RCLOL_LOCALE.'
     return 0
   fi
-  region=$(region_for_locale "$locale")
+  region=$(region_for_locale "$locale") || region=''
+  if [[ -n $region ]]; then
+    prompt="Use your system region and language (${region}, ${locale}) for the launch?"
+  else
+    prompt="Use your system language (${locale}) and keep the configured region for the launch?"
+  fi
   if ! interactive_run; then
     # An unattended update keeps what the installed shortcut already has; only
     # creation (or an update that falls back to creation) takes the suggestion.
     if (( CURRENT_OWNED )); then
       return 0
     fi
-    ENV_FLAGS+=("RCLOL_REGION=$region" "RCLOL_LOCALE=$locale")
-    info "Using the system region and language: $region / $locale."
-    return 0
+    if [[ -n $region ]]; then
+      info "Using the system region and language: $region / $locale."
+    else
+      info "Using the system language ($locale) and keeping the configured region."
+    fi
+  else
+    while true; do
+      read -r -p "${CYAN}${ICON_INFO}${RESET} $prompt [Y/n]: " reply ||
+        fail 'No input received while choosing the region and language.'
+      case ${reply,,} in
+        ''|y|yes) break ;;
+        n|no) return 0 ;;
+        *) warning 'Invalid answer. Enter y or n.' ;;
+      esac
+    done
   fi
-  while true; do
-    read -r -p "${CYAN}${ICON_INFO}${RESET} Use your system region and language (${region}, ${locale}) for the launch? [Y/n]: " reply ||
-      fail 'No input received while choosing the region and language.'
-    case ${reply,,} in
-      ''|y|yes)
-        ENV_FLAGS+=("RCLOL_REGION=$region" "RCLOL_LOCALE=$locale")
-        return 0
-        ;;
-      n|no) return 0 ;;
-      *) warning 'Invalid answer. Enter y or n.' ;;
-    esac
-  done
+  if [[ -n $region ]]; then
+    ENV_FLAGS+=("RCLOL_REGION=$region")
+  fi
+  ENV_FLAGS+=("RCLOL_LOCALE=$locale")
 }
 
 # Update-mode defaults parsed from the installed launcher entry (helper --show).

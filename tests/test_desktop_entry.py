@@ -374,6 +374,19 @@ class DesktopEntryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(legacy.read_text(), foreign_text)
 
+    def test_game_entry_with_matching_exec_requires_ownership_marker(self):
+        project = self.project()
+        foreign = self.window_entry('darling-league-game.desktop')
+        foreign.parent.mkdir(parents=True)
+        text = ('[Desktop Entry]\nName=My game shortcut\n'
+                f'Exec={project}/scripts/launch-shortcut.sh\n')
+        foreign.write_text(text)
+        for args in (('--window-entries',), (), ('--remove',)):
+            with self.subTest(args=args):
+                result = self.install(project, *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(foreign.read_text(), text)
+
     def test_window_entry_symlink_does_not_overwrite_launcher(self):
         project = self.project()
         self.assertEqual(self.install(project).returncode, 0)

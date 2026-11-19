@@ -531,6 +531,14 @@ exit 1
         entry = parse_entry(self.entry().read_text())
         self.assertNotIn('env ', entry['Exec'])
 
+    def test_supported_language_without_a_region_mapping_keeps_the_region(self):
+        self.fake_repo()
+        result = self.run_script('--yes', '--create', lang='zh_TW.UTF-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = parse_entry(self.entry().read_text())['Exec']
+        self.assertIn('RCLOL_LOCALE=zh_TW', command)
+        self.assertNotIn('RCLOL_REGION=', command)
+
     def test_explicit_env_flags_replace_the_system_region_and_locale(self):
         self.fake_repo()
         result = self.run_script(

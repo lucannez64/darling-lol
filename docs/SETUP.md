@@ -120,9 +120,8 @@ scripts/create-desktop-entry.sh --window-entries
 The option is off by default because those fields carry third-party product
 names while the shipped launcher stays neutral (see `docs/COMPLIANCE.md`; the
 Nix package and its checks are unchanged). Running the helper again without the
-option removes the three entries it created. When the option is enabled, a file
-with one of those names that the project did not create is never overwritten or
-removed; the helper reports it on stderr and skips that entry. The helper never
+option removes the three entries it created. The helper leaves conflicting files
+in place and reports them on stderr when window entries are enabled. The helper never
 extracts an icon from the game. Reopen the client after creating the entries:
 the shell matches a window to its entry when the window is created.
 
