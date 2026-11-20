@@ -14,6 +14,7 @@ sources in `tools/` and `scripts/`, never the generated copies.
 | `update.sh` | After `git pull`: re-apply changed patches, rebuild and reinstall the runtime. |
 | `installer.sh` | Run Riot's installer inside the prefix for one region code. |
 | `uninstall.sh` | Remove Riot software from the prefix so the installer can start clean; destructive, keeps the Darling runtime. |
+| `clean-prefix.sh` | Back up and clean local Riot/League logs, `machine.cfg` and client session data/caches, and regenerate synthetic platform identity; keeps runtime and game. |
 | `preflight.py` | Check host versions and build/runtime prerequisites; `RCLOL_SKIP_PREFLIGHT=1` bypasses it. |
 
 ## Launch and desktop integration

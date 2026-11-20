@@ -23,6 +23,8 @@ EMULATED_PRODUCT_VERSION = '14.7'
 EMULATED_BUILD_VERSION = '23H124'
 KNOWN_SERIAL = 'C02ZL0GVMD6N'
 KNOWN_UUID = '6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B'
+GENERATED_KEYS = ('IOPlatformSerialNumber', 'mlb-serial-number', 'IOPlatformUUID',
+                  'provisioning_UDID', 'system-id', 'ROM')
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64}
 BYTES = {'ROM': 6, 'system-id': 16}
@@ -153,11 +155,11 @@ def ensure_stopped(prefix):
         raise ValueError('Shut down the selected Darling prefix before writing platform identity')
 
 
-def atomic_write(path, data):
+def atomic_write(path, data, create_backup=True):
     if path.exists() and path.read_bytes() == data:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
+    if create_backup and path.exists():
         backup = path.with_name(path.name + '.before-platform-change')
         if not backup.exists():
             fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -177,15 +179,16 @@ def atomic_write(path, data):
     return True
 
 
-def save(prefix, properties):
+def save(prefix, properties, create_backup=True):
     path = destination(prefix)
     ensure_stopped(prefix)
     encoded = plistlib.dumps({'schema': 1, 'properties': validate(properties)}, sort_keys=True)
-    checked_path(prefix, 'private/etc/darling-platform.plist.before-platform-change')
+    if create_backup:
+        checked_path(prefix, 'private/etc/darling-platform.plist.before-platform-change')
     if path.exists():
         load(path)  # refuse to silently overwrite an unknown schema
     path.parent.mkdir(parents=True, exist_ok=True)
-    return atomic_write(destination(prefix), encoded)
+    return atomic_write(destination(prefix), encoded, create_backup=create_backup)
 
 
 def has_known_defaults(properties):
@@ -258,7 +261,7 @@ def load_runtime_system_version(runtime_root):
     return normalize_system_version(metadata)
 
 
-def provisioning_files(prefix, properties, runtime_root):
+def provisioning_files(prefix, properties, runtime_root, create_backup=True):
     """Preflight every file before making any identity changes."""
     version_plist = load_runtime_system_version(runtime_root)
     reverse = {value: key for key, value in ALIASES.items() if key.startswith('SMBIOS_')}
@@ -273,7 +276,8 @@ def provisioning_files(prefix, properties, runtime_root):
     }
     for relative in files:
         path = checked_path(prefix, relative)
-        checked_path(prefix, relative + '.before-platform-change')
+        if create_backup:
+            checked_path(prefix, relative + '.before-platform-change')
         if path.exists():
             if relative.endswith('darling-platform.plist'):
                 load(path)
@@ -285,26 +289,28 @@ def provisioning_files(prefix, properties, runtime_root):
     return files
 
 
-def save_system_version(prefix, runtime_root):
+def save_system_version(prefix, runtime_root, create_backup=True):
     ensure_stopped(prefix)
     version_plist = load_runtime_system_version(runtime_root)
     relative = 'System/Library/CoreServices/SystemVersion.plist'
     target = checked_path(prefix, relative)
-    checked_path(prefix, relative + '.before-platform-change')
+    if create_backup:
+        checked_path(prefix, relative + '.before-platform-change')
     if target.exists() and not isinstance(plistlib.loads(target.read_bytes()), dict):
         raise ValueError('Existing SystemVersion.plist is invalid')
-    return atomic_write(target, version_plist)
+    return atomic_write(target, version_plist, create_backup=create_backup)
 
 
-def save_provisioning(prefix, properties, runtime_root):
+def save_provisioning(prefix, properties, runtime_root, create_backup=True):
     ensure_stopped(prefix)
-    files = provisioning_files(prefix, properties, runtime_root)
+    files = provisioning_files(prefix, properties, runtime_root, create_backup=create_backup)
     # Save the canonical identity first: an interrupted run reuses it on retry.
     order = ['private/etc/darling-platform.plist', 'private/etc/darling-smbios.conf',
              'System/Library/CoreServices/SystemVersion.plist']
     changed = False
     for relative in order:
-        changed = atomic_write(checked_path(prefix, relative), files[relative]) or changed
+        changed = atomic_write(checked_path(prefix, relative), files[relative],
+                               create_backup=create_backup) or changed
     return changed
 
 
@@ -327,17 +333,26 @@ def main(argv=None):
     parser.add_argument('--runtime-root', type=Path, help='Runtime supplying SystemVersion.plist (default: saved SDK or /usr/local/libexec/darling)')
     parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
     parser.add_argument('--replace-known-defaults', action='store_true',
-                        help='Provision only if the prefix identity still has the shared serial or UUID; otherwise change nothing')
+                        help='Provision only if an existing prefix has no saved identity (iokitd then reports '
+                             'its DARLING- serial) or still has the shared serial or UUID; otherwise change nothing')
+    parser.add_argument('--regenerate', action='store_true',
+                        help='Regenerate synthetic per-prefix identifiers (serial, MLB, UUID, system-id, provisioning_UDID, ROM) while keeping model/board fields')
     parser.add_argument('--normalize-system-version', action='store_true',
                         help='Normalize an existing prefix SystemVersion.plist to the emulated macOS version without changing identity files')
+    parser.add_argument('--no-backup', action='store_true',
+                        help='Do not write *.before-platform-change copies inside the prefix (for callers that already archived them)')
     parser.add_argument('--write', action='store_true', help='Write validated overrides to a stopped prefix (otherwise preview only)')
     args = parser.parse_args(argv)
     if args.normalize_system_version and (
-            args.source or args.set or args.provision or args.replace_known_defaults or args.rom_oui):
+            args.source or args.set or args.provision or args.replace_known_defaults or args.regenerate or args.rom_oui):
         parser.error('--normalize-system-version cannot be combined with identity-changing options')
+    if args.replace_known_defaults and args.regenerate:
+        parser.error('--replace-known-defaults cannot be combined with --regenerate')
     if args.replace_known_defaults:
         if args.source or args.set:
             parser.error('--replace-known-defaults cannot be combined with --import or --set')
+        args.provision = True
+    if args.regenerate:
         args.provision = True
     config = Path(__file__).resolve().parents[1] / 'build/config.json'
     saved = json.loads(config.read_text()) if config.exists() else {}
@@ -351,7 +366,7 @@ def main(argv=None):
             runtime_root = args.runtime_root or Path(saved.get('sdk', '/usr/local/libexec/darling'))
             with prefix_lock(prefix) if args.write else nullcontext():
                 if args.write:
-                    changed = save_system_version(prefix, runtime_root)
+                    changed = save_system_version(prefix, runtime_root, create_backup=not args.no_backup)
                     print('SystemVersion.plist ' + ('saved' if changed else 'unchanged') + '; restart Darling to apply.')
                 else:
                     print(json.dumps(plistlib.loads(load_runtime_system_version(runtime_root)), indent=2, sort_keys=True))
@@ -364,13 +379,17 @@ def main(argv=None):
             if len(rom_oui) != 3 or rom_oui[0] & 1:
                 raise ValueError('--rom-oui requires exactly three unicast bytes')
         identity_files = [checked_path(prefix, 'private/etc/darling-smbios.conf'), destination(prefix)]
-        if args.replace_known_defaults and not any(path.exists() for path in identity_files):
-            print('No saved platform identity; nothing to replace.')
+        # Without a saved identity iokitd falls back to a host-derived UUID and a
+        # "DARLING-" serial no Mac has, so an existing prefix in that state is
+        # provisioned like one with the shared defaults. A missing prefix is left alone.
+        saved_identity = any(path.exists() for path in identity_files)
+        if args.replace_known_defaults and not saved_identity and not prefix.is_dir():
+            print('Prefix does not exist; nothing to replace.')
             return 0
         with prefix_lock(prefix) if args.write else nullcontext():
             path = destination(prefix)
             properties = {}
-            if args.replace_known_defaults and not any(
+            if args.replace_known_defaults and saved_identity and not any(
                     path.exists() and has_known_defaults(load(path)) for path in identity_files):
                 print('Platform identity has no shared defaults; nothing changed.')
                 return 0
@@ -384,6 +403,9 @@ def main(argv=None):
                     properties.pop('system-id', None)
                     properties.pop('provisioning_UDID', None)
                 properties.update(incoming)
+            if args.regenerate:
+                for key in GENERATED_KEYS:
+                    properties.pop(key, None)
             if args.source:
                 incoming = load(args.source)
                 if 'IOPlatformUUID' in incoming:
@@ -402,11 +424,12 @@ def main(argv=None):
             runtime_root = args.runtime_root or Path(saved.get('sdk', '/usr/local/libexec/darling'))
             if args.provision:
                 properties = provision(properties, rom_oui)
-                provisioning_files(prefix, properties, runtime_root)
+                provisioning_files(prefix, properties, runtime_root, create_backup=not args.no_backup)
             else:
                 properties = validate(properties)
             if args.write:
-                changed = (save_provisioning(prefix, properties, runtime_root) if args.provision else save(prefix, properties))
+                changed = (save_provisioning(prefix, properties, runtime_root, create_backup=not args.no_backup)
+                           if args.provision else save(prefix, properties, create_backup=not args.no_backup))
                 print('Platform identity ' + ('saved' if changed else 'unchanged') + '; restart iokitd to apply.')
             else:
                 print(json.dumps({'schema': 1, 'properties': properties}, default=lambda value: value.hex().upper(), indent=2))

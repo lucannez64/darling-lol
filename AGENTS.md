@@ -97,6 +97,7 @@ guest probes; do not run the guest probes on your own.
 | `scripts/run.sh` | Thin launcher: no arguments, optional `gamemoderun`, delegates to `run-riot-client.sh` |
 | `scripts/installer.sh` | Run Riot's installer inside the prefix for one region code |
 | `scripts/uninstall.sh` | Remove Riot software from the prefix; destructive; keeps the Darling runtime |
+| `scripts/clean-prefix.sh` | Back up and clean prefix logs/local config and regenerate synthetic platform identity; keeps runtime and game |
 | `scripts/preflight.py` | Check host versions and build/runtime prerequisites |
 | `scripts/validate.py` | Audit tracked source, rendered shell/Python syntax, pinned revisions and patches |
 | `scripts/create-shortcuts.sh` | Interactive shortcut manager; calls the rendered `desktop-entry.py` |

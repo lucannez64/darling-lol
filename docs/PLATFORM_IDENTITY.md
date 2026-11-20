@@ -89,8 +89,8 @@ prefix is stopped, then restart it.
 
 Provision your own prefix instead of keeping Darling's base identity. Do not
 copy another user's identifiers. First-time runtime installation does this for
-new prefixes; existing prefixes without saved overrides need an explicit
-provisioning run. With the game and clients closed, stop the selected prefix,
+new prefixes, and `scripts/update.sh` provisions an existing prefix that has
+none (see below); you can also run it explicitly. With the game and clients closed, stop the selected prefix,
 then follow the commands below. `--provision --write` fills missing identifiers
 and replaces the known shared defaults, while preserving an already custom
 identity. It does not rotate custom identifiers on every run.
@@ -122,9 +122,12 @@ PR; the config tool alone cannot update an older running daemon. Besides
 first-time setup above, provisioning runs automatically in one other case:
 after installing, `scripts/update.sh` runs
 `configure-darling-platform.py --replace-known-defaults --write`, which
-provisions the prefix only if its saved identity still contains the shared
-serial or UUID below. Prefixes without saved identity files, or whose saved
-values are all custom, keep their identity files byte-for-byte unchanged.
+provisions an existing prefix only if it has no saved identity files (iokitd
+then reports a host-derived UUID and a `DARLING-` serial that no Mac has) or its
+saved identity still contains the shared serial or UUID below. Prefixes whose
+saved values are all custom keep their identity files byte-for-byte unchanged,
+and a missing prefix is not created. `darling-lol --doctor` warns about a prefix
+with no saved identity or with the shared values.
 On existing prefixes, `scripts/install-runtime.sh` also runs
 `configure-darling-platform.py --normalize-system-version --write` so
 `System/Library/CoreServices/SystemVersion.plist` stays aligned to the emulated
@@ -172,6 +175,21 @@ canonical identity is saved first so rerunning after interruption completes
 provisioning with the same identity. Concurrent CLI writers serialize through
 a per-prefix lock. Repeated writes preserve identifiers and unchanged files.
 Previewing a fresh identity generates a sample; only `--write` makes it stable.
+To explicitly regenerate the synthetic per-prefix identifiers (serial, MLB,
+UUID, `system-id`, `provisioning_UDID` and ROM) on a stopped prefix while
+keeping any configured `model`, `product-name`, `board-id` or `manufacturer`,
+pass `--regenerate`:
+
+```sh
+python3 tools/configure-darling-platform.py --prefix /absolute/prefix --regenerate --write
+```
+
+`scripts/clean-prefix.sh` wraps that step together with archiving and clearing
+the prefix's local Riot/League logs, `machine.cfg`, client profiles, crash
+reports, local config/caches and `.before-platform-change` identity copies
+(passing `--no-backup` so no copy of the replaced identity stays in
+`private/etc/`; the host-side cleanup archive is mode `0600` for the same user)
+without removing the Darling runtime or the installed game.
 To restore host-derived defaults after provisioning, remove both identity files
 while stopped, so a later provisioning run cannot reimport the legacy copy.
 
@@ -187,8 +205,16 @@ copy first and falls back to the checkout copy.
 is moved to `compat` once by `tools/migrate-system-profile.py`). It reports the
 MacBookPro16,1 compatibility values
 (`i7-9750H`, `Radeon Pro 5500M` on AMD, `UHD Graphics 630` on Intel, 4096 MB VRAM
-and 16 GiB). NVIDIA cards keep their own name in both profiles so the game does
-not take another vendor's driver path. `profile=host` reports the real host CPU,
+and 16 GiB). An NVIDIA card is presented as the `Radeon Pro 5500M` too: no Mac
+that runs macOS 14 has an NVIDIA GPU, and the game's rendering goes through the
+same Metal-to-Vulkan layer on every vendor. `compat.gpu.name=host` keeps the real
+card name and IDs while the rest of the profile stays compat. The cache sysctls
+(`hw.cacheconfig`, `hw.cachesize`) and the game's cache and topology `cpuid`
+leaves report the i7-9750H's 6 cores / 12 threads and its 32 KiB / 256 KiB /
+12 MiB caches, whatever the host CPU. Leaf 1 and `machdep.cpu.features` report
+the i7-9750H's feature words: its EDX, and its ECX with each instruction-set bit
+kept only when the host has it, plus the ring-0-only bits (VMX, EST, PCID,
+x2APIC...) every Coffee Lake reports. `profile=host` reports the real host CPU,
 GPU, VRAM and memory. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
 file for diagnostics.
@@ -220,17 +246,22 @@ commands.
 reports the host card name, device and VRAM. In the default `compat` profile an AMD
 card is reported as `AMD Radeon Pro 5500M`, vendor `0x1002`, device `0x7340`, bus
 PCIe and VRAM from `compat.gpu.vram` (4096 by default); an Intel card is reported
-as `Intel UHD Graphics 630` on bus Built-In with shared memory. NVIDIA cards keep
-host-derived names in both profiles. The profiler uses the PCI ID database and
-can fall back to `NVIDIA Graphics`; Metal uses the Vulkan device name, so the
-two names may differ. IOKit also publishes a synthetic `IOPCIDevice` with the
-same `vendor-id`/`device-id` values and an `IOGraphicsAccelerator2` child whose
-registry ID matches `-[MTLDevice registryID]`, so Metal and Dawn resolve the GPU
-without the host driver having to publish anything in the guest registry. When
-the host has more than one card and `/tmp/metal-gpu`/`METAL_INDIUM_GPU` does not
-single one out, or when the selector may name a software device, iokitd
-publishes no GPU entry instead of presenting another GPU's IDs, and Dawn falls
-back to the Metal device name.
+as `Intel UHD Graphics 630` on bus Built-In with shared memory, and an NVIDIA
+card like an AMD one. An AMD card beside the discrete GPU (an NVIDIA card, or an
+AMD card with a larger `mem_info_vram_total`, such as a Ryzen APU next to a
+Radeon dGPU) is reported as the `Intel UHD Graphics 630`, in IOKit and Metal too,
+so the host shows the MacBookPro16,1's pair instead of two 5500Ms. With `compat.gpu.name=host` or `profile=host`, NVIDIA
+cards keep host-derived names; the profiler uses the PCI ID database and can
+fall back to `NVIDIA Graphics`, while Metal uses the Vulkan device name, so the
+two names may differ. IOKit also publishes a synthetic `IOPCIDevice` per host
+card with the same `vendor-id`/`device-id` values and an `IOGraphicsAccelerator2`
+child, so Metal and Dawn resolve the GPU without the host driver having to
+publish anything in the guest registry. Each accelerator's registry ID is
+derived from the card's real PCI IDs, and `-[MTLDevice registryID]` derives the
+same value from its Vulkan device, so on a hybrid or multi-GPU host the lookup
+finds the card Metal actually renders on, whichever one the Vulkan loader,
+`/tmp/metal-gpu` or `METAL_INDIUM_GPU` picked. A software Metal device names no
+card, so Dawn falls back to the Metal device name.
 `RCLOL_GPU_*`
 variables are the launcher-to-guest handoff; `RCLOL_SYSTEM_ROOT` is a test-only
 host-root override.
