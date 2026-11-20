@@ -384,6 +384,14 @@ class ToolboxSessionTests(unittest.TestCase):
         (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
         return init
 
+    def launcher_helper(self, pid, name, directory=None):
+        directory = supervisor.LAUNCHER_DIR if directory is None else directory
+        helper = fake_process(self.proc, pid, comm='python3')
+        (helper / 'cmdline').write_bytes(
+            b'python3\0' + os.fsencode(directory / name) + b'\0')
+        (helper / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        return helper
+
     def run_supervisor(self, container=None, runtime_at_start=None, remaining=None,
                        stoppable=True):
         remaining = [] if remaining is None else remaining
@@ -505,6 +513,37 @@ class ToolboxSessionTests(unittest.TestCase):
         other = fake_process(self.proc, 12346, comm='bash')
         (other / 'cgroup').write_text('0::/user.slice/libpod-other.scope\n')
         _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_launcher_helpers_do_not_block_the_stop(self):
+        for pid, name in enumerate(('close-league-client-in-game.py',
+                                    'hide-league-client-in-game.py',
+                                    'hide-league-splash-window.py'), start=12400):
+            self.launcher_helper(pid, name)
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_helper_named_script_from_another_directory_is_other_work(self):
+        self.launcher_helper(12400, 'hide-league-client-in-game.py',
+                             directory=Path('/opt/darling-lol'))
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_unknown_python_script_is_still_other_work(self):
+        self.launcher_helper(12400, 'some-other-tool.py')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_last_session_stops_with_a_launcher_helper(self):
+        self.launcher_helper(12400, 'hide-league-client-in-game.py')
+        attached = self.other_session()
+        _code, stop = self.run_supervisor(container=self.container,
+                                          runtime_at_start='stopped')
+        stop.assert_not_called()
+        with mock.patch.object(supervisor, 'stop_container', return_value=True) as stop:
+            self.assertTrue(attached.finish(
+                self.container, request_stop=False, stoppable=True,
+                out=io.StringIO()))
         stop.assert_called_once()
 
     def test_unknown_scope_is_left_running(self):

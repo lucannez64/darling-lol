@@ -538,9 +538,10 @@ tree running. The supervisor:
   inside the container, so the supervisor stops the container's host systemd
   user scope after the guest session is gone. If multiple Darling-LoL sessions
   share the container, the runtime owner can pass the shutdown request to the
-  last eligible session. The supervisor leaves the container running when an
-  interactive `toolbox enter` shell or other work remains in that scope, or
-  when it cannot verify the scope. Set `RCLOL_STOP_TOOLBOX=0` on a launch to
+  last eligible session. The supervisor ignores the launcher's own detached
+  helpers, and leaves the container running when an interactive `toolbox enter`
+  shell or other work remains in that scope, or when it cannot verify the
+  scope. Set `RCLOL_STOP_TOOLBOX=0` on a launch to
   keep the container running when that session finishes last.
 - leaves everything as it was with `RCLOL_CLEAN_ON_EXIT=0`, which is the old
   `exec` behaviour.
