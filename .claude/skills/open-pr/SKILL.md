@@ -29,7 +29,7 @@ The canonical repository is `lucannez64/darling-lol`.
    - `git stash push -u -m open-pr` when the tree is dirty, and remember that this run created that stash
    - `git checkout main && git merge --ff-only <remote>/main`
    - `git push origin main` when `origin` is a fork
-   - If the fast-forward fails, stop and report. Never reset main, rebase it or force push.
+   - If the fast-forward fails, return to the starting branch, restore this run's stash, and report. Never reset main, rebase it or force push.
 3. Create the PR branch: `git checkout -b <type>/<slug>` from the updated main.
    - When step 1 found commits ahead of main, branch from the branch that holds them instead (`git checkout -b <type>/<slug> <branch>`) and merge the updated main into it, so those commits stay in the PR.
    - Restore the stash only when step 2 created it, once the branch exists and any ahead commits are on it. When the tree was clean, skip `git stash pop` so an unrelated stash is neither applied nor dropped.
@@ -42,7 +42,7 @@ The canonical repository is `lucannez64/darling-lol`.
    - `python3 scripts/prepare.py --check-only --source <darling-src>` only when a patch or pin changed
    A behavior change needs a new or updated test. If a check fails, fix it or stop. Do not open a PR over a failing check. A check that could not be run is stated in the PR body.
 5. Stage files by name. Never stage `build/`, logs, prefixes, `custom-icon.*`, binaries or archives.
-6. Commit with `git commit -s` and the format below.
+6. Commit with `git commit -s` and the format below when step 5 staged changes; when the tree was clean, skip the commit and push the existing commits.
 7. `git push -u origin <branch>`.
 8. Open the PR: `gh pr create --repo lucannez64/darling-lol --base main --head <head> --title <title> --body-file <file>`. Put the body in a temporary file outside the repository. Reply with the PR URL and one line of summary.
 
