@@ -75,6 +75,17 @@ class IokitGpuRegistryTests(unittest.TestCase):
         # The single shared constant is gone: a fixed ID can only name one card.
         self.assertNotIn('kIOGraphicsAcceleratorRegistryID', added_lines('src/IOGraphicsAccelerator.h'))
 
+    def test_integrated_rule_is_identical_in_metal(self):
+        def rule(source):
+            start = source.index('bool presentedAsIntegrated(')
+            end = source.index('\n}\n', start)
+            return ' '.join(source[start:end].split())
+        self.assertEqual(rule(added_lines(IDS)), rule(added_lines(METAL_INFO, 'patches/metal.patch')))
+        device = added_lines('src/Metal/MTLDevice.mm', 'patches/metal.patch')
+        self.assertIn('MTLDeviceInfo::macGpuName(priv->properties().vendorID, '
+                      'priv->properties().deviceID, cards)', device)
+        self.assertIn('presented_as_integrated "$card" && vendor=8086', PROFILER.read_text())
+
     def test_id_matching_uses_the_entry_id(self):
         service = added_lines('src/IOService.mm')
         self.assertIn('kIORegistryEntryIDKey', service)
@@ -174,7 +185,8 @@ int main(int argc, char** argv)
 	printf("%s", G::hostGpuMode().c_str());
 	for (const auto& gpu : G::accelerators())
 	{
-		const char* metal = MTLDeviceInfo::macGpuName(gpu.host.vendor);
+		const char* metal = MTLDeviceInfo::macGpuName(gpu.host.vendor, gpu.host.device,
+		                                              MTLDeviceInfo::hostCards());
 		printf(" %llx:%04x:%04x:%llx:%s", (unsigned long long) gpu.registryId,
 		       gpu.presented.vendor, gpu.presented.device,
 		       (unsigned long long) MTLDeviceInfo::registryIdFor(gpu.host.vendor, gpu.host.device),
@@ -193,13 +205,16 @@ int main(int argc, char** argv)
     def tearDown(self):
         self.folder.cleanup()
 
-    def card(self, directory, vendor, device):
+    def card(self, directory, vendor, device, vram=()):
         path = self.root / directory / 'sys/class/drm'
         for index, (vendor_id, device_id) in enumerate(zip(vendor, device)):
             device_dir = path / f'card{index}/device'
             device_dir.mkdir(parents=True)
             (device_dir / 'vendor').write_text(vendor_id + '\n')
             (device_dir / 'device').write_text(device_id + '\n')
+            # amdgpu's mem_info_vram_total in bytes; None leaves it out (NVIDIA).
+            if index < len(vram) and vram[index] is not None:
+                (device_dir / 'mem_info_vram_total').write_text(f'{vram[index]}\n')
         return self.root / directory
 
     def prop(self, name, text):
@@ -296,17 +311,24 @@ int main(int argc, char** argv)
 
     def test_hybrid_host_publishes_every_card_like_the_profiler(self):
         prop = self.prop('prop', 'profile=compat\ncompat.gpu.name=mac\n')
+        gib = 1 << 30
+        mac_pair = [(0x8086, 0x3e9b), (0x1002, 0x7340)]
         cases = [
             # Intel iGPU + NVIDIA: the MacBookPro16,1 pair, whichever Metal picks.
-            (('0x8086', '0x10de'), ('0x9a49', '0x2520'), [(0x8086, 0x3e9b), (0x1002, 0x7340)]),
-            # AMD APU + AMD dGPU: two distinct cards, two entries.
-            (('0x1002', '0x1002'), ('0x164e', '0x744c'), [(0x1002, 0x7340), (0x1002, 0x7340)]),
-            # AMD APU + NVIDIA.
-            (('0x1002', '0x10de'), ('0x1681', '0x2560'), [(0x1002, 0x7340), (0x1002, 0x7340)]),
+            (('0x8086', '0x10de'), ('0x9a49', '0x2520'), (), mac_pair),
+            # Ryzen 7000 APU (512 MiB carve-out) + RX 7800 XT: the APU is the
+            # Mac's integrated GPU, never a second Radeon Pro 5500M (issue #31).
+            (('0x1002', '0x1002'), ('0x164e', '0x747e'), (gib // 2, 16 * gib), mac_pair),
+            # The dGPU probed first: the order of the cards does not matter.
+            (('0x1002', '0x1002'), ('0x747e', '0x164e'), (16 * gib, gib // 2), mac_pair[::-1]),
+            # AMD APU + NVIDIA (no mem_info_vram_total on NVIDIA).
+            (('0x1002', '0x10de'), ('0x1681', '0x2560'), (gib // 2, None), mac_pair),
+            # Two AMD cards that cannot be told apart stay two 5500Ms.
+            (('0x1002', '0x1002'), ('0x164e', '0x744c'), (), [(0x1002, 0x7340), (0x1002, 0x7340)]),
         ]
-        for index, (vendors, devices, expected) in enumerate(cases):
+        for index, (vendors, devices, vram, expected) in enumerate(cases):
             with self.subTest(index=index):
-                root = self.card(f'hybrid{index}', vendors, devices)
+                root = self.card(f'hybrid{index}', vendors, devices, vram)
                 mode, gpus = self.run_ids(root, prop)
                 self.assertEqual([(v, d) for _, v, d in gpus], expected)
                 self.assertEqual(len({registry for registry, _, _ in gpus}), len(gpus))
@@ -315,6 +337,12 @@ int main(int argc, char** argv)
         host = self.prop('host', 'profile=compat\ncompat.gpu.name=host\n')
         root = self.card('hybrid-host', ('0x8086', '0x10de'), ('0x9a49', '0x2520'))
         self.assertEqual(self.presented(root, host), [(0x8086, 0x9a49), (0x10de, 0x2520)])
+
+    def test_lone_apu_stays_the_5500m(self):
+        prop = self.prop('prop', 'profile=compat\ncompat.gpu.name=mac\n')
+        root = self.card('apu', ('0x1002',), ('0x164e',), (1 << 29,))
+        self.assertEqual(self.presented(root, prop), [(0x1002, 0x7340)])
+        self.assertEqual(self.profiler_ids(root, prop), [(0x1002, 0x7340)])
 
     def test_identical_cards_share_one_entry(self):
         prop = self.prop('prop', 'profile=compat\ncompat.gpu.name=host\n')

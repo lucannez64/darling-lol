@@ -1211,7 +1211,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..1855e6d 100644
+index f58184a..477759c 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,34 @@
@@ -1298,7 +1298,7 @@ index f58184a..1855e6d 100644
  }
  
  @synthesize device = _device;
-@@ -116,6 +171,53 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -116,6 +171,58 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1320,7 +1320,12 @@ index f58184a..1855e6d 100644
 +	} catch (...) {
 +		vulkanName = "";
 +	}
-+	const char* mac = macName && priv ? MTLDeviceInfo::macGpuName(priv->properties().vendorID) : nullptr;
++	const char* mac = nullptr;
++	if (macName && priv) {
++		// The host cards decide which card is presented as the integrated GPU.
++		static const std::vector<MTLDeviceInfo::HostCard> cards = MTLDeviceInfo::hostCards();
++		mac = MTLDeviceInfo::macGpuName(priv->properties().vendorID, priv->properties().deviceID, cards);
++	}
 +	_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::resolveName(nameOverride, vulkanName.c_str(), mac).c_str()];
 +	if (_name == nil) {
 +		_name = [[NSString alloc] initWithUTF8String: MTLDeviceInfo::kFallbackName];
@@ -1352,7 +1357,7 @@ index f58184a..1855e6d 100644
  - (instancetype)initWithDevice: (std::shared_ptr<Indium::Device>)device
  {
  	self = [super init];
-@@ -123,6 +225,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -123,6 +230,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		_device = device;
  		_threadExitCondition = [NSCondition new];
  		_threadIsRunning = NO;
@@ -1360,7 +1365,7 @@ index f58184a..1855e6d 100644
  		_pollingThread = [[NSThread alloc] initWithTarget: self selector: @selector(pollingLoop) object: nil];
  		[_pollingThread start];
  	}
-@@ -133,6 +236,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -133,6 +241,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  {
  	[_pollingThread release];
  	[_threadExitCondition release];
@@ -1368,7 +1373,7 @@ index f58184a..1855e6d 100644
  
  	[super dealloc];
  }
-@@ -153,12 +257,109 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -153,12 +262,109 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  	[_threadExitCondition unlock];
  }
  
@@ -1479,7 +1484,7 @@ index f58184a..1855e6d 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -166,6 +367,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -166,6 +372,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1487,7 +1492,7 @@ index f58184a..1855e6d 100644
  	return [[MTLComputePipelineStateInternal alloc] initWithState: pso device: self label: descriptor.label];
  }
  
-@@ -183,7 +385,14 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -183,7 +390,14 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
                                                          reflection: (MTLAutoreleasedComputePipelineReflection*)reflection 
                                                               error: (NSError**)error
  {
@@ -1503,7 +1508,7 @@ index f58184a..1855e6d 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -191,13 +400,45 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -191,13 +405,45 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1550,7 +1555,7 @@ index f58184a..1855e6d 100644
  	if (!pso) {
  		if (error) {
  			// TODO: better error and/or match what the official Metal method does
-@@ -205,7 +446,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -205,7 +451,118 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  		}
  		return nil;
  	}
@@ -1670,7 +1675,7 @@ index f58184a..1855e6d 100644
  }
  
  - (id<MTLCommandQueue>)newCommandQueue
-@@ -275,9 +627,33 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
+@@ -275,9 +632,33 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {
  - (id<MTLLibrary>)newLibraryWithData: (dispatch_data_t)data
                                 error: (NSError**)error
  {
@@ -3774,10 +3779,10 @@ new file mode 100644
 +#endif
 diff --git a/private-include/Metal/MTLDeviceInfo.h b/private-include/Metal/MTLDeviceInfo.h
 new file mode 100644
-index 0000000..683fff6
+index 0000000..eabc8a4
 --- /dev/null
 +++ b/private-include/Metal/MTLDeviceInfo.h
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,296 @@
 +// SPDX-FileCopyrightText: 2026 Darling Developers
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -3788,9 +3793,16 @@ index 0000000..683fff6
 +// Plain C++ only (no Objective-C, Vulkan or Indium) so tools/test-metal-device-info.cpp
 +// can compile this header on the host.
 +
++#include <algorithm>
++#include <cctype>
 +#include <cstddef>
 +#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dirent.h>
 +#include <string>
++#include <vector>
 +
 +namespace MTLDeviceInfo {
 +
@@ -3903,6 +3915,112 @@ index 0000000..683fff6
 +	case 0x8086: return "Intel UHD Graphics 630";
 +	default: return nullptr;
 +	}
++}
++
++// A host DRM card: its PCI IDs and amdgpu's mem_info_vram_total (0 when the driver does
++// not publish it, like NVIDIA's).
++struct HostCard {
++	uint32_t vendor;
++	uint32_t device;
++	uint64_t vramBytes;
++};
++
++// True when an AMD card sits beside the host's discrete GPU: an NVIDIA card, or an AMD
++// card with more VRAM (an APU's carve-out is far smaller than a dGPU's memory). The Mac
++// GPU name then presents it as the MacBookPro16,1's integrated UHD Graphics 630, like
++// iokitd (IOGraphicsAcceleratorIds::presentedAsIntegrated in patches/iokitd.patch) and
++// tools/darling-system_profiler.sh do; keep the copies identical.
++static inline bool presentedAsIntegrated(const HostCard& card, const std::vector<HostCard>& cards) {
++	if (card.vendor != 0x1002)
++		return false;
++	for (const HostCard& other : cards)
++	{
++		if (other.vendor == card.vendor && other.device == card.device)
++			continue;
++		if (other.vendor == 0x10de || (other.vendor == 0x1002 && other.vramBytes > card.vramBytes))
++			return true;
++	}
++	return false;
++}
++
++static inline bool readHex(const std::string& path, uint32_t* value) {
++	FILE* file = fopen(path.c_str(), "r");
++	if (!file) {
++		return false;
++	}
++	unsigned int parsed = 0;
++	bool ok = fscanf(file, "%x", &parsed) == 1;
++	fclose(file);
++	if (ok) {
++		*value = parsed;
++	}
++	return ok;
++}
++
++static inline uint64_t readVramBytes(const std::string& directory) {
++	FILE* file = fopen((directory + "/mem_info_vram_total").c_str(), "r");
++	if (!file) {
++		return 0;
++	}
++	unsigned long long parsed = 0;
++	bool ok = fscanf(file, "%llu", &parsed) == 1;
++	fclose(file);
++	return ok ? parsed : 0;
++}
++
++// The host's DRM cards, read like iokitd's IOGraphicsAcceleratorIds::hostCards: the
++// host root (RCLOL_SYSTEM_ROOT, else /Volumes/SystemRoot) first, then /sys.
++static inline std::vector<HostCard> hostCards() {
++	const char* rootEnv = getenv("RCLOL_SYSTEM_ROOT");
++	const std::string roots[] = {
++		std::string(rootEnv && *rootEnv ? rootEnv : "/Volumes/SystemRoot") + "/sys/class/drm",
++		"/sys/class/drm",
++	};
++	std::vector<HostCard> ids;
++	for (const std::string& root : roots) {
++		DIR* directory = opendir(root.c_str());
++		if (!directory) {
++			continue;
++		}
++		std::vector<int> numbers;
++		while (struct dirent* entry = readdir(directory)) {
++			const char* name = entry->d_name;
++			if (strncmp(name, "card", 4) != 0 || name[4] == '\0') {
++				continue;
++			}
++			bool digits = true;
++			for (const char* c = name + 4; *c; ++c) {
++				digits = digits && isdigit(static_cast<unsigned char>(*c));
++			}
++			if (digits) {
++				numbers.push_back(atoi(name + 4));
++			}
++		}
++		closedir(directory);
++		std::sort(numbers.begin(), numbers.end());
++		for (int number : numbers) {
++			std::string device = root + "/card" + std::to_string(number) + "/device";
++			uint32_t vendorID = 0, deviceID = 0;
++			if (readHex(device + "/vendor", &vendorID) && readHex(device + "/device", &deviceID)) {
++				ids.push_back({ vendorID, deviceID, readVramBytes(device) });
++			}
++		}
++		if (!ids.empty()) {
++			return ids;
++		}
++	}
++	return ids;
++}
++
++// The Mac GPU name of the host card with these Vulkan (PCI) IDs: an AMD card beside the
++// discrete GPU is the Mac's UHD Graphics 630, any other card goes by its vendor.
++static inline const char* macGpuName(uint32_t vendorID, uint32_t deviceID, const std::vector<HostCard>& cards) {
++	for (const HostCard& card : cards) {
++		if (card.vendor == vendorID && card.device == deviceID && presentedAsIntegrated(card, cards)) {
++			return "Intel UHD Graphics 630";
++		}
++	}
++	return macGpuName(vendorID);
 +}
 +
 +// DARLING_METAL_GPU_NAME wins, then the Mac GPU name (when enabled and known), then the
