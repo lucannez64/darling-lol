@@ -118,7 +118,8 @@ int main() {
             dct = folder / 'dct.py'
             log = folder / 'entries'
             dct.write_text('import os, pathlib, sys\nif sys.argv[1] == "default-store": print("test-store")\nelse: pathlib.Path(os.environ["DC_POLICY_LOG"]).write_text(pathlib.Path(sys.argv[-1]).read_text())\n')
-            env = dict(os.environ, DCC=str(dcc), DCT=str(dct), RCODESIGN='/bin/true', DPREFIX=str(folder / 'prefix'), DC_POLICY_LOG=str(log))
+            env = dict(os.environ, DCC=str(dcc), DCT=str(dct), RCODESIGN='/bin/true', DPREFIX=str(folder / 'prefix'),
+                       DC_POLICY_LOG=str(log), DARLING_SIGN_CACHE=str(folder / 'sign-cache'))
             cases = [(['--prefix'], set()), (['--sdk', '--prefix'], {'sdk-hash'}),
                      ([], {'sdk-hash'}), (['--prefix', '--trust'], {'overlay-hash'}),
                      (['--sdk', '--prefix', '--no-trust'], set())]
@@ -129,6 +130,70 @@ int main() {
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     entries = {line.split()[0] for line in log.read_text().splitlines()} if log.exists() else set()
                     self.assertEqual(entries, expected)
+
+    def test_signing_reuses_cached_copies_of_reinstalled_binaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            root = folder / 'runtime'
+            (root / 'lib').mkdir(parents=True)
+            unsigned = {
+                'lib/a.dylib': b'\xcf\xfa\xed\xfe' + b'\x06\0\0\0' * 3 + b'A' * 64,
+                'lib/b.dylib': b'\xcf\xfa\xed\xfe' + b'\x06\0\0\0' * 3 + b'B' * 64,
+                'lib/c.o': b'\xcf\xfa\xed\xfe' + b'\x07\0\0\0' * 2 + b'\x01\0\0\0' + b'C' * 64,
+                'lib/notes.txt': b'plain text',
+            }
+            def install():  # what `cmake --install` does to signed binaries
+                for name, data in unsigned.items():
+                    (root / name).write_bytes(data)
+            install()
+            # Fakes: a signature is a trailing marker; every rcodesign run is logged.
+            calls = folder / 'rcodesign.log'
+            rcodesign = folder / 'rcodesign'
+            rcodesign.write_text('#!/bin/sh\nfor last; do :; done\necho "$last" >> "%s"\n'
+                                 'printf SIGNED >> "$last"\n' % calls)
+            dcc = folder / 'dcc'
+            dcc.write_text('#!/bin/sh\ncase "$1" in cdhash) echo hash;; *) tail -c 6 "$2" | grep -q SIGNED;; esac\n')
+            for tool in (rcodesign, dcc):
+                tool.chmod(0o755)
+            cache = folder / 'cache'
+            env = dict(os.environ, DCC=str(dcc), RCODESIGN=str(rcodesign), DARLING_SIGN_CACHE=str(cache))
+            command = ['sh', str(ROOT / 'tools/sign-darling-runtime.sh'), '--allow-running', '--no-trust', '--quiet', str(root)]
+
+            def sign(*extra):
+                result = subprocess.run(command[:-1] + list(extra) + command[-1:], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.strip().splitlines()[-1]
+
+            self.assertIn('total=3 signed=2 restored=0 skipped=0', sign())
+            self.assertIn('object=1', sign())
+            first = {name: (root / name).read_bytes() for name in ('lib/a.dylib', 'lib/b.dylib')}
+            self.assertEqual(len(calls.read_text().splitlines()), 2)
+            # Reinstalled unchanged binaries come back from the cache, byte for byte.
+            install()
+            self.assertIn('signed=0 restored=2 skipped=0', sign())
+            self.assertEqual(len(calls.read_text().splitlines()), 2)
+            for name, data in first.items():
+                self.assertEqual((root / name).read_bytes(), data)
+            # A changed binary is signed; the unchanged one is still restored.
+            install()
+            (root / 'lib/b.dylib').write_bytes(unsigned['lib/b.dylib'] + b'v2')
+            self.assertIn('signed=1 restored=1', sign())
+            # Entries the root no longer uses are pruned; already-signed binaries keep theirs.
+            (root / 'lib/b.dylib').unlink()
+            self.assertIn('skipped=1', sign())
+            [directory] = [path for path in cache.iterdir() if path.is_dir()]
+            self.assertEqual(len([path for path in directory.iterdir() if path.name != 'index']), 1)
+            install()
+            self.assertIn('signed=1 restored=1', sign())
+            # --force and --no-cache always sign; a cache others can write is refused.
+            install()
+            self.assertIn('signed=2 restored=0', sign('--no-cache'))
+            install()
+            cache.chmod(0o777)
+            self.assertIn('signed=2 restored=0', sign())
+            cache.chmod(0o755)
+            self.assertIn('signed=2 restored=0 skipped=0', sign('--force'))
 
     def test_ground_truth_does_not_infer_success_from_unavailable_data(self):
         ground = module_at('review_ground_truth', ROOT / 'tests/security/ground_truth_to_golden.py')
