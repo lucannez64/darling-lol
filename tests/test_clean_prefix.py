@@ -77,6 +77,8 @@ class CleanPrefixTests(unittest.TestCase):
         }))
         (prefix / 'private/etc/darling-smbios.conf').write_text(
             f'SMBIOS_SERIAL_NUMBER={self.old_serial}\nSMBIOS_PLATFORM_UUID={self.old_uuid}\n')
+        (prefix / 'private/etc/darling-platform.plist.before-platform-change').write_text('first-plist\n')
+        (prefix / 'private/etc/darling-smbios.conf.before-platform-change').write_text('first-conf\n')
         (prefix / 'Applications/League of Legends.app/Contents/LoL/game.bin').write_text('game\n')
         (prefix / 'Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/r3dlog.txt').write_text('match\n')
         (prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices').write_text('bin\n')
@@ -137,6 +139,8 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertIn('Users/tester/Library/Application Support/Riot Games/Riot Client/Data/RiotGamesPrivateSettings.yaml', names)
         self.assertIn('private/etc/darling-platform.plist', names)
         self.assertIn('private/etc/darling-smbios.conf', names)
+        self.assertIn('private/etc/darling-platform.plist.before-platform-change', names)
+        self.assertIn('private/etc/darling-smbios.conf.before-platform-change', names)
         # Escaping symlink must not be archived and its external target must remain intact.
         self.assertFalse(any('secret.log' in name for name in names))
         self.assertEqual((self.outside / 'external-logs/secret.log').read_text(), 'keep\n')
@@ -153,6 +157,11 @@ class CleanPrefixTests(unittest.TestCase):
             '.init.pid.stale-1-2',
         ):
             self.assertFalse(os.path.lexists(self.prefix / gone), gone)
+        # Stale pre-reset .before-platform-change copies were replaced by the fresh backup of the prior identity.
+        self.assertNotEqual(
+            (self.prefix / 'private/etc/darling-platform.plist.before-platform-change').read_text(errors='ignore'),
+            'first-plist\n',
+        )
 
         for kept in (
             'private/etc/darling-system.prop',
@@ -226,6 +235,63 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertIn('darling shutdown', missing_stop.stderr)
         self.assertEqual(self.stops(), 0)
         self.assertTrue((self.prefix / 'Users/Shared/Riot Games/machine.cfg').exists())
+
+    def test_symlinked_parent_outside_prefix_is_never_archived_or_deleted(self):
+        external_logs = self.outside / 'parent-logs'
+        (external_logs / 'Riot Games').mkdir(parents=True)
+        (external_logs / 'Riot Games/keep.log').write_text('precious\n')
+        shutil.rmtree(self.guest / 'Library/Logs')
+        os.symlink(external_logs, self.guest / 'Library/Logs')
+
+        result = self.run_script('--keep-identity', '--yes')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # External directory behind the symlinked parent must remain completely untouched.
+        self.assertEqual((external_logs / 'Riot Games/keep.log').read_text(), 'precious\n')
+        archives = sorted((self.repo / 'build/prefix-cleanup-backups').glob('prefix-cleanup-*.tar.gz'))
+        self.assertEqual(len(archives), 1)
+        with tarfile.open(archives[0], 'r:gz') as tar:
+            names = set(tar.getnames())
+        self.assertFalse(any('keep.log' in name for name in names))
+
+    def test_backup_dir_validation_preserves_existing_mode_and_resolves_relative_to_cwd(self):
+        # Backup directory inside prefix (e.g. cache glob) must be refused before stopping runtime.
+        inside_cache = self.guest / 'Library/Caches/com.riotgames.backups'
+        refused = self.run_script('--backup-dir', str(inside_cache), '--yes')
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('inside the Darling prefix', refused.stderr)
+        self.assertEqual(self.stops(), 0)
+        self.assertTrue((self.prefix / 'Users/Shared/Riot Games/machine.cfg').exists())
+
+        # Existing backup directory keeps its original permissions (not forced to 0700).
+        existing = self.root / 'existing-backups'
+        existing.mkdir(mode=0o755)
+        os.chmod(existing, 0o755)
+        res = self.run_script('--keep-identity', '--backup-dir', str(existing), '--yes')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(existing.stat().st_mode & 0o777, 0o755)
+
+        # Relative --backup-dir resolves against caller cwd, not repo root.
+        (self.prefix / 'Users/Shared/Riot Games/machine.cfg').write_text('rel\n')
+        caller_cwd = self.root / 'caller cwd'
+        caller_cwd.mkdir()
+        env = dict(
+            os.environ,
+            HOME=str(self.home),
+            DPREFIX=str(self.prefix),
+            RIOT_GUEST_HOME=str(self.guest),
+            CLEAN_PREFIX_PROC_ROOT=str(self.proc),
+            CLEAN_PREFIX_RUNTIME_ROOT=str(self.runtime),
+        )
+        env.pop('DARLING_WORKSPACE', None)
+        rel_run = subprocess.run(
+            ['sh', str(self.repo / 'scripts/clean-prefix.sh'), '--keep-identity',
+             '--backup-dir', 'rel-backups', '--yes'],
+            cwd=str(caller_cwd), stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, check=False, env=env, timeout=60,
+        )
+        self.assertEqual(rel_run.returncode, 0, rel_run.stdout + rel_run.stderr)
+        self.assertEqual(len(list((caller_cwd / 'rel-backups').glob('prefix-cleanup-*.tar.gz'))), 1)
+        self.assertFalse((self.repo / 'rel-backups').exists())
 
 
 if __name__ == '__main__':

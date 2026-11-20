@@ -1602,4 +1602,7 @@ sudo sysctl --system
 ```
 
 Verify with `cat /proc/sys/kernel/perf_event_paranoid` (should print `2` or
-lower) and `python3 tools/doctor.py`.
+lower) and `python3 tools/doctor.py`. Note that lowering
+`kernel.perf_event_paranoid` relaxes a host hardening setting for unprivileged
+users; granting `CAP_PERFMON` to the relevant account or loader is a narrower
+alternative if you prefer to keep `perf_event_paranoid` restricted.

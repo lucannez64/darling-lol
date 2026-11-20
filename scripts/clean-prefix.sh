@@ -7,6 +7,7 @@
 # refusal and the confirmation have passed.
 set -eu
 umask 077
+caller_pwd=$(pwd)
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 
@@ -29,6 +30,7 @@ EOF
 
 keep_identity=0
 backup_dir=$repo/build/prefix-cleanup-backups
+custom_backup_dir=0
 confirmed=0
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -36,11 +38,13 @@ while [ "$#" -gt 0 ]; do
 	--backup-dir)
 		[ "$#" -ge 2 ] && [ -n "$2" ] || usage
 		backup_dir=$2
+		custom_backup_dir=1
 		shift 2
 		;;
 	--backup-dir=*)
 		backup_dir=${1#--backup-dir=}
 		[ -n "$backup_dir" ] || usage
+		custom_backup_dir=1
 		shift
 		;;
 	--yes) confirmed=1; shift ;;
@@ -48,6 +52,13 @@ while [ "$#" -gt 0 ]; do
 	*) usage ;;
 	esac
 done
+
+if [ "$custom_backup_dir" = 1 ]; then
+	case "$backup_dir" in
+	/*) ;;
+	*) backup_dir=$caller_pwd/$backup_dir ;;
+	esac
+fi
 
 python3 scripts/configure.py >/dev/null
 . build/runtime/tools/runtime-paths.sh
@@ -69,6 +80,34 @@ fi
 if [ ! -d "$prefix/Volumes/SystemRoot" ] && [ ! -f "$prefix/private/etc/darling-system.prop" ]; then
 	refuse "$prefix is not a Darling prefix (no Volumes/SystemRoot and no private/etc/darling-system.prop)."
 fi
+
+# Validate the backup destination before stopping the runtime: it must stay
+# outside the prefix being cleaned and be writable (or creatable).
+python3 - "$resolved" "$backup_dir" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+prefix = Path(sys.argv[1]).resolve()
+backup = Path(sys.argv[2]).expanduser()
+try:
+    backup_resolved = backup.resolve()
+except OSError as exc:
+    raise SystemExit(f'Cannot resolve backup directory {backup}: {exc}. Nothing was changed.')
+
+if backup_resolved == prefix or backup_resolved.is_relative_to(prefix):
+    raise SystemExit(f'Refusing backup directory inside the Darling prefix: {backup}. Nothing was changed.')
+
+if backup.exists():
+    if not backup.is_dir() or not os.access(backup, os.W_OK | os.X_OK):
+        raise SystemExit(f'Backup directory is not writable: {backup}. Nothing was changed.')
+else:
+    ancestor = backup.parent
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if not ancestor.is_dir() or not os.access(ancestor, os.W_OK | os.X_OK):
+        raise SystemExit(f'Cannot create backup directory {backup}: parent {ancestor} is not writable. Nothing was changed.')
+PY
 
 # Refuse while a Riot Client or League process is running; CLEAN_PREFIX_PROC_ROOT exists for tests.
 python3 - <<'PY'
@@ -96,8 +135,10 @@ fi
 echo "Darling prefix: $prefix"
 echo "Backup directory: $backup_dir"
 cat <<'EOF'
-Will be backed up and cleaned: Riot/League logs, machine.cfg, Riot Client
-  local session data, client caches (com.riotgames.*) and stale runtime markers.
+Will be backed up and cleaned: Riot/League logs, machine.cfg and Riot Client
+  local session data.
+Will be cleaned without backup: client caches (com.riotgames.*) and stale
+  runtime markers.
 EOF
 if [ "$keep_identity" = 1 ]; then
 	echo 'Platform identity: kept unchanged (--keep-identity).'
@@ -122,10 +163,11 @@ fi
 python3 build/runtime/tools/stop-darling-runtime.py
 
 # Archive existing logs, local machine/session config and previous platform
-# identity to a mode-0600 tarball before deleting anything. Symlinks are never
-# followed outside the prefix.
-archive_path=$(python3 - "$prefix" "$guest" "$backup_dir" "$keep_identity" <<'PY'
+# identity to a mode-0600 tarball before deleting anything. Every target is
+# checked so neither archival nor deletion follows symlinks outside the prefix.
+cleaned_count=$(python3 - "$prefix" "$guest" "$backup_dir" "$keep_identity" <<'PY'
 import os
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -134,10 +176,111 @@ from pathlib import Path
 
 prefix = Path(sys.argv[1]).resolve()
 guest = Path(sys.argv[2])
-backup_dir = Path(sys.argv[3])
+backup_dir = Path(sys.argv[3]).expanduser()
 keep_identity = sys.argv[4] == '1'
 
-targets = [
+def safe_within(path):
+    try:
+        return path.resolve().is_relative_to(prefix)
+    except OSError:
+        return False
+
+def parent_within_prefix(path):
+    try:
+        parent = path.parent.resolve()
+        return parent == prefix or parent.is_relative_to(prefix)
+    except OSError:
+        return False
+
+def ensure_private_dir(path):
+    """Create missing directories with mode 0700 without modifying existing ones."""
+    missing = []
+    cur = path
+    while not cur.exists() and cur != cur.parent:
+        missing.append(cur)
+        cur = cur.parent
+    for folder in reversed(missing):
+        folder.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(folder, 0o700)
+
+archive_targets = [
+    guest / 'Library/Logs/Riot Games',
+    guest / 'Library/Logs/Riot Client',
+    prefix / 'Applications/League of Legends.app/Contents/LoL/Logs',
+    prefix / 'Users/Shared/Riot Games/machine.cfg',
+    guest / 'Library/Application Support/Riot Games/machine.cfg',
+    guest / 'Library/Application Support/Riot Games/Riot Client/Config/machine.cfg',
+    guest / 'Library/Application Support/Riot Games/Riot Client/Data',
+]
+identity_backups = [
+    prefix / 'private/etc/darling-platform.plist.before-platform-change',
+    prefix / 'private/etc/darling-smbios.conf.before-platform-change',
+]
+if not keep_identity:
+    archive_targets.extend([
+        prefix / 'private/etc/darling-platform.plist',
+        prefix / 'private/etc/darling-smbios.conf',
+        *identity_backups,
+    ])
+
+to_archive = []
+for target in archive_targets:
+    if not os.path.lexists(target) or target.is_symlink():
+        continue
+    if not parent_within_prefix(target) or not safe_within(target):
+        continue
+    to_archive.append(target)
+
+if to_archive:
+    ensure_private_dir(backup_dir)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    fd, tmp_name = tempfile.mkstemp(prefix='.prefix-cleanup-', suffix='.tar.gz', dir=backup_dir)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    added = 0
+    try:
+        with tarfile.open(tmp_path, 'w:gz') as tar:
+            for item in to_archive:
+                if item.is_file():
+                    rel = item.resolve().relative_to(prefix)
+                    tar.add(item, arcname=str(rel), recursive=False)
+                    added += 1
+                elif item.is_dir():
+                    for root, dirs, files in os.walk(item, followlinks=False):
+                        root_path = Path(root)
+                        if not safe_within(root_path):
+                            dirs[:] = []
+                            continue
+                        rel_root = root_path.resolve().relative_to(prefix)
+                        tar.add(root_path, arcname=str(rel_root), recursive=False)
+                        added += 1
+                        dirs[:] = [d for d in dirs if not (root_path / d).is_symlink()]
+                        for name in files:
+                            child = root_path / name
+                            if child.is_symlink() or not safe_within(child):
+                                continue
+                            tar.add(child, arcname=str(child.resolve().relative_to(prefix)), recursive=False)
+                            added += 1
+        if added:
+            os.chmod(tmp_path, 0o600)
+            suffix = 0
+            while True:
+                name = f'prefix-cleanup-{stamp}.tar.gz' if suffix == 0 else f'prefix-cleanup-{stamp}-{suffix}.tar.gz'
+                dest = backup_dir / name
+                try:
+                    os.link(tmp_path, dest)
+                    break
+                except FileExistsError:
+                    suffix += 1
+            tmp_path.unlink(missing_ok=True)
+            print(f'Saved backup in {dest}', file=sys.stderr)
+        else:
+            tmp_path.unlink(missing_ok=True)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+remove_targets = [
     guest / 'Library/Logs/Riot Games',
     guest / 'Library/Logs/Riot Client',
     prefix / 'Applications/League of Legends.app/Contents/LoL/Logs',
@@ -147,99 +290,44 @@ targets = [
     guest / 'Library/Application Support/Riot Games/Riot Client/Data',
 ]
 if not keep_identity:
-    targets.extend([
-        prefix / 'private/etc/darling-platform.plist',
-        prefix / 'private/etc/darling-smbios.conf',
-    ])
+    remove_targets.extend(identity_backups)
 
-def safe_within(path):
-    try:
-        return path.resolve().is_relative_to(prefix)
-    except OSError:
-        return False
+caches_dir = guest / 'Library/Caches'
+if os.path.lexists(caches_dir) and not caches_dir.is_symlink() and parent_within_prefix(caches_dir) and safe_within(caches_dir):
+    for entry in sorted(caches_dir.iterdir()):
+        if entry.name.startswith('com.riotgames.'):
+            remove_targets.append(entry)
 
-to_archive = []
-for target in targets:
-    if not target.exists() or target.is_symlink():
+for entry in sorted(prefix.iterdir()):
+    if entry.name.startswith('.init.pid.stale-'):
+        remove_targets.append(entry)
+
+removed = 0
+for target in remove_targets:
+    if not os.path.lexists(target):
         continue
-    if not safe_within(target):
+    # Never delete through a parent directory symlink pointing outside the prefix.
+    if not parent_within_prefix(target):
         continue
-    to_archive.append(target)
-
-if not to_archive:
-    sys.exit(0)
-
-backup_dir.mkdir(parents=True, exist_ok=True)
-os.chmod(backup_dir, 0o700)
-stamp = time.strftime('%Y%m%d-%H%M%S')
-dest = backup_dir / f'prefix-cleanup-{stamp}.tar.gz'
-suffix = 1
-while dest.exists():
-    dest = backup_dir / f'prefix-cleanup-{stamp}-{suffix}.tar.gz'
-    suffix += 1
-
-fd, tmp_name = tempfile.mkstemp(prefix='.prefix-cleanup-', suffix='.tar.gz', dir=backup_dir)
-os.close(fd)
-tmp_path = Path(tmp_name)
-added = 0
-try:
-    with tarfile.open(tmp_path, 'w:gz') as tar:
-        for item in to_archive:
-            if item.is_file():
-                rel = item.resolve().relative_to(prefix)
-                tar.add(item, arcname=str(rel), recursive=False)
-                added += 1
-            elif item.is_dir():
-                for root, dirs, files in os.walk(item, followlinks=False):
-                    root_path = Path(root)
-                    if not safe_within(root_path):
-                        dirs[:] = []
-                        continue
-                    rel_root = root_path.resolve().relative_to(prefix)
-                    tar.add(root_path, arcname=str(rel_root), recursive=False)
-                    added += 1
-                    dirs[:] = [d for d in dirs if not (root_path / d).is_symlink()]
-                    for name in files:
-                        child = root_path / name
-                        if child.is_symlink() or not safe_within(child):
-                            continue
-                        tar.add(child, arcname=str(child.resolve().relative_to(prefix)), recursive=False)
-                        added += 1
-    if added:
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, dest)
-        print(dest)
+    if target.is_symlink():
+        target.unlink()
+    elif not safe_within(target):
+        continue
+    elif target.is_dir():
+        shutil.rmtree(target)
     else:
-        tmp_path.unlink(missing_ok=True)
-except Exception:
-    tmp_path.unlink(missing_ok=True)
-    raise
+        target.unlink()
+    print(f'Removed {target}', file=sys.stderr)
+    removed += 1
+
+print(removed)
 PY
 )
 
-if [ -n "$archive_path" ]; then
-	echo "Saved backup in $archive_path"
-fi
-
 cleaned=0
-remove() {
-	if [ -e "$1" ] || [ -L "$1" ]; then
-		rm -rf -- "$1"
-		echo "Removed $1"
-		cleaned=1
-	fi
-}
-
-remove "$guest/Library/Logs/Riot Games"
-remove "$guest/Library/Logs/Riot Client"
-remove "$prefix/Applications/League of Legends.app/Contents/LoL/Logs"
-remove "$prefix/Users/Shared/Riot Games/machine.cfg"
-remove "$guest/Library/Application Support/Riot Games/machine.cfg"
-remove "$guest/Library/Application Support/Riot Games/Riot Client/Config/machine.cfg"
-remove "$guest/Library/Application Support/Riot Games/Riot Client/Data"
-for item in "$guest/Library/Caches"/com.riotgames.* "$prefix"/.init.pid.stale-*; do
-	remove "$item"
-done
+if [ "${cleaned_count:-0}" -gt 0 ]; then
+	cleaned=1
+fi
 
 if [ "$keep_identity" != 1 ]; then
 	if [ -n "${CLEAN_PREFIX_RUNTIME_ROOT:-}" ]; then

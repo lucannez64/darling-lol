@@ -119,9 +119,10 @@ if [ "$profile" = compat ]; then
  export DARLING_METAL_HOST_UNIFIED_MEMORY="${DARLING_METAL_HOST_UNIFIED_MEMORY:-0}"
  # profile=compat aligns guest cpuid via perf_event_open; Debian and hardened
  # kernels default kernel.perf_event_paranoid > 2 and reject it with EACCES.
+ # RCLOL_PERF_EVENT_PARANOID_PATH is a test-only override.
  perf_paranoid_path=${RCLOL_PERF_EVENT_PARANOID_PATH:-/proc/sys/kernel/perf_event_paranoid}
  if [ -r "$perf_paranoid_path" ]; then
-  perf_paranoid=$(tr -d '[:space:]' < "$perf_paranoid_path" 2>/dev/null || true)
+  perf_paranoid=$(tr -d '[:space:]' 2>/dev/null < "$perf_paranoid_path" || true)
   case "$perf_paranoid" in
    ''|*[!0-9]*) ;;
    *)

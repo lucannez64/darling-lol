@@ -1935,7 +1935,7 @@ new file mode 100644
 index 0000000..2d3bdde
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,835 @@
+@@ -0,0 +1,837 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2530,11 +2530,13 @@ index 0000000..2d3bdde
 +	// mach_header_64: magic,cputype,cpusubtype,filetype,ncmds,sizeofcmds,flags,reserved
 +	const uint32_t* h = (const uint32_t*) base;
 +	uint32_t ncmds = h[4];
++	uint32_t sizeofcmds = h[5];
 +	const unsigned char* p = (const unsigned char*) base + 32; // sizeof(mach_header_64)
-+	for (uint32_t i = 0; i < ncmds; ++i) {
++	const unsigned char* end = p + sizeofcmds;
++	for (uint32_t i = 0; i < ncmds && p + 8 <= end; ++i) {
 +		uint32_t cmd = ((const uint32_t*) p)[0];
 +		uint32_t cmdsize = ((const uint32_t*) p)[1];
-+		if (cmdsize < 8)
++		if (cmdsize < 8 || (unsigned long) (end - p) < cmdsize)
 +			break;
 +		if (cmd == 0x1b /* LC_UUID */ && cmdsize >= 24) {
 +			static const char hex[] = "0123456789abcdef";
