@@ -1760,7 +1760,7 @@ index 8d00405..754b5b9 100644
  };
  
 diff --git a/src/indium/blit-command-encoder.cpp b/src/indium/blit-command-encoder.cpp
-index e58f0ba..3e7c168 100644
+index e58f0ba..a89b8e4 100644
 --- a/src/indium/blit-command-encoder.cpp
 +++ b/src/indium/blit-command-encoder.cpp
 @@ -1,8 +1,10 @@
@@ -1911,14 +1911,12 @@ index e58f0ba..3e7c168 100644
  
  	auto aspect = pixelFormatToVkImageAspectFlags(privateSource->pixelFormat());
  
-@@ -231,10 +264,12 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+@@ -231,10 +264,10 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
  	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, sizeof(barriers) / sizeof(*barriers), barriers);
  };
  
 -void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, std::shared_ptr<Texture> destination) {
 +void Indium::PrivateBlitCommandEncoder::copy(const std::shared_ptr<Texture>& source, const std::shared_ptr<Texture>& destination) {
-+	_keepAlive.push_back(source);
-+	_keepAlive.push_back(destination);
  	auto cmdbuf = _privateCommandBuffer.lock();
 -	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
 -	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
@@ -1927,7 +1925,7 @@ index e58f0ba..3e7c168 100644
  	size_t sourceMipLevel = SIZE_MAX;
  	size_t destMipLevel = SIZE_MAX;
  
-@@ -282,18 +317,19 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, st
+@@ -282,18 +315,19 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, st
  	copy(source, 0, sourceMipLevel, Origin { 0, 0, 0 }, destination, 0, destMipLevel, Origin { 0, 0, 0 }, sliceCount, mipCount, Size { source->width() / divisor, source->height() / divisor, source->depth() / divisor });
  };
  
@@ -1951,7 +1949,7 @@ index e58f0ba..3e7c168 100644
  	uint32_t value32 =
  		((uint32_t)value << 24) |
  		((uint32_t)value << 16) |
-@@ -314,8 +350,10 @@ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffe
+@@ -314,8 +348,10 @@ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffe
  	DynamicVK::vkCmdFillBuffer(cmdbuf->commandBuffer(), privateBuffer->buffer(), range.start, range.length, value32);
  };
  
@@ -1964,7 +1962,7 @@ index e58f0ba..3e7c168 100644
  	auto cmdbuf = _privateCommandBuffer.lock();
  
  	auto aspect = pixelFormatToVkImageAspectFlags(privateTexture->pixelFormat());
-@@ -439,5 +477,5 @@ void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_pt
+@@ -439,5 +475,5 @@ void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_pt
  };
  
  void Indium::PrivateBlitCommandEncoder::endEncoding() {

@@ -1,4 +1,4 @@
-"""Blit operands must live until the command buffer completes (#252).
+"""Blit operands must live until the command buffer completes.
 
 Metal retains the buffers and textures a blit uses, so callers may release them right after encoding. Indium has to
 hold them too, or the GPU copies from or into memory that was already freed.
