@@ -32,7 +32,7 @@ The canonical repository is `lucannez64/darling-lol`.
    - If the fast-forward fails, return to the starting branch, restore this run's stash, and report. Never reset main, rebase it or force push.
 3. Create the PR branch: `git checkout -b <type>/<slug>` from the updated main.
    - When step 1 found commits ahead of main, branch from the branch that holds them instead (`git checkout -b <type>/<slug> <branch>`) and merge the updated main into it, so those commits stay in the PR.
-   - Restore the stash only when step 2 created it, once the branch exists and any ahead commits are on it. When the tree was clean, skip `git stash pop` so an unrelated stash is neither applied nor dropped.
+   - Restore the stash only when step 2 created it, once the branch exists and any ahead commits are on it, with `git stash pop --index` so a partially staged tree comes back staged. When the tree was clean, skip it so an unrelated stash is neither applied nor dropped, and report a restore conflict instead of resolving it.
    - Types: `fix`, `feat`, `docs`, `tests`, `scripts`, `build`, `refactor`.
    - Slug: lowercase, hyphenated, at most five words (`fix/quiet-sudo-update`, `feat/patchkit`).
 4. Run the checks the change needs and report the result:
