@@ -12251,10 +12251,10 @@ index 24c037abc..cc18546ce 100644
  {
      if (verbose) puts("STUB: vDSP_zvmulD called");
 diff --git a/tools/shutdown-user.sh b/tools/shutdown-user.sh
-index 072a6e2..c804100 100755
+index 072a6e244..80f00398e 100755
 --- a/tools/shutdown-user.sh
 +++ b/tools/shutdown-user.sh
-@@ -1,26 +1,40 @@
+@@ -1,26 +1,61 @@
  #!/bin/sh
  
 -if [ "$(whoami)" != "root" ]
@@ -12283,6 +12283,20 @@ index 072a6e2..c804100 100755
 +    # cannot respond to shutdown and must be reaped by their parent.
 +    ps -eo pid=,stat=,args= | awk '$2 !~ /^Z/ && $3 == "/sbin/launchd" { print $1 }'
 +}
++
++# The prefix a launchd belongs to: its parent darlingserver's first argument.
++# `darling shutdown` without DPREFIX only reaches ~/.darling, so a prefix moved
++# elsewhere (darling-lol --set-prefix) would never stop. Prints nothing unless
++# the parent is darlingserver with an absolute prefix.
++server_prefix() {
++    parent=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]')
++    [ -n "$parent" ] || return 0
++    [ "$(cat "/proc/$parent/comm" 2>/dev/null)" = darlingserver ] || return 0
++    prefix=$(tr '\0' '\n' < "/proc/$parent/cmdline" 2>/dev/null | sed -n 2p)
++    case "$prefix" in
++        /*) printf '%s\n' "$prefix" ;;
++    esac
++}
  
 -while [ -n "$PID" ]
 -do
@@ -12303,8 +12317,15 @@ index 072a6e2..c804100 100755
 +    RUNNING_USER=$(ps -o uname= -p "$PID" | head -n1 | tr -d '[:space:]')
 +    # The process may have exited between enumeration and the owner query.
 +    if [ -n "$RUNNING_USER" ]; then
-+        echo "Darling currently running for $RUNNING_USER, shutting it down..."
-+        timeout 15s su --login "$RUNNING_USER" -c "darling shutdown" || true
++        PREFIX=$(server_prefix "$PID")
++        echo "Darling currently running for $RUNNING_USER${PREFIX:+ in $PREFIX}, shutting it down..."
++        # /bin/sh rather than the user's login shell (fish has no $1), and the
++        # prefix as an argument, never as shell text.
++        if [ -n "$PREFIX" ]; then
++            timeout 15s su -s /bin/sh --login "$RUNNING_USER" -c 'DPREFIX=$1 exec darling shutdown' darling-shutdown "$PREFIX" || true
++        else
++            timeout 15s su -s /bin/sh --login "$RUNNING_USER" -c 'exec darling shutdown' || true
++        fi
 +    fi
 +    attempts=$((attempts + 1))
 +    sleep 2
