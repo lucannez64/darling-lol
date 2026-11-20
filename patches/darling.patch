@@ -6947,7 +6947,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..84a478de0 100644
+index ffd7fe0..15e94e2 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -7212,9 +7212,19 @@ index ffd7fe054..84a478de0 100644
      g_displays = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
  }
  
-@@ -93,41 +294,71 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
+@@ -91,43 +292,151 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
+     return result;
+ }
  
++/* darling-lol Wayland (RCLOL_WAYLAND=1): once the Wayland display is up it owns
++ * the process's EGL state. The game process keeps an X11 connection for other
++ * things, so X11 registration and per-connection lookups must not replace it. */
++static int wayland_mode;
++static struct _CGLDisplay wayland_cgl_display;
++
  CGLError CGLRegisterNativeDisplay(void *native_display) {
++    if (wayland_mode)
++        return kCGLNoError;
  
 -    display = eglGetDisplay(native_display);
 +    ensure_native_egl();
@@ -7228,19 +7238,86 @@ index ffd7fe054..84a478de0 100644
 -    eglChooseConfig(display, attribute_list, &config, 1, &num_config);
 +    p_eglInitialize(display, NULL, NULL);
 +    chooseDefaultConfig(display, &config, &num_config, "CGLRegisterNativeDisplay");
++
++    p_eglBindAPI(EGL_OPENGL_API);
++
++    return kCGLNoError;
++}
++
++/* A config can back an OpenGL window surface: EGL_WINDOW_BIT and EGL_OPENGL_BIT. */
++static int configIsWindowGL(EGLDisplay disp, EGLConfig cfg) {
++    EGLint surface_type = 0, renderable = 0;
++    return cfg != NULL && p_eglGetConfigAttrib &&
++        p_eglGetConfigAttrib(disp, cfg, EGL_SURFACE_TYPE, &surface_type) &&
++        p_eglGetConfigAttrib(disp, cfg, EGL_RENDERABLE_TYPE, &renderable) &&
++        (surface_type & EGL_WINDOW_BIT) && (renderable & EGL_OPENGL_BIT);
++}
  
 -    eglBindAPI(EGL_OPENGL_API);
-+    p_eglBindAPI(EGL_OPENGL_API);
++static CGLError waylandDisplayFailed(EGLint error) {
++    fprintf(stderr, "darling-wayland: EGL Wayland display failed (0x%x)\n", (unsigned) error);
++    return kCGLBadConnection;
++}
  
++/* Only assigns the globals after every step succeeds; a failure leaves the
++ * previously registered display in place. */
++CGLError CGLRegisterNativeWaylandDisplay(void *wl_display) {
++    ensure_native_egl();
++    if (!p_eglGetPlatformDisplay || !p_eglInitialize || !p_eglChooseConfig || !p_eglBindAPI)
++        return waylandDisplayFailed(0);
++
++    EGLDisplay disp = p_eglGetPlatformDisplay(0x31D8 /* EGL_PLATFORM_WAYLAND_KHR */, wl_display, NULL);
++    if (disp == EGL_NO_DISPLAY)
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++    if (!p_eglInitialize(disp, NULL, NULL))
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++
++    EGLConfig cfg = NULL;
++    EGLint count = 0;
++    chooseDefaultConfig(disp, &cfg, &count, "CGLRegisterNativeWaylandDisplay");
++    if (!configIsWindowGL(disp, cfg)) {
++        /* The default query can pick a GLES1-only config; ask for an OpenGL window config. */
++        EGLConfig fallback = NULL;
++        EGLint fallback_count = 0;
++        if (p_eglChooseConfig(disp, gl_window_attribute_list, &fallback, 1, &fallback_count) &&
++            fallback_count > 0 && configIsWindowGL(disp, fallback)) {
++            cfg = fallback;
++            count = fallback_count;
++        } else {
++            cfg = NULL;
++        }
++    }
++    if (cfg == NULL)
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++
++    if (!p_eglBindAPI(EGL_OPENGL_API))
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++
++    display = disp;
++    config = cfg;
++    num_config = count;
++    wayland_cgl_display.display = disp;
++    wayland_cgl_display.config = cfg;
++    wayland_cgl_display.num_config = count;
++    wayland_mode = 1;
++
++    const char *vendor = p_eglQueryString ? p_eglQueryString(disp, EGL_VENDOR) : NULL;
++    fprintf(stderr, "darling-wayland: EGL on the Wayland display (vendor %s)\n", vendor ? vendor : "?");
      return kCGLNoError;
  }
  
++int CGLUsesWaylandDisplay(void) {
++    return wayland_mode;
++}
++
 +/* darling-lol M57: processes that create a CGL context without first calling
 + * CGLRegisterNativeDisplay (e.g. Chromium's GPU process) previously got
 + * display==0/config==0 and CGLCreateContext always failed. Lazily initialise a
 + * default EGL display so context creation can proceed. */
 +static void ensureDefaultDisplay(void) {
 +    ensure_native_egl();
++    if (wayland_mode)
++        return;
 +    if (display != EGL_NO_DISPLAY && display != NULL && config != NULL)
 +        return;
 +
@@ -7268,6 +7345,9 @@ index ffd7fe054..84a478de0 100644
      struct _CGLDisplay* rv;
  
 +    ensure_native_egl();
++    /* Wayland mode: reuse the registered Wayland display, not a per-connection X11 one. */
++    if (wayland_mode)
++        return &wayland_cgl_display;
      pthread_mutex_lock(&g_displaysMutex);
      rv = (struct _CGLDisplay*) CFDictionaryGetValue(g_displays, (const void*)(unsigned long) cid);
      pthread_mutex_unlock(&g_displaysMutex);
@@ -7292,7 +7372,7 @@ index ffd7fe054..84a478de0 100644
  
          pthread_mutex_lock(&g_displaysMutex);
          CFDictionaryAddValue(g_displays, (const void*)(unsigned long) cid, rv);
-@@ -139,6 +370,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
+@@ -139,6 +448,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
  
  CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid)
  {
@@ -7301,7 +7381,7 @@ index ffd7fe054..84a478de0 100644
      struct _CGLDisplay* disp = getCGLDisplay(cid);
      if (!disp)
          return kCGLBadConnection;
-@@ -152,7 +385,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -152,7 +463,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
      if (!window)
          return kCGLBadWindow;
  
@@ -7310,7 +7390,7 @@ index ffd7fe054..84a478de0 100644
      if (gl->egl_surface == EGL_NO_SURFACE)
          return kCGLBadState;
      return kCGLNoError;
-@@ -161,7 +394,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -161,7 +472,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
  CGLWindowRef CGLGetWindow(void *native_window) {
  
      EGLNativeWindowType window = (EGLNativeWindowType) native_window;
@@ -7319,13 +7399,34 @@ index ffd7fe054..84a478de0 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -170,15 +403,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +481,74 @@ CGLWindowRef CGLGetWindow(void *native_window) {
      return (CGLWindowRef) surface;
  }
  
++/* Wayland windows have no X visual to match: take the best config with at least
++ * 8 alpha bits, or the default config when there is none. */
++static CGLWindowRef waylandWindowWithAlpha(void *native_window) {
++    static EGLint const wayland_alpha_list[] = {
++        EGL_ALPHA_SIZE, 8,
++        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
++        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
++        EGL_NONE
++    };
++    EGLConfig alpha = NULL;
++    EGLint count = 0;
++    EGLSurface surface = EGL_NO_SURFACE;
++    if (p_eglChooseConfig(display, wayland_alpha_list, &alpha, 1, &count) && count > 0 && alpha != NULL)
++        surface = p_eglCreateWindowSurface(display, alpha, (EGLNativeWindowType) native_window, NULL);
++    if (surface == EGL_NO_SURFACE)
++        surface = p_eglCreateWindowSurface(display, config, (EGLNativeWindowType) native_window, NULL);
++    return surface == EGL_NO_SURFACE ? NULL : (CGLWindowRef) surface;
++}
++
 +/* The default config has no alpha, and NVIDIA rejects it on 32-bit windows (EGL_BAD_CONFIG).
 + * Translucent windows need an alpha config whose native visual is the window's. */
 +CGLWindowRef CGLGetWindowWithAlpha(void *native_window, unsigned long visual_id) {
++    if (wayland_mode)
++        return waylandWindowWithAlpha(native_window);
 +    static EGLint const alpha_attribute_list[] = {
 +        EGL_RED_SIZE, 1,
 +        EGL_GREEN_SIZE, 1,
@@ -7375,7 +7476,7 @@ index ffd7fe054..84a478de0 100644
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +469,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +568,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -7423,7 +7524,7 @@ index ffd7fe054..84a478de0 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +518,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +617,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -7438,7 +7539,7 @@ index ffd7fe054..84a478de0 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +548,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +647,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -7449,7 +7550,7 @@ index ffd7fe054..84a478de0 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -303,37 +604,99 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -303,37 +703,99 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
      return pixelFormat->retain_count;
  }
  
@@ -7552,7 +7653,7 @@ index ffd7fe054..84a478de0 100644
      return context;
  }
  
-@@ -342,11 +705,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +804,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -7573,7 +7674,7 @@ index ffd7fe054..84a478de0 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +723,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +822,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -7586,7 +7687,7 @@ index ffd7fe054..84a478de0 100644
  
      free(context);
  }
-@@ -384,8 +757,325 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -384,8 +856,327 @@ CGLError CGLUnlockContext(CGLContextObj context) {
  }
  
  CGLError CGLFlushDrawable(CGLContextObj context) {
@@ -7727,7 +7828,9 @@ index ffd7fe054..84a478de0 100644
 + * acknowledges suspension of CPU writes before the first GL swap. Fallback
 + * leaves the existing readback path available and restores all GL bindings. */
 +CGL_EXPORT int CGLPresentIOSurface(IOSurfaceRef surface) {
-+    if(!surface || !getenv("RCLOL_GPU_DIRECT_PRESENT") || IOSurfaceGetPlaneCount(surface)>1 ||
++    /* Its native present surface is an X11 window from the shared target; the
++     * Wayland display cannot take it, so report "not presented" in Wayland mode. */
++    if(wayland_mode || !surface || !getenv("RCLOL_GPU_DIRECT_PRESENT") || IOSurfaceGetPlaneCount(surface)>1 ||
 +       IOSurfaceGetBytesPerElement(surface)!=4)return 0;
 +    size_t width=IOSurfaceGetWidth(surface),height=IOSurfaceGetHeight(surface);
 +    if(width<256 || height<256)return 0;
@@ -7914,7 +8017,7 @@ index ffd7fe054..84a478de0 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -395,9 +1085,11 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -395,9 +1186,11 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
      if (parameter == kCGLCPSwapInterval)
      {
          GLint v = *value;
@@ -7928,7 +8031,7 @@ index ffd7fe054..84a478de0 100644
          return success ? kCGLNoError : kCGLBadValue;
      }
      fprintf(stderr, "CGLSetParameter unimplemented for parameter %d\n", parameter);
-@@ -417,14 +1109,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1210,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -7955,11 +8058,17 @@ index ffd7fe054..84a478de0 100644
 \ No newline at end of file
 +}
 diff --git a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
-index 1d0b10e65..5cdd9a89c 100644
+index 1d0b10e6..c09a8ba4 100644
 --- a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
 +++ b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
-@@ -14,8 +14,12 @@ typedef void *CGLWindowRef;
+@@ -12,10 +12,18 @@ extern "C" {
+ typedef void *CGLWindowRef;
+ 
  CGL_EXPORT CGLError CGLRegisterNativeDisplay(void *native_display);
++// Experimental (RCLOL_WAYLAND=1): EGL on a host wl_display. Once it succeeds, the
++// X11 registration and lookups keep this display. Window pointers are wl_egl_window*.
++CGL_EXPORT CGLError CGLRegisterNativeWaylandDisplay(void *wl_display);
++CGL_EXPORT int CGLUsesWaylandDisplay(void);
  
  CGL_EXPORT CGLWindowRef CGLGetWindow(void *native_window);
 +// A surface with an alpha channel, for a window created with the given 32-bit visual.

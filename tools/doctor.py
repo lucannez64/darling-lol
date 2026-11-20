@@ -49,6 +49,7 @@ ENV_ALLOWLIST = (
     'RCLOL_RECOVER_STALE_CLIENT',
     'RCLOL_CLIENT_IN_GAME_TRICKS',
     'RCLOL_HIDE_LEAGUE_SPLASH',
+    'RCLOL_WAYLAND',
     'DPREFIX',
     'DARLING_WORKSPACE',
     # PRIME render offload (docs/TROUBLESHOOTING.md, hybrid graphics laptops).
@@ -223,6 +224,43 @@ def runtime_dir(env=None):
     return next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
 
 
+# Built by the runtime build when the host Wayland packages exist (docs/SETUP.md).
+WAYLAND_LIBRARY = Path('build/libdarling-wayland.so')
+
+
+def wayland_socket_path(env):
+    """The socket rule of tools/run-riot-client.sh: an absolute WAYLAND_DISPLAY, else XDG_RUNTIME_DIR/name."""
+    display = env.get('WAYLAND_DISPLAY', '')
+    if display.startswith('/'):
+        return display
+    return '%s/%s' % (env.get('XDG_RUNTIME_DIR', ''), display or 'wayland-0')
+
+
+def wayland_library(env, here=None):
+    """Where the runtime build puts libdarling-wayland.so: the workspace, or the checkout around this file."""
+    here = Path(here or __file__).resolve()
+    roots = [Path(env['DARLING_WORKSPACE'])] if env.get('DARLING_WORKSPACE') else []
+    # tools/doctor.py -> checkout (parents[1]); build/runtime/tools/doctor.py -> checkout (parents[3]).
+    roots += [parent for index, parent in enumerate(here.parents) if index in (1, 3)]
+    for root in roots:
+        if (root / WAYLAND_LIBRARY).is_file():
+            return root / WAYLAND_LIBRARY
+    return (roots[0] if roots else here.parent) / WAYLAND_LIBRARY
+
+
+def wayland_facts(env):
+    socket = wayland_socket_path(env)
+    library = wayland_library(env)
+    return {
+        'requested': env.get('RCLOL_WAYLAND', ''),
+        'session_type': env.get('XDG_SESSION_TYPE', ''),
+        'socket': socket,
+        'socket_found': bool(socket) and Path(socket).is_socket(),
+        'library': str(library),
+        'library_found': library.is_file(),
+    }
+
+
 def active_switches(prefix, host_tmp=Path('/tmp')):
     """Names of the opt-in switch files that exist now, by kind."""
     guest_tmp = Path(prefix) / 'private/tmp'
@@ -395,6 +433,7 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'environment': {key: env[key] for key in ENV_ALLOWLIST if key in env},
         'trace_env': sorted(key for key, value in env.items() if value and TRACE_ENV.match(key)),
         'switches': active_switches(prefix, host_tmp),
+        'wayland': wayland_facts(env),
         'tools':{name: which(name) for name in ('xprop', 'xdpyinfo', 'vulkaninfo', 'dmesg', 'coredumpctl')},
     }
 
@@ -501,6 +540,25 @@ def check_session(facts):
     if session['display']:
         return 'ok', 'X11 (%s)' % session['display']
     return 'warn', 'No X11 DISPLAY; start the launcher from a desktop session'
+
+
+def check_wayland(facts):
+    """Experimental native Wayland game window. Informational: it never fails the doctor."""
+    wayland = facts.get('wayland') or {}
+    requested = wayland.get('requested', '')
+    session = (wayland.get('session_type') or '').lower() or 'unknown'
+    if requested not in ('', '0', '1', 'game'):
+        return 'warn', 'RCLOL_WAYLAND=%s is not 0, 1 or game; the launcher treats it as 0' % requested
+    if requested not in ('1', 'game') and session != 'wayland':
+        return 'ok', 'Experimental Wayland game window off (RCLOL_WAYLAND unset, %s session)' % session
+    socket_state = 'found' if wayland.get('socket_found') else 'missing'
+    library_state = 'found' if wayland.get('library_found') else 'missing'
+    details = ('RCLOL_WAYLAND=%s; %s session; socket %s (%s); library %s (%s)'
+               % (requested or 'unset', session, wayland.get('socket') or 'none', socket_state,
+                  wayland.get('library', ''), library_state))
+    if requested in ('1', 'game') and not (wayland.get('socket_found') and wayland.get('library_found')):
+        return 'warn', details + '; the game stays on X11 until both are present (docs/TROUBLESHOOTING.md)'
+    return 'ok', details
 
 
 def check_hud(facts):
@@ -620,6 +678,7 @@ CHECKS = (
     ('vulkan', 'Vulkan driver', check_vulkan),
     ('hybrid', 'Hybrid graphics', check_hybrid),
     ('session', 'Display session', check_session),
+    ('wayland', 'Experimental Wayland game window', check_wayland),
     ('hud', 'Overlay layer', check_hud),
     ('switches', 'Diagnostic switches', check_switches),
     ('core', 'Core dumps', check_core_dumps),

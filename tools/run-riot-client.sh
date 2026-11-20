@@ -262,6 +262,48 @@ case "$guest_home" in
  "$prefix"/*) guest_path=/${guest_home#"$prefix"/} ;;
  *) echo "RIOT_GUEST_HOME must be inside DPREFIX" >&2; exit 1 ;;
 esac
+# Experimental native Wayland, off by default. RCLOL_WAYLAND=1 covers the game window and the
+# League client and Riot Client windows (scope all); RCLOL_WAYLAND=game covers the game window
+# only (scope game), and the clients stay on Xwayland. The game process loads
+# libDarlingWayland.dylib next to libDarlingXShm.dylib and talks to the host compositor socket.
+# Native code uses host Linux paths, so the socket is passed unchanged (no /Volumes/SystemRoot).
+# Prints the socket for WAYLAND_DISPLAY $1 in XDG_RUNTIME_DIR $2; an absolute $1 is used as it is.
+wayland_socket_path() {
+ case "$1" in
+  /*) printf '%s\n' "$1" ;;
+  *) printf '%s/%s\n' "$2" "${1:-wayland-0}" ;;
+ esac
+}
+wayland_mode=${RCLOL_WAYLAND:-0}
+case "$wayland_mode" in
+ 0|'') wayland_mode=0 ;;
+ 1|game) ;;
+ *) echo "wayland: RCLOL_WAYLAND=$wayland_mode is not 0, 1 or game; treating it as 0" >&2; wayland_mode=0 ;;
+esac
+# Only the values below reach the guest; an inherited value must not survive a launch without them.
+unset RCLOL_WAYLAND_SOCKET RCLOL_WAYLAND_ACTIVATION_TOKEN RCLOL_WAYLAND_SCOPE
+wayland_socket=
+wayland_library=
+wayland_token=
+wayland_scope=
+if [ "$wayland_mode" != 0 ]; then
+ wayland_path=$(wayland_socket_path "${WAYLAND_DISPLAY:-}" "${XDG_RUNTIME_DIR:-}")
+ if [ -S "$wayland_path" ]; then
+  wayland_socket=$wayland_path
+  wayland_library=${DARLING_WAYLAND_LIBRARY:-$guest_path/libDarlingWayland.dylib}
+  # The activation token is short-lived; it is forwarded for xdg-activation focus and never printed.
+  wayland_token=${XDG_ACTIVATION_TOKEN:-}
+  if [ "$wayland_mode" = 1 ]; then
+   wayland_scope=all
+   echo "wayland: experimental native Wayland for the game and client windows (socket $wayland_path)" >&2
+  else
+   wayland_scope=game
+   echo "wayland: experimental native Wayland for the game window (socket $wayland_path)" >&2
+  fi
+ else
+  echo "wayland: RCLOL_WAYLAND=$wayland_mode but no Wayland socket at $wayland_path; the game stays on X11" >&2
+ fi
+fi
 # The client saves its locale in RiotClientSettings.yaml and prefers it over --locale, so
 # an explicit RCLOL_LOCALE is ignored once a session has run in another language. The
 # in-client language switch needs a self-restart, which closes the client under Darling,
@@ -448,6 +490,10 @@ exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}" \
   DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}" \
   DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}" \
+  ${wayland_socket:+RCLOL_WAYLAND_SOCKET="$wayland_socket"} \
+  ${wayland_socket:+RCLOL_WAYLAND_SCOPE="$wayland_scope"} \
+  ${wayland_socket:+DARLING_WAYLAND_LIBRARY="$wayland_library"} \
+  ${wayland_token:+RCLOL_WAYLAND_ACTIVATION_TOKEN="$wayland_token"} \
   "$darling_bin" "$A" --region="${RCLOL_REGION:-@REGION@}" --locale="${RCLOL_LOCALE:-@LOCALE@}" \
     "$@" \
     --log-dir="$guest_path/Library/Logs/Riot Games/Riot Client"

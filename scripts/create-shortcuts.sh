@@ -449,6 +449,8 @@ show_flag_reference() {
     "$BOLD" "$RESET"
   printf '  RCLOL_HIDE_LEAGUE_SPLASH=1        Hide the splash window that can appear over the client\n'
   printf '  RCLOL_CLIENT_IN_GAME_TRICKS=1     Close or hide the client automatically during a match\n'
+  printf '  RCLOL_WAYLAND=1                   Experimental: native Wayland for the game and client windows\n'
+  printf '  RCLOL_WAYLAND=game                Experimental: native Wayland for the game window only\n'
   printf '  RCLOL_CLOSE_CLIENT_IN_GAME=1      Close the League client during a match (low-level)\n'
   printf '  RCLOL_HIDE_CLIENT_IN_GAME=1       Hide the League client during a match (low-level)\n'
   printf '  RCLOL_HIDE_RIOT_CLIENT_IN_GAME=1  Hide the Riot Client during a match\n'

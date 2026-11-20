@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -54,6 +55,146 @@ class HostEnvFixture(unittest.TestCase):
                                 env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
+
+
+class WaylandGameWindow(HostEnvFixture):
+    """RCLOL_WAYLAND plumbing: the launcher's own block, then its guest `env` assignments."""
+    BLOCK = launcher_text('wayland_socket_path() {', '# The client saves its locale')
+    ASSIGNMENTS = launcher_text('  XMODIFIERS=', '  "$darling_bin" "$A"')
+    GUEST_PATH = '/.darling/guest'
+    SEEN = 'printf "%s\\n" "${RCLOL_WAYLAND_SOCKET-unset}" "${DARLING_WAYLAND_LIBRARY-unset}" ' \
+           '"${RCLOL_WAYLAND_ACTIVATION_TOKEN-unset}" "${RCLOL_WAYLAND_SCOPE-unset}"'
+    OFF = ['unset', 'unset', 'unset', 'unset']
+
+    def setUp(self):
+        super().setUp()
+        self.env_tool = shutil.which('env')
+
+    def listen(self, path):
+        """A real AF_UNIX socket file at path; the file stays after the server closes."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(server.close)
+        server.bind(str(path))
+        return str(path)
+
+    def launch(self, **env):
+        """Run the block and the guest env list; return (guest values, stderr)."""
+        script = Path(self.tmp.name) / 'wayland launch.sh'
+        script.write_text(
+            'set -eu\nguest_path=' + self.GUEST_PATH + '\n' + self.BLOCK +
+            self.env_tool + ' \\\n' + self.ASSIGNMENTS +
+            '  ' + SH + " -c '" + self.SEEN + "'\n")
+        base = {'PATH': str(self.bin), 'HOME': str(self.home)}
+        base.update(env)
+        result = subprocess.run([SH, str(script)], env=base, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines(), result.stderr
+
+    def test_unset_flag_passes_nothing_even_with_a_socket(self):
+        self.listen(self.runtime / 'wayland-1')
+        values, stderr = self.launch(WAYLAND_DISPLAY='wayland-1', XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(values, self.OFF)
+        self.assertEqual(stderr, '')
+
+    def test_inherited_guest_values_do_not_survive_when_the_flag_is_off(self):
+        values, _ = self.launch(RCLOL_WAYLAND='0', RCLOL_WAYLAND_SOCKET='/stale', XDG_RUNTIME_DIR=str(self.runtime),
+                                RCLOL_WAYLAND_ACTIVATION_TOKEN='stale', XDG_ACTIVATION_TOKEN='fresh')
+        self.assertEqual(values, self.OFF)
+
+    def test_flag_on_passes_the_host_socket_library_and_token(self):
+        socket_path = self.listen(self.runtime / 'wayland-1')
+        values, stderr = self.launch(RCLOL_WAYLAND='game', WAYLAND_DISPLAY='wayland-1',
+                                     XDG_RUNTIME_DIR=str(self.runtime), XDG_ACTIVATION_TOKEN='token-1')
+        self.assertEqual(values, [socket_path, self.GUEST_PATH + '/libDarlingWayland.dylib', 'token-1', 'game'])
+        self.assertEqual(stderr, 'wayland: experimental native Wayland for the game window '
+                                 '(socket %s)\n' % socket_path)
+        self.assertNotIn('token-1', stderr)
+
+    def test_flag_one_passes_scope_all_and_the_game_and_client_line(self):
+        socket_path = self.listen(self.runtime / 'wayland-1')
+        values, stderr = self.launch(RCLOL_WAYLAND='1', WAYLAND_DISPLAY='wayland-1',
+                                     XDG_RUNTIME_DIR=str(self.runtime), XDG_ACTIVATION_TOKEN='token-1')
+        self.assertEqual(values, [socket_path, self.GUEST_PATH + '/libDarlingWayland.dylib', 'token-1', 'all'])
+        self.assertEqual(stderr, 'wayland: experimental native Wayland for the game and client windows '
+                                 '(socket %s)\n' % socket_path)
+        self.assertNotIn('token-1', stderr)
+
+    def test_flag_game_passes_scope_game_with_the_game_only_line(self):
+        socket_path = self.listen(self.runtime / 'wayland-1')
+        values, stderr = self.launch(RCLOL_WAYLAND='game', WAYLAND_DISPLAY='wayland-1',
+                                     XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(values[0], socket_path)
+        self.assertEqual(values[3], 'game')
+        self.assertEqual(stderr, 'wayland: experimental native Wayland for the game window '
+                                 '(socket %s)\n' % socket_path)
+
+    def test_scope_is_removed_when_off_or_without_a_socket(self):
+        self.listen(self.runtime / 'wayland-1')
+        inherited = {'RCLOL_WAYLAND_SCOPE': 'all', 'XDG_RUNTIME_DIR': str(self.runtime),
+                     'WAYLAND_DISPLAY': 'wayland-1'}
+        values, stderr = self.launch(RCLOL_WAYLAND='0', **inherited)
+        self.assertEqual((values, stderr), (self.OFF, ''))
+        values, stderr = self.launch(**inherited)
+        self.assertEqual((values, stderr), (self.OFF, ''))
+        values, _ = self.launch(RCLOL_WAYLAND='game', RCLOL_WAYLAND_SCOPE='all', XDG_RUNTIME_DIR=str(self.runtime),
+                                WAYLAND_DISPLAY='wayland-missing')
+        self.assertEqual(values, self.OFF)
+        values, _ = self.launch(RCLOL_WAYLAND='1', RCLOL_WAYLAND_SCOPE='game', XDG_RUNTIME_DIR=str(self.runtime),
+                                WAYLAND_DISPLAY='wayland-missing')
+        self.assertEqual(values, self.OFF)
+
+    def test_game_without_a_socket_warns_and_passes_nothing(self):
+        path = self.runtime / 'wayland-1'
+        values, stderr = self.launch(RCLOL_WAYLAND='game', WAYLAND_DISPLAY='wayland-1',
+                                     XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(values, self.OFF)
+        self.assertEqual(stderr, 'wayland: RCLOL_WAYLAND=game but no Wayland socket at %s; '
+                                 'the game stays on X11\n' % path)
+
+    def test_absolute_display_is_used_as_it_is_and_the_default_name_is_wayland_0(self):
+        absolute = self.listen(Path(self.tmp.name) / 'compositor dir' / 'wl')
+        values, _ = self.launch(RCLOL_WAYLAND='1', WAYLAND_DISPLAY=absolute, XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(values[0], absolute)
+        default = self.listen(self.runtime / 'wayland-0')
+        values, _ = self.launch(RCLOL_WAYLAND='1', XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(values[0], default)
+
+    def test_missing_or_non_socket_path_warns_and_passes_nothing(self):
+        path = self.runtime / 'wayland-1'
+        expected = ('wayland: RCLOL_WAYLAND=1 but no Wayland socket at %s; the game stays on X11\n' % path)
+        for setup in (lambda: None, lambda: path.write_text('')):
+            setup()
+            values, stderr = self.launch(RCLOL_WAYLAND='1', WAYLAND_DISPLAY='wayland-1',
+                                         XDG_RUNTIME_DIR=str(self.runtime), XDG_ACTIVATION_TOKEN='token-1')
+            self.assertEqual(values, self.OFF)
+            self.assertEqual(stderr, expected)
+            path.unlink(missing_ok=True)
+
+    def test_other_values_warn_and_mean_off(self):
+        self.listen(self.runtime / 'wayland-1')
+        values, stderr = self.launch(RCLOL_WAYLAND='yes', WAYLAND_DISPLAY='wayland-1',
+                                     XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(values, self.OFF)
+        self.assertIn('RCLOL_WAYLAND=yes is not 0, 1 or game; treating it as 0', stderr)
+        values, stderr = self.launch(RCLOL_WAYLAND='Game', WAYLAND_DISPLAY='wayland-1',
+                                     XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual(values, self.OFF)
+        self.assertIn('RCLOL_WAYLAND=Game is not 0, 1 or game; treating it as 0', stderr)
+        values, stderr = self.launch(RCLOL_WAYLAND='', WAYLAND_DISPLAY='wayland-1',
+                                     XDG_RUNTIME_DIR=str(self.runtime))
+        self.assertEqual((values, stderr), (self.OFF, ''))
+
+    def test_library_path_can_be_overridden(self):
+        self.listen(self.runtime / 'wayland-1')
+        values, _ = self.launch(RCLOL_WAYLAND='1', WAYLAND_DISPLAY='wayland-1', XDG_RUNTIME_DIR=str(self.runtime),
+                                DARLING_WAYLAND_LIBRARY='/opt/custom/libDarlingWayland.dylib')
+        self.assertEqual(values[1], '/opt/custom/libDarlingWayland.dylib')
+
+    def test_the_guest_env_list_keeps_the_xshm_library_line(self):
+        self.assertIn('DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}"',
+                      self.ASSIGNMENTS)
 
 
 class XwaylandCookie(HostEnvFixture):
