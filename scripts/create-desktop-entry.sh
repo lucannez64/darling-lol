@@ -1,7 +1,8 @@
 #!/bin/sh
 # Create/update GNOME desktop entry and launcher icon.
 # --window-entries (or DARLING_LOL_WINDOW_ENTRIES=1) also creates the hidden
-# entries that give the League and Riot Client windows a name and icon.
+# entries that give the League client, game and Riot Client windows a name and
+# icon.
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"

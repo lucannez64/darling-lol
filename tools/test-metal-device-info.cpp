@@ -51,9 +51,23 @@ int main() {
 
 	// -[MTLDevice registryID]: never 0, like a real Mac.
 	{
-		bool ok = MTLDeviceInfo::kDefaultRegistryID != 0;
+		bool ok = MTLDeviceInfo::kDefaultRegistryID != 0
+		       && MTLDeviceInfo::registryIdFor(0, 0) != 0;
 		failures += !ok;
 		std::printf("%s registry ID is non-zero\n", ok ? "PASS" : "FAIL");
+	}
+
+	// Per-card registry IDs: distinct for the GPUs of a hybrid host, stable per card.
+	{
+		using MTLDeviceInfo::registryIdFor;
+		bool ok = registryIdFor(0x1002, 0x73ff) == registryIdFor(0x1002, 0x73ff)
+		       && registryIdFor(0x1002, 0x73ff) != registryIdFor(0x10de, 0x2503)
+		       && registryIdFor(0x8086, 0x9a49) != registryIdFor(0x10de, 0x2520)
+		       && registryIdFor(0x1002, 0x164e) != registryIdFor(0x1002, 0x744c)
+		       && registryIdFor(0x1002, 0x73ff) >= MTLDeviceInfo::kRegistryIdBase
+		       && registryIdFor(0x1002, 0x73ff) < MTLDeviceInfo::kRegistryIdBase + MTLDeviceInfo::kRegistryIdSlots;
+		failures += !ok;
+		std::printf("%s per-card registry ID\n", ok ? "PASS" : "FAIL");
 	}
 
 	// DARLING_METAL_GPU_NAME override.
@@ -65,14 +79,17 @@ int main() {
 		std::printf("%s name override\n", ok ? "PASS" : "FAIL");
 	}
 
-	// DARLING_METAL_MAC_GPU_NAME: MacBookPro16,1 GPUs for AMD and Intel hosts; NVIDIA keeps its name.
+	// DARLING_METAL_MAC_GPU_NAME: MacBookPro16,1 GPUs; AMD and NVIDIA hosts present its
+	// Radeon Pro 5500M, Intel its UHD Graphics 630; software devices keep their name.
 	{
 		using MTLDeviceInfo::macGpuName;
 		bool ok = std::string(macGpuName(0x1002)) == "AMD Radeon Pro 5500M"
 		       && std::string(macGpuName(0x8086)) == "Intel UHD Graphics 630"
-		       && macGpuName(0x10de) == nullptr
+		       && std::string(macGpuName(0x10de)) == "AMD Radeon Pro 5500M"
+		       && macGpuName(0x10005) == nullptr
 		       && MTLDeviceInfo::resolveName(nullptr, "AMD Radeon RX 6600 (RADV NAVI23)", macGpuName(0x1002)) == "AMD Radeon Pro 5500M"
-		       && MTLDeviceInfo::resolveName(nullptr, "NVIDIA GeForce GTX 1060 6GB", macGpuName(0x10de)) == "NVIDIA GeForce GTX 1060 6GB"
+		       && MTLDeviceInfo::resolveName(nullptr, "NVIDIA GeForce GTX 1060 6GB", macGpuName(0x10de)) == "AMD Radeon Pro 5500M"
+		       && MTLDeviceInfo::resolveName(nullptr, "llvmpipe (LLVM 22.1.0, 256 bits)", macGpuName(0x10005)) == "llvmpipe"
 		       && MTLDeviceInfo::resolveName("My GPU", "AMD Radeon RX 6600 (RADV NAVI23)", macGpuName(0x1002)) == "My GPU";
 		failures += !ok;
 		std::printf("%s Mac GPU name\n", ok ? "PASS" : "FAIL");

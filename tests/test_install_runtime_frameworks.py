@@ -23,6 +23,11 @@ class InstallRuntimeFrameworkTests(unittest.TestCase):
         sign = (ROOT / 'tools/sign-darling-runtime.sh').read_text()
         self.assertIn('make -C $here/dc-codesign', sign)
 
+    def test_existing_prefixes_normalize_system_version_after_stopping_runtime(self):
+        stop = self.script.index('stop-darling-runtime.py')
+        normalize = self.script.index('configure-darling-platform.py --prefix "$prefix_dir" --normalize-system-version --write')
+        self.assertLess(stop, normalize)
+
 
 if __name__ == '__main__':
     unittest.main()

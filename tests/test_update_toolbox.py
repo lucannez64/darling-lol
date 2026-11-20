@@ -1,9 +1,4 @@
-"""Unit coverage for the Toolbox re-exec block in scripts/update.sh.
-
-The real update.sh runs in a temporary repo (only scripts/update.sh is needed:
-every re-exec path exits through the fake toolbox, and the remaining paths exit
-at the "No existing build" check), with a fake `toolbox` binary first on PATH.
-"""
+"""Exercise updater re-exec and step handling in a disposable checkout."""
 import os
 import shutil
 import subprocess
@@ -73,11 +68,11 @@ class UpdateToolboxTests(unittest.TestCase):
         self.env.pop('DARLING_WORKSPACE', None)
         self.env.pop('DARLING_LOL_UPDATE_REEXEC', None)
 
-    def run_update(self, **overrides):
+    def run_update(self, *args, **overrides):
         env = dict(self.env)
         env.update(overrides)
         return subprocess.run(
-            [SH, str(self.repo / 'scripts' / 'update.sh')],
+            [SH, str(self.repo / 'scripts' / 'update.sh'), *args],
             capture_output=True, text=True, check=False, env=env,
         )
 
@@ -190,6 +185,132 @@ class UpdateToolboxTests(unittest.TestCase):
         result = self.run_update(DARLING_WORKSPACE='/nix/store/abc/share/darling-lol')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.argv_lines(), [])
+
+    def test_verbose_flag_is_forwarded_to_the_container(self):
+        self.write_marker('mycont')
+        result = self.run_update('--verbose', FAKE_TOOLBOX_CONTAINER_OK='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'{REEXEC_ARGV.format(name="mycont", repo=self.repo)} --verbose',
+                      self.argv_lines())
+
+    def test_help_exits_without_touching_the_container(self):
+        result = self.run_update('--help')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--verbose', result.stdout)
+        self.assertEqual(self.argv_lines(), [])
+
+    def test_unknown_option_is_rejected(self):
+        result = self.run_update('--bogus')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Unknown option: --bogus', result.stderr)
+        self.assertEqual(self.argv_lines(), [])
+
+    def stub(self, path, body):
+        path.write_text('#!/bin/sh\n' + body + '\n')
+        path.chmod(0o755)
+
+    def prepare_stub_update(self, build_exit=0):
+        (self.repo / 'build/darling-src/build').mkdir(parents=True)
+        self.write_native_marker()
+        self.stub(self.repo / 'scripts/build.sh',
+                  f'echo build-diagnostic >&2\nexit {build_exit}')
+        self.stub(self.repo / 'scripts/install-runtime.sh', 'echo overlay-ran')
+        self.stub(self.bindir / 'python3', 'exit 0')
+        self.stub(self.bindir / 'sudo', 'echo sudo-foreground')
+        # A privileged command must never go through the detachment wrapper.
+        self.stub(self.bindir / 'setsid',
+                  'if [ "$1" = sudo ]; then exit 97; fi\nexec "$@"')
+
+    def test_quiet_update_preserves_failure_and_its_saved_log(self):
+        self.prepare_stub_update(build_exit=23)
+        cache = self.home / '.cache'
+        result = self.run_update(XDG_CACHE_HOME=str(cache))
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn('build-diagnostic', result.stderr)
+        self.assertNotIn('sudo-foreground', result.stdout)
+        logs = list(cache.glob('darling-lol-update.*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertIn(f'Full log: {logs[0]}', result.stderr)
+
+    def test_quiet_update_streams_failure_if_cache_cannot_be_created(self):
+        self.prepare_stub_update(build_exit=23)
+        result = self.run_update(XDG_CACHE_HOME='/dev/null/no-cache')
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn('build-diagnostic', result.stderr)
+        self.assertIn('No update log was saved.', result.stderr)
+        self.assertNotIn('Full log:', result.stderr)
+
+    def test_quiet_update_logs_sudo_output_after_terminal_auth(self):
+        self.prepare_stub_update()
+        sudo_log = self.home / 'sudo-argv.log'
+        self.stub(self.bindir / 'sudo',
+                  f'printf "%s\\n" "$*" >> "{sudo_log}"\n'
+                  '[ "$1" = -v ] || echo sudo-install-output')
+        cache = self.home / '.cache'
+        result = self.run_update(XDG_CACHE_HOME=str(cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('sudo-install-output', result.stdout)
+        self.assertIn('Log:', result.stdout)
+        logs = list(cache.glob('darling-lol-update.*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertIn('sudo-install-output', logs[0].read_text())
+        calls = sudo_log.read_text().splitlines()
+        self.assertEqual(calls[0], '-v')
+        self.assertIn('-n cmake --install build/darling-src/build', calls)
+
+    def test_verbose_update_streams_sudo_output(self):
+        self.prepare_stub_update()
+        result = self.run_update('--verbose')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('sudo-foreground', result.stdout)
+
+    def test_quiet_update_surfaces_overlay_signing_warning(self):
+        self.prepare_stub_update()
+        self.stub(self.repo / 'scripts/install-runtime.sh',
+                  'echo "WARNING: the darling-lol runtime is NOT signed." >&2\nexit 0')
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('user runtime overlays were NOT signed', result.stderr)
+
+    def test_update_signs_non_writable_sdk_under_sudo(self):
+        self.prepare_stub_update()
+        sdk = self.home / 'readonly-sdk'
+        sdk.mkdir()
+        sdk.chmod(0o555)
+        self.addCleanup(sdk.chmod, 0o755)
+        (self.repo / 'tools/dc-codesign').mkdir(parents=True)
+        self.stub(self.repo / 'tools/dc-codesign/dc-codesign', 'exit 0')
+        self.stub(self.repo / 'tools/sign-darling-runtime.sh', 'exit 0')
+        rcodesign = self.home / '.local/bin/rcodesign'
+        rcodesign.parent.mkdir(parents=True)
+        self.stub(rcodesign, 'exit 0')
+        sudo_log = self.home / 'sudo.log'
+        self.stub(self.bindir / 'sudo',
+                  f'printf "%s\\n" "$*" >> "{sudo_log}"\n'
+                  'if [ "${FAKE_SUDO_SIGN_FAIL:-0}" = 1 ] && [ "$1" = env ]; then exit 1; fi\n'
+                  'exit 0')
+        # Exclude any host rcodesign from PATH so resolve_rcodesign exercises $HOME/.local/bin.
+        clean_path = os.pathsep.join(
+            entry for entry in self.env['PATH'].split(os.pathsep)
+            if not (Path(entry) / 'rcodesign').is_file()
+        )
+
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'),
+                                 DARLING_SDK_DIR=str(sdk), PATH=clean_path, RCODESIGN='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = sudo_log.read_text().splitlines()
+        self.assertTrue(
+            any(f'env RCODESIGN={rcodesign} sh {self.repo}/tools/sign-darling-runtime.sh --sdk --quiet' == line
+                for line in calls),
+            calls,
+        )
+
+        # A failing SDK sign warns prominently instead of staying silent.
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'),
+                                 DARLING_SDK_DIR=str(sdk), PATH=clean_path, RCODESIGN='',
+                                 FAKE_SUDO_SIGN_FAIL='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Base Darling SDK signing failed', result.stderr)
 
 
 if __name__ == '__main__':

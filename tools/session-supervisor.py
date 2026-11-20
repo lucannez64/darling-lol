@@ -20,6 +20,11 @@ stops the session once a managed League/Riot window has been absent for N
 seconds and no game process is running. It is off by default and never stops
 when the window state cannot be read.
 
+Riot Client self-update: after updating itself the Riot Client launcher starts
+a new RiotClientServices with --restart-timestamp and exits 0, which ends the
+loader. While that relaunched client runs, the supervisor keeps the session
+instead of shutting the runtime down under it.
+
 A failed client exit is reported with its status, and, when --guest-log names
 the client's log directory, with the last available line of its newest log file, labelled as possibly historical. That
 turns a bare "runtime and guest processes are gone" into the reason the guest
@@ -40,6 +45,15 @@ log shows UX_PROCESS_BOOTSTRAP_COMPLETE without "Ux reports successful load"
 (PUT /riotclient/ux-load-complete), and LeagueClient hides the splash itself.
 RCLOL_FINISH_LEAGUE_LOAD=0 turns this off.
 
+Toolbox: when the project is installed with `--toolbox`, the launcher runs
+inside a Fedora Toolbox container that `toolbox run` leaves running after the
+command exits. The supervisor therefore stops its own host container as the
+last cleanup step, once the guest session is gone. Sessions that share the
+container register with each other, so only the last one stops it. A container
+started from an interactive `toolbox enter` shell is left alone, because the
+shell that runs the launcher would end with it. RCLOL_STOP_TOOLBOX=0 turns this
+off.
+
 Set RCLOL_CLEAN_ON_EXIT=0 to keep the previous behaviour: the runtime is left
 alone when the launcher exits.
 
@@ -49,21 +63,47 @@ Usage (from run-riot-client.sh):
         -- python3 exec-guest.py env ... darling ...
 """
 import argparse
+import fcntl
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 SOCK_VARIABLE = b'__mldr_sockpath'
 SOCK_NAME = '.darlingserver.sock'
 GAME_NAME = 'LeagueofLegends'
+RIOT_CLIENT_NAME = 'RiotClientServices'
+RESTART_FLAG = '--restart-timestamp'
 CLIENT_CLASSES = ('leagueclientux', 'riot client')
 POLL_SECONDS = 2.0
 TERM_GRACE = 5.0
 KILL_GRACE = 5.0
+# Toolbox leaves the first marker inside its containers; Podman writes the
+# engine metadata, including the container ID that names its systemd scope, to
+# the second one. A shell that started the launcher means `toolbox enter`: the
+# container belongs to that interactive session, not to this launch.
+TOOLBOX_MARKER = Path('/run/.toolboxenv')
+CONTAINER_ENV = Path('/run/.containerenv')
+INTERACTIVE_SHELLS = ('bash', 'dash', 'fish', 'ksh', 'sh', 'zsh')
+# Sessions that share one Toolbox container register below a per-container
+# directory and hold a lock for their lifetime, so only the last one stops it.
+SESSION_PREFIX = 'session-'
+REGISTRY_LOCK = 'registry.lock'
+STOP_REQUESTED = 'stop-requested'
+STOP_QUEUED = 'stop-queued'
+LAUNCHER_HELPERS = frozenset((
+    'close-league-client-in-game.py',
+    'hide-league-client-in-game.py',
+    'hide-league-splash-window.py',
+))
+# The helpers are installed next to this supervisor. The guest shares the host
+# process table, so a same-named script from another checkout is different work.
+LAUNCHER_DIR = Path(__file__).resolve().parent
+TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 def log(message, out=sys.stdout):
@@ -333,6 +373,291 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
     return remaining
 
 
+def container_metadata(marker=TOOLBOX_MARKER, containerenv=CONTAINER_ENV):
+    """(name, id) of the Toolbox container hosting this process, or None.
+
+    Only a Toolbox container qualifies: `/run/.containerenv` exists in every
+    Podman container, but a native install inside an ordinary container must
+    not stop it. The ID is validated as hexadecimal because it becomes part of
+    a systemd unit name.
+    """
+    try:
+        if not marker.exists():
+            return None
+        lines = containerenv.read_text(errors='replace').splitlines()
+    except OSError:
+        return None
+    values = {}
+    for line in lines:
+        key, separator, value = line.partition('=')
+        if separator:
+            values[key.strip()] = value.strip().strip('"')
+    container_id = values.get('id', '').lower()
+    if not container_id or any(char not in '0123456789abcdef' for char in container_id):
+        return None
+    return values.get('name') or container_id, container_id
+
+
+def started_by_shell(proc_root=Path('/proc'), pid=None):
+    """True when a shell launched this process, as `toolbox enter` does.
+
+    `toolbox run` starts the launcher as the container's exec command, so the
+    supervisor is the direct child of the exec session. A shell parent means a
+    human owns the container: stopping it would close that shell too.
+    """
+    info = process_info(proc_root / str(os.getpid() if pid is None else pid))
+    if info is None or info[1] <= 1:
+        return False
+    names = command_names(proc_root / str(info[1]))
+    if not names:
+        return False
+    # A login shell is exposed as `-bash` in argv[0]; the leading hyphen marks
+    # the login mode and is not part of the program name.
+    return os.path.basename(names[0]).lstrip('-') in INTERACTIVE_SHELLS
+
+
+def ignore_termination_signals():
+    """Ignore termination signals; return the handlers to restore.
+
+    A queued `systemctl --user stop` reaches every process in the container's
+    systemd scope, this supervisor included. Once the stop is queued, ignoring
+    those signals lets the supervisor exit normally, so its child's exit status
+    reaches the launcher instead of a signal status.
+    """
+    previous = {}
+    for signum in TERMINATION_SIGNALS:
+        try:
+            previous[signum] = signal.signal(signum, signal.SIG_IGN)
+        except (OSError, ValueError):
+            pass
+    return previous
+
+
+def restore_termination_signals(previous):
+    """Put back the handlers saved by ignore_termination_signals()."""
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, ValueError):
+            pass
+
+
+def stop_container(container, run=subprocess.run, out=sys.stdout, timeout=10):
+    """Stop this session's Toolbox container as the last cleanup step.
+
+    `podman stop` is unavailable inside the Toolbox image, and the container
+    lives in a host systemd user scope named after its ID. `--no-block` queues
+    the stop and returns: the scope contains this process, so the supervisor
+    ends with the container. Termination signals are ignored from the moment
+    the stop is queued, because the queued stop also signals this process;
+    otherwise it would die before returning the child's exit status. A stop
+    that was not queued restores the previous handlers.
+    """
+    name, container_id = container
+    unit = 'libpod-%s.scope' % container_id
+    previous = ignore_termination_signals()
+    try:
+        result = run(['systemctl', '--user', '--no-block', 'stop', unit],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as error:
+        restore_termination_signals(previous)
+        log('could not stop Toolbox container %s (%s); stop it with '
+            "'podman stop %s'" % (name, error, name), out)
+        return False
+    status = getattr(result, 'returncode', 0)
+    if status != 0:
+        restore_termination_signals(previous)
+        log('could not stop Toolbox container %s (systemctl exited with %d); '
+            "stop it with 'podman stop %s'" % (name, status, name), out)
+        return False
+    log('stopping Toolbox container %s' % name, out)
+    return True
+
+
+def session_registry(container_id, base=None):
+    """Directory where the sessions sharing one Toolbox container register."""
+    root = Path('/run/user') / str(os.getuid()) if base is None else Path(base)
+    return root / 'darling-lol-toolbox' / container_id
+
+
+def in_container_scope(proc, unit):
+    try:
+        return any(line.startswith('0::') and unit in Path(line[3:]).parts
+                   for line in (proc / 'cgroup').read_text().splitlines())
+    except OSError:
+        return False
+
+
+def launcher_helper(script):
+    """True when `script` is one of the helpers installed beside this module."""
+    try:
+        return Path(script).resolve().parent == LAUNCHER_DIR
+    except (OSError, RuntimeError):
+        return False
+
+
+def toolbox_state(container_id, proc_root):
+    """Return the live Toolbx init identity and whether its scope is idle."""
+    unit = 'libpod-%s.scope' % container_id
+    if not in_container_scope(proc_root / 'self', unit):
+        return None, False
+    instance = None
+    idle = True
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
+            continue
+        if not in_container_scope(proc, unit):
+            continue
+        info = process_info(proc)
+        if info is not None and info[0] in ('Z', 'X'):
+            continue
+        args = command_line(proc)
+        if (info is not None and args and Path(args[0]).name == 'toolbox'
+                and 'init-container' in args[1:]):
+            # Both the mount namespace inode and PID can be reused at restart.
+            instance = '%s:%d' % (proc.name, info[2])
+            continue
+        if (len(args) > 1 and Path(args[0]).name.startswith('python')
+                and Path(args[1]).name in LAUNCHER_HELPERS
+                and launcher_helper(args[1])):
+            continue
+        # Other supervisors serialize through the registry. A finisher can
+        # still be returning its status after it removes its registration.
+        if (len(args) > 1 and Path(args[0]).name.startswith('python')
+                and Path(args[1]).name == 'session-supervisor.py'):
+            continue
+        idle = False
+    return instance, idle
+
+
+class ContainerStopping(Exception):
+    """A previous supervisor already queued a stop for this instance."""
+
+
+class ContainerSessions:
+    """Registration of the sessions that share one Toolbox container.
+
+    `toolbox run` leaves the container running, but several launches can use
+    the same container. Each supervisor registers before starting its child
+    and holds an advisory lock on its own file for the session's lifetime, so
+    the session that ends last is the one that stops the container. The final
+    stop decision and unregistering use the same lock. A finished runtime
+    owner can authorize the last attached session to stop the container.
+    The Toolbx init PID and start time identify each running instance.
+    """
+
+    def __init__(self, container_id, base=None, proc_root=Path('/proc')):
+        self.container_id = container_id
+        self.directory = session_registry(container_id, base)
+        self.proc_root = proc_root
+        self.path = None
+        self.handle = None
+
+    def register(self):
+        """Register this session; False when the registry is unusable."""
+        handle = None
+        try:
+            self.directory.parent.mkdir(mode=0o700, exist_ok=True)
+            self.directory.mkdir(mode=0o700, exist_ok=True)
+            with open(self.directory / REGISTRY_LOCK, 'a+') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                queued = self.directory / STOP_QUEUED
+                if queued.exists():
+                    instance, _idle = toolbox_state(self.container_id, self.proc_root)
+                    if instance is None:
+                        return False
+                    if queued.read_text() == instance:
+                        raise ContainerStopping
+                    queued.unlink()
+                pending = self.directory / STOP_REQUESTED
+                if pending.exists() and not self.active_sessions():
+                    pending.unlink()
+                handle = tempfile.NamedTemporaryFile(
+                    prefix=SESSION_PREFIX, dir=str(self.directory), delete=False)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            if handle is not None:
+                handle.close()
+            return False
+        self.handle, self.path = handle, Path(handle.name)
+        return True
+
+    def finish(self, container, *, request_stop, stoppable,
+               run=subprocess.run, out=sys.stdout):
+        """Stop `container` only when no other session is still using it."""
+        if self.path is None:
+            return False
+        try:
+            with open(self.directory / REGISTRY_LOCK, 'a+') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                self.release()
+                pending = self.directory / STOP_REQUESTED
+                if request_stop:
+                    pending.touch()
+                if self.active_sessions():
+                    return False
+                if not pending.exists():
+                    return False
+                pending.unlink()
+                instance, idle = toolbox_state(self.container_id, self.proc_root)
+                if not stoppable or instance is None or not idle:
+                    log('leaving Toolbox container %s running' % container[0], out)
+                    return False
+                queued = self.directory / STOP_QUEUED
+                queued.write_text(instance)
+                if stop_container(container, run=run, out=out):
+                    return True
+                queued.unlink()
+                return False
+        except OSError as error:
+            log('could not read the Toolbox session registry (%s); leaving the '
+                "container running; stop it with 'podman stop %s'"
+                % (error, container[0]), out)
+            return False
+        finally:
+            self.release()
+
+    def active_sessions(self):
+        """Registered sessions, other than this one, that still hold a lock."""
+        active = []
+        for entry in sorted(self.directory.iterdir()):
+            if entry == self.path or not entry.name.startswith(SESSION_PREFIX):
+                continue
+            try:
+                fd = os.open(entry, os.O_RDONLY)
+            except FileNotFoundError:
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    active.append(entry.name)
+                else:
+                    try:
+                        entry.unlink()  # the session that owned it is gone
+                    except OSError:
+                        pass
+            finally:
+                os.close(fd)
+        return active
+
+    def release(self):
+        """Forget this session; leftovers are removed by the next check."""
+        handle, self.handle = self.handle, None
+        path, self.path = self.path, None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        if path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
 def newest_guest_log(directory, pattern='*.log'):
     """Newest log file below directory, or None when there is none."""
     if not directory:
@@ -556,6 +881,25 @@ def session_members(prefix, namespace, proc_root=Path('/proc'), own_namespace=No
     return prefix_only(prefix, proc_root)
 
 
+def restarted_riot_client(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
+    """True when the Riot Client relaunched itself and the new process runs.
+
+    After a self-update the Riot Client launcher spawns a new
+    RiotClientServices with --restart-timestamp, then exits 0. The loader the
+    supervisor started exits with it, but the session lives on in that new
+    process.
+    """
+    for _pid, proc in session_members(prefix, namespace, proc_root, own_namespace):
+        info = process_info(proc)
+        if info is None or info[0] == 'Z':
+            continue
+        argv = command_line(proc)
+        if (any(os.path.basename(part) == RIOT_CLIENT_NAME for part in argv[:2])
+                and any(part.startswith(RESTART_FLAG) for part in argv[1:])):
+            return True
+    return False
+
+
 def league_game_present(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
     """True unless /proc proves no game runs; unknown counts as running."""
     if any(GAME_NAME in command_names(proc)
@@ -647,19 +991,39 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    proc_root=Path('/proc'), run=subprocess.run, kill=os.kill,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
                    own_namespace=None, runtime_at_start=None, guest_log=None,
-                   league_exit=None, league_load=None):
+                   league_exit=None, league_load=None, container=None,
+                   stoppable=True, session_base=None):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
     while a session is alive attaches to that server, and must not shut it down
-    when its own loader exits.
+    when its own loader exits. `container` names the Toolbox container this
+    session shares, and `stoppable` says whether the container may be stopped
+    when this is the last session using it; both stay unused for a native
+    session.
     """
     if not clean:
         os.execvp(command[0], command)
     owns_runtime = (runtime_at_start == 'stopped' if runtime_at_start is not None
                     else not runtime_alive(prefix, proc_root))
+    sessions = None
+    if container is not None:
+        sessions = ContainerSessions(container[1], base=session_base, proc_root=proc_root)
+        try:
+            registered = sessions.register()
+        except ContainerStopping:
+            log('Toolbox container %s is stopping; retry the launch' % container[0], out)
+            return 1
+        if not registered:
+            log('could not register this session for Toolbox container %s; '
+                'it will be left running' % container[0], out)
     namespace = None
-    child = subprocess.Popen(command, start_new_session=True)
+    try:
+        child = subprocess.Popen(command, start_new_session=True)
+    except OSError:
+        if sessions is not None:
+            sessions.release()
+        raise
     def signal_child(signum):
         try:
             if os.getpgid(child.pid) != child.pid:
@@ -686,8 +1050,27 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     if league_load is None:
         league_load = os.environ.get('RCLOL_FINISH_LEAGUE_LOAD', '1') != '0'
     load_watch = LeagueLoadWatch(prefix) if league_load else None
+    following = []
+
+    def session_running():
+        if child.poll() is None:
+            return True
+        # A Riot Client self-update ends the loader with status 0 and leaves
+        # the relaunched client running; stopping the runtime now would kill
+        # it and the player would have to launch twice.
+        if not owns_runtime or child.returncode != 0:
+            return False
+        if not restarted_riot_client(prefix, namespace or prefix_namespace(prefix, proc_root),
+                                     proc_root, own_namespace):
+            return False
+        if not following:
+            following.append(True)
+            log('Riot Client restarted itself after an update; '
+                'following the new client process', out)
+        return True
+
     try:
-        while child.poll() is None and not stop:
+        while session_running() and not stop:
             # Learn the guest namespace while the session runs: after a crash
             # the processes that still carry the socket may be the only proof.
             if namespace is None:
@@ -757,6 +1140,12 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                             own_namespace=own_namespace, note=note)
     if stop:
         log('interrupted by signal %d' % stop[0], out)
+    if sessions is not None and sessions.path is not None:
+        # A different finisher can stop the scope as soon as we unregister.
+        # This process has finished its work and is about to return the status.
+        ignore_termination_signals()
+        sessions.finish(container, request_stop=owns_runtime and stoppable,
+                        stoppable=stoppable, run=run, out=out)
     # A surviving guest process is a failed cleanup, not a clean exit.
     return (status or 1) if remaining else status
 
@@ -798,9 +1187,16 @@ def main(argv=None):
     if not command:
         parser.error('a command is required after --')
     clean = not args.no_clean and os.environ.get('RCLOL_CLEAN_ON_EXIT', '1') != '0'
+    # The registry keeps every session that shares the container visible, even
+    # when this one must not stop it (an interactive shell, or opt-out).
+    container = container_metadata()
+    stoppable = (container is not None
+                 and os.environ.get('RCLOL_STOP_TOOLBOX', '1') != '0'
+                 and not started_by_shell())
     return run_supervised(command, prefix, args.darling, stop_after=max(0, args.stop_after),
                           clean=clean, runtime_at_start=args.runtime_at_start,
-                          guest_log=args.guest_log)
+                          guest_log=args.guest_log, container=container,
+                          stoppable=stoppable)
 
 
 if __name__ == '__main__':

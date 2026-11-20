@@ -127,19 +127,48 @@ struct linux_utsname* need_uname(void) {
 mach_port_t mach_host_self(void) { return 1; }
 mach_port_t mach_task_self(void) { return 1; }
 kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name) { (void)task; (void)name; return 0; }
-kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count) {
-    (void)host; (void)itype;
-    struct host_basic_info* reply = hinfo;
+#define SENTINEL_MEMORY (64ULL << 30) // "host" memory: 64 GiB
+static void sentinel_reply(struct host_basic_info* reply) {
     *reply = (struct host_basic_info) { 0 };
     reply->avail_cpus = 99;
     reply->max_cpus = 99;
+    reply->memory_size = 0x80000000u;
     reply->physical_cpu = 99;
     reply->physical_cpu_max = 99;
     reply->logical_cpu = 99;
     reply->logical_cpu_max = 99;
     reply->cpu_type = 7;
-    *count = 8; // the legacy reply size
+    reply->max_mem = SENTINEL_MEMORY;
+}
+// The raw darlingserver reply (libsyscall wraps host_info() around it).
+static int rpc_fail = 0; // the next raw RPCs fail without touching the buffer
+kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count) {
+    (void)host; (void)itype;
+    if (rpc_fail)
+        return 5; // KERN_FAILURE
+    sentinel_reply(hinfo);
+    *count = HOST_BASIC_INFO_COUNT;
     return 0;
+}
+
+// sysctl_hw.c: what libsyscall's host_info wrapper writes into a reply.
+void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count);
+
+// dyld calls host_info(HOST_BASIC_INFO) before libc exists, so nothing the
+// wrapper reaches may call getenv() (a NULL-environ getenv crashed launchd at
+// boot). This getenv interposes libc's and fails the check while forbidden.
+extern char** environ;
+static int forbid_getenv = 0;
+char* getenv(const char* name) {
+    if (forbid_getenv) {
+        fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=host_info path called getenv(\"%s\")\n", name);
+        exit(1);
+    }
+    size_t len = strlen(name);
+    for (char** entry = environ; entry != NULL && *entry != NULL; ++entry)
+        if (strncmp(*entry, name, len) == 0 && (*entry)[len] == '=')
+            return *entry + len + 1;
+    return NULL;
 }
 
 // A minimal sysctl tree whose "hw" node is the real one; sysctl_unspec.c
@@ -380,23 +409,34 @@ static void machdep_string(const char* name, char* buf, unsigned long size) {
     buf[size - 1] = '\0';
 }
 
-static const char feature_names[32][7] = {
-    "FPU", "VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "", "SEP",
-    "MTRR", "PGE", "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI",
-    "MMX", "FXSR", "SSE", "SSE2", "SS", "HTT", "TM", "IA64", "PBE"
+// xnu's feature_map order and names (osfmk/i386/cpuid.c): leaf 1 EDX, then
+// ECX (bits 32..63), as macOS prints machdep.cpu.features.
+static const struct { int bit; const char* name; } feature_names[] = {
+    {0, "FPU"}, {1, "VME"}, {2, "DE"}, {3, "PSE"}, {4, "TSC"}, {5, "MSR"}, {6, "PAE"},
+    {7, "MCE"}, {8, "CX8"}, {9, "APIC"}, {11, "SEP"}, {12, "MTRR"}, {13, "PGE"},
+    {14, "MCA"}, {15, "CMOV"}, {16, "PAT"}, {17, "PSE36"}, {18, "PSN"}, {19, "CLFSH"},
+    {21, "DS"}, {22, "ACPI"}, {23, "MMX"}, {24, "FXSR"}, {25, "SSE"}, {26, "SSE2"},
+    {27, "SS"}, {28, "HTT"}, {29, "TM"}, {31, "PBE"},
+    {32, "SSE3"}, {33, "PCLMULQDQ"}, {34, "DTES64"}, {35, "MON"}, {36, "DSCPL"},
+    {37, "VMX"}, {38, "SMX"}, {39, "EST"}, {40, "TM2"}, {41, "SSSE3"}, {42, "CID"},
+    {44, "FMA"}, {45, "CX16"}, {46, "TPR"}, {47, "PDCM"}, {51, "SSE4.1"},
+    {52, "SSE4.2"}, {53, "x2APIC"}, {54, "MOVBE"}, {55, "POPCNT"}, {57, "AES"},
+    {49, "PCID"}, {50, "DCA"}, {58, "XSAVE"}, {59, "OSXSAVE"}, {43, "SEGLIM64"},
+    {56, "TSCTMR"}, {60, "AVX1.0"}, {62, "RDRAND"}, {61, "F16C"}, {63, "VMM"},
 };
 
-// The same list the check builds from a feature word, independently of the
+// The same list the check builds from the feature words, independently of the
 // source under test (the source used to decode the vendor ASCII as bits).
-static void feature_string(unsigned int edx, char* out, size_t size) {
+static void feature_string(unsigned int edx, unsigned int ecx, char* out, size_t size) {
     size_t length = 0;
     out[0] = '\0';
-    for (int i = 0; i < 32; ++i) {
-        if (i == 10 || i == 20 || !(edx & (1u << i)))
+    for (size_t i = 0; i < sizeof(feature_names) / sizeof(feature_names[0]); ++i) {
+        unsigned int word = feature_names[i].bit < 32 ? edx : ecx;
+        if (!(word & (1u << (feature_names[i].bit & 31))))
             continue;
         if (length != 0 && length + 1 < size)
             out[length++] = ' ';
-        for (const char* p = feature_names[i]; *p && length + 1 < size; ++p)
+        for (const char* p = feature_names[i].name; *p && length + 1 < size; ++p)
             out[length++] = *p;
     }
     out[length] = '\0';
@@ -404,8 +444,8 @@ static void feature_string(unsigned int edx, char* out, size_t size) {
 
 static int machdep_mode(int compat) {
     unsigned int leaf0[4], leaf1[4];
-    unsigned int max_basic, signature, edx;
-    char vendor[16], features[256], expected[256], brand[64];
+    unsigned int max_basic, signature, edx, ecx;
+    char vendor[16], features[512], expected[512], brand[64];
     char label[32];
 
     ref_cpuid(0, leaf0);
@@ -416,12 +456,16 @@ static int machdep_mode(int compat) {
         max_basic = 0x16u;
         signature = 0x000906eau;
         edx = 0xbfebfbffu;
+        // The i7-9750H's ECX: its instruction-set bits the host has, plus the
+        // ring-0-only bits (VMX, EST, PCID, x2APIC...) whatever the host.
+        ecx = (leaf1[2] & 0x7ffafbbfu) | 0x0122c9b4u;
         snprintf(vendor, sizeof(vendor), "GenuineIntel");
         snprintf(label, sizeof(label), "compat");
     } else {
         max_basic = leaf0[0];
         signature = leaf1[0];
         edx = leaf1[3];
+        ecx = leaf1[2];
         snprintf(vendor, sizeof(vendor), "%c%c%c%c%c%c%c%c%c%c%c%c",
                  leaf0[1] & 0xff, (leaf0[1] >> 8) & 0xff, (leaf0[1] >> 16) & 0xff, leaf0[1] >> 24,
                  leaf0[3] & 0xff, (leaf0[3] >> 8) & 0xff, (leaf0[3] >> 16) & 0xff, leaf0[3] >> 24,
@@ -450,10 +494,24 @@ static int machdep_mode(int compat) {
     }
 
     machdep_string("features", features, sizeof(features));
-    feature_string(edx, expected, sizeof(expected));
+    feature_string(edx, ecx, expected, sizeof(expected));
     if (strcmp(features, expected) != 0) {
         fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=features '%s' expected '%s'\n", features, expected);
         return 1;
+    }
+    // On a host with every instruction set a 9750H has (any Zen or recent
+    // Intel), compat prints exactly what a real MacBookPro16,1 prints.
+    if (compat && (leaf1[2] & 0x7ffafbbfu & ~0x0122c9b4u) == (0x7ffafbbfu & ~0x0122c9b4u)) {
+        static const char mac[] =
+            "FPU VME DE PSE TSC MSR PAE MCE CX8 APIC SEP MTRR PGE MCA CMOV PAT PSE36 CLFSH DS "
+            "ACPI MMX FXSR SSE SSE2 SS HTT TM PBE SSE3 PCLMULQDQ DTES64 MON DSCPL VMX EST TM2 "
+            "SSSE3 FMA CX16 TPR PDCM SSE4.1 SSE4.2 x2APIC MOVBE POPCNT AES PCID XSAVE OSXSAVE "
+            "SEGLIM64 TSCTMR AVX1.0 RDRAND F16C";
+        if (strcmp(features, mac) != 0) {
+            fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=features '%s' expected the Mac's '%s'\n",
+                    features, mac);
+            return 1;
+        }
     }
 
     if (compat) {
@@ -478,7 +536,11 @@ int main(int argc, char** argv) {
     if (strcmp(mode, "machdep-compat") == 0)
         return machdep_mode(1);
 
-    if (strcmp(mode, "affinity") == 0) {
+    // compat / compat-affinity: RCLOL_PLATFORM_PROFILE=compat is in the
+    // environment (the build script sets it); every count is the i7-9750H's.
+    int compat = strcmp(mode, "compat") == 0 || strcmp(mode, "compat-affinity") == 0;
+
+    if (strcmp(mode, "affinity") == 0 || strcmp(mode, "compat-affinity") == 0) {
         // Restrict this process to the first four online CPUs.
         unsigned int online = file_count("/sys/devices/system/cpu/online");
         if (online < 4) {
@@ -497,9 +559,48 @@ int main(int argc, char** argv) {
         failDetection = 1;
     }
 
+    if (strcmp(mode, "rpc-fail") == 0) {
+        // Our own RPC fails: the caller's successful reply keeps its memory,
+        // and the next call retries the RPC.
+        struct host_basic_info reply;
+        sentinel_reply(&reply);
+        reply.max_mem = 7ULL << 30;
+        reply.memory_size = 0x7fffffffu;
+        rpc_fail = 1;
+        darling_host_basic_info_present(&reply, HOST_BASIC_INFO_COUNT);
+        rpc_fail = 0;
+        if (reply.max_mem != (7ULL << 30) || reply.memory_size != 0x7fffffffu) {
+            fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=failed RPC overwrote memory max_mem=%llu memory_size=%u\n",
+                    (unsigned long long)reply.max_mem, reply.memory_size);
+            return 1;
+        }
+        sentinel_reply(&reply);
+        reply.max_mem = 7ULL << 30;
+        darling_host_basic_info_present(&reply, HOST_BASIC_INFO_COUNT);
+        if (reply.max_mem != SENTINEL_MEMORY) {
+            fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=RPC not retried after a failure (max_mem=%llu)\n",
+                    (unsigned long long)reply.max_mem);
+            return 1;
+        }
+        printf("HOST_SYSCTL_CPU pass=1 mode=rpc-fail\n");
+        return 0;
+    }
+
+    // The first use of the cached host info must come through host_info, as
+    // dyld's does, with getenv forbidden.
+    {
+        struct host_basic_info early;
+        sentinel_reply(&early);
+        forbid_getenv = 1;
+        darling_host_basic_info_present(&early, HOST_BASIC_INFO_COUNT);
+        forbid_getenv = 0;
+    }
+
     struct expect e;
     if (strcmp(mode, "no-detect") == 0 || strcmp(mode, "optout") == 0)
         e = (struct expect) { 8, 8, 8, 8, 8, 8 };
+    else if (compat)
+        e = (struct expect) { 12, 12, 12, 12, 6, 6 };
     else
         host_expectations(&e);
 
@@ -522,6 +623,37 @@ int main(int argc, char** argv) {
         strcmp(model_buf, "MacBookPro16,1") != 0) {
         fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=model changed to '%s'\n", model_buf);
         return 1;
+    }
+
+    // host_info(HOST_BASIC_INFO) must present exactly what hw.* reports, and
+    // the profile memory size (RCLOL_MEMORY_BYTES) instead of the host's.
+    const char* memory_env = getenv("RCLOL_MEMORY_BYTES");
+    unsigned long long memory = (memory_env && *memory_env) ? strtoull(memory_env, NULL, 10) : SENTINEL_MEMORY;
+    struct host_basic_info reply;
+    sentinel_reply(&reply);
+    darling_host_basic_info_present(&reply, HOST_BASIC_INFO_COUNT);
+    unsigned int memory_size = memory > 0x80000000ULL ? 0x80000000u : (unsigned int)memory;
+    if (reply.max_cpus != (int)e.ncpu || reply.avail_cpus != (int)e.active ||
+        reply.logical_cpu != (int)e.logical || reply.logical_cpu_max != (int)e.logical_max ||
+        reply.physical_cpu != (int)e.physical || reply.physical_cpu_max != (int)e.physical_max ||
+        reply.max_mem != memory || reply.memory_size != memory_size || reply.cpu_type != 7) {
+        fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=host_info max=%d avail=%d logical=%d/%d physical=%d/%d max_mem=%llu memory_size=%u cpu_type=%d\n",
+                reply.max_cpus, reply.avail_cpus, reply.logical_cpu, reply.logical_cpu_max,
+                reply.physical_cpu, reply.physical_cpu_max, (unsigned long long)reply.max_mem,
+                reply.memory_size, reply.cpu_type);
+        return 1;
+    }
+    // A legacy-sized reply gets only the legacy fields.
+    sentinel_reply(&reply);
+    darling_host_basic_info_present(&reply, 5);
+    if (reply.max_cpus != (int)e.ncpu || reply.physical_cpu != 99 || reply.max_mem != SENTINEL_MEMORY) {
+        fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=legacy host_info reply overwritten past its size\n");
+        return 1;
+    }
+
+    if (compat) {
+        require_value(find_machdep("core_count"), 6);
+        require_value(find_machdep("thread_count"), 12);
     }
 
     printf("HOST_SYSCTL_CPU pass=1 mode=%s ncpu=%d active=%d logicalcpu=%d logicalcpu_max=%d physicalcpu=%d physicalcpu_max=%d model=%s\n",

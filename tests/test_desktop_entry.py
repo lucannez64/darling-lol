@@ -219,9 +219,10 @@ class DesktopEntryTests(unittest.TestCase):
         result = self.install(project)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertFalse(self.window_entry('darling-league-game.desktop').exists())
         self.assertFalse(self.window_entry('darling-riot-client.desktop').exists())
 
-    def test_window_entries_name_and_icon_the_client_windows(self):
+    def test_window_entries_name_and_icon_the_windows(self):
         project = self.project()
         (self.home / 'Desktop').mkdir()
         result = self.install(project, '--window-entries')
@@ -229,6 +230,7 @@ class DesktopEntryTests(unittest.TestCase):
         launcher = parse_entry(self.entry().read_text())
         expected = {
             'darling-league-client.desktop': ('League of Legends', 'LeagueClientUx'),
+            'darling-league-game.desktop': ('League of Legends', 'LeagueofLegends'),
             'darling-riot-client.desktop': ('Riot Client', 'Riot Client'),
         }
         for file_name, (name, wm_class) in expected.items():
@@ -271,13 +273,15 @@ class DesktopEntryTests(unittest.TestCase):
                                 env=self.child_env(DARLING_LOL_WINDOW_ENTRIES='1'), check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.window_entry('darling-league-client.desktop').is_file())
+        self.assertTrue(self.window_entry('darling-league-game.desktop').is_file())
         self.assertTrue(self.window_entry('darling-riot-client.desktop').is_file())
 
     def test_window_entries_launch_through_the_container(self):
         project = self.project()
         result = self.install(project, '--toolbox', 'my-box', '--window-entries')
         self.assertEqual(result.returncode, 0, result.stderr)
-        for file_name in ('darling-league-client.desktop', 'darling-riot-client.desktop'):
+        for file_name in ('darling-league-client.desktop', 'darling-league-game.desktop',
+                          'darling-riot-client.desktop'):
             exec_line = next(line for line in self.window_entry(file_name).read_text().splitlines()
                              if line.startswith('Exec='))
             self.assertTrue(exec_line.startswith('Exec=toolbox run -c my-box '), exec_line)
@@ -291,6 +295,7 @@ class DesktopEntryTests(unittest.TestCase):
         result = self.install(project)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertFalse(self.window_entry('darling-league-game.desktop').exists())
         self.assertTrue(foreign.is_file())
         self.assertIn('Name=Mine', foreign.read_text())
 
@@ -302,7 +307,8 @@ class DesktopEntryTests(unittest.TestCase):
                 project = self.project("proj $dollar#hash'quote" + ('-tb' if args else ''))
                 enabled = self.install(project, *args, '--window-entries')
                 self.assertEqual(enabled.returncode, 0, enabled.stderr)
-                names = ('darling-league-client.desktop', 'darling-riot-client.desktop')
+                names = ('darling-league-client.desktop', 'darling-league-game.desktop',
+                         'darling-riot-client.desktop')
                 for name in names:
                     self.assertTrue(self.window_entry(name).is_file(), name)
                 disabled = self.install(project, *args)
@@ -322,6 +328,7 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertIn(str(foreign), result.stderr)
         self.assertNotIn(f'Created window entry: {foreign}', result.stdout)
         # The conflict does not stop the other entry from being written.
+        self.assertTrue(self.window_entry('darling-league-game.desktop').is_file())
         self.assertTrue(self.window_entry('darling-riot-client.desktop').is_file())
 
     def test_enabling_the_option_refreshes_an_entry_this_project_wrote(self):
@@ -344,7 +351,8 @@ class DesktopEntryTests(unittest.TestCase):
     def test_ownership_comes_from_exec_not_from_other_fields(self):
         project = self.project()
         foreign_text = self.foreign_entry_mentioning(project)
-        names = ('darling-league-client.desktop', 'darling-riot-client.desktop')
+        names = ('darling-league-client.desktop', 'darling-league-game.desktop',
+                 'darling-riot-client.desktop')
         legacy = self.home / '.local/share/applications/league-of-legends.desktop'
         with self.subTest(flow='enable'):
             self.window_entry(names[0]).parent.mkdir(parents=True, exist_ok=True)
@@ -365,6 +373,19 @@ class DesktopEntryTests(unittest.TestCase):
             result = self.install(project)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(legacy.read_text(), foreign_text)
+
+    def test_game_entry_with_matching_exec_requires_ownership_marker(self):
+        project = self.project()
+        foreign = self.window_entry('darling-league-game.desktop')
+        foreign.parent.mkdir(parents=True)
+        text = ('[Desktop Entry]\nName=My game shortcut\n'
+                f'Exec={project}/scripts/launch-shortcut.sh\n')
+        foreign.write_text(text)
+        for args in (('--window-entries',), (), ('--remove',)):
+            with self.subTest(args=args):
+                result = self.install(project, *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(foreign.read_text(), text)
 
     def test_window_entry_symlink_does_not_overwrite_launcher(self):
         project = self.project()
@@ -501,6 +522,7 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertFalse(self.entry().exists())
         self.assertFalse((self.home / 'Desktop/darling-launcher.desktop').exists())
         self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertFalse(self.window_entry('darling-league-game.desktop').exists())
         self.assertTrue(foreign.is_file())
         self.assertTrue(handler.is_file())
         self.assertIn('Removed application launcher', result.stdout)
@@ -530,7 +552,8 @@ class DesktopEntryTests(unittest.TestCase):
 
     def test_window_entry_ownership_survives_the_env_wrapper(self):
         project = self.project()
-        names = ('darling-league-client.desktop', 'darling-riot-client.desktop')
+        names = ('darling-league-client.desktop', 'darling-league-game.desktop',
+                 'darling-riot-client.desktop')
         self.assertEqual(
             self.install(project, '--window-entries', '--env', 'RCLOL_CLEAN_ON_EXIT=0').returncode, 0)
         # Re-running without the flag must still recognise the entries as ours
@@ -571,7 +594,8 @@ class DesktopEntryTests(unittest.TestCase):
         result = self.install(project, '--icon', str(icon), '--window-entries')
         self.assertEqual(result.returncode, 0, result.stderr)
         for path in (self.entry(), self.home / 'Desktop/darling-launcher.desktop',
-                     self.window_entry('darling-league-client.desktop')):
+                     self.window_entry('darling-league-client.desktop'),
+                     self.window_entry('darling-league-game.desktop')):
             self.assertEqual(parse_entry(path.read_text())['Icon'], str(icon))
         if shutil.which('desktop-file-validate'):
             check = subprocess.run(['desktop-file-validate', str(self.entry())],
@@ -645,6 +669,7 @@ class DesktopEntryTests(unittest.TestCase):
                                  capture_output=True, text=True, env=env, check=False)
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertFalse(self.window_entry('darling-league-client.desktop').exists())
+        self.assertFalse(self.window_entry('darling-league-game.desktop').exists())
 
     def test_show_reports_a_missing_entry_without_an_icon(self):
         project = self.project()

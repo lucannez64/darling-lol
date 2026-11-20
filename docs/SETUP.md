@@ -103,12 +103,14 @@ Region/locale remain the existing `RCLOL_REGION`/`RCLOL_LOCALE` options.
 GNOME names and icons a window from the desktop entry whose `StartupWMClass`
 matches the window's `WM_CLASS`. Only the Riot Client startup window
 (`RiotClientServices`) matches the launcher, so the League client
-(`LeagueClientUx`) and the main Riot Client window (`Riot Client`) show up under
-their raw class names. `--window-entries` (or `DARLING_LOL_WINDOW_ENTRIES=1`)
-adds two hidden entries (`NoDisplay=true`, `darling-league-client.desktop` and
-`darling-riot-client.desktop`) that name those windows `League of Legends` and
-`Riot Client` and give them the launcher icon, and adds `LoL`, `League` and
-`Riot` as search keywords of the launcher:
+(`LeagueClientUx`), the game window (`LeagueofLegends`) and the main Riot Client
+window (`Riot Client`) show up under their raw class names. `--window-entries`
+(or `DARLING_LOL_WINDOW_ENTRIES=1`) adds three hidden entries (`NoDisplay=true`,
+`darling-league-client.desktop`, `darling-league-game.desktop` and
+`darling-riot-client.desktop`) that name the two League windows `League of
+Legends` and the Riot Client window `Riot Client` and give all three the
+launcher icon, or the custom icon passed with `--icon`; it also adds `LoL`,
+`League` and `Riot` as search keywords of the launcher:
 
 ```sh
 scripts/create-desktop-entry.sh --window-entries
@@ -118,12 +120,10 @@ scripts/create-desktop-entry.sh --window-entries
 The option is off by default because those fields carry third-party product
 names while the shipped launcher stays neutral (see `docs/COMPLIANCE.md`; the
 Nix package and its checks are unchanged). Running the helper again without the
-option removes the two entries it created. A file with one of those names that the
-project did not create is never overwritten or removed; the helper reports it on
-stderr and skips that entry. The
-icon is the project's own `darling-launcher`; the helper never extracts one from
-the game. Reopen the client after creating the entries: the shell matches a
-window to its entry when the window is created.
+option removes the three entries it created. The helper leaves conflicting files
+in place and reports them on stderr when window entries are enabled. The helper never
+extracts an icon from the game. Reopen the client after creating the entries:
+the shell matches a window to its entry when the window is created.
 
 `RCLOL_CDN_IPV4_ONLY` defaults to `1` in the Riot launcher and can be set to `0`
 to disable the CDN-only resolver workaround. `RCLOL_RECOVER_HIDDEN_CLIENT=1`
@@ -184,7 +184,9 @@ file descriptors above stderr before the guest starts.
 
 ## Updating an existing runtime
 
-`./scripts/update.sh` updates everything after `git pull`: `build.sh`, then the base install, then `install-runtime.sh`. When a pull changes a patch, `prepare.py` finds the earlier version applied in that component (its copy in `build/applied-patches`, or a version from this repository's history), reverts it, and applies the new one. It never resets a repository; if neither version matches, it stops and names the repository with other edits. The steps below update single components instead.
+`./scripts/update.sh` updates everything after `git pull`: `build.sh`, then the base install, then `install-runtime.sh`. By default, background steps show progress and write to a per-run log in `~/.cache` (or `$XDG_CACHE_HOME`). The updater prints the log path, and the privileged install keeps the terminal for `sudo` authentication. Stream all steps with `./scripts/update.sh --verbose`. When a pull changes a patch, `prepare.py` finds the earlier version applied in that component (its copy in `build/applied-patches`, or a version from this repository's history), reverts it, and applies the new one. It never resets a repository; if neither version matches, it stops and names the repository with other edits. The steps below update single components instead.
+
+Repeated updates skip work that did not change. The overlay builders run by `install-riot-gpu-runtime.sh` compile through `tools/clang-cache.py`, which skips a compile whose command, compiler, CPU (for `-march=native`) and recorded source and header contents are all unchanged; set `RCLOL_CLANG_CACHE=0` to compile everything. `cmake --install` puts unsigned binaries back over the signed SDK, so `tools/sign-darling-runtime.sh` keeps a signed copy of each binary under its unsigned content hash (in `/var/cache/darling-lol/signed` for the SDK, `~/.cache/darling-lol/signed` for the per-user overlays) and restores it instead of signing the same binary again; `--no-cache` and `--force` always sign. The cache is pruned to the binaries each tree still has and is used only when nobody else can write it.
 
 These commands assume the pinned, patched source tree and its configured Makefiles already exist. From the repository root, build the two components with one worker to reduce resource contention:
 

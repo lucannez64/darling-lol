@@ -21,10 +21,23 @@ darling-lol --perf                  # frame pacing from the game's own logs
 
 The crash bundle contains the doctor checks, the runtime/client/zombie process
 table, the runtime and launcher log tails, graphics kernel messages, display
-state and recent core dumps. It does not collect environment variables, masks
-credential-shaped command-line values, and replaces your home directory, user
-name and host name unless you pass `--no-redact`. Log text itself is copied
-verbatim, so skim the bundle before sharing it. See
+state and recent core dumps. It also includes the tails of the newest Riot
+Client, LeagueClient/LeagueClientUx and game (`r3dlog`) logs, and the Metal,
+signal, input-trace and game-switch logs from `/tmp` when they exist;
+`report.json` lists the client logs it looked for and did not find. Pass
+`--no-client-logs` to leave all of those out. It does not collect environment
+variables, masks credential-shaped command-line values, masks session tokens,
+account ids, game names and e-mail addresses in the client logs (even with
+`--no-redact`), and replaces your home directory, user name and host name
+unless you pass `--no-redact`. Other log text is copied verbatim, so skim the
+bundle before sharing it.
+
+The doctor also warns about diagnostic switches left on (for example
+`/tmp/rclol-input-trace`, `/tmp/metal-debug-waits` or `RCLOL_*_TRACE`
+variables), non-default tuning files, `kernel.perf_event_paranoid > 2`, a
+sandbox that refuses `perf_event_open`, a prefix without its own platform
+identity, an unsigned runtime, and hybrid graphics started without
+complete PRIME offload variables. See
 [compatibility](COMPATIBILITY.md) for what the performance numbers mean and
 for verified machines.
 
@@ -393,6 +406,31 @@ cache. `--keep-game` keeps the game and its product metadata instead of
 removing it, and `--all` removes the whole prefix. Only a Darling prefix is
 accepted; any other directory is refused.
 
+### Clean prefix logs, local state and platform identity
+
+To reset local Riot/League logs, `machine.cfg`, Riot Client / Electron / CEF
+profiles, unsent crash reports, local League client config/webcache, client
+caches, stale runtime markers, and the prefix's synthetic platform identity
+without reinstalling the Riot Client or redownloading the game:
+
+```sh
+sh scripts/clean-prefix.sh
+```
+
+Close the game and both clients first: the script refuses to run while a Riot
+Client or League process is running, stops the runtime, archives removed logs,
+`machine.cfg`, client profiles, crash reports, config files and previous
+identity files into a mode-`0600` tarball under `build/prefix-cleanup-backups/`
+(override with `--backup-dir`), removes stale `.before-platform-change` identity
+copies, and regenerates the synthetic per-prefix identifiers via
+`tools/configure-darling-platform.py --regenerate --no-backup --write` (so no
+copy of the previous identity stays in `private/etc/`). Pass `--keep-identity`
+to keep `darling-platform.plist` and `darling-smbios.conf` unchanged,
+`--keep-game-settings` to preserve `Config/game.cfg` and `Config/input.ini`,
+and `--yes` to skip the confirmation prompt. The Darling runtime,
+`Riot Client.app`, `League of Legends.app`, product metadata and the Mesa
+shader cache are kept.
+
 ## Riot exits and League reports that it lost its connection
 
 Check the launcher stderr or `build/desktop-launch.log` when launched through
@@ -494,6 +532,17 @@ tree running. The supervisor:
   prefix or a host process is never touched.
 - shuts the runtime down after the loader exits normally. If a second launch
   attached to a runtime that was already running, that runtime is left alone.
+- stops the Toolbox container when the launcher was started by `toolbox run`
+  (a menu entry or `toolbox run -c <container> ...`). `toolbox run` leaves the
+  container running after its command exits, and `podman stop` is unavailable
+  inside the container, so the supervisor stops the container's host systemd
+  user scope after the guest session is gone. If multiple Darling-LoL sessions
+  share the container, the runtime owner can pass the shutdown request to the
+  last eligible session. The supervisor ignores the launcher's own detached
+  helpers, and leaves the container running when an interactive `toolbox enter`
+  shell or other work remains in that scope, or when it cannot verify the
+  scope. Set `RCLOL_STOP_TOOLBOX=0` on a launch to
+  keep the container running when that session finishes last.
 - leaves everything as it was with `RCLOL_CLEAN_ON_EXIT=0`, which is the old
   `exec` behaviour.
 
@@ -910,6 +959,8 @@ rm -rf build/darling-src/build
 ./scripts/build.sh
 ```
 
+A checkout reached through a symlink (for example `~/dev` pointing at `~/Development`) is not a move: `scripts/build.sh` configures CMake with the checkout's physical path however it was started. It used the path it was reached through, and CMake writes that into every target's flags, so building once through the symlink and once without recompiled everything. The first build after this change does that one last time if the existing cache holds the symlinked path.
+
 Patches are rendered at `scripts/prepare.py` time, so `@PROJECT_ROOT@` in a patched file keeps the old path until it runs again. `./scripts/build.sh` and `./scripts/update.sh` both do that; do not run `prepare.py` by hand while the checkout has other edits in `build/darling-src`, because it refuses rather than resetting them.
 
 The opt-in RenderDoc capture bridge (`RCLOL_RENDERDOC_CAPTURE=1`) is a developer diagnostic, not part of the installer. It expects `build/renderdoc/capture-bridge.so` and a RenderDoc build under `build/renderdoc/`, and neither setup script creates them. Without those files the capture is skipped and the game runs normally; the absolute path baked into the Indium patch is refreshed by the same `prepare.py` run.
@@ -1202,13 +1253,16 @@ presentation. To report the real host card name and VRAM for one run:
 RCLOL_PLATFORM_PROFILE=host ./scripts/run.sh
 ```
 
-Or set `profile=host` in the installed `system.prop`. In COMPAT, AMD becomes
-`AMD Radeon Pro 5500M` and Intel becomes `Intel UHD Graphics 630`; NVIDIA keeps
-its own name so the game never takes AMD or Intel driver paths on an NVIDIA card.
+Or set `profile=host` in the installed `system.prop`. In COMPAT, AMD and NVIDIA
+become `AMD Radeon Pro 5500M` and Intel becomes `Intel UHD Graphics 630`, the
+MacBookPro16,1's two GPUs; set `compat.gpu.name=host` to keep the real card name
+with the rest of the compat profile. NVIDIA-specific runtime tuning keys on the
+real Vulkan vendor, not on the reported name.
 The working set is still the host's. `DARLING_METAL_MAC_GPU_NAME=0` and
 `DARLING_METAL_GPU_NAME` remain lower-level per-process overrides.
 
-`registryID` is a fixed non-zero value, as on a real Mac.
+`registryID` is a non-zero value derived from the card's PCI IDs; iokitd publishes
+the matching `IOGraphicsAccelerator2` entry for every host card.
 
 ### Host-side checks
 
@@ -1522,3 +1576,53 @@ python3 tools/run-riot-native-check.py riot-display-link-isolation-check
 ```
 
 The probe does not launch Riot or League.
+
+## Debian and hardened kernels block cpuid alignment (`kernel.perf_event_paranoid > 2`)
+
+Under the default `profile=compat`, the guest aligns the game's direct `cpuid`
+sites with the compatibility CPU identity (`sysctl`/`host_info`/`iokitd`) using
+hardware execute breakpoints opened through `perf_event_open`. Upstream Linux
+allows unprivileged `perf_event_open` at `kernel.perf_event_paranoid <= 2`, but
+Debian kernels and hardened kernels (such as `linux-hardened`) ship a patch that
+defaults `kernel.perf_event_paranoid` to `3` or `4`, causing `perf_event_open`
+to fail with `EACCES` (`-13`).
+
+When blocked, `/tmp/rclol-cpuid-trace.log` (if diagnostic tracing is enabled)
+records:
+
+```text
+cpuid-trace: ARM FAILED cookie=0x... runtime=0x... err=-13
+cpuid-trace: armed 0 site(s) fake=1
+```
+
+Both `darling-lol --doctor` and `scripts/run.sh` warn when
+`/proc/sys/kernel/perf_event_paranoid` is greater than `2`. Lower it to `2` for
+the current boot:
+
+```sh
+sudo sysctl kernel.perf_event_paranoid=2
+```
+
+To keep the setting across reboots:
+
+```sh
+printf 'kernel.perf_event_paranoid = 2\n' | sudo tee /etc/sysctl.d/99-darling-lol.conf
+sudo sysctl --system
+```
+
+Verify with `cat /proc/sys/kernel/perf_event_paranoid` (should print `2` or
+lower) and `python3 tools/doctor.py`. Note that lowering
+`kernel.perf_event_paranoid` relaxes a host hardening setting for unprivileged
+users; granting `CAP_PERFMON` to the relevant account or loader is a narrower
+alternative if you prefer to keep `perf_event_paranoid` restricted.
+
+### A sandbox refuses `perf_event_open`
+
+`perf_event_paranoid` is not the only gate. The default seccomp profiles of
+Docker, Podman and Flatpak, and some security modules, refuse `perf_event_open`
+with `EPERM` whatever the sysctl says, with the same `armed 0 site(s)` result.
+`darling-lol --doctor` and `scripts/run.sh` open and close one disabled
+user-only event to find out, and warn when that fails while
+`perf_event_paranoid` allows it. Start the launcher outside that sandbox, or
+allow `perf_event_open` in its seccomp profile (Podman/Docker:
+`--security-opt seccomp=` with a profile that permits it).

@@ -5,6 +5,20 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$project_dir/tools/runtime-paths.sh"
 cd "$project_dir"
 mkdir -p build
+# The overlay builders below compile every source on every update. Shims first
+# on PATH send their clang/clang++ calls through tools/clang-cache.py, which
+# skips a compile whose command, compiler and recorded inputs are unchanged.
+# RCLOL_CLANG_CACHE=0 compiles everything. make and sudo keep their own compilers.
+clang_cache_bin="$project_dir/build/clang-cache-bin"
+mkdir -p "$clang_cache_bin"
+for compiler in clang clang++; do
+ printf '#!/bin/sh\nexec python3 "%s/tools/clang-cache.py" %s "$@"\n' "$project_dir" "$compiler" > "$clang_cache_bin/$compiler.next"
+ chmod 755 "$clang_cache_bin/$compiler.next"
+ mv -f "$clang_cache_bin/$compiler.next" "$clang_cache_bin/$compiler"
+done
+RCLOL_CLANG_CACHE_SHIMS=$clang_cache_bin
+PATH="$clang_cache_bin:$PATH"
+export RCLOL_CLANG_CACHE_SHIMS PATH
 python3 tools/build-m58f333-iosurface.py
 # Rebuild the native wrapper with floating-point-safe symbol resolvers.
 make -C build/darling-src/build/src/native GL -j4

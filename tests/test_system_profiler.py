@@ -125,14 +125,23 @@ class SystemProfilerTests(unittest.TestCase):
         self.assertEqual(item['spdisplays_vram'], '4096 MB')
         self.assertEqual(item['spdisplays_bus'], 'spdisplays_pcie')
 
-    def test_compat_display_keeps_nvidia_name(self):
+    def test_compat_display_presents_nvidia_as_the_mac_discrete_gpu(self):
+        # No Mac that runs macOS 14 has an NVIDIA GPU; iokitd and Metal present
+        # the same Radeon Pro 5500M.
         item = self.display(self.drm_root('0x10de', '0x1b80', 6 << 30),
                             RCLOL_PLATFORM_PROFILE='compat', RCLOL_GPU_NAME='mac',
                             RCLOL_GPU_VRAM_MB='4096')
-        self.assertEqual(item['sppci_model'], 'NVIDIA Graphics')
+        self.assertEqual(item['sppci_model'], 'AMD Radeon Pro 5500M')
+        self.assertEqual(item['spdisplays_device-id'], '0x7340')
+        self.assertEqual(item['spdisplays_vendor'], 'AMD (0x1002)')
+        self.assertEqual(item['spdisplays_vram'], '4096 MB')
+        self.assertEqual(item['spdisplays_bus'], 'spdisplays_pcie')
+
+    def test_host_name_keeps_nvidia_identity(self):
+        item = self.display(self.drm_root('0x10de', '0x1b80', 6 << 30),
+                            RCLOL_PLATFORM_PROFILE='compat', RCLOL_GPU_NAME='host')
         self.assertEqual(item['spdisplays_device-id'], '0x1b80')
         self.assertEqual(item['spdisplays_vendor'], 'NVIDIA (0x10de)')
-        self.assertEqual(item['spdisplays_vram'], '4096 MB')
 
     def test_standalone_run_reads_the_installed_profile(self):
         prop = Path(self.folder.name) / 'darling-system.prop'

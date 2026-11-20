@@ -149,16 +149,17 @@ index 207dae6..f5e96db 100644
  VISIBLE
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
 new file mode 100644
-index 0000000..8ae1665
+index 0000000..a608e09
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,289 @@
 +#ifndef DARLING_COMMON_CPU_TOPOLOGY_H
 +#define DARLING_COMMON_CPU_TOPOLOGY_H
 +
 +#include <stdbool.h>
 +
 +#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/cpu_identity.h>
 +#include <darling/emulation/common/simple.h>
 +#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
 +
@@ -170,7 +171,8 @@ index 0000000..8ae1665
 + * hw.ncpu / hw.activecpu, so on this 6-core/12-thread host the game created 7
 + * workers where the same PC runs 12 threads under Windows. Report what the
 + * host really has instead, while the emulated hw.model identity stays
-+ * unchanged.
++ * unchanged. Under profile=compat the counts are the compat CPU's
++ * (common/cpu_identity.c) instead, so they agree with its brand and cpuid.
 + *
 + * Values are cached once per process. avail/active reflect the process's
 + * affinity mask (cgroup or taskset restrictions); max values reflect the
@@ -417,6 +419,21 @@ index 0000000..8ae1665
 +		struct darling_cpu_topology probe;
 +
 +		darling_cpu_topology_probe(&probe);
++
++		/*
++		 * The compat profile presents a MacBookPro16,1 with an i7-9750H, so its
++		 * counts are that part's 6 cores / 12 threads whatever the host has: a
++		 * 32-thread host reporting 32 logical CPUs next to an i7-9750H brand is
++		 * not a machine that exists. The opt-out flag still wins for A/B runs.
++		 */
++		if (!probe.fixed && darling_compat_profile_enabled())
++		{
++			const struct darling_cpu_identity* identity = darling_compat_cpu_identity();
++
++			probe.online = probe.available = identity->threads;
++			probe.physical_online = probe.physical_available = identity->cores;
++			probe.detected = true;
++		}
 +		cached = probe;
 +		__atomic_store_n(&decided, 1, __ATOMIC_RELEASE);
 +	}
@@ -1915,10 +1932,10 @@ index 0000000..9901d10
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..2d3bdde
+index 0000000..1b8d54e
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,971 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2055,6 +2072,7 @@ index 0000000..2d3bdde
 +};
 +static struct rclol_site g_sites[RCLOL_MAX_SITES];
 +static int g_site_count = 0;
++static int g_log_enabled = 0;
 +static int g_log_fd = -1;
 +
 +// ---------------------------------------------------------------------------
@@ -2067,6 +2085,8 @@ index 0000000..2d3bdde
 +
 +static int rclol_open_log(void)
 +{
++	if (!g_log_enabled)
++		return -1;
 +	if (g_log_fd >= 0)
 +		return g_log_fd;
 +	long fd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) RCLOL_CPUID_LOG_PATH,
@@ -2170,8 +2190,14 @@ index 0000000..2d3bdde
 +// fake mode the handler rewrites the results of those leaves so the guest sees
 +// a coherent Intel mobile part instead of the host's AMD CPU. Leaves the host
 +// implements with vendor-specific meanings (0x80000001, 0x80000006..8) are
-+// adjusted in place; everything else passes through, so capability detection
-+// still sees what this CPU really supports.
++// adjusted in place. The identity's cache and topology leaves (2, 4, 0xb) and
++// its clock leaves (0x15, 0x16) are synthesized from the table, so they agree
++// with hw.cacheconfig, hw.cachesize and leaf 1 whatever the host's core count.
++// A leaf above the identity's maximum basic or extended leaf returns the
++// highest basic leaf, as Intel parts do, instead of the host's own AMD leaves
++// (0x8000001d/0x8000001e topology and the like). The hypervisor range
++// (0x40000000..0x4fffffff) and the feature leaves (7, 0xd) pass through, so
++// capability detection still sees what this CPU really supports.
 +//
 +// The identity itself lives in one table shared with the sysctls
 +// (common/cpu_identity.h, src/common/cpu_identity.c). The brand string there is
@@ -2221,12 +2247,87 @@ index 0000000..2d3bdde
 +	return value;
 +}
 +
++/* Intel CPUID.01H:EBX[23:16] is the 1-based maximum addressable logical
++ * processor ID count (power of two >= threads; 16 for 6c/12t i7-9750H). */
++static uint32_t rclol_max_logical_ids(uint32_t threads)
++{
++	uint32_t count = 1u;
++	while (count < threads && count < 128u)
++		count <<= 1;
++	return count;
++}
++
++static uint32_t rclol_log2(uint32_t value)
++{
++	uint32_t shift = 0;
++	while ((1u << shift) < value && shift < 31u)
++		++shift;
++	return shift;
++}
++
++/* The identity's APIC ID for the CPU the host reported. Folding into
++ * 0..threads-1 keeps the ID below the leaf 1 / leaf 0xb counts on a host with
++ * more logical CPUs (or sparse APIC IDs, as on multi-CCD parts), and keeps the
++ * SMT bit, since the thread count is even. */
++static uint32_t rclol_apic_id(uint32_t host_apic_id, uint32_t threads)
++{
++	return threads ? host_apic_id % threads : 0;
++}
++
++/* Leaf 4, deterministic cache parameters, for cache `index` (0 L1D, 1 L1I,
++ * 2 L2, 3 L3). Line size 64; the associativities are the identity part's. */
++static void rclol_cache_leaf(const struct darling_cpu_identity* id, uint32_t index,
++	uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx)
++{
++	static const struct { uint32_t type, level, ways; } caches[] = {
++		{ 1u, 1u, 8u },  /* L1 data */
++		{ 2u, 1u, 8u },  /* L1 instruction */
++		{ 3u, 2u, 4u },  /* L2 unified */
++		{ 3u, 3u, 16u }, /* L3 unified */
++	};
++	uint32_t per_core = id->cores ? id->threads / id->cores : 1u;
++	uint32_t size_kb, sharing;
++
++	*eax = *ebx = *ecx = *edx = 0;
++	if (index >= sizeof(caches) / sizeof(caches[0]))
++		return; /* type 0: no more caches */
++	switch (caches[index].level) {
++	case 1u: size_kb = id->l1d_kb; sharing = per_core; break;
++	case 2u: size_kb = id->l2_kb; sharing = per_core; break;
++	default: size_kb = id->l3_kb; sharing = id->threads; break;
++	}
++	*eax = ((rclol_max_logical_ids(id->cores) - 1u) << 26)
++		| ((rclol_max_logical_ids(sharing) - 1u) << 14)
++		| (1u << 8) /* self-initializing */
++		| (caches[index].level << 5) | caches[index].type;
++	*ebx = ((caches[index].ways - 1u) << 22) | 63u; /* one partition, 64-byte lines */
++	*ecx = (size_kb * 1024u) / (caches[index].ways * 64u) - 1u;
++	if (caches[index].level == 3u)
++		*edx = 0x6u; /* inclusive, complex indexing */
++}
++
++/* Leaf 0x16, processor frequency: base and maximum MHz, 100 MHz bus. */
++static void rclol_frequency_leaf(const struct darling_cpu_identity* id,
++	uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx)
++{
++	*eax = id->base_mhz;
++	*ebx = id->max_mhz;
++	*ecx = 100u;
++	*edx = 0;
++}
++
 +void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
 +	uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx)
 +{
 +	const struct darling_cpu_identity* id = rclol_identity();
 +
-+	(void) subleaf;
++	/* Intel returns the highest basic leaf for any leaf above the maximum
++	 * basic or extended leaf; the hypervisor range is left to the host. */
++	if ((leaf > id->max_basic && leaf < 0x40000000u) || leaf > id->max_ext) {
++		rclol_frequency_leaf(id, eax, ebx, ecx, edx);
++		return;
++	}
++
 +	switch (leaf) {
 +	case 0x00000000u:
 +		*eax = id->max_basic;
@@ -2236,13 +2337,65 @@ index 0000000..2d3bdde
 +		break;
 +	case 0x00000001u:
 +		*eax = id->signature;
-+		/* Brand index 0, CLFLUSH line size 8 (64 bytes), full thread count. */
-+		*ebx = (*ebx & 0xff000000u) | ((id->threads - 1) << 16) | (8u << 8);
++		/* Initial APIC ID, 1-based max logical IDs, CLFLUSH line size 8
++		 * (64 bytes), brand index 0. */
++		*ebx = (rclol_apic_id(*ebx >> 24, id->threads) << 24)
++			| (rclol_max_logical_ids(id->threads) << 16) | (8u << 8);
 +		/* The identity part's feature word. It is a superset of the host's
 +		 * (the host AMD leaf 1 EDX lacks only DS, SS and TM), so nothing the
 +		 * host really has is lost. machdep.cpu.features reports the same
 +		 * word, so the sysctl and the game cannot disagree. */
 +		*edx = id->leaf1_edx;
++		/* The identity part's ECX, keeping each instruction-set bit only when
++		 * the host has it (an old host must never be offered FMA or MOVBE it
++		 * cannot run) and adding the ring-0-only bits every Coffee Lake has
++		 * (VMX, EST, PCID, x2APIC...). A Zen host's word alone lacks those, an
++		 * AMD feature set behind an Intel signature. Bits a 9750H never sets
++		 * (SMX, DCA, the hypervisor bit) are dropped. machdep.cpu.features
++		 * reports the same word. */
++		*ecx = (*ecx & id->leaf1_ecx) | (id->leaf1_ecx & id->leaf1_ecx_system);
++		break;
++	case 0x00000002u:
++		/* Coffee Lake TLB/prefetch descriptors; 0xff sends cache queries to leaf 4. */
++		*eax = 0x76036301u;
++		*ebx = 0x00f0b5ffu;
++		*ecx = 0;
++		*edx = 0x00c30000u;
++		break;
++	case 0x00000004u:
++		rclol_cache_leaf(id, subleaf, eax, ebx, ecx, edx);
++		break;
++	case 0x0000000bu: {
++		/* Extended topology: SMT level, then core level, then invalid levels.
++		 * EDX is the x2APIC ID of the CPU, folded like leaf 1's. */
++		uint32_t per_core = id->cores ? id->threads / id->cores : 1u;
++		uint32_t x2apic = rclol_apic_id(*edx, id->threads);
++		if (subleaf == 0u) {
++			*eax = rclol_log2(per_core);
++			*ebx = per_core;
++			*ecx = (1u << 8);
++		} else if (subleaf == 1u) {
++			*eax = rclol_log2(rclol_max_logical_ids(id->threads));
++			*ebx = id->threads;
++			*ecx = (2u << 8) | 1u;
++		} else {
++			*eax = 0;
++			*ebx = 0;
++			*ecx = subleaf & 0xffu;
++		}
++		*edx = x2apic;
++		break;
++	}
++	case 0x00000015u:
++		/* TSC/crystal ratio 216/2 of a 24 MHz crystal; the crystal itself is
++		 * not enumerated (ECX 0), as on Coffee Lake-H. */
++		*eax = 2u;
++		*ebx = 216u;
++		*ecx = 0;
++		*edx = 0;
++		break;
++	case 0x00000016u:
++		rclol_frequency_leaf(id, eax, ebx, ecx, edx);
 +		break;
 +	case 0x80000000u:
 +		*eax = id->max_ext;
@@ -2251,7 +2404,11 @@ index 0000000..2d3bdde
 +		*ecx = 0x6c65746eu;
 +		break;
 +	case 0x80000001u:
-+		/* Clear the AMD-only bits; keep NX, 1GB pages, RDTSCP and long mode. */
++		/* Intel leaves EAX/EBX reserved (AMD: extended signature and
++		 * package type). Clear the AMD-only bits; keep NX, 1GB pages, RDTSCP
++		 * and long mode. */
++		*eax = 0;
++		*ebx = 0;
 +		*ecx &= ~0x00003fc4u; /* SVM, SSE4A, misaligned SSE, 3DNow prefetch, OSVW, IBS, XOP, SKINIT, WDT */
 +		*edx &= ~0xc0400000u; /* MMX-ext, FXSR-opt, 3DNow, 3DNow-ext */
 +		break;
@@ -2265,17 +2422,32 @@ index 0000000..2d3bdde
 +		*edx = rclol_brand_word(off + 12u);
 +		break;
 +	}
++	case 0x80000005u:
++		/* Reserved on Intel (AMD reports its L1 caches and TLBs here). */
++		*eax = 0;
++		*ebx = 0;
++		*ecx = 0;
++		*edx = 0;
++		break;
 +	case 0x80000006u:
-+		*ecx = ((id->l2_kb & 0xffffu) << 16) | 0x4001u;
-+		*edx = (((id->l3_kb / 512u) & 0x3fffu) << 18) | 0x0000f001u;
++		/* Intel Extended L2 Cache Features: EAX/EBX/EDX are 0; ECX holds
++		 * L2 size in KiB (bits 31:16), 4-way associativity (0x4 in bits
++		 * 15:12) and 64-byte line size (0x40 in bits 7:0). */
++		*eax = 0;
++		*ebx = 0;
++		*ecx = ((id->l2_kb & 0xffffu) << 16) | 0x4040u;
++		*edx = 0;
 +		break;
 +	case 0x80000007u:
 +		*edx &= 0x00000100u; /* invariant TSC only */
 +		break;
 +	case 0x80000008u:
++		/* Intel Virtual/Physical Address Sizes: EBX is extended feature flags
++		 * (0 on Coffee Lake-H), and ECX/EDX are reserved (0). */
 +		*eax = (id->phys_bits & 0xffu) | ((id->virt_bits & 0xffu) << 8);
-+		*ebx = (id->cores - 1) | ((id->threads - 1) << 8);
++		*ebx = 0;
 +		*ecx = 0;
++		*edx = 0;
 +		break;
 +	default:
 +		break;
@@ -2323,21 +2495,23 @@ index 0000000..2d3bdde
 +	r->rip += 2;  // skip the two-byte `0f a2`
 +
 +	unsigned long n = site->hits++;
-+	if (n < RCLOL_LOG_FIRST_N) {
-+		char line[192];
-+		__simple_snprintf(line, sizeof(line),
-+			"cpuid t=%llu tid=%ld site=0x%lx off=0x%lx in[eax=0x%x ecx=0x%x] "
-+			"out[eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x] n=%lu\n",
-+			rclol_monotonic_ns(), rclol_gettid(), cookie,
-+			cookie - RCLOL_IMAGE_TEXT_BASE, in_eax, in_ecx,
-+			oa, ob, oc, od, n);
-+		rclol_write_str(line);
-+	} else if (n == RCLOL_LOG_FIRST_N) {
-+		char line[96];
-+		__simple_snprintf(line, sizeof(line),
-+			"cpuid-trace: site=0x%lx reached %d hits; counting only from here\n",
-+			cookie, RCLOL_LOG_FIRST_N);
-+		rclol_write_str(line);
++	if (g_log_enabled) {
++		if (n < RCLOL_LOG_FIRST_N) {
++			char line[192];
++			__simple_snprintf(line, sizeof(line),
++				"cpuid t=%llu tid=%ld site=0x%lx off=0x%lx in[eax=0x%x ecx=0x%x] "
++				"out[eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x] n=%lu\n",
++				rclol_monotonic_ns(), rclol_gettid(), cookie,
++				cookie - RCLOL_IMAGE_TEXT_BASE, in_eax, in_ecx,
++				oa, ob, oc, od, n);
++			rclol_write_str(line);
++		} else if (n == RCLOL_LOG_FIRST_N) {
++			char line[96];
++			__simple_snprintf(line, sizeof(line),
++				"cpuid-trace: site=0x%lx reached %d hits; counting only from here\n",
++				cookie, RCLOL_LOG_FIRST_N);
++			rclol_write_str(line);
++		}
 +	}
 +
 +	return true;
@@ -2490,21 +2664,30 @@ index 0000000..2d3bdde
 +	// mach_header_64: magic,cputype,cpusubtype,filetype,ncmds,sizeofcmds,flags,reserved
 +	const uint32_t* h = (const uint32_t*) base;
 +	uint32_t ncmds = h[4];
++	uint32_t sizeofcmds = h[5];
 +	const unsigned char* p = (const unsigned char*) base + 32; // sizeof(mach_header_64)
-+	for (uint32_t i = 0; i < ncmds; ++i) {
++	const unsigned char* end = p + sizeofcmds;
++	for (uint32_t i = 0; i < ncmds && p + 8 <= end; ++i) {
 +		uint32_t cmd = ((const uint32_t*) p)[0];
 +		uint32_t cmdsize = ((const uint32_t*) p)[1];
-+		if (cmdsize < 8)
++		if (cmdsize < 8 || (unsigned long) (end - p) < cmdsize)
 +			break;
-+		if (cmd == 0x1b /* LC_UUID */) {
++		if (cmd == 0x1b /* LC_UUID */ && cmdsize >= 24) {
++			static const char hex[] = "0123456789abcdef";
 +			const unsigned char* u = p + 8;
++			char uuid_str[37];
++			int pos = 0;
++			for (int b = 0; b < 16; ++b) {
++				if (b == 4 || b == 6 || b == 8 || b == 10)
++					uuid_str[pos++] = '-';
++				uuid_str[pos++] = hex[(u[b] >> 4) & 0xf];
++				uuid_str[pos++] = hex[u[b] & 0xf];
++			}
++			uuid_str[pos] = '\0';
 +			char line[128];
 +			__simple_snprintf(line, sizeof(line),
-+				"cpuid-trace: image base=0x%lx uuid="
-+				"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
-+				(unsigned long) base,
-+				u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],
-+				u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]);
++				"cpuid-trace: image base=0x%lx uuid=%s\n",
++				(unsigned long) base, uuid_str);
 +			rclol_write_str(line);
 +			return;
 +		}
@@ -2645,6 +2828,7 @@ index 0000000..2d3bdde
 +	if (ffd < 0 && !compat)
 +		return;
 +	if (ffd >= 0) {
++		g_log_enabled = 1;
 +		long got = rclol_sys(__NR_read, ffd, (long) contents, (long) sizeof(contents) - 1, 0, 0, 0);
 +		rclol_sys(__NR_close, ffd, 0, 0, 0, 0, 0);
 +		if (got < 0)
@@ -2825,10 +3009,10 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..d8e6830 100644
+index f273989..7ecb675 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-@@ -9,6 +9,9 @@
+@@ -9,13 +9,19 @@
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
  #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
  #include <darling/emulation/common/simple.h>
@@ -2838,7 +3022,10 @@ index f273989..d8e6830 100644
  #include <darling/emulation/common/string.h>
  
  extern kern_return_t mach_port_deallocate(ipc_space_t task, mach_port_name_t name);
-@@ -16,6 +19,7 @@ extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, ma
+-extern kern_return_t host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count);
++// The raw darlingserver reply; host_info() itself is wrapped in libsyscall/mach/host.c
++// to present the values below.
++extern kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count);
  
  /* Darling specific */
  enum {
@@ -2846,7 +3033,7 @@ index f273989..d8e6830 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +28,14 @@ enum {
+@@ -24,10 +30,14 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -2862,7 +3049,7 @@ index f273989..d8e6830 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +47,78 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +49,78 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -2942,7 +3129,7 @@ index f273989..d8e6830 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,10 +130,19 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +132,98 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -2963,10 +3150,20 @@ index f273989..d8e6830 100644
  static const struct host_basic_info* gethostinfo(void)
  {
  	static struct host_basic_info hinfo;
-@@ -71,6 +155,36 @@ static const struct host_basic_info* gethostinfo(void)
++	static int host_answered; // the RPC succeeded; until then it is retried
+ 
+-	if (!hinfo.avail_cpus)
++	if (!hinfo.avail_cpus || !host_answered)
+ 	{
+ 		mach_msg_type_number_t hcount = HOST_BASIC_INFO_COUNT;
+ 		mach_port_t hself;
+ 
  		hself = mach_host_self();
- 		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
+-		host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount);
++		host_answered = _kernelrpc_host_info(hself, HOST_BASIC_INFO, &hinfo, &hcount) == KERN_SUCCESS;
  		mach_port_deallocate(mach_task_self(), hself);
++		if (!host_answered)
++			hinfo.max_mem = 0; // unknown, not "no memory"
 +		host_real_mem = hinfo.max_mem;
 +
 +		// Keep the emulated MacBookPro16,1 hw.model, but report the host's real
@@ -2993,14 +3190,48 @@ index f273989..d8e6830 100644
 +			hinfo.physical_cpu = hinfo.physical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +			hinfo.logical_cpu = hinfo.logical_cpu_max = DARLING_CPU_FIXED_COUNT;
 +		}
-+		extern char* getenv(const char*);
-+		const char* memory = getenv("RCLOL_MEMORY_BYTES");
-+		if (memory != NULL && memory[0] != '\0')
-+			hinfo.max_mem = __simple_atoi(memory, NULL);
++		// Not getenv(): host_info() reaches this before libc sets up environ
++		// (a NULL-environ getenv crashed launchd at boot).
++		unsigned long long memory = darling_configured_memory_bytes();
++		if (memory != 0)
++			hinfo.max_mem = memory;
  	}
  
  	return &hinfo;
-@@ -83,6 +197,13 @@ sysctl_handler(handle_availcpu)
+ }
+ 
++// darling-lol: host_info(HOST_BASIC_INFO) must agree with hw.*: the reply from
++// darlingserver carries the host's real CPU counts and memory, which under
++// profile=compat contradict the i7-9750H / profile memory the sysctls report.
++// libsyscall's host_info wrapper calls this on every successful reply. The
++// legacy 32-bit memory_size saturates at 2 GiB, as XNU does.
++__attribute__((visibility("hidden")))
++void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count)
++{
++	const struct host_basic_info* hinfo = gethostinfo();
++	unsigned long long memory = hinfo->max_mem;
++
++	out->max_cpus = hinfo->max_cpus;
++	out->avail_cpus = hinfo->avail_cpus;
++	// memory is 0 only when neither the profile nor our own RPC gave a size:
++	// keep the caller's successful reply then.
++	if (memory != 0)
++		out->memory_size = (natural_t) (memory > 0x80000000ULL ? 0x80000000ULL : memory);
++	if (count >= HOST_BASIC_INFO_COUNT)
++	{
++		out->physical_cpu = hinfo->physical_cpu;
++		out->physical_cpu_max = hinfo->physical_cpu_max;
++		out->logical_cpu = hinfo->logical_cpu;
++		out->logical_cpu_max = hinfo->logical_cpu_max;
++		if (memory != 0)
++			out->max_mem = memory;
++	}
++}
++
+ sysctl_handler(handle_availcpu)
+ {
+ 	sysctl_handle_size(sizeof(int));
+@@ -83,6 +231,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3014,7 +3245,7 @@ index f273989..d8e6830 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +232,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +266,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3032,7 +3263,7 @@ index f273989..d8e6830 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +301,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +335,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3097,7 +3328,7 @@ index f273989..d8e6830 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +366,104 @@ sysctl_handler(handle_machine)
+@@ -193,3 +400,130 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -3165,6 +3396,32 @@ index f273989..d8e6830 100644
 +	return false;
 +}
 +
++// The compat profile reports the compatibility part's caches, not the host's:
++// otherwise a 16-thread host would say 16 CPUs share an L3 while
++// hw.cacheconfig[0] says there are 12, and the sizes would disagree with cpuid
++// leaf 4 and 0x80000006. L1D and L2 are per core (shared by its SMT threads),
++// L3 by the whole package.
++static bool compat_cache_level(unsigned int level, unsigned long long* size, unsigned int* sharing)
++{
++	const struct darling_cpu_identity* id = darling_compat_cpu_identity();
++	unsigned int per_core = id->cores ? id->threads / id->cores : 1;
++
++	switch (level)
++	{
++		case 1: *size = (unsigned long long) id->l1d_kb << 10; *sharing = per_core; return true;
++		case 2: *size = (unsigned long long) id->l2_kb << 10; *sharing = per_core; return true;
++		case 3: *size = (unsigned long long) id->l3_kb << 10; *sharing = id->threads; return true;
++		default: return false;
++	}
++}
++
++static bool cache_level(unsigned int level, unsigned long long* size, unsigned int* sharing)
++{
++	if (darling_compat_profile_enabled())
++		return compat_cache_level(level, size, sharing);
++	return host_cache_level(level, size, sharing);
++}
++
 +// hw.cacheconfig[0] is the number of logical CPUs, [n] the number of CPUs sharing a level n cache
 +sysctl_handler(handle_cacheconfig)
 +{
@@ -3178,7 +3435,7 @@ index f273989..d8e6830 100644
 +		unsigned long long size;
 +		unsigned int sharing;
 +
-+		if (host_cache_level(level, &size, &sharing))
++		if (cache_level(level, &size, &sharing))
 +			config[level] = sharing;
 +	}
 +	return 0;
@@ -3197,7 +3454,7 @@ index f273989..d8e6830 100644
 +		unsigned long long size;
 +		unsigned int sharing;
 +
-+		if (host_cache_level(level, &size, &sharing))
++		if (cache_level(level, &size, &sharing))
 +			sizes[level] = size;
 +	}
 +	return 0;
@@ -3281,7 +3538,7 @@ index bd9cdc2..61fe056 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..da10132 100644
+index 4319355..65b2e58 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -2,8 +2,12 @@
@@ -3368,10 +3625,7 @@ index 4319355..da10132 100644
 +// as the leaf, so every caller ran leaf 0 regardless of the value it asked for.
 +static void cpuid_leaf(unsigned int leaf, unsigned int* eax, unsigned int* ebx,
 +		unsigned int* ecx, unsigned int* edx)
- {
--        char tmp[64];
--        __simple_sprintf(tmp, "%d", value);
--        copyout_string(tmp, to_copy, to_copy_length);
++{
 +	unsigned int a, b, c, d;
 +
 +	__cpuid(leaf, a, b, c, d);
@@ -3379,8 +3633,8 @@ index 4319355..da10132 100644
 +	*ebx = b;
 +	*ecx = c;
 +	*edx = d;
- }
- 
++}
++
 +// machdep.cpu.family/model/stepping/max_basic are CTLTYPE_INT on macOS: a
 +// four-byte integer. They used to be written with copyout_string(), so a
 +// caller asking for an int received the first one or two digits ("158") as the
@@ -3423,13 +3677,16 @@ index 4319355..da10132 100644
 +
 +// Family/model/stepping from a leaf-1 signature (Intel SDM CPUID.1.EAX).
 +static unsigned int signature_family(unsigned int signature)
-+{
+ {
+-        char tmp[64];
+-        __simple_sprintf(tmp, "%d", value);
+-        copyout_string(tmp, to_copy, to_copy_length);
 +	unsigned int base = (signature >> 8) & 0xfu;
 +	unsigned int extended = (signature >> 20) & 0xffu;
 +
 +	return base == 0xfu ? base + extended : base;
-+}
-+
+ }
+ 
 +static unsigned int signature_model(unsigned int signature)
 +{
 +	unsigned int base_family = (signature >> 8) & 0xfu;
@@ -3470,20 +3727,20 @@ index 4319355..da10132 100644
  	v.name[12] = 0;
  	copyout_string(v.name, (char*) old, oldlen);
  
-@@ -103,211 +208,181 @@ sysctl_handler(handle_vendor)
+@@ -103,211 +208,202 @@ sysctl_handler(handle_vendor)
  
  sysctl_handler(handle_max_basic)
  {
 -	setup(0);
--
--
--    __cpuid(level, eax, ebx, ecx, edx);
 +	unsigned int eax, ebx, ecx, edx;
  
--	copyout_int(eax, (char*)old,oldlen);
 +	if (darling_compat_profile_enabled())
 +		return copyout_int32(darling_compat_cpu_identity()->max_basic, old, oldlen);
  
+-    __cpuid(level, eax, ebx, ecx, edx);
+-
+-	copyout_int(eax, (char*)old,oldlen);
+-
 -	return 0;
 +	cpuid_leaf(0, &eax, &ebx, &ecx, &edx);
 +	return copyout_int32(eax, old, oldlen);
@@ -3492,14 +3749,14 @@ index 4319355..da10132 100644
  sysctl_handler(handle_family)
  {
 -    setup(1);
--
++	unsigned int eax, ebx, ecx, edx;
++	unsigned int signature;
+ 
 -    __cpuid(level, eax, ebx, ecx, edx);
 -
 -    eax = eax >> 7;
 -    eax &= 15;
-+	unsigned int eax, ebx, ecx, edx;
-+	unsigned int signature;
- 
+-
 -    copyout_int(eax, old, oldlen);
 +	if (darling_compat_profile_enabled())
 +		signature = darling_compat_cpu_identity()->signature;
@@ -3518,12 +3775,12 @@ index 4319355..da10132 100644
 -    setup(1);
 -
 -    __cpuid(level, eax, ebx, ecx, edx);
+-
+-    eax = eax >> 3;
+-    eax &= 15;
 +	unsigned int eax, ebx, ecx, edx;
 +	unsigned int signature;
  
--    eax = eax >> 3;
--    eax &= 15;
--
 -    copyout_int(eax,(char*)old, oldlen);
 +	if (darling_compat_profile_enabled())
 +		signature = darling_compat_cpu_identity()->signature;
@@ -3540,11 +3797,11 @@ index 4319355..da10132 100644
  sysctl_handler(handle_stepping)
  {
 -    setup(1);
+-
+-    __cpuid(level, eax, ebx, ecx, edx);
 +	unsigned int eax, ebx, ecx, edx;
 +	unsigned int signature;
  
--    __cpuid(level, eax, ebx, ecx, edx);
--
 -    eax &= 15;
 -
 -    copyout_int(eax,(char*)old, oldlen);
@@ -3618,24 +3875,40 @@ index 4319355..da10132 100644
  
  sysctl_handler(handle_features)
  {
-+	// The flags are leaf 1 EDX. The old code read leaf 0, whose EDX is the
-+	// "ineI" half of the vendor string, so the list was vendor ASCII decoded
-+	// as feature bits (no SSE/SSE2, a spurious IA64).
-+	static const char features[][7] = {"FPU","VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "","SEP","MTRR","PGE",
-+						"MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS",
-+						"HTT", "TM","IA64","PBE"};
++	// Leaf 1 EDX then ECX, named and ordered like xnu's cpuid feature_map
++	// (osfmk/i386/cpuid.c): a real i7-9750H prints "FPU VME ... PBE SSE3
++	// PCLMULQDQ ... AVX1.0 RDRAND F16C". The old code read leaf 0, whose EDX is
++	// the "ineI" half of the vendor string, and never listed the ECX features.
++	// Bits 0..31 are EDX, 32..63 ECX.
++	static const struct { unsigned char bit; char name[10]; } features[] = {
++		{0, "FPU"}, {1, "VME"}, {2, "DE"}, {3, "PSE"}, {4, "TSC"}, {5, "MSR"},
++		{6, "PAE"}, {7, "MCE"}, {8, "CX8"}, {9, "APIC"}, {11, "SEP"}, {12, "MTRR"},
++		{13, "PGE"}, {14, "MCA"}, {15, "CMOV"}, {16, "PAT"}, {17, "PSE36"},
++		{18, "PSN"}, {19, "CLFSH"}, {21, "DS"}, {22, "ACPI"}, {23, "MMX"},
++		{24, "FXSR"}, {25, "SSE"}, {26, "SSE2"}, {27, "SS"}, {28, "HTT"},
++		{29, "TM"}, {31, "PBE"},
++		{32 + 0, "SSE3"}, {32 + 1, "PCLMULQDQ"}, {32 + 2, "DTES64"}, {32 + 3, "MON"},
++		{32 + 4, "DSCPL"}, {32 + 5, "VMX"}, {32 + 6, "SMX"}, {32 + 7, "EST"},
++		{32 + 8, "TM2"}, {32 + 9, "SSSE3"}, {32 + 10, "CID"}, {32 + 12, "FMA"},
++		{32 + 13, "CX16"}, {32 + 14, "TPR"}, {32 + 15, "PDCM"}, {32 + 19, "SSE4.1"},
++		{32 + 20, "SSE4.2"}, {32 + 21, "x2APIC"}, {32 + 22, "MOVBE"},
++		{32 + 23, "POPCNT"}, {32 + 25, "AES"}, {32 + 17, "PCID"}, {32 + 18, "DCA"},
++		{32 + 26, "XSAVE"}, {32 + 27, "OSXSAVE"}, {32 + 11, "SEGLIM64"},
++		{32 + 24, "TSCTMR"}, {32 + 28, "AVX1.0"}, {32 + 30, "RDRAND"},
++		{32 + 29, "F16C"}, {32 + 31, "VMM"},
++	};
 +	unsigned int eax, ebx, ecx, edx;
-+	char buffer[256];
++	char buffer[512];
 +	int length = 0;
 +
++	cpuid_leaf(1, &eax, &ebx, &ecx, &edx);
 +	if (darling_compat_profile_enabled())
-+		edx = darling_compat_cpu_identity()->leaf1_edx;
-+	else
-+		cpuid_leaf(1, &eax, &ebx, &ecx, &edx);
-+
-+	for (int i = 0; i < 32; i++)
 +	{
-+		const char* name = features[i];
++		// The same words the game's cpuid sees (cpuid_trace.c leaf 1).
++		const struct darling_cpu_identity* id = darling_compat_cpu_identity();
++		edx = id->leaf1_edx;
++		ecx = (ecx & id->leaf1_ecx) | (id->leaf1_ecx & id->leaf1_ecx_system);
++	}
  
 -    setup(1);
 -
@@ -3706,8 +3979,12 @@ index 4319355..da10132 100644
 -
 -    }
 -        
--
-+		if (i == 10 || i == 20 || !(edx & (1u << i)))
++	for (size_t i = 0; i < sizeof(features) / sizeof(features[0]); i++)
++	{
++		unsigned int word = features[i].bit < 32 ? edx : ecx;
++		const char* name = features[i].name;
+ 
++		if (!(word & (1u << (features[i].bit & 31))))
 +			continue;
  
 -    return 0;
@@ -3806,7 +4083,7 @@ index 4319355..da10132 100644
  	}
  
  out:
-@@ -319,3 +394,21 @@ out:
+@@ -319,3 +415,21 @@ out:
  		*oldlen = sizeof(uint32_t);
  	return 0;
  }
@@ -7745,13 +8022,45 @@ index 88658cb..83ce61c 100644
  	int *tsderrno = (int*)_os_tsd_get_direct(__TSD_ERRNO);
  	if (tsderrno) {
 diff --git a/libsyscall/mach/host.c b/libsyscall/mach/host.c
-index 6d977fd..ec68ce4 100644
+index 6d977fd..3eae2f0 100644
 --- a/libsyscall/mach/host.c
 +++ b/libsyscall/mach/host.c
-@@ -108,3 +108,61 @@ host_create_mach_voucher(mach_port_name_t host,
+@@ -108,3 +108,93 @@ host_create_mach_voucher(mach_port_name_t host,
  
  	return rv;
  }
++
++/*
++ * darling-lol: HOST_BASIC_INFO comes from darlingserver with the host's real
++ * CPU counts and memory. Present the same values as the hw.* sysctls instead
++ * (the compat profile's i7-9750H counts and memory size), so the two channels
++ * cannot disagree.
++ */
++extern kern_return_t
++_kernelrpc_host_info(host_t host, host_flavor_t flavor, host_info_t info,
++    mach_msg_type_number_t *count);
++
++extern void darling_host_basic_info_present(struct host_basic_info *out,
++    mach_msg_type_number_t count);
++
++/* max_cpus .. cpu_subtype: the legacy reply (kernel-private in host_info.h) */
++#ifndef HOST_BASIC_INFO_OLD_COUNT
++#define HOST_BASIC_INFO_OLD_COUNT ((mach_msg_type_number_t)5)
++#endif
++
++kern_return_t
++host_info(host_t host, host_flavor_t flavor, host_info_t info,
++    mach_msg_type_number_t *count)
++{
++	kern_return_t rv = _kernelrpc_host_info(host, flavor, info, count);
++
++	if (rv == KERN_SUCCESS && flavor == HOST_BASIC_INFO &&
++	    *count >= HOST_BASIC_INFO_OLD_COUNT) {
++		darling_host_basic_info_present((struct host_basic_info *)info, *count);
++	}
++
++	return rv;
++}
 +
 +/*
 + * darling-lol: HOST_VM_INFO64 comes from darlingserver with the host's real
@@ -7811,10 +8120,50 @@ index 6d977fd..ec68ce4 100644
 +	return rv;
 +}
 diff --git a/libsyscall/os/tsd.h b/libsyscall/os/tsd.h
-index 6619381..78d90df 100644
+index 6619381..37f3626 100644
 --- a/libsyscall/os/tsd.h
 +++ b/libsyscall/os/tsd.h
-@@ -63,6 +63,22 @@ static __inline__ unsigned int
+@@ -58,11 +58,62 @@
+ 
+ extern void _thread_set_tsd_base(void *tsd_base);
+ 
++#ifdef DARLING
++/*
++ * darling-lol: Darwin promises 0 <= _os_cpu_number() < hw.logicalcpu_max, and
++ * callers size per-CPU arrays from that sysctl (libdispatch's continuation
++ * magazines are 2 MiB per CPU and are indexed with this value). profile=compat
++ * presents the i7-9750H's 12 logical CPUs while Linux may schedule this thread
++ * on any of the host's CPUs, so fold the host CPU number into the guest's
++ * range: without it a thread on host CPU 12 or 13 indexes one magazine past
++ * the mapped heap. mldr writes the count into the 64-bit commpage
++ * (_COMM_PAGE_LOGICAL_CPUS, byte 0x36), so this stays a single load; 0 (no
++ * commpage yet) leaves the value unchanged.
++ */
++#if defined(__LP64__)
++#define DARLING_COMM_PAGE_LOGICAL_CPUS_ADDR 0x00007fffffe00036ULL
++#else
++#define DARLING_COMM_PAGE_LOGICAL_CPUS_ADDR 0x0000ffff0036UL
++#endif
++#ifndef DARLING_COMM_PAGE_LOGICAL_CPUS
++#define DARLING_COMM_PAGE_LOGICAL_CPUS \
++	(*(const volatile uint8_t *) DARLING_COMM_PAGE_LOGICAL_CPUS_ADDR)
++#endif
++
++__attribute__((always_inline))
++static __inline__ unsigned int
++__darling_fold_cpu_number(unsigned int cpu)
++{
++	unsigned int logical = DARLING_COMM_PAGE_LOGICAL_CPUS;
++
++	if (__builtin_expect(logical != 0 && cpu >= logical, 0)) {
++		cpu %= logical;
++	}
++	return cpu;
++}
++#endif /* DARLING */
++
+ __attribute__((always_inline))
+ static __inline__ unsigned int
  _os_cpu_number(void)
  {
  #ifdef DARLING
@@ -7831,12 +8180,21 @@ index 6619381..78d90df 100644
 +	if (__builtin_expect(__darling_has_rdtscp, 1)) {
 +		unsigned int lo, hi, aux;
 +		__asm__ volatile("rdtscp" : "=a"(lo), "=d"(hi), "=c"(aux));
-+		return aux & 0xfff;
++		return __darling_fold_cpu_number(aux & 0xfff);
 +	}
 +#endif
  	extern int __linux_syscall(int nr, ...);
  
  	unsigned int cpu_num = 0;
+@@ -72,7 +123,7 @@ _os_cpu_number(void)
+ 		return 0; // i guess?
+ 	}
+ 
+-	return cpu_num;
++	return __darling_fold_cpu_number(cpu_num);
+ #else // !DARLING
+ #if defined(__arm__)
+ 	uintptr_t p;
 diff --git a/libsyscall/wrappers/__commpage_gettimeofday.c b/libsyscall/wrappers/__commpage_gettimeofday.c
 index ccd2b33..1a1a7c6 100644
 --- a/libsyscall/wrappers/__commpage_gettimeofday.c
@@ -9767,10 +10125,10 @@ index a26ae39..0fb6d6a 100644
  	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
 new file mode 100644
-index 0000000..254db21
+index 0000000..70ded6d
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,62 @@
 +#ifndef DARLING_LOL_CPU_IDENTITY_H
 +#define DARLING_LOL_CPU_IDENTITY_H
 +
@@ -9783,8 +10141,8 @@ index 0000000..254db21
 +// identity leaves) and the machdep.cpu.* / hw.cpufrequency sysctls agree.
 +//
 +// The SKU is a MacBookPro16,1 part: i7-9750H, Coffee Lake-H, 6 cores /
-+// 12 threads. Those counts match this host, so the profile does not have to
-+// invent a topology the scheduler does not have.
++// 12 threads. Under the profile every CPU count (hw.*, machdep.cpu.*_count,
++// host_info, the commpage) reports those 6/12, whatever the host has.
 +
 +#include <stdint.h>
 +
@@ -9794,15 +10152,23 @@ index 0000000..254db21
 +	uint32_t brand_len;
 +	uint32_t signature;   // leaf 1 EAX: family/model/stepping
 +	uint32_t leaf1_edx;   // leaf 1 EDX: feature flags
++	uint32_t leaf1_ecx;   // leaf 1 ECX: the identity part's feature flags
++	// The leaf 1 ECX bits that only describe ring-0 facilities (VMX, EST, PCID,
++	// x2APIC, ...): no user-mode instruction depends on them, so they are
++	// reported even when the host lacks them. Every other ECX bit is an
++	// instruction set and is reported only when the host has it too.
++	uint32_t leaf1_ecx_system;
 +	uint32_t cores;       // physical cores (leaf 0x80000008 EBX low byte + 1)
 +	uint32_t threads;     // logical processors (leaf 1 EBX bits 16..23 + 1)
 +	uint32_t max_basic;   // leaf 0 EAX
 +	uint32_t max_ext;     // leaf 0x80000000 EAX
 +	uint32_t phys_bits;   // leaf 0x80000008 EAX low byte
 +	uint32_t virt_bits;   // leaf 0x80000008 EAX high byte
-+	uint32_t l2_kb;
-+	uint32_t l3_kb;
-+	uint32_t base_mhz;    // hw.cpufrequency
++	uint32_t l1d_kb;      // per-core L1 data cache (cpuid leaf 4, hw.cachesize[1])
++	uint32_t l2_kb;       // per-core L2 (leaves 4 and 0x80000006, hw.cachesize[2])
++	uint32_t l3_kb;       // package L3 (leaf 4, hw.cachesize[3])
++	uint32_t base_mhz;    // hw.cpufrequency, leaf 0x16 EAX
++	uint32_t max_mhz;     // leaf 0x16 EBX (maximum turbo)
 +};
 +
 +// The compatibility identity. Never NULL.
@@ -9819,13 +10185,18 @@ index 0000000..254db21
 +// owned by this module.
 +const char* darling_configured_cpu_brand(void);
 +
++// The profile's memory size from RCLOL_MEMORY_BYTES, or 0 when it is unset,
++// empty or not a number. Like the profile check, safe before the C library is
++// initialized (host_info can run that early, from any process including launchd).
++unsigned long long darling_configured_memory_bytes(void);
++
 +#endif // DARLING_LOL_CPU_IDENTITY_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
 new file mode 100644
-index 0000000..bfe2626
+index 0000000..7bd67dd
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,178 @@
 +// darling-lol: the shared compatibility CPU identity. See common/cpu_identity.h.
 +
 +#include <darling/emulation/common/cpu_identity.h>
@@ -9844,15 +10215,23 @@ index 0000000..bfe2626
 +	.brand_len = sizeof(DARLING_COMPAT_BRAND) - 1,
 +	.signature = 0x000906eau,
 +	.leaf1_edx = 0xbfebfbffu,
++	// SSE3 PCLMULQDQ DTES64 MON DSCPL VMX EST TM2 SSSE3 SEGLIM64 FMA CX16 TPR
++	// PDCM PCID SSE4.1 SSE4.2 x2APIC MOVBE POPCNT TSCTMR AES XSAVE OSXSAVE
++	// AVX1.0 F16C RDRAND, as a real i7-9750H reports it.
++	.leaf1_ecx = 0x7ffafbbfu,
++	// DTES64 DSCPL VMX EST TM2 SEGLIM64 TPR PDCM PCID x2APIC TSCTMR.
++	.leaf1_ecx_system = 0x0122c9b4u,
 +	.cores = 6,
 +	.threads = 12,
 +	.max_basic = 0x16u,
 +	.max_ext = 0x80000008u,
 +	.phys_bits = 39,
 +	.virt_bits = 48,
++	.l1d_kb = 32,
 +	.l2_kb = 256,
 +	.l3_kb = 12288,
 +	.base_mhz = 2600,
++	.max_mhz = 4500,
 +};
 +
 +const struct darling_cpu_identity* darling_compat_cpu_identity(void)
@@ -9965,6 +10344,37 @@ index 0000000..bfe2626
 +	}
 +	return state == 1 ? copy : 0;
 +}
++
++unsigned long long darling_configured_memory_bytes(void)
++{
++	static unsigned long long bytes;
++	static int state = 0; // 0: not resolved, 1: resolved
++
++	if (state == 0)
++	{
++		const char* value = darling_environ_value("RCLOL_MEMORY_BYTES");
++		unsigned long long parsed = 0;
++
++		if (value != 0)
++		{
++			for (; *value >= '0' && *value <= '9'; ++value)
++			{
++				unsigned long long digit = (unsigned long long) (*value - '0');
++				if (parsed > (~0ULL - digit) / 10)
++				{
++					parsed = 0;
++					break;
++				}
++				parsed = parsed * 10 + digit;
++			}
++			if (*value != '\0')
++				parsed = 0;
++		}
++		bytes = parsed;
++		state = 1;
++	}
++	return bytes;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h
 new file mode 100644
 index 0000000..ca3afa3
@@ -10006,10 +10416,28 @@ index 0000000..85e0663
 +	return ts.tv_sec * 1000000000L + ts.tv_nsec;
 +}
 diff --git a/osfmk/mach/mach_host.defs b/osfmk/mach/mach_host.defs
-index a1b55f5..03dab69 100644
+index a1b55f5..e6540d8 100644
 --- a/osfmk/mach/mach_host.defs
 +++ b/osfmk/mach/mach_host.defs
-@@ -236,10 +236,13 @@ routine host_lockgroup_info(
+@@ -86,8 +86,16 @@ subsystem
+ 
+ /*
+  *	Return information about this host.
++ *	darling-lol: the user side is wrapped in libsyscall/mach/host.c.
+  */
+-routine host_info(
++routine
++#ifdef KERNEL_SERVER
++host_info(
++#elif !KERNEL && !LIBSYSCALL_INTERFACE
++_kernelrpc_host_info(
++#else
++host_info(
++#endif
+ 		host		: host_t;
+ 		flavor		: host_flavor_t;
+ 	out	host_info_out	: host_info_t, CountInOut);
+@@ -236,10 +244,13 @@ routine host_lockgroup_info(
  
  /*
   *	Return 64-bit statistics from this host.

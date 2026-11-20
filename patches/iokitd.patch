@@ -3684,3 +3684,600 @@ index 0000000..6c87959
 +}
 +}
 +#endif
+diff --git a/src/IOGraphicsAccelerator.h b/src/IOGraphicsAccelerator.h
+new file mode 100644
+index 0000000..050fe50
+--- /dev/null
++++ b/src/IOGraphicsAccelerator.h
+@@ -0,0 +1,59 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef IOKITD_IOGRAPHICSACCELERATOR_H
++#define IOKITD_IOGRAPHICSACCELERATOR_H
++
++#include "IOService.h"
++#include "ServiceRegistry.h"
++#include <cstdint>
++
++// The synthetic GPU entries. macOS publishes an IOPCIDevice with vendor-id/device-id
++// properties and an accelerator child per GPU; Metal and Dawn walk that pair to
++// identify the GPU. The host's Vulkan driver publishes nothing in the guest
++// IORegistry, so iokitd stands one in per host card with the host PCI IDs (or the
++// compatibility IDs the rest of the system reports). Each accelerator ID is pinned to
++// IOGraphicsAcceleratorIds::registryIdFor() of the card's real PCI IDs, the value
++// -[MTLDevice registryID] reports for the card Metal renders on; Dawn resolves it
++// through IOServiceGetMatchingService(IORegistryEntryIDMatching(...)).
++class IOPCIDevice : public IOService
++{
++public:
++	IOPCIDevice(uint32_t vendor, uint32_t device);
++
++	const char* className() const override;
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++
++private:
++	uint32_t m_vendor;
++	uint32_t m_device;
++};
++
++class IOGraphicsAccelerator : public IOService
++{
++public:
++	const char* className() const override;
++	bool conformsTo(const char* className) override;
++	NSDictionary* matchingDictionary() override;
++
++	static void registerSelf(ServiceRegistry* targetServiceRegistry);
++};
++
++#endif
+diff --git a/src/IOGraphicsAccelerator.mm b/src/IOGraphicsAccelerator.mm
+new file mode 100644
+index 0000000..186d27b
+--- /dev/null
++++ b/src/IOGraphicsAccelerator.mm
+@@ -0,0 +1,118 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "IOGraphicsAccelerator.h"
++#include "IOGraphicsAcceleratorIds.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSString.h>
++#include <os/log.h>
++#include <cstdio>
++#include <cstring>
++
++static NSData* dataForWord(uint32_t word)
++{
++	return [NSData dataWithBytes: &word length: sizeof(word)];
++}
++
++IOPCIDevice::IOPCIDevice(uint32_t vendor, uint32_t device)
++: m_vendor(vendor), m_device(device)
++{
++}
++
++const char* IOPCIDevice::className() const
++{
++	return "IOPCIDevice";
++}
++
++NSDictionary* IOPCIDevice::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @"IOPCIDevice",
++		@"IOClass": @"IOPCIDevice",
++	};
++}
++
++NSDictionary* IOPCIDevice::getProperties()
++{
++	// macOS publishes both IDs as four-byte little-endian data; Dawn reads them
++	// from the accelerator's parent entry with IORegistryEntrySearchCFProperty.
++	return @{
++		@"vendor-id": dataForWord(m_vendor),
++		@"device-id": dataForWord(m_device),
++	};
++}
++
++const char* IOGraphicsAccelerator::className() const
++{
++	return "IOGraphicsAccelerator2";
++}
++
++bool IOGraphicsAccelerator::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IOAccelerator") == 0
++	    || std::strcmp(className, "IOGraphicsAccelerator") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++NSDictionary* IOGraphicsAccelerator::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @[ @"IOAccelerator", @"IOGraphicsAccelerator2" ],
++		@"IOClass": @"IOGraphicsAccelerator2",
++	};
++}
++
++void IOGraphicsAccelerator::registerSelf(ServiceRegistry* targetServiceRegistry)
++{
++	static bool registered = false;
++
++	if (registered)
++		return;
++	registered = true;
++
++	// No readable host card publishes nothing. Dawn trusts any entry it finds for
++	// -[MTLDevice registryID] and reads missing or zero IDs as vendor 0; with no
++	// entry it falls back to the Metal device name, as before this entry existed.
++	// A software Metal device (llvmpipe) names no card's ID, so it falls back too.
++	unsigned int index = 0;
++	for (const auto& gpu : IOGraphicsAcceleratorIds::accelerators())
++	{
++		IOGraphicsAccelerator* accelerator = new IOGraphicsAccelerator;
++		// Pin before registering anything, so a refused ID leaves no orphan entry.
++		if (!accelerator->assignId(gpu.registryId))
++		{
++			os_log_error(OS_LOG_DEFAULT, "iokitd: registry ID 0x%llx is already in use",
++			             (unsigned long long) gpu.registryId);
++			accelerator->release();
++			continue;
++		}
++
++		IOPCIDevice* pciDevice = new IOPCIDevice(gpu.presented.vendor, gpu.presented.device);
++		char path[16];
++		snprintf(path, sizeof(path), "GFX%u@0", index++);
++		pciDevice->registerInPlane(kIOServicePlane, path, IORegistryEntry::root());
++		targetServiceRegistry->registerService(pciDevice);
++
++		accelerator->registerInPlane(kIOServicePlane, "IOAccelerator", pciDevice);
++		targetServiceRegistry->registerService(accelerator);
++	}
++}
+diff --git a/src/IOGraphicsAcceleratorIds.h b/src/IOGraphicsAcceleratorIds.h
+new file mode 100644
+index 0000000..41aeae3
+--- /dev/null
++++ b/src/IOGraphicsAcceleratorIds.h
+@@ -0,0 +1,297 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef IOKITD_IOGRAPHICSACCELERATORIDS_H
++#define IOKITD_IOGRAPHICSACCELERATORIDS_H
++
++#include <algorithm>
++#include <cctype>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dirent.h>
++#include <string>
++#include <vector>
++
++// The GPU identity iokitd publishes comes from the same inputs
++// tools/darling-system_profiler.sh uses for SPDisplaysDataType, so both report
++// the same PCI IDs in the host and mac profiles. Free of Foundation so the host
++// tests can compile this header directly.
++namespace IOGraphicsAcceleratorIds {
++
++struct PciId
++{
++	uint32_t vendor;
++	uint32_t device;
++};
++
++// A host DRM card: its PCI IDs and amdgpu's mem_info_vram_total (0 when the
++// driver does not publish it, like NVIDIA's).
++struct HostCard
++{
++	uint32_t vendor;
++	uint32_t device;
++	uint64_t vramBytes;
++};
++
++inline std::string systemRoot()
++{
++	const char* root = getenv("RCLOL_SYSTEM_ROOT");
++	return root && *root ? std::string(root) : std::string("/Volumes/SystemRoot");
++}
++
++inline std::string systemProfilePath()
++{
++	const char* path = getenv("RCLOL_SYSTEM_PROP");
++	return path && *path ? std::string(path) : std::string("/private/etc/darling-system.prop");
++}
++
++inline bool readPciId(const std::string& directory, const char* name, uint32_t* value)
++{
++	FILE* file = fopen((directory + "/" + name).c_str(), "r");
++	if (!file)
++		return false;
++
++	unsigned int parsed = 0;
++	bool ok = fscanf(file, "%x", &parsed) == 1;
++	fclose(file);
++	if (ok)
++		*value = parsed;
++	return ok;
++}
++
++inline uint64_t readVramBytes(const std::string& directory)
++{
++	FILE* file = fopen((directory + "/mem_info_vram_total").c_str(), "r");
++	if (!file)
++		return 0;
++
++	unsigned long long parsed = 0;
++	bool ok = fscanf(file, "%llu", &parsed) == 1;
++	fclose(file);
++	return ok ? parsed : 0;
++}
++
++inline bool isCardName(const char* name)
++{
++	if (strncmp(name, "card", 4) != 0 || name[4] == '\0')
++		return false;
++	for (const char* c = name + 4; *c; c++)
++		if (!isdigit((unsigned char) *c))
++			return false;
++	return true;
++}
++
++// Every DRM card with a readable vendor/device pair, in the driver's probe
++// order. A missing root or an unreadable card leaves the identity unknown
++// instead of falling back to another device.
++inline std::vector<HostCard> hostCards()
++{
++	std::vector<HostCard> ids;
++	const std::string roots[] = {
++		systemRoot() + "/sys/class/drm",
++		"/sys/class/drm",
++	};
++
++	for (const std::string& root : roots)
++	{
++		DIR* directory = opendir(root.c_str());
++		if (!directory)
++			continue;
++
++		std::vector<std::string> cards;
++		while (struct dirent* entry = readdir(directory))
++			if (isCardName(entry->d_name))
++				cards.emplace_back(entry->d_name);
++		closedir(directory);
++
++		std::sort(cards.begin(), cards.end(), [](const std::string& left, const std::string& right) {
++			return atoi(left.c_str() + 4) < atoi(right.c_str() + 4);
++		});
++
++		for (const std::string& card : cards)
++		{
++			uint32_t vendor = 0, device = 0;
++			std::string deviceDirectory = root + "/" + card + "/device";
++			if (readPciId(deviceDirectory, "vendor", &vendor)
++			    && readPciId(deviceDirectory, "device", &device))
++				ids.push_back({ vendor, device, readVramBytes(deviceDirectory) });
++		}
++		if (!ids.empty())
++			return ids;
++	}
++	return ids;
++}
++
++// Returns the last `key=value` line, like the sed/tail pair system_profiler
++// uses. `found` distinguishes a missing key from an empty value.
++inline void readLastValue(const std::string& path, const std::string& key,
++                          std::string* value, bool* found)
++{
++	*value = std::string();
++	*found = false;
++	FILE* file = fopen(path.c_str(), "r");
++	if (!file)
++		return;
++
++	const std::string prefix = key + "=";
++	char line[256];
++	while (fgets(line, sizeof(line), file))
++	{
++		std::string text(line);
++		while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
++			text.pop_back();
++		if (text.compare(0, prefix.size(), prefix) == 0)
++		{
++			*value = text.substr(prefix.size());
++			*found = true;
++		}
++	}
++	fclose(file);
++}
++
++// The effective GPU name of the active profile, resolved like
++// tools/darling-system_profiler.sh: RCLOL_GPU_NAME, then the last
++// <profile>.gpu.name line, then DARLING_METAL_MAC_GPU_NAME, then the host.
++// An empty value therefore means host, and only "mac" substitutes the
++// compatibility PCI IDs.
++inline std::string hostGpuMode()
++{
++	std::string profile = "compat";
++	std::string name;
++	const char* profileEnv = getenv("RCLOL_PLATFORM_PROFILE");
++	const char* nameEnv = getenv("RCLOL_GPU_NAME");
++	if (nameEnv)
++		name = nameEnv;
++
++	// system_profiler only reads the profile file when the launcher did not
++	// hand RCLOL_PLATFORM_PROFILE over.
++	if (!(profileEnv && *profileEnv))
++	{
++		std::string value;
++		bool found = false;
++		readLastValue(systemProfilePath(), "profile", &value, &found);
++		if (found && (value == "host" || value == "compat"))
++			profile = value;
++		if (name.empty())
++			readLastValue(systemProfilePath(), profile + ".gpu.name", &name, &found);
++	}
++
++	if (name.empty())
++	{
++		const char* mac = getenv("DARLING_METAL_MAC_GPU_NAME");
++		if (mac && *mac && std::strcmp(mac, "0") != 0)
++			name = "mac";
++	}
++	return name.empty() ? std::string("host") : name;
++}
++
++// True when an AMD card sits beside the host's discrete GPU: an NVIDIA card, or
++// an AMD card with more VRAM (an APU's carve-out is far smaller than a dGPU's
++// memory). mac mode presents it as the MacBookPro16,1's integrated UHD Graphics
++// 630, so an APU + dGPU host shows the Mac's pair instead of two Radeon Pro
++// 5500Ms, which no Mac has. MTLDeviceInfo::presentedAsIntegrated in
++// patches/metal.patch and tools/darling-system_profiler.sh apply the same rule;
++// keep the copies identical.
++inline bool presentedAsIntegrated(const HostCard& card, const std::vector<HostCard>& cards)
++{
++	if (card.vendor != 0x1002)
++		return false;
++	for (const HostCard& other : cards)
++	{
++		if (other.vendor == card.vendor && other.device == card.device)
++			continue;
++		if (other.vendor == 0x10de || (other.vendor == 0x1002 && other.vramBytes > card.vramBytes))
++			return true;
++	}
++	return false;
++}
++
++// The PCI IDs a host card is presented with. mac mode presents the
++// MacBookPro16,1's GPUs: Intel, and an AMD card beside the discrete GPU, as its
++// UHD Graphics 630 and the discrete vendors (AMD and NVIDIA) as its Radeon Pro
++// 5500M, which is also the name Metal reports for them
++// (MTLDeviceInfo::macGpuName in patches/metal.patch) and what system_profiler
++// shows. No Mac that runs macOS 14 has an NVIDIA GPU. Any other mode, and any
++// other vendor, keeps the host IDs.
++inline PciId presentedIds(const HostCard& host, const std::string& mode, bool integrated)
++{
++	if (mode != "mac")
++		return { host.vendor, host.device };
++	if (host.vendor == 0x8086 || integrated)
++		return { 0x8086, 0x3e9b };
++	if (host.vendor == 0x1002 || host.vendor == 0x10de)
++		return { 0x1002, 0x7340 };
++	return { host.vendor, host.device };
++}
++
++// The registry ID of a host card's accelerator, from its real PCI IDs. Metal
++// derives -[MTLDevice registryID] from the Vulkan device's vendorID/deviceID with
++// the same function (MTLDeviceInfo::registryIdFor in patches/metal.patch), so
++// whichever card Indium selects -- the loader's order, /tmp/metal-gpu or
++// METAL_INDIUM_GPU -- the ID Dawn looks up is that card's entry. Keep the two
++// copies identical. The IDs sit just above iokitd's sequential range
++// (0x100000000 upwards, a few dozen entries in practice).
++static constexpr uint64_t kRegistryIdBase = 0x100000439ULL;
++static constexpr uint32_t kRegistryIdSlots = 1021; // prime
++
++inline uint64_t registryIdFor(uint32_t vendor, uint32_t device)
++{
++	uint32_t key = ((vendor & 0xffffu) << 16) | (device & 0xffffu);
++	return kRegistryIdBase + key % kRegistryIdSlots;
++}
++
++struct Accelerator
++{
++	uint64_t registryId;
++	HostCard host;
++	PciId presented;
++};
++
++// One accelerator per distinct host card, in the driver's probe order. A
++// multi-GPU host publishes every card, like a MacBookPro16,1 publishes both of
++// its GPUs, so the entry Metal names exists whichever card it renders on. Two
++// identical cards share an entry (Metal reports the same ID for either); a card
++// whose ID collides with an earlier one is left out rather than misdescribed.
++inline std::vector<Accelerator> acceleratorsFor(const std::vector<HostCard>& cards,
++                                                const std::string& mode)
++{
++	std::vector<Accelerator> accelerators;
++	for (const HostCard& card : cards)
++	{
++		if (card.vendor == 0 && card.device == 0)
++			continue;
++		uint64_t id = registryIdFor(card.vendor, card.device);
++		if (std::any_of(accelerators.begin(), accelerators.end(),
++		                [id](const Accelerator& existing) { return existing.registryId == id; }))
++			continue;
++		accelerators.push_back({ id, card, presentedIds(card, mode, presentedAsIntegrated(card, cards)) });
++	}
++	return accelerators;
++}
++
++inline std::vector<Accelerator> accelerators()
++{
++	return acceleratorsFor(hostCards(), hostGpuMode());
++}
++
++}
++
++#endif
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -41,6 +41,7 @@
+ 	src/PowerSources.mm
+ 	src/PowerAssertionsX11.mm
+ 	src/IOPlatformExpertDevice.mm
++	src/IOGraphicsAccelerator.mm
+ 	src/IOPMrootDomain.mm
+ 	src/IOInterestNotification.mm
+ 	src/LogindSleep.c
+diff --git a/src/IORegistryEntry.h b/src/IORegistryEntry.h
+--- a/src/IORegistryEntry.h
++++ b/src/IORegistryEntry.h
+@@ -32,6 +32,10 @@
+ 	static IORegistryEntry* findById(uint64_t id);
+ 	
+ 	void registerInPlane(const char* plane, const char* pathName, IORegistryEntry* parent);
++
++	// Pins the entry to an ID that another component already uses to address it.
++	// Refuses zero and IDs another live entry owns.
++	bool assignId(uint64_t id);
+ protected:
+ 	// The key is the plane name, e.g. kIOServicePlane (as declared in IOKit/IOKitKeys.h)
+ 	std::unordered_map<std::string, std::string> m_name;
+diff --git a/src/IORegistryEntry.mm b/src/IORegistryEntry.mm
+--- a/src/IORegistryEntry.mm
++++ b/src/IORegistryEntry.mm
+@@ -39,6 +39,29 @@
+ 		for (auto* parent : plane.second) parent->m_children[plane.first].erase(this);
+ 	for (auto& plane : m_children)
+ 		for (auto* child : plane.second) child->m_parents[plane.first].erase(this);
++}
++
++bool IORegistryEntry::assignId(uint64_t id)
++{
++	// Zero and the all-ones value are reserved in the kernel's ID space.
++	if (id == 0 || id == std::numeric_limits<uint64_t>::max())
++		return false;
++
++	std::unique_lock l(m_entriesByIdMutex);
++	auto existing = m_entriesById.find(id);
++	if (existing != m_entriesById.end() && existing->second != this)
++		return false;
++
++	if (m_id != id)
++	{
++		m_entriesById.erase(m_id);
++		m_id = id;
++		m_entriesById.emplace(m_id, this);
++	}
++	// Keep the allocator above a pinned ID so a later entry cannot take it.
++	if (m_nextId <= id)
++		m_nextId = id + 1;
++	return true;
+ }
+ 
+ IORegistryEntry* IORegistryEntry::findById(uint64_t id)
+diff --git a/src/IOService.mm b/src/IOService.mm
+--- a/src/IOService.mm
++++ b/src/IOService.mm
+@@ -24,6 +24,8 @@
+ #include <cstring>
+ #include <os/log.h>
+ #import <Foundation/NSArray.h>
++#import <Foundation/NSNumber.h>
++#include <IOKit/IOKitKeys.h>
+ 
+ extern "C" {
+ #include "iokitmigServer.h"
+@@ -43,6 +45,15 @@
+ 	{
+ 		NSObject* ourProp = ourProps[key];
+ 		NSObject* expectedValue = dict[key];
++
++		// IORegistryEntryIDMatching() addresses an entry by ID instead of by property.
++		if ([key isEqualToString: @kIORegistryEntryIDKey])
++		{
++			if (![expectedValue isKindOfClass: [NSNumber class]]
++			    || [expectedValue unsignedLongLongValue] != id())
++				return false;
++			continue;
++		}
+ 
+ 		if ([ourProp isKindOfClass:[NSArray class]])
+ 		{
+diff --git a/src/main.mm b/src/main.mm
+--- a/src/main.mm
++++ b/src/main.mm
+@@ -32,6 +32,7 @@
+ #include "IODisplayConnectX11.h"
+ #include "PowerAssertions.h"
+ #include "IOSurfaceRoot.h"
++#include "IOGraphicsAccelerator.h"
+ #include "IOPlatformExpertDevice.h"
+ #include "IOPMrootDomain.h"
+ 
+@@ -151,6 +152,7 @@
+ 	IORegistryEntry::root();
+ 	IODisplayConnectX11::discoverDevices(registry);
+ 	IOPlatformExpertDevice::registerSelf(registry);
++	IOGraphicsAccelerator::registerSelf(registry);
+ 	IOSurfaceRoot::registerSelf(registry);
+ 	IOPMrootDomain::registerSelf(registry);
+ }

@@ -1,0 +1,56 @@
+name: Bug report
+description: A crash, hang, black screen, missing sound, input or performance problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two commands collect everything needed to look into most problems. Neither starts or stops anything, and both work while the client is open. Run them right after the problem happens:
+
+        ```sh
+        darling-lol --doctor --report doctor.json
+        darling-lol --report        # writes ~/.cache/darling-lol/reports/lol-report-*.tar.gz
+        ```
+
+        On a native or manual install, use `python3 tools/doctor.py --report doctor.json` and `python3 tools/crash-report.py`.
+
+        The bundle holds the doctor checks, the process table, and the tails of the runtime, launcher, Riot Client, League client, game and Metal logs. Your home path, user name, host name, session tokens, account ids and e-mail addresses are masked. Skim it before attaching if you want to.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Say where it stopped (installer, Riot Client, League client, loading screen, in game).
+    validations:
+      required: true
+  - type: textarea
+    id: attachments
+    attributes:
+      label: doctor.json and the report bundle
+      description: Drag both files here. If one of the commands failed, paste its output instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Nix launcher
+        - Native (scripts/install-native.sh)
+        - Toolbox
+        - Manual build
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: darling-lol commit
+      description: Output of `git -C <checkout> rev-parse --short HEAD`, or the release you installed.
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once

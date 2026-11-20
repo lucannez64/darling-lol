@@ -262,7 +262,7 @@ int main(int argc, char** argv) {
         unsigned o[4];
         rclol_test_cpuid(1, 0, o);
         CHECK(o[0] == 0x000906eau, "fake: leaf 1 signature is i7-9750H (6/0x9e/0xa)");
-        CHECK(((o[1] >> 16) & 0xffu) == 11u, "fake: leaf 1 reports 12 logical processors");
+        CHECK(((o[1] >> 16) & 0xffu) == 16u, "fake: leaf 1 reports 16 max addressable logical IDs");
         CHECK(((o[1] >> 8) & 0xffu) == 8u, "fake: leaf 1 keeps CLFLUSH size 8");
     }
     {
@@ -279,9 +279,16 @@ int main(int argc, char** argv) {
     }
     {
         unsigned o[4];
+        rclol_test_cpuid(0x80000006u, 0, o);
+        CHECK(o[0] == 0u && o[1] == 0u && o[2] == ((256u << 16) | 0x4040u) && o[3] == 0u,
+              "fake: leaf 0x80000006 reports Intel 256 KiB 4-way 64B L2 and zero EDX");
+    }
+    {
+        unsigned o[4];
         rclol_test_cpuid(0x80000008u, 0, o);
         CHECK(o[0] == 0x3027u, "fake: leaf 0x80000008 reports 39/48 address bits");
-        CHECK(o[1] == (5u | (11u << 8)), "fake: leaf 0x80000008 reports 6C/12T");
+        CHECK(o[1] == 0u && o[2] == 0u && o[3] == 0u,
+              "fake: leaf 0x80000008 clears Intel EBX/ECX/EDX");
     }
     {
         unsigned o[4];

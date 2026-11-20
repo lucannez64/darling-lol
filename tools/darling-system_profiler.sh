@@ -46,11 +46,41 @@ valid_vram() { # positive decimal MB, bounded so the shell test cannot overflow
  [ "${#1}" -le 7 ] && [ "$1" -gt 0 ] && [ "$1" -le 1048576 ]
 }
 
+card_vram_bytes() { # amdgpu's mem_info_vram_total in bytes, 0 when absent or not a number
+ v=$(cat "$1/device/mem_info_vram_total" 2>/dev/null) || v=
+ case "$v" in ''|*[!0-9]*) echo 0;; *) echo "$v";; esac
+}
+
+# True when the AMD card $1 sits beside the host's discrete GPU: an NVIDIA card, or an
+# AMD card with more VRAM (an APU's carve-out is far smaller than a dGPU's memory).
+# The mac name then presents it as the MacBookPro16,1's integrated UHD Graphics 630, so
+# an APU + dGPU host shows the Mac's pair instead of two Radeon Pro 5500Ms. Same rule as
+# presentedAsIntegrated in patches/iokitd.patch and patches/metal.patch.
+presented_as_integrated() {
+ [ "$(sed 's/^0x//' "$1/device/vendor" 2>/dev/null)" = 1002 ] || return 1
+ own_device=$(sed 's/^0x//' "$1/device/device" 2>/dev/null)
+ own_vram=$(card_vram_bytes "$1")
+ for other in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
+  [ -r "$other/device/vendor" ] && [ -r "$other/device/device" ] || continue
+  other_vendor=$(sed 's/^0x//' "$other/device/vendor"); other_device=$(sed 's/^0x//' "$other/device/device")
+  [ "$other_vendor" = 1002 ] && [ "$other_device" = "$own_device" ] && continue
+  [ "$other_vendor" = 10de ] && return 0
+  if [ "$other_vendor" = 1002 ] &&
+     awk -v a="$(card_vram_bytes "$other")" -v b="$own_vram" 'BEGIN { exit !(a + 0 > b + 0) }'; then
+   return 0
+  fi
+ done
+ return 1
+}
+
 displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  # HOST reports the host card. COMPAT is the default MacBookPro16,1 presentation,
  # selected by tools/system.prop; it only changes the reported identity, never
- # the host, the driver, or the GPU that actually presents frames. NVIDIA keeps
- # its own name in COMPAT so the game does not take AMD driver paths.
+ # the host, the driver, or the GPU that actually presents frames. The mac name
+ # presents Intel, and an AMD card beside the discrete GPU, as the
+ # MacBookPro16,1's UHD Graphics 630 and the discrete
+ # vendors (AMD, NVIDIA) as its Radeon Pro 5500M, like iokitd and Metal do: no
+ # Mac that runs macOS 14 has an NVIDIA GPU.
  # Run outside the launcher, nothing is handed over: read the installed profile.
  prop=${RCLOL_SYSTEM_PROP:-/private/etc/darling-system.prop}
  if [ -z "${RCLOL_PLATFORM_PROFILE:-}" ] && [ -r "$prop" ]; then
@@ -94,8 +124,9 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
   fi
   [ -n "$name" ] || name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
   if [ "$mac_gpu_profile" = 1 ]; then
+   [ "$vendor" = 1002 ] && presented_as_integrated "$card" && vendor=8086
    case "$vendor" in
-    1002) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
+    1002|10de) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
           valid_vram "$vram" || vram=4096
           bus=pcie;;
     8086) vendor=8086; device=3e9b; name='Intel UHD Graphics 630'

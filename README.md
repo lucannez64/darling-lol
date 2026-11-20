@@ -55,7 +55,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 - **GPU:** Working hardware Vulkan/OpenGL driver. AMD RADV and NVIDIA (proprietary and open modules) have been exercised; others are not validated. See [NVIDIA](docs/TROUBLESHOOTING.md#nvidia). Hybrid laptops usually render on the iGPU unless started with PRIME offload: see [hybrid graphics](docs/TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
 - **Tools:** Git + Git LFS (2.13+), Bash, curl, unzip, CMake 3.20+, Make, Clang/LLD, LLVM dev files (16+; 22/23 is what the Metal overlays are tested with), C/C++ compiler, Python 3.10+. Node.js only for offline JavaScript checks.
 - **Libs:** X11/XCB/SHM development files.
-- **Disk:** at least **50 GB** free (Darling sources/build, Git LFS assets and the game).
+- **Disk:** at least **50 GiB** in total for Darling sources/build, Git LFS assets and the game. Space already used by a previous install (build tree, `~/.darling` prefix and system runtime) counts toward this minimum only when it is on the same filesystem as the checkout. Keep at least **5 GiB** free on that filesystem for build and staging files.
 
 `scripts/build.sh` and `scripts/install-runtime.sh` run `scripts/preflight.py` first and stop on unsupported versions (`RCLOL_SKIP_PREFLIGHT=1` bypasses it). For other distributions, see the dependency list in the [pinned Darling source](https://github.com/darlinghq/darling/tree/60ba801decee7a00782f74f6be4c8ffb013f79ff); `tools/env-check.sh` is a starting check (package names may need adapting).
 
@@ -63,7 +63,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 
 ## Automated Installation
 
-Installs dependencies, configures the build environment and compiles Darling-LoL. Requires at least **50 GiB** free.
+Installs dependencies, configures the build environment and compiles Darling-LoL. Requires at least **50 GiB** of disk space in total; a previous build/prefix already on disk counts toward it only when it is on the same filesystem as the checkout.
 
 Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+. Hosts outside this list (for example Ubuntu 24.04 and its derivatives) can still install through a Fedora Toolbox container with `--toolbox`.
 
@@ -75,7 +75,7 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`); run later update commands inside it (`toolbox enter darling-lol`, then `cd` to the checkout).
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`).
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, a native install runs a full `pacman -Syu` and asks first unless this is given.
 - `--region CODE`: Riot region (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`). Without it, an interactive install asks; with `--yes` or without a terminal it is the region of an explicit `--locale`, else `EUW`.
@@ -158,17 +158,18 @@ These window-management helpers are opt-in, off by default, and do not patch cli
 
 Exit the game and both clients first.
 
-**Nix users:** use `nix run --refresh github:lucannez64/darling-lol#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`. The commands below are for native and manual builds.
+**Nix users:** use `nix run --refresh github:lucannez64/darling-lol#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`.
 
-**Native / manual builds** (for a `--toolbox` install, run these inside the container):
+**Native, manual, and Toolbox builds**:
 
 ```bash
 git pull
 ./scripts/update.sh
-sh scripts/run.sh
 ```
 
-`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
+For a Toolbox install, run these commands from the host. The updater detects the recorded container and runs the update inside it.
+
+`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. Background steps log their output by default. Pass `--verbose` to stream all output to the terminal. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
 
 A built runtime can also be shipped without the toolchain via `tools/runtime-package.py`: see [prebuilt runtime overlays](docs/PACKAGING.md).
 

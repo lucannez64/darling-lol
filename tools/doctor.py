@@ -13,11 +13,14 @@ Usage:
 Exit status is 1 when a required check fails; warnings do not fail.
 """
 import argparse
+import errno
+import importlib.util
 import json
 import os
 import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -48,7 +51,31 @@ ENV_ALLOWLIST = (
     'RCLOL_HIDE_LEAGUE_SPLASH',
     'DPREFIX',
     'DARLING_WORKSPACE',
+    # PRIME render offload (docs/TROUBLESHOOTING.md, hybrid graphics laptops).
+    '__NV_PRIME_RENDER_OFFLOAD',
+    '__VK_LAYER_NV_optimus',
+    '__GLX_VENDOR_LIBRARY_NAME',
+    'DRI_PRIME',
 )
+# Variables that only add tracing. Left set, they slow the client or change its
+# behaviour (the input trace once made the game see stray clicks), so the
+# doctor names them; their values are never collected.
+TRACE_ENV = re.compile(r'^(?:RCLOL_[A-Z0-9_]*(?:TRACE|DEBUG|DUMP)[A-Z0-9_]*|DARLING_METAL_DEVICE_LOG)$')
+# Opt-in switch files. Guest files live in the prefix's /private/tmp, which
+# Darling empties when it starts; host files are read by the game process at
+# start (docs/SETUP.md, "Game-process switches").
+GUEST_DIAGNOSTIC_SWITCHES = ('rclol-input-trace', 'metal-debug-waits', 'metal-gpu')
+GUEST_TUNING_SWITCHES = (
+    'metal-present-dispatch-wait', 'metal-deferred-blit', 'metal-worker-lease',
+    'metal-skip-cpu-devices', 'metal-all-devices', 'metal-no-drawable-vram',
+    'metal-no-lazy-wakeup', 'metal-submit-batch-us', 'metal-submit-batch-max',
+)
+HOST_TUNING_SWITCHES = (
+    'rclol-no-local-mutex', 'rclol-no-local-condvars', 'rclol-no-local-semaphores',
+    'rclol-core-isolation', 'rclol-region-pace-us', 'rclol-rpc-spin-us',
+)
+DISCRETE_DRIVERS = ('nvidia', 'nouveau')
+INTEGRATED_DRIVERS = ('i915', 'xe', 'amdgpu', 'radeon')
 
 
 def read_text(path, default=''):
@@ -196,11 +223,128 @@ def runtime_dir(env=None):
     return next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
 
 
-def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys'), which=None):
+def active_switches(prefix, host_tmp=Path('/tmp')):
+    """Names of the opt-in switch files that exist now, by kind."""
+    guest_tmp = Path(prefix) / 'private/tmp'
+
+    def present(folder, names):
+        return [name for name in names if (folder / name).exists()]
+
+    return {
+        'diagnostic': present(guest_tmp, GUEST_DIAGNOSTIC_SWITCHES),
+        'tuning': present(guest_tmp, GUEST_TUNING_SWITCHES) + present(host_tmp, HOST_TUNING_SWITCHES),
+    }
+
+
+PERF_EVENT_OPEN_X86_64 = 298
+
+
+def probe_perf_event_open():
+    """Open and close one disabled, user-only software event on this thread.
+
+    The cpuid alignment of profile=compat needs perf_event_open. Besides
+    kernel.perf_event_paranoid, a seccomp filter (Docker, Podman and Flatpak
+    defaults) or an LSM can refuse it, which only a real call shows. Returns
+    'ok', the errno name, or 'unavailable' where the probe cannot run.
+    """
+    if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'AMD64'):
+        return 'unavailable'
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+    except (ImportError, OSError):
+        return 'unavailable'
+    # struct perf_event_attr, PERF_ATTR_SIZE_VER0: PERF_TYPE_SOFTWARE,
+    # PERF_COUNT_SW_DUMMY; flags disabled | exclude_kernel | exclude_hv.
+    attr = bytearray(64)
+    struct.pack_into('<IIQ', attr, 0, 1, 64, 9)
+    struct.pack_into('<Q', attr, 40, 1 | 1 << 5 | 1 << 6)
+    buffer = (ctypes.c_char * len(attr)).from_buffer(attr)
+    libc.syscall.restype = ctypes.c_long
+    fd = libc.syscall(ctypes.c_long(PERF_EVENT_OPEN_X86_64), buffer, ctypes.c_int(0), ctypes.c_int(-1),
+                      ctypes.c_int(-1), ctypes.c_ulong(8))  # PERF_FLAG_FD_CLOEXEC
+    if fd >= 0:
+        os.close(fd)
+        return 'ok'
+    code = ctypes.get_errno()
+    return errno.errorcode.get(code, str(code))
+
+
+def _platform_tool():
+    """configure-darling-platform.py next to this file (source or rendered copy), or None."""
+    path = Path(__file__).resolve().parent / 'configure-darling-platform.py'
+    try:
+        spec = importlib.util.spec_from_file_location('darling_lol_platform', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except (OSError, ImportError, SyntaxError, AttributeError):
+        return None
+
+
+def platform_identity_state(prefix):
+    """'missing', 'shared', 'saved' or 'unreadable' for the prefix's saved platform identity."""
+    etc = Path(prefix) / 'private/etc'
+    files = [etc / 'darling-platform.plist', etc / 'darling-smbios.conf']
+    present = [path for path in files if path.is_file()]
+    if not present:
+        return 'missing'
+    tool = _platform_tool()
+    if tool is None:
+        return 'unreadable'
+    try:
+        if any(tool.has_known_defaults(tool.load(path)) for path in present):
+            return 'shared'
+    except Exception:  # a malformed file is reported, not raised
+        return 'unreadable'
+    return 'saved'
+
+
+def trust_store(env):
+    """The runtime signing trust store sign-darling-runtime.sh writes, or ''."""
+    candidates = []
+    if env.get('DARLING_TRUST_DIR'):
+        candidates.append(Path(env['DARLING_TRUST_DIR']) / 'trustcache')
+    config = Path(env['XDG_CONFIG_HOME']) if env.get('XDG_CONFIG_HOME') else (
+        Path(env['HOME']) / '.config' if env.get('HOME') else None)
+    if config is not None:
+        candidates.append(config / 'darling/trustcache')
+    candidates.append(Path('/etc/darling/trustcache'))
+    return next((str(path) for path in candidates if path.exists()), '')
+
+
+def configured_prefix(env, roots=None):
+    """The prefix the launcher uses: $DPREFIX, then build/config.json, then ~/.darling.
+
+    `darling-lol --doctor` passes no prefix, and a prefix moved with --set-prefix
+    is only recorded in build/config.json, so reading ~/.darling alone would
+    inspect a stale or empty prefix.
+    """
+    if env.get('DPREFIX'):
+        return Path(env['DPREFIX'])
+    if roots is None:
+        roots = []
+        if env.get('DARLING_WORKSPACE'):
+            roots.append(Path(env['DARLING_WORKSPACE']))
+        # tools/doctor.py or the rendered build/runtime/tools/doctor.py
+        roots.extend(Path(__file__).resolve().parents)
+    for root in roots:
+        config = Path(root) / 'build/config.json'
+        try:
+            prefix = json.loads(config.read_text()).get('prefix')
+        except (OSError, ValueError, AttributeError):
+            continue
+        if prefix:
+            return Path(prefix)
+    return Path.home() / '.darling'
+
+
+def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys'), which=None,
+           host_tmp=Path('/tmp'), perf_probe=probe_perf_event_open):
     """Collect facts once; checks below only interpret them and stay testable."""
     env = dict(os.environ if env is None else env)
     which = which or shutil.which
-    prefix = Path(prefix or env.get('DPREFIX') or (Path.home() / '.darling')).expanduser()
+    prefix = Path(prefix or configured_prefix(env)).expanduser()
 
     release = os_release()
     memory = meminfo()
@@ -243,9 +387,15 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'prefix_socket': socket.exists(),
         'prefix_state': prefix_state(prefix, proc_root),
         'psr': read_text(sys_root / 'module/i915/parameters/enable_psr').strip(),
+        'perf_event_paranoid': read_text(proc_root / 'sys/kernel/perf_event_paranoid').strip(),
+        'perf_event_open': perf_probe(),
+        'platform_identity': platform_identity_state(prefix) if prefix.is_dir() else 'missing',
+        'trust_store': trust_store(env),
         'core_limit': _core_limit(),
         'environment': {key: env[key] for key in ENV_ALLOWLIST if key in env},
-        'tools': {name: which(name) for name in ('xprop', 'xdpyinfo', 'vulkaninfo', 'dmesg', 'coredumpctl')},
+        'trace_env': sorted(key for key, value in env.items() if value and TRACE_ENV.match(key)),
+        'switches': active_switches(prefix, host_tmp),
+        'tools':{name: which(name) for name in ('xprop', 'xdpyinfo', 'vulkaninfo', 'dmesg', 'coredumpctl')},
     }
 
 
@@ -296,6 +446,43 @@ def check_gpu(facts):
     return 'ok', ', '.join(described)
 
 
+def check_hybrid(facts):
+    drivers = {gpu['driver'] for gpu in facts['gpus']}
+    if not (drivers & set(DISCRETE_DRIVERS) and drivers & set(INTEGRATED_DRIVERS)):
+        return 'ok', 'Single GPU vendor'
+    environment = facts['environment']
+    offload = environment.get('__NV_PRIME_RENDER_OFFLOAD') == '1' or environment.get('DRI_PRIME')
+    guide = 'see docs/TROUBLESHOOTING.md, "Hybrid graphics laptops"'
+    if 'metal-gpu' in facts.get('switches', {}).get('diagnostic', ()):
+        return 'warn', ('/tmp/metal-gpu moves only Vulkan; with two GPUs, OpenGL stays on the other one and '
+                        'frames cannot be presented. Remove it and use PRIME offload; ' + guide)
+    if not offload:
+        return 'warn', ('Hybrid graphics without PRIME offload in this environment: Vulkan and OpenGL can '
+                        'land on different GPUs (black window or stuck at 93%%). If you start the launcher '
+                        'with prime-run, run the doctor the same way; %s' % guide)
+    if environment.get('__NV_PRIME_RENDER_OFFLOAD') == '1' and (
+            environment.get('__VK_LAYER_NV_optimus') != 'NVIDIA_only'
+            or environment.get('__GLX_VENDOR_LIBRARY_NAME') != 'nvidia'):
+        return 'warn', ('PRIME offload is only partly set: Vulkan and OpenGL need __VK_LAYER_NV_optimus='
+                        'NVIDIA_only and __GLX_VENDOR_LIBRARY_NAME=nvidia too (prime-run sets all three); '
+                        + guide)
+    return 'ok', 'Hybrid graphics with PRIME offload'
+
+
+def check_switches(facts):
+    switches = facts.get('switches', {})
+    diagnostic = [('/tmp/' + name) for name in switches.get('diagnostic', ())]
+    diagnostic += facts.get('trace_env', [])
+    tuning = [('/tmp/' + name) for name in switches.get('tuning', ())]
+    if diagnostic:
+        return 'warn', ('Diagnostic switches are on: %s. They add tracing and can slow or change input; '
+                        'remove them unless you are collecting a trace' % ', '.join(diagnostic))
+    if tuning:
+        return 'warn', ('Non-default tuning files are present: %s. Remove them to compare against the '
+                        'defaults (docs/SETUP.md)' % ', '.join(tuning))
+    return 'ok', 'No diagnostic or tuning switches'
+
+
 def check_vulkan(facts):
     icds = facts['vulkan_icds']
     if not icds:
@@ -339,6 +526,67 @@ def check_psr(facts):
     return 'ok', 'Panel self-refresh is off or not applicable'
 
 
+def check_perf_event_paranoid(facts):
+    raw = str(facts.get('perf_event_paranoid', '')).strip()
+    if not raw:
+        return 'ok', 'kernel.perf_event_paranoid unavailable'
+    try:
+        value = int(raw)
+    except ValueError:
+        return 'ok', 'kernel.perf_event_paranoid=%s' % raw
+    if value > 2:
+        return 'warn', (
+            'kernel.perf_event_paranoid=%d blocks unprivileged perf_event_open (EACCES), '
+            'so profile=compat cannot align guest cpuid (common on Debian and hardened kernels). '
+            'Set it to 2 or lower with `sudo sysctl kernel.perf_event_paranoid=2` '
+            '(or persist in /etc/sysctl.d/99-darling-lol.conf); see docs/TROUBLESHOOTING.md' % value
+        )
+    return 'ok', 'kernel.perf_event_paranoid=%d' % value
+
+
+def check_perf_event_open(facts):
+    result = facts.get('perf_event_open', 'unavailable')
+    if result in ('ok', 'unavailable', ''):
+        return 'ok', ('perf_event_open works' if result == 'ok'
+                      else 'perf_event_open probe not available on this platform')
+    try:
+        paranoid = int(str(facts.get('perf_event_paranoid', '')).strip())
+    except ValueError:
+        paranoid = None
+    if result in ('EACCES', 'EPERM') and paranoid is not None and paranoid > 2:
+        # check_perf_event_paranoid already names the fix.
+        return 'warn', 'perf_event_open refused (%s) by kernel.perf_event_paranoid=%d' % (result, paranoid)
+    return 'warn', (
+        'perf_event_open is refused here (%s) although kernel.perf_event_paranoid allows it: a seccomp '
+        'filter (Docker, Podman or Flatpak sandbox) or a security module blocks it, so profile=compat '
+        'cannot align guest cpuid. Run the launcher outside that sandbox, or allow perf_event_open in '
+        'its seccomp profile; see docs/TROUBLESHOOTING.md' % result)
+
+
+def check_platform_identity(facts):
+    if not facts.get('prefix_exists'):
+        return 'ok', 'No prefix yet; setup provisions its platform identity'
+    state = facts.get('platform_identity', 'missing')
+    fix = 'run `python3 tools/configure-darling-platform.py --provision --write` with Darling stopped'
+    if state == 'missing':
+        return 'warn', ('No saved platform identity in this prefix, so iokitd reports a DARLING- serial no '
+                        'Mac has; ' + fix + ' (scripts/update.sh does this too)')
+    if state == 'shared':
+        return 'warn', 'The prefix still has the old shared serial or UUID; ' + fix
+    if state == 'unreadable':
+        return 'warn', 'The saved platform identity could not be read; ' + fix
+    return 'ok', 'Per-prefix platform identity saved'
+
+
+def check_runtime_signing(facts):
+    if not facts.get('prefix_launchd'):
+        return 'ok', 'Runtime not installed yet'
+    if facts.get('trust_store'):
+        return 'ok', 'Runtime trust store present'
+    return 'warn', ('No runtime signing trust store found, so the installed runtime is probably unsigned; '
+                    'rerun scripts/install-runtime.sh (it builds tools/dc-codesign and signs the overlays)')
+
+
 def check_prefix(facts):
     if not facts['prefix_exists']:
         return 'fail', 'Prefix %s does not exist; run the installer first' % facts['prefix']
@@ -370,10 +618,16 @@ CHECKS = (
     ('disk', 'Disk space', check_disk),
     ('gpu', 'GPU driver', check_gpu),
     ('vulkan', 'Vulkan driver', check_vulkan),
+    ('hybrid', 'Hybrid graphics', check_hybrid),
     ('session', 'Display session', check_session),
     ('hud', 'Overlay layer', check_hud),
+    ('switches', 'Diagnostic switches', check_switches),
     ('core', 'Core dumps', check_core_dumps),
     ('psr', 'Panel self-refresh', check_psr),
+    ('perf_event_paranoid', 'Perf event access', check_perf_event_paranoid),
+    ('perf_event_open', 'Perf event syscall', check_perf_event_open),
+    ('platform_identity', 'Platform identity', check_platform_identity),
+    ('runtime_signing', 'Runtime signing', check_runtime_signing),
     ('prefix', 'Darling prefix', check_prefix),
     ('runtime', 'Darling runtime', check_runtime),
     ('markers', 'Runtime markers', check_stale_markers),
@@ -442,6 +696,8 @@ def report(facts, results, redact=True):
         'prefix': '<prefix>' if redact else prefix,
         'redacted': redact,
         'environment': environment,
+        'trace_env': facts.get('trace_env', []),
+        'switches': facts.get('switches', {}),
         'checks': checks,
     }
 

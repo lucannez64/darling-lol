@@ -2,11 +2,12 @@
 #
 # Create, update or remove the Darling-LoL desktop shortcuts interactively:
 # the launcher shortcut with a custom name, the hidden window entries that
-# name and icon the League and Riot Client windows, custom launch flags
+# name and icon the League client, game and Riot Client windows, the launch
+# region and language derived from the system locale, custom launch flags
 # (environment variables) baked into the Exec line, and whether the shortcut
 # runs on the host or re-enters a Toolbox container. The work itself is done
-# by build/runtime/tools/desktop-entry.py, the same helper the
-# non-interactive scripts/create-desktop-entry.sh and the installer use.
+# by build/runtime/tools/desktop-entry.py, the same helper the non-interactive
+# scripts/create-desktop-entry.sh and the installer use.
 
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
 TARGET_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)
@@ -15,6 +16,14 @@ LAUNCHER_ENTRY="${HOME:-}/.local/share/applications/darling-launcher.desktop"
 
 readonly DEFAULT_NAME='Darling Launcher'
 readonly DEFAULT_TOOLBOX='darling-lol'
+# Locales the Riot Client ships; keep in sync with LOCALES in
+# scripts/install-native.sh and scripts/common.py (tests/test_create_shortcuts.py
+# compares the list with the one configure.py uses).
+readonly -a LOCALES=(
+  ar_AE cs_CZ de_DE el_GR en_AU en_GB en_PH en_SG en_US es_AR es_ES es_MX
+  fr_FR hu_HU id_ID it_IT ja_JP ko_KR pl_PL pt_BR ro_RO ru_RU th_TH tr_TR
+  vi_VN zh_CN zh_MY zh_TW
+)
 
 ACTION=''
 YES=0
@@ -26,6 +35,9 @@ TOOLBOX_SET=0
 WINDOW_ENTRIES=0
 if [[ ${DARLING_LOL_WINDOW_ENTRIES:-0} == 1 ]]; then WINDOW_ENTRIES=1; fi
 ENV_FLAGS=()
+# 1 when --env supplied the launch flags: they replace the automatic
+# RCLOL_REGION/RCLOL_LOCALE pair derived from the system locale.
+ENV_FLAGS_EXPLICIT=0
 REMOVE_HANDLER=0
 ICON_CUSTOM=0
 # Resolved custom icon (empty = the helper's default project icon).
@@ -99,9 +111,12 @@ Options:
   --toolbox NAME     Run the shortcut through the given Toolbox container;
                      an empty value runs it on the host
   --window-entries   Also create the hidden entries that name and icon the
-                     League and Riot Client windows in the GNOME overview
-                     (GNOME only; the question is skipped elsewhere)
-  --env VAR=VALUE    Launch flag written into the Exec line; repeatable
+                     League client, game and Riot Client windows in the GNOME
+                     overview (GNOME only; the question is skipped elsewhere)
+  --env VAR=VALUE    Launch flag written into the Exec line; repeatable.
+                     When given, the flags replace the automatic
+                     RCLOL_REGION/RCLOL_LOCALE pair offered from the
+                     system locale
   --icon             Use a custom-icon.* file (svg, png, ...) from the project
                      root as the shortcut icon instead of the project icon
   --url-handler      With --remove, also remove the riotclient:// sign-in
@@ -121,6 +136,7 @@ add_env_flag() {
     fail "$source expects NAME=VALUE, got '$value'."
   fi
   ENV_FLAGS+=("$value")
+  ENV_FLAGS_EXPLICIT=1
 }
 
 parse_args() {
@@ -331,7 +347,7 @@ choose_window_entries() {
     return 0
   fi
   while true; do
-    read -r -p "${CYAN}${ICON_INFO}${RESET} Name and icon the League and Riot Client windows in the GNOME overview? [Y/n]: " reply ||
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Name and icon the League client, game and Riot Client windows in the GNOME overview? [Y/n]: " reply ||
       fail 'No input received while choosing the window entries.'
     case ${reply,,} in
       ''|y|yes) WINDOW_ENTRIES=1; return 0 ;;
@@ -341,7 +357,94 @@ choose_window_entries() {
   done
 }
 
+# Region and language detection copied from scripts/install-native.sh so the
+# shortcut can bake the desktop session's own server and client language into
+# its Exec line.
+normalize_locale() {
+  # Case conversion and the ASCII ranges must not follow a locale such as
+  # tr_TR, where they would produce non-ASCII codes.
+  local LC_ALL=C value=${1//-/_}
+  if [[ $value =~ ^([A-Za-z]{2})_([A-Za-z]{2})$ ]]; then
+    printf '%s_%s' "${BASH_REMATCH[1],,}" "${BASH_REMATCH[2]^^}"
+    return 0
+  fi
+  return 1
+}
+
+valid_locale() {
+  local entry
+  for entry in "${LOCALES[@]}"; do
+    [[ $entry == "$1" ]] && return 0
+  done
+  return 1
+}
+
+detect_system_locale() {
+  local name value
+  for name in LC_ALL LC_MESSAGES LANG; do
+    value=${!name:-}
+    [[ -n $value ]] || continue
+    value=${value%%.*}
+    value=${value%%@*}
+    if normalize_locale "$value"; then
+      return 0
+    fi
+    # The first non-empty variable wins, even when it cannot be parsed.
+    return 1
+  done
+  return 1
+}
+
+# The system locale when the Riot Client ships it; fails otherwise (fr_CA,
+# C, ...), so the caller can keep the shortcut neutral and say why.
+supported_system_locale() {
+  local detected
+  detected=$(detect_system_locale) || return 1
+  valid_locale "$detected" || return 1
+  printf '%s' "$detected"
+}
+
+region_for_country() {
+  # Map a locale's country part to a Riot region; unknown countries fail, so
+  # callers can tell a real match apart from the generic default.
+  local country=${1:-}
+
+  case "$country" in
+    DE|ES|FR|GB|IT) printf 'EUW' ;;
+    BR) printf 'BR' ;;
+    US|CA) printf 'NA' ;;
+    MX|GT|BZ|SV|HN|NI|CR|PA|DO|PR|CU|HT|JM|TT|BB|BS) printf 'LAN' ;;
+    AR|BO|CL|CO|EC|PE|PY|UY|VE|GY|SR|GF) printf 'LAS' ;;
+    KR) printf 'KR' ;;
+    JP) printf 'JP' ;;
+    TR) printf 'TR' ;;
+    RU|BY|KZ) printf 'RU' ;;
+    AU|NZ|FJ|PG) printf 'OCE' ;;
+    PL|CZ|SK|HU|RO|BG|HR|SI|RS|BA|MK|AL|ME|EE|LV|LT|UA|MD|SE|NO|DK|FI|IS) printf 'EUNE' ;;
+    *) return 1 ;;
+  esac
+}
+
+region_for_locale() {
+  region_for_country "${1#*_}"
+}
+
+# The darlingserver affinity switch only helps a hybrid Intel CPU whose
+# performance cores the kernel lists in sysfs (the same file the server reads);
+# anywhere else the server logs that it has nothing to pin and runs unchanged.
+# DARLING_LOL_PCORE_CPUS is a test seam, like DARLING_OS_RELEASE in the installer.
+pcore_affinity_helps() {
+  local file=${DARLING_LOL_PCORE_CPUS:-/sys/devices/cpu_core/cpus} cpus=''
+  [[ -r $file ]] || return 1
+  read -r cpus < "$file" || return 1
+  [[ -n $cpus ]]
+}
+
 show_flag_reference() {
+  local pcore_recommended=''
+  if pcore_affinity_helps; then
+    pcore_recommended=' (recommended)'
+  fi
   printf '\n%sDocumented launch flags (see docs/SETUP.md and docs/TROUBLESHOOTING.md):%s\n' \
     "$BOLD" "$RESET"
   printf '  RCLOL_HIDE_LEAGUE_SPLASH=1        Hide the splash window that can appear over the client\n'
@@ -354,12 +457,17 @@ show_flag_reference() {
   printf '  RCLOL_RECOVER_HIDDEN_CLIENT=1     Recover a hidden client at launch\n'
   printf '  RCLOL_CLEAN_STALE_HELPERS=1       Remove orphaned in-game helpers at launch\n'
   printf '  RCLOL_CLEAN_ON_EXIT=0             Keep the runtime running after the clients exit\n'
+  printf '  RCLOL_STOP_AFTER_CLIENT_SECONDS=N  Stop the runtime N seconds after the last window closes (default: 60)\n'
+  printf '  RCLOL_STOP_TOOLBOX=0              Keep the Toolbox container running after the session\n'
   printf '  RCLOL_DISCORD_RPC=0               Disable the Discord Rich Presence links\n'
   printf '  RCLOL_FILTER_HOST_ENV=1           Remove host desktop-session variables at launch\n'
   printf '  RCLOL_FINISH_LEAGUE_LOAD=0        Disable the League load finish workaround\n'
   printf '  RCLOL_PLATFORM_PROFILE=host       Override the platform identity profile (host|compat)\n'
   printf '  RCLOL_REGION=CODE                 Server region for the launch, for example BR\n'
-  printf '  RCLOL_LOCALE=CODE                 Client language for the launch, for example pt_BR\n\n'
+  printf '  RCLOL_LOCALE=CODE                 Client language for the launch, for example pt_BR\n'
+  printf '  DSERVER_PCORE_AFFINITY=1          Keep the server threads on the performance cores of a hybrid Intel CPU%s\n' \
+    "$pcore_recommended"
+  printf '\n'
 }
 
 # Custom launch flags are environment variables written into the Exec line.
@@ -425,6 +533,58 @@ choose_flags() {
     fi
     warning "Invalid launch flag(s):${invalid}. Expected NAME=VALUE."
   done
+}
+
+# Offer the region and language the desktop session already uses. The answer
+# defaults to yes (like the installer's locale suggestion), and unattended runs
+# take the default. Explicit flags win: --env, or an installed
+# RCLOL_REGION/RCLOL_LOCALE that an update keeps, skip the question.
+choose_region_locale() {
+  local flag locale region reply prompt
+  if (( ENV_FLAGS_EXPLICIT )); then
+    return 0
+  fi
+  for flag in "${ENV_FLAGS[@]}"; do
+    case $flag in
+      RCLOL_REGION=*|RCLOL_LOCALE=*) return 0 ;;
+    esac
+  done
+  if ! locale=$(supported_system_locale); then
+    info 'The system locale is not one the Riot Client ships; not adding RCLOL_REGION/RCLOL_LOCALE.'
+    return 0
+  fi
+  region=$(region_for_locale "$locale") || region=''
+  if [[ -n $region ]]; then
+    prompt="Use your system region and language (${region}, ${locale}) for the launch?"
+  else
+    prompt="Use your system language (${locale}) and keep the configured region for the launch?"
+  fi
+  if ! interactive_run; then
+    # An unattended update keeps what the installed shortcut already has; only
+    # creation (or an update that falls back to creation) takes the suggestion.
+    if (( CURRENT_OWNED )); then
+      return 0
+    fi
+    if [[ -n $region ]]; then
+      info "Using the system region and language: $region / $locale."
+    else
+      info "Using the system language ($locale) and keeping the configured region."
+    fi
+  else
+    while true; do
+      read -r -p "${CYAN}${ICON_INFO}${RESET} $prompt [Y/n]: " reply ||
+        fail 'No input received while choosing the region and language.'
+      case ${reply,,} in
+        ''|y|yes) break ;;
+        n|no) return 0 ;;
+        *) warning 'Invalid answer. Enter y or n.' ;;
+      esac
+    done
+  fi
+  if [[ -n $region ]]; then
+    ENV_FLAGS+=("RCLOL_REGION=$region")
+  fi
+  ENV_FLAGS+=("RCLOL_LOCALE=$locale")
 }
 
 # Update-mode defaults parsed from the installed launcher entry (helper --show).
@@ -532,7 +692,7 @@ summarize() {
     printf '%sTarget: the host%s\n' "$DIM" "$RESET"
   fi
   if (( WINDOW_ENTRIES )); then
-    printf '%sWindow entries: League of Legends, Riot Client%s\n' "$DIM" "$RESET"
+    printf '%sWindow entries: League of Legends (client and game), Riot Client%s\n' "$DIM" "$RESET"
   else
     printf '%sWindow entries: no%s\n' "$DIM" "$RESET"
   fi
@@ -660,6 +820,7 @@ main() {
       choose_name "$default_name"
       choose_window_entries
       choose_flags
+      choose_region_locale
       choose_target
       resolve_icon
       summarize

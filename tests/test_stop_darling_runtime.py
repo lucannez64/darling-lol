@@ -51,7 +51,7 @@ class StopRuntimeTests(unittest.TestCase):
         (self.prefix / '.init.pid').write_text('100')
         self.process(100, **kwargs)
 
-    def run_script(self):
+    def run_script(self, script=SCRIPT, with_dprefix=True):
         proc = self.proc
         original_read = Path.read_text
         owner = self
@@ -96,13 +96,34 @@ class StopRuntimeTests(unittest.TestCase):
                 patch('os.kill', side_effect=kill), \
                 patch('time.monotonic', side_effect=monotonic), \
                 patch('time.sleep'):
-            runpy.run_path(str(SCRIPT), run_name='__main__')
+            if not with_dprefix:
+                os.environ.pop('DPREFIX', None)
+            runpy.run_path(str(script), run_name='__main__')
 
     def assert_finished(self):
         self.assertEqual(self.calls[0][0], ['darling', 'shutdown'])
         self.assertEqual(self.calls[-1], (
             [sys.executable, str(SCRIPT.with_name('ensure-darling-runtime.py'))],
             {'check': True}))
+
+    def test_rendered_copy_stops_the_configured_prefix(self):
+        # update.sh runs the rendered copy without DPREFIX; a prefix moved with
+        # --set-prefix must still be the one stopped, and darling shutdown
+        # must target it too.
+        self.server()
+        self.shutdown = lambda: self.status(100, 'Z')
+        rendered = self.root / 'stop-darling-runtime.py'
+        rendered.write_text(SCRIPT.read_text().replace('@DPREFIX@', str(self.prefix)))
+        (self.root / 'ensure-darling-runtime.py').write_text('')
+        self.run_script(rendered, with_dprefix=False)
+        command, kwargs = self.calls[0]
+        self.assertEqual(command, ['darling', 'shutdown'])
+        self.assertEqual(kwargs['env']['DPREFIX'], str(self.prefix))
+
+    def test_unrendered_copy_without_dprefix_uses_the_darling_default(self):
+        text = SCRIPT.read_text()
+        self.assertIn("CONFIGURED_PREFIX = '@DPREFIX@'", text)
+        self.assertIn("str(Path.home() / '.darling')", text)
 
     def test_process_disappears_during_status_read(self):
         self.server()
