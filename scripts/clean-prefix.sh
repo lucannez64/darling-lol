@@ -13,8 +13,54 @@ caller_pwd=$(pwd)
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+	esc=$(printf '\033')
+	BOLD=$esc'[1m'
+	DIM=$esc'[2m'
+	RED=$esc'[31m'
+	GREEN=$esc'[32m'
+	YELLOW=$esc'[33m'
+	CYAN=$esc'[36m'
+	RESET=$esc'[0m'
+else
+	BOLD='' DIM='' RED='' GREEN='' YELLOW='' CYAN='' RESET=''
+fi
+
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+*[Uu][Tt][Ff]*8*)
+	ICON_INFO='▶' ICON_OK='✔' ICON_ERR='✖' ICON_WARN='!'
+	;;
+*)
+	ICON_INFO='>' ICON_OK='+' ICON_ERR='x' ICON_WARN='!'
+	;;
+esac
+
+info() {
+	printf '%s%s%s %s\n' "$CYAN" "$ICON_INFO" "$RESET" "$*"
+}
+
+success() {
+	printf '%s%s%s %s\n' "$GREEN" "$ICON_OK" "$RESET" "$*"
+}
+
+warning() {
+	printf '%s%s%s %s\n' "$YELLOW" "$ICON_WARN" "$RESET" "$*" >&2
+}
+
+error() {
+	printf '%s%s ERROR:%s %s\n' "$RED$BOLD" "$ICON_ERR" "$RESET" "$*" >&2
+}
+
+note() {
+	printf '  %s%s%s\n' "$DIM" "$*" "$RESET"
+}
+
+error_note() {
+	printf '  %s%s%s\n' "$DIM" "$*" "$RESET" >&2
+}
+
 usage() {
-	cat <<'EOF' >&2
+	cat <<'EOF'
 Usage: sh scripts/clean-prefix.sh [--keep-identity] [--keep-game-settings] [--backup-dir DIR] [--yes]
 
 Cleans local Riot/League logs, machine.cfg, Riot Client / Electron / CEF
@@ -29,8 +75,11 @@ Removed logs, config, profiles and previous identity files are archived
   --backup-dir DIR      Directory for timestamped backup archives
                         (default: build/prefix-cleanup-backups)
   --yes                 Do not ask for confirmation (required without a terminal)
+
+A checkout installed with --toolbox re-enters its recorded container, so the
+runtime can be stopped and the prefix cleaned from the host.
 EOF
-	exit 1
+	exit "${1:-1}"
 }
 
 keep_identity=0
@@ -43,20 +92,23 @@ while [ "$#" -gt 0 ]; do
 	--keep-identity) keep_identity=1; shift ;;
 	--keep-game-settings) keep_game_settings=1; shift ;;
 	--backup-dir)
-		[ "$#" -ge 2 ] && [ -n "$2" ] || usage
+		[ "$#" -ge 2 ] && [ -n "$2" ] || usage 1 >&2
 		backup_dir=$2
 		custom_backup_dir=1
 		shift 2
 		;;
 	--backup-dir=*)
 		backup_dir=${1#--backup-dir=}
-		[ -n "$backup_dir" ] || usage
+		[ -n "$backup_dir" ] || usage 1 >&2
 		custom_backup_dir=1
 		shift
 		;;
 	--yes) confirmed=1; shift ;;
-	-h | --help) usage ;;
-	*) usage ;;
+	-h | --help) usage 0 ;;
+	*)
+		error "Unknown option: $1"
+		usage 1 >&2
+		;;
 	esac
 done
 
@@ -67,13 +119,109 @@ if [ "$custom_backup_dir" = 1 ]; then
 	esac
 fi
 
+inside_toolbox=0
+if [ -f /run/.toolboxenv ]; then
+	inside_toolbox=1
+fi
+
+# A Toolbox install keeps Darling, the runtime and the build cache inside the
+# container, so a host run cannot find `darling` to stop the runtime. Detect it
+# the same way scripts/update.sh does: the marker written by install-native.sh,
+# then the launcher entry for this checkout, then the installer's default
+# container only for a legacy checkout that left no record at all. A native
+# install records build/native-install and is never redirected.
+# CLEAN_PREFIX_REEXEC stops the re-exec from looping when the inner run is not
+# recognized as being inside the container.
+if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
+	[ -z "${DARLING_WORKSPACE:-}" ] && [ ! -f build/native-install ]; then
+	name=''
+	if [ -f build/toolbox-container ]; then
+		name=$(cat build/toolbox-container)
+	else
+		# $HOME holds a single launcher entry shared by every checkout: only trust
+		# its container name when its Exec points at this checkout's scripts.
+		# Reserved path characters come out escaped in the Exec value, so those
+		# paths may not match here; a false negative is safe.
+		entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
+		name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
+			sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
+	fi
+	# No record of any kind: only a legacy checkout can be assumed to live in the
+	# installer's default container. This probe also starts a stopped container,
+	# so it must not decide for checkouts that are already recorded above.
+	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 &&
+		toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+		name=darling-lol
+	fi
+	if [ -n "$name" ]; then
+		if ! command -v toolbox >/dev/null 2>&1; then
+			error "This checkout was installed via Toolbox container '$name', but Toolbox is not installed on this host."
+			error_note "Install Toolbox, then run the cleanup inside the container: toolbox enter $name"
+			exit 1
+		fi
+		if ! toolbox run -c "$name" true 2>/dev/null; then
+			error "This checkout was installed via Toolbox container '$name', but that container is not reachable."
+			error_note "Start it and run the cleanup inside it: toolbox enter $name"
+			exit 1
+		fi
+		info "Toolbox install detected; running the cleanup inside container '$name'..."
+		# Rebuild the parsed options so the container run needs neither the host
+		# cwd nor a second parse. A relative --backup-dir was already resolved
+		# against the caller's cwd above; the confirmation still happens inside.
+		set -- sh "$repo/scripts/clean-prefix.sh"
+		if [ "$keep_identity" = 1 ]; then
+			set -- "$@" --keep-identity
+		fi
+		if [ "$keep_game_settings" = 1 ]; then
+			set -- "$@" --keep-game-settings
+		fi
+		if [ "$custom_backup_dir" = 1 ]; then
+			set -- "$@" --backup-dir "$backup_dir"
+		fi
+		if [ "$confirmed" = 1 ]; then
+			set -- "$@" --yes
+		fi
+		set -- env CLEAN_PREFIX_REEXEC=1 "$@"
+		# `toolbox run` uses the container environment, so pass through the
+		# overrides a caller may have set for this checkout.
+		if [ -n "${DPREFIX+x}" ]; then
+			set -- DPREFIX="$DPREFIX" "$@"
+		fi
+		if [ -n "${RIOT_GUEST_HOME+x}" ]; then
+			set -- RIOT_GUEST_HOME="$RIOT_GUEST_HOME" "$@"
+		fi
+		if [ -n "${CLEAN_PREFIX_PROC_ROOT+x}" ]; then
+			set -- CLEAN_PREFIX_PROC_ROOT="$CLEAN_PREFIX_PROC_ROOT" "$@"
+		fi
+		if [ -n "${CLEAN_PREFIX_RUNTIME_ROOT+x}" ]; then
+			set -- CLEAN_PREFIX_RUNTIME_ROOT="$CLEAN_PREFIX_RUNTIME_ROOT" "$@"
+		fi
+		if [ -n "${NO_COLOR+x}" ]; then
+			set -- NO_COLOR="$NO_COLOR" "$@"
+		fi
+		exec toolbox run --container "$name" "$@"
+	fi
+fi
+
+if [ "$inside_toolbox" = 1 ]; then
+	name=''
+	if [ -f build/toolbox-container ]; then
+		IFS= read -r name <build/toolbox-container || true
+	fi
+	if [ -n "$name" ]; then
+		info "Running inside Toolbox container '$name'."
+	else
+		info 'Running inside a Toolbox container.'
+	fi
+fi
+
 python3 scripts/configure.py >/dev/null
 . build/runtime/tools/runtime-paths.sh
 prefix=$prefix_dir
 guest=$guest_home
 
 refuse() {
-	echo "$1 Nothing was changed." >&2
+	error "$1 Nothing was changed."
 	exit 1
 }
 
@@ -139,33 +287,47 @@ if [ ! -f build/runtime/tools/stop-darling-runtime.py ]; then
 	refuse 'build/runtime/tools/stop-darling-runtime.py is missing, so the runtime cannot be stopped. Close the game and both clients, run `darling shutdown`, and restore the checkout before running this again.'
 fi
 
-echo "Darling prefix: $prefix"
-echo "Backup directory: $backup_dir"
-cat <<'EOF'
-Will be backed up and cleaned: Riot/League logs, machine.cfg, Riot Games /
-  Riot Client / riot-client-ux / CEF Application Support profiles and crash
-  reports, com.riotgames.*.plist preferences, and League client Config files.
-Will be cleaned without backup: client caches (com.riotgames.*), League
-  Saved/webcache, and stale runtime markers.
-EOF
+printf '\n%s%sCleaning the Darling prefix%s\n\n' "$BOLD" "$CYAN" "$RESET"
+info "Darling prefix:"
+note "$prefix"
+printf '\n'
+info "Backup directory:"
+note "$backup_dir"
+printf '\n'
+info 'Will be backed up and cleaned:'
+note 'Riot/League logs, machine.cfg, Riot Games, Riot Client, riot-client-ux'
+note 'and CEF Application Support profiles, crash reports,'
+note 'com.riotgames.*.plist preferences, and League client Config files.'
+printf '\n'
+info 'Will be cleaned without backup:'
+note 'client caches (com.riotgames.*), League Saved/webcache, and stale runtime markers.'
+printf '\n'
 if [ "$keep_game_settings" = 1 ]; then
-	echo 'Game settings: Config/game.cfg and Config/input.ini kept (--keep-game-settings).'
+	info 'Game settings:'
+	note 'Config/game.cfg and Config/input.ini kept (--keep-game-settings).'
 else
-	echo 'Game settings: Config/game.cfg and Config/input.ini backed up and removed.'
+	info 'Game settings:'
+	note ' Config/game.cfg and Config/input.ini backed up and removed.'
 fi
+printf '\n'
 if [ "$keep_identity" = 1 ]; then
-	echo 'Platform identity: kept unchanged (--keep-identity).'
+	info 'Platform identity:'
+	note 'kept unchanged (--keep-identity).'
 else
-	echo 'Platform identity: previous files backed up, *.before-platform-change removed, and synthetic identifiers regenerated.'
+	info 'Platform identity:'
+	note 'previous files backed up, *.before-platform-change removed, and synthetic identifiers regenerated.'
 fi
-echo 'Will be kept: the Darling runtime, Riot Client.app, League of Legends.app game files, Metadata and the shader cache.'
-echo 'The Darling runtime is stopped first.'
+printf '\n'
+info 'Will be kept:'
+note 'the Darling runtime, Riot Client.app, League of Legends.app game files, Metadata and the shader cache.'
+printf '\n'
+info 'The Darling runtime is stopped first.'
 
 if [ "$confirmed" != 1 ]; then
 	if [ ! -t 0 ]; then
 		refuse 'No terminal to ask for confirmation; pass --yes to proceed without asking.'
 	fi
-	printf 'Continue? [y/N] '
+	printf '\n%s%s%s Continue? [y/N] ' "$YELLOW" "$ICON_WARN" "$RESET"
 	read -r reply || reply=''
 	case "$reply" in
 	y | Y | yes | Yes | YES) ;;
@@ -173,7 +335,13 @@ if [ "$confirmed" != 1 ]; then
 	esac
 fi
 
-python3 build/runtime/tools/stop-darling-runtime.py
+info 'Stopping the Darling runtime...'
+if ! python3 build/runtime/tools/stop-darling-runtime.py; then
+	error 'Could not stop the Darling runtime. Nothing was cleaned.'
+	exit 1
+fi
+success 'Darling runtime stopped.'
+info 'Archiving removed files and cleaning the prefix...'
 
 # Archive existing logs, local client profiles/config/crashes and previous
 # platform identity to a mode-0600 tarball before deleting anything. Every
@@ -397,7 +565,7 @@ if [ "$keep_identity" != 1 ]; then
 fi
 
 if [ "$cleaned" = 1 ]; then
-	echo 'Prefix cleanup complete. The Darling runtime, Riot Client, League of Legends and shader cache were kept.'
+	success 'Prefix cleanup complete. The Darling runtime, Riot Client, League of Legends and shader cache were kept.'
 else
-	echo 'Prefix was already clean; nothing was changed.'
+	info 'Prefix was already clean; nothing was changed.'
 fi

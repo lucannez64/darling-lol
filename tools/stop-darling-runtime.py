@@ -90,8 +90,14 @@ def orphaned_riot():
 
 owned_riot = riot_descendants(old_pid)
 owned_riot.update(orphaned_riot())
-subprocess.run(['darling', 'shutdown'], env=dict(os.environ, DPREFIX=str(prefix)),
-               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+try:
+    subprocess.run(['darling', 'shutdown'], env=dict(os.environ, DPREFIX=str(prefix)),
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+except FileNotFoundError:
+    raise SystemExit(
+        "The 'darling' command was not found. Run this from the install that owns the prefix "
+        "(for a Toolbox install: toolbox enter darling-lol). Runtime remains untouched."
+    )
 deadline = time.monotonic() + 5
 while live(old_pid) and time.monotonic() < deadline:
     time.sleep(.1)

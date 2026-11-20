@@ -28,6 +28,7 @@ class StopRuntimeTests(unittest.TestCase):
         self.signals = []
         self.clock = 0
         self.status_error = None
+        self.missing_darling = False
         self.shutdown = lambda: None
         self.on_signal = lambda pid, sig: self.status(pid, 'Z')
 
@@ -79,6 +80,8 @@ class StopRuntimeTests(unittest.TestCase):
         def run(command, **kwargs):
             self.calls.append((command, kwargs))
             if command == ['darling', 'shutdown']:
+                if self.missing_darling:
+                    raise FileNotFoundError(2, 'No such file or directory', 'darling')
                 self.shutdown()
             return subprocess.CompletedProcess(command, 0)
 
@@ -139,6 +142,12 @@ class StopRuntimeTests(unittest.TestCase):
     def test_no_marker(self):
         self.run_script()
         self.assert_finished()
+
+    def test_missing_darling_command_fails_without_a_traceback(self):
+        self.missing_darling = True
+        with self.assertRaisesRegex(SystemExit, "darling.*was not found"):
+            self.run_script()
+        self.assertEqual(len(self.calls), 1)
 
     def test_invalid_marker(self):
         (self.prefix / '.init.pid').write_text('invalid')
