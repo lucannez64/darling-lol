@@ -313,12 +313,38 @@ def trust_store(env):
     return next((str(path) for path in candidates if path.exists()), '')
 
 
+def configured_prefix(env, roots=None):
+    """The prefix the launcher uses: $DPREFIX, then build/config.json, then ~/.darling.
+
+    `darling-lol --doctor` passes no prefix, and a prefix moved with --set-prefix
+    is only recorded in build/config.json, so reading ~/.darling alone would
+    inspect a stale or empty prefix.
+    """
+    if env.get('DPREFIX'):
+        return Path(env['DPREFIX'])
+    if roots is None:
+        roots = []
+        if env.get('DARLING_WORKSPACE'):
+            roots.append(Path(env['DARLING_WORKSPACE']))
+        # tools/doctor.py or the rendered build/runtime/tools/doctor.py
+        roots.extend(Path(__file__).resolve().parents)
+    for root in roots:
+        config = Path(root) / 'build/config.json'
+        try:
+            prefix = json.loads(config.read_text()).get('prefix')
+        except (OSError, ValueError, AttributeError):
+            continue
+        if prefix:
+            return Path(prefix)
+    return Path.home() / '.darling'
+
+
 def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys'), which=None,
            host_tmp=Path('/tmp'), perf_probe=probe_perf_event_open):
     """Collect facts once; checks below only interpret them and stay testable."""
     env = dict(os.environ if env is None else env)
     which = which or shutil.which
-    prefix = Path(prefix or env.get('DPREFIX') or (Path.home() / '.darling')).expanduser()
+    prefix = Path(prefix or configured_prefix(env)).expanduser()
 
     release = os_release()
     memory = meminfo()

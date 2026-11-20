@@ -175,6 +175,18 @@ class CheckTests(unittest.TestCase):
                                                  'XDG_CONFIG_HOME': str(Path(folder) / 'cfg')}),
                              str(override))
 
+    def test_prefix_follows_dprefix_then_the_configured_prefix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'build').mkdir()
+            (root / 'build/config.json').write_text(json.dumps({'prefix': '/mnt/disk/darling'}))
+            self.assertEqual(doctor.configured_prefix({}, roots=[root]), Path('/mnt/disk/darling'))
+            self.assertEqual(doctor.configured_prefix({'DPREFIX': '/other'}, roots=[root]), Path('/other'))
+            self.assertEqual(doctor.configured_prefix({}, roots=[root / 'missing']),
+                             Path.home() / '.darling')
+            env = {'DARLING_WORKSPACE': str(root)}
+            self.assertEqual(doctor.configured_prefix(env), Path('/mnt/disk/darling'))
+
     def test_gather_reads_perf_event_paranoid(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
