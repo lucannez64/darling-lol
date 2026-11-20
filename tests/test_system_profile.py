@@ -155,6 +155,40 @@ class SystemProfileTests(unittest.TestCase):
         self.assertEqual(compat['metal_mac'], '0')
         self.assertEqual(compat['metal_vram'], '8192')
 
+    def launcher_handoff_raw(self, profile, **extra):
+        launcher = (ROOT / 'tools/run-riot-client.sh').read_text()
+        start = launcher.index('system_prop=')
+        end = launcher.index('# Opt-in partial recovery:')
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder) / 'prefix'
+            (prefix / 'private/etc').mkdir(parents=True)
+            (prefix / 'private/etc/darling-system.prop').write_text(PROFILE.read_text())
+            block = Path(folder) / 'profile-block.sh'
+            block.write_text(launcher[start:end])
+            env = {
+                'PATH': os.environ['PATH'], 'HOME': folder, 'prefix_dir': str(prefix),
+                'runner_dir': str(ROOT / 'tools'), 'RCLOL_PLATFORM_PROFILE': profile,
+            }
+            env.update(extra)
+            return subprocess.run(['sh', '-c', '. "$1"', 'sh', str(block)], env=env,
+                                  check=True, capture_output=True, text=True)
+
+    def test_compat_warns_when_perf_event_paranoid_blocks_perf(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sysctl = Path(folder) / 'perf_event_paranoid'
+            sysctl.write_text('3\n')
+            compat = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl))
+            self.assertIn('WARNING: kernel.perf_event_paranoid=3', compat.stderr)
+            self.assertIn('sudo sysctl kernel.perf_event_paranoid=2', compat.stderr)
+
+            host = self.launcher_handoff_raw('host', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl))
+            self.assertNotIn('perf_event_paranoid', host.stderr)
+
+            for allowed in ('2\n', '-1\n'):
+                sysctl.write_text(allowed)
+                ok = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl))
+                self.assertNotIn('perf_event_paranoid', ok.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

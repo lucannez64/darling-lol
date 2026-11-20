@@ -1935,7 +1935,7 @@ new file mode 100644
 index 0000000..2d3bdde
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,828 @@
+@@ -0,0 +1,835 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2536,15 +2536,22 @@ index 0000000..2d3bdde
 +		uint32_t cmdsize = ((const uint32_t*) p)[1];
 +		if (cmdsize < 8)
 +			break;
-+		if (cmd == 0x1b /* LC_UUID */) {
++		if (cmd == 0x1b /* LC_UUID */ && cmdsize >= 24) {
++			static const char hex[] = "0123456789abcdef";
 +			const unsigned char* u = p + 8;
++			char uuid_str[37];
++			int pos = 0;
++			for (int b = 0; b < 16; ++b) {
++				if (b == 4 || b == 6 || b == 8 || b == 10)
++					uuid_str[pos++] = '-';
++				uuid_str[pos++] = hex[(u[b] >> 4) & 0xf];
++				uuid_str[pos++] = hex[u[b] & 0xf];
++			}
++			uuid_str[pos] = '\0';
 +			char line[128];
 +			__simple_snprintf(line, sizeof(line),
-+				"cpuid-trace: image base=0x%lx uuid="
-+				"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
-+				(unsigned long) base,
-+				u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],
-+				u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]);
++				"cpuid-trace: image base=0x%lx uuid=%s\n",
++				(unsigned long) base, uuid_str);
 +			rclol_write_str(line);
 +			return;
 +		}

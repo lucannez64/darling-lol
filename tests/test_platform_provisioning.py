@@ -267,3 +267,58 @@ class ProvisioningChecks(unittest.TestCase):
         (self.prefix / '.init.pid').unlink()
         conflict = subprocess.run([*normalize, '--provision'], capture_output=True, text=True)
         self.assertNotEqual(conflict.returncode, 0)
+
+    def test_regenerate_rotates_identifiers_while_preserving_model_and_honouring_overrides(self):
+        initial = {
+            'IOPlatformSerialNumber': 'CUSTOMSER123',
+            'mlb-serial-number': 'CUSTOMMLB12345678',
+            'IOPlatformUUID': '11111111-2222-4333-8444-555555555555',
+            'ROM': bytes.fromhex('021122334455'),
+            'model': 'CustomModel1,1',
+            'board-id': 'Mac-CUSTOMBOARD',
+            'manufacturer': 'CustomVendor',
+        }
+        platform.save(self.prefix, initial)
+        canonical = platform.destination(self.prefix)
+        before_bytes = canonical.read_bytes()
+
+        regen = [sys.executable, str(SCRIPT), '--prefix', str(self.prefix),
+                 '--runtime-root', str(self.runtime), '--regenerate']
+        # Preview does not touch the prefix.
+        preview = subprocess.run(regen, capture_output=True, text=True)
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertEqual(canonical.read_bytes(), before_bytes)
+        preview_props = json.loads(preview.stdout)['properties']
+        self.assertNotEqual(preview_props['IOPlatformUUID'], initial['IOPlatformUUID'])
+        self.assertEqual(preview_props['model'], 'CustomModel1,1')
+
+        # Write rotates all generated identifiers while keeping hardware fields.
+        write = subprocess.run([*regen, '--rom-oui', '00:11:22', '--write'],
+                               capture_output=True, text=True)
+        self.assertEqual(write.returncode, 0, write.stderr)
+        after = platform.load(canonical)
+        self.assertEqual(after, platform.load(self.prefix / 'private/etc/darling-smbios.conf'))
+        self.assertNotEqual(after['IOPlatformSerialNumber'], initial['IOPlatformSerialNumber'])
+        self.assertNotEqual(after['mlb-serial-number'], initial['mlb-serial-number'])
+        self.assertNotEqual(after['IOPlatformUUID'], initial['IOPlatformUUID'])
+        self.assertNotEqual(after['provisioning_UDID'], initial['IOPlatformUUID'])
+        self.assertNotEqual(after['system-id'], uuid.UUID(initial['IOPlatformUUID']).bytes_le)
+        self.assertEqual(after['ROM'][:3], bytes.fromhex('001122'))
+        self.assertEqual(after['model'], 'CustomModel1,1')
+        self.assertEqual(after['board-id'], 'Mac-CUSTOMBOARD')
+        self.assertEqual(after['manufacturer'], 'CustomVendor')
+
+        # Explicit --set overrides survive --regenerate.
+        explicit_uuid = '99999999-8888-4777-8666-555555555555'
+        override = subprocess.run([*regen, '--set', f'IOPlatformUUID={explicit_uuid}', '--write'],
+                                  capture_output=True, text=True)
+        self.assertEqual(override.returncode, 0, override.stderr)
+        self.assertEqual(platform.load(canonical)['IOPlatformUUID'], explicit_uuid)
+
+        # Rejects conflicting flags and live prefixes.
+        for bad in (['--replace-known-defaults'], ['--normalize-system-version']):
+            conflict = subprocess.run([*regen, *bad], capture_output=True, text=True)
+            self.assertNotEqual(conflict.returncode, 0)
+        (self.prefix / '.init.pid').write_text(str(os.getpid()))
+        live = subprocess.run([*regen, '--write'], capture_output=True, text=True)
+        self.assertNotEqual(live.returncode, 0)
