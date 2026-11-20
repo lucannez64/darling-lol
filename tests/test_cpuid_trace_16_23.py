@@ -213,6 +213,8 @@ struct darling_cpu_identity {{
     uint32_t brand_len;
     uint32_t signature;
     uint32_t leaf1_edx;
+    uint32_t leaf1_ecx;
+    uint32_t leaf1_ecx_system;
     uint32_t cores;
     uint32_t threads;
     uint32_t max_basic;
@@ -231,6 +233,8 @@ static const struct darling_cpu_identity k_id = {{
     .brand_len = 40,
     .signature = 0x000906eau,
     .leaf1_edx = 0xbfebfbffu,
+    .leaf1_ecx = 0x7ffafbbfu,
+    .leaf1_ecx_system = 0x0122c9b4u,
     .cores = 6,
     .threads = 12,
     .max_basic = 0x16u,
@@ -285,6 +289,19 @@ int main(void) {{
     assert(((b >> 8) & 0xffu) == 8u);
     assert((b & 0xffu) == 0u);
     assert(d == 0xbfebfbffu);
+    assert(c == 0x7ffafbbfu);
+
+    // Leaf 1 ECX on a Zen host (issue #31): the AMD word lacks VMX, EST, TM2,
+    // PCID, x2APIC... that every Coffee Lake reports; the result is exactly a
+    // real i7-9750H's word.
+    a = 0; b = 0; c = 0x7ed8320bu; d = 0x178bfbffu;
+    rclol_cpuid_trace_spoof(1u, 0u, &a, &b, &c, &d);
+    assert(c == 0x7ffafbbfu);
+    // A host without FMA/MOVBE/F16C/RDRAND is never offered them; the
+    // hypervisor bit (31), SMX and DCA, which a 9750H never sets, are dropped.
+    c = 0x80000000u | 0x00040040u | (0x7ffafbbfu & ~((1u << 12) | (1u << 22) | (1u << 29) | (1u << 30)));
+    rclol_cpuid_trace_spoof(1u, 0u, &a, &b, &c, &d);
+    assert(c == (0x7ffafbbfu & ~((1u << 12) | (1u << 22) | (1u << 29) | (1u << 30))));
 
     // A host APIC ID beyond the identity's 12 threads (a 32-thread or
     // multi-CCD host) folds below the 16 IDs leaf 1 advertises, keeping SMT parity.
@@ -376,6 +393,31 @@ int main(void) {{
             subprocess.run([str(exe_path)], check=True)
 
     @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_machdep_features_report_the_same_leaf1_words(self):
+        patch = (ROOT / 'patches/xnu.patch').read_text()
+
+        def added(path):
+            marker = f'diff --git a/{path} b/{path}\n'
+            section = patch.split(marker, 1)[1].split('\ndiff --git ', 1)[0]
+            return '\n'.join(line[1:] for line in section.splitlines()
+                             if line.startswith('+') and not line.startswith('+++'))
+
+        base = 'darling/src/libsystem_kernel/emulation/'
+        sysctl = added(base + 'src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c')
+        identity = added(base + 'src/common/cpu_identity.c')
+        expression = '(ecx & id->leaf1_ecx) | (id->leaf1_ecx & id->leaf1_ecx_system)'
+        # The game's leaf 1 and machdep.cpu.features cannot disagree.
+        self.assertIn('*ecx = ' + expression.replace('(ecx', '(*ecx', 1), cpuid_trace_source())
+        self.assertIn('ecx = ' + expression, sysctl)
+        self.assertIn('.leaf1_ecx = 0x7ffafbbfu,', identity)
+        self.assertIn('.leaf1_ecx_system = 0x0122c9b4u,', identity)
+        # macOS names (xnu feature_map), ECX included.
+        for name in ('"PSE36"', '"PCLMULQDQ"', '"MON"', '"DSCPL"', '"TPR"', '"SEGLIM64"',
+                     '"TSCTMR"', '"AVX1.0"'):
+            self.assertIn(name, sysctl)
+        self.assertNotIn('"PSE-36"', sysctl)
+        self.assertNotIn('"IA64"', sysctl)
+
     def test_log_uuid_formats_hex_without_width_specifiers(self):
         src = cpuid_trace_source()
         start = src.index('static void rclol_log_uuid(')
