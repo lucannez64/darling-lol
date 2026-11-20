@@ -13,11 +13,14 @@ Usage:
 Exit status is 1 when a required check fails; warnings do not fail.
 """
 import argparse
+import errno
+import importlib.util
 import json
 import os
 import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -233,12 +236,115 @@ def active_switches(prefix, host_tmp=Path('/tmp')):
     }
 
 
+PERF_EVENT_OPEN_X86_64 = 298
+
+
+def probe_perf_event_open():
+    """Open and close one disabled, user-only software event on this thread.
+
+    The cpuid alignment of profile=compat needs perf_event_open. Besides
+    kernel.perf_event_paranoid, a seccomp filter (Docker, Podman and Flatpak
+    defaults) or an LSM can refuse it, which only a real call shows. Returns
+    'ok', the errno name, or 'unavailable' where the probe cannot run.
+    """
+    if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'AMD64'):
+        return 'unavailable'
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+    except (ImportError, OSError):
+        return 'unavailable'
+    # struct perf_event_attr, PERF_ATTR_SIZE_VER0: PERF_TYPE_SOFTWARE,
+    # PERF_COUNT_SW_DUMMY; flags disabled | exclude_kernel | exclude_hv.
+    attr = bytearray(64)
+    struct.pack_into('<IIQ', attr, 0, 1, 64, 9)
+    struct.pack_into('<Q', attr, 40, 1 | 1 << 5 | 1 << 6)
+    buffer = (ctypes.c_char * len(attr)).from_buffer(attr)
+    libc.syscall.restype = ctypes.c_long
+    fd = libc.syscall(ctypes.c_long(PERF_EVENT_OPEN_X86_64), buffer, ctypes.c_int(0), ctypes.c_int(-1),
+                      ctypes.c_int(-1), ctypes.c_ulong(8))  # PERF_FLAG_FD_CLOEXEC
+    if fd >= 0:
+        os.close(fd)
+        return 'ok'
+    code = ctypes.get_errno()
+    return errno.errorcode.get(code, str(code))
+
+
+def _platform_tool():
+    """configure-darling-platform.py next to this file (source or rendered copy), or None."""
+    path = Path(__file__).resolve().parent / 'configure-darling-platform.py'
+    try:
+        spec = importlib.util.spec_from_file_location('darling_lol_platform', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except (OSError, ImportError, SyntaxError, AttributeError):
+        return None
+
+
+def platform_identity_state(prefix):
+    """'missing', 'shared', 'saved' or 'unreadable' for the prefix's saved platform identity."""
+    etc = Path(prefix) / 'private/etc'
+    files = [etc / 'darling-platform.plist', etc / 'darling-smbios.conf']
+    present = [path for path in files if path.is_file()]
+    if not present:
+        return 'missing'
+    tool = _platform_tool()
+    if tool is None:
+        return 'unreadable'
+    try:
+        if any(tool.has_known_defaults(tool.load(path)) for path in present):
+            return 'shared'
+    except Exception:  # a malformed file is reported, not raised
+        return 'unreadable'
+    return 'saved'
+
+
+def trust_store(env):
+    """The runtime signing trust store sign-darling-runtime.sh writes, or ''."""
+    candidates = []
+    if env.get('DARLING_TRUST_DIR'):
+        candidates.append(Path(env['DARLING_TRUST_DIR']) / 'trustcache')
+    config = Path(env['XDG_CONFIG_HOME']) if env.get('XDG_CONFIG_HOME') else (
+        Path(env['HOME']) / '.config' if env.get('HOME') else None)
+    if config is not None:
+        candidates.append(config / 'darling/trustcache')
+    candidates.append(Path('/etc/darling/trustcache'))
+    return next((str(path) for path in candidates if path.exists()), '')
+
+
+def configured_prefix(env, roots=None):
+    """The prefix the launcher uses: $DPREFIX, then build/config.json, then ~/.darling.
+
+    `darling-lol --doctor` passes no prefix, and a prefix moved with --set-prefix
+    is only recorded in build/config.json, so reading ~/.darling alone would
+    inspect a stale or empty prefix.
+    """
+    if env.get('DPREFIX'):
+        return Path(env['DPREFIX'])
+    if roots is None:
+        roots = []
+        if env.get('DARLING_WORKSPACE'):
+            roots.append(Path(env['DARLING_WORKSPACE']))
+        # tools/doctor.py or the rendered build/runtime/tools/doctor.py
+        roots.extend(Path(__file__).resolve().parents)
+    for root in roots:
+        config = Path(root) / 'build/config.json'
+        try:
+            prefix = json.loads(config.read_text()).get('prefix')
+        except (OSError, ValueError, AttributeError):
+            continue
+        if prefix:
+            return Path(prefix)
+    return Path.home() / '.darling'
+
+
 def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys'), which=None,
-           host_tmp=Path('/tmp')):
+           host_tmp=Path('/tmp'), perf_probe=probe_perf_event_open):
     """Collect facts once; checks below only interpret them and stay testable."""
     env = dict(os.environ if env is None else env)
     which = which or shutil.which
-    prefix = Path(prefix or env.get('DPREFIX') or (Path.home() / '.darling')).expanduser()
+    prefix = Path(prefix or configured_prefix(env)).expanduser()
 
     release = os_release()
     memory = meminfo()
@@ -282,6 +388,9 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'prefix_state': prefix_state(prefix, proc_root),
         'psr': read_text(sys_root / 'module/i915/parameters/enable_psr').strip(),
         'perf_event_paranoid': read_text(proc_root / 'sys/kernel/perf_event_paranoid').strip(),
+        'perf_event_open': perf_probe(),
+        'platform_identity': platform_identity_state(prefix) if prefix.is_dir() else 'missing',
+        'trust_store': trust_store(env),
         'core_limit': _core_limit(),
         'environment': {key: env[key] for key in ENV_ALLOWLIST if key in env},
         'trace_env': sorted(key for key, value in env.items() if value and TRACE_ENV.match(key)),
@@ -435,6 +544,49 @@ def check_perf_event_paranoid(facts):
     return 'ok', 'kernel.perf_event_paranoid=%d' % value
 
 
+def check_perf_event_open(facts):
+    result = facts.get('perf_event_open', 'unavailable')
+    if result in ('ok', 'unavailable', ''):
+        return 'ok', ('perf_event_open works' if result == 'ok'
+                      else 'perf_event_open probe not available on this platform')
+    try:
+        paranoid = int(str(facts.get('perf_event_paranoid', '')).strip())
+    except ValueError:
+        paranoid = None
+    if result in ('EACCES', 'EPERM') and paranoid is not None and paranoid > 2:
+        # check_perf_event_paranoid already names the fix.
+        return 'warn', 'perf_event_open refused (%s) by kernel.perf_event_paranoid=%d' % (result, paranoid)
+    return 'warn', (
+        'perf_event_open is refused here (%s) although kernel.perf_event_paranoid allows it: a seccomp '
+        'filter (Docker, Podman or Flatpak sandbox) or a security module blocks it, so profile=compat '
+        'cannot align guest cpuid. Run the launcher outside that sandbox, or allow perf_event_open in '
+        'its seccomp profile; see docs/TROUBLESHOOTING.md' % result)
+
+
+def check_platform_identity(facts):
+    if not facts.get('prefix_exists'):
+        return 'ok', 'No prefix yet; setup provisions its platform identity'
+    state = facts.get('platform_identity', 'missing')
+    fix = 'run `python3 tools/configure-darling-platform.py --provision --write` with Darling stopped'
+    if state == 'missing':
+        return 'warn', ('No saved platform identity in this prefix, so iokitd reports a DARLING- serial no '
+                        'Mac has; ' + fix + ' (scripts/update.sh does this too)')
+    if state == 'shared':
+        return 'warn', 'The prefix still has the old shared serial or UUID; ' + fix
+    if state == 'unreadable':
+        return 'warn', 'The saved platform identity could not be read; ' + fix
+    return 'ok', 'Per-prefix platform identity saved'
+
+
+def check_runtime_signing(facts):
+    if not facts.get('prefix_launchd'):
+        return 'ok', 'Runtime not installed yet'
+    if facts.get('trust_store'):
+        return 'ok', 'Runtime trust store present'
+    return 'warn', ('No runtime signing trust store found, so the installed runtime is probably unsigned; '
+                    'rerun scripts/install-runtime.sh (it builds tools/dc-codesign and signs the overlays)')
+
+
 def check_prefix(facts):
     if not facts['prefix_exists']:
         return 'fail', 'Prefix %s does not exist; run the installer first' % facts['prefix']
@@ -473,6 +625,9 @@ CHECKS = (
     ('core', 'Core dumps', check_core_dumps),
     ('psr', 'Panel self-refresh', check_psr),
     ('perf_event_paranoid', 'Perf event access', check_perf_event_paranoid),
+    ('perf_event_open', 'Perf event syscall', check_perf_event_open),
+    ('platform_identity', 'Platform identity', check_platform_identity),
+    ('runtime_signing', 'Runtime signing', check_runtime_signing),
     ('prefix', 'Darling prefix', check_prefix),
     ('runtime', 'Darling runtime', check_runtime),
     ('markers', 'Runtime markers', check_stale_markers),

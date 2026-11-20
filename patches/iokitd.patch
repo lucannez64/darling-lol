@@ -3686,9 +3686,10 @@ index 0000000..6c87959
 +#endif
 diff --git a/src/IOGraphicsAccelerator.h b/src/IOGraphicsAccelerator.h
 new file mode 100644
+index 0000000..050fe50
 --- /dev/null
 +++ b/src/IOGraphicsAccelerator.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,59 @@
 +/*
 + This file is part of Darling.
 +
@@ -3715,17 +3716,14 @@ new file mode 100644
 +#include "ServiceRegistry.h"
 +#include <cstdint>
 +
-+// -[MTLDevice registryID] reports this value and Dawn resolves it through
-+// IOServiceGetMatchingService(IORegistryEntryIDMatching(...)). Keep it in sync
-+// with MTLDeviceInfo::kDefaultRegistryID in patches/metal.patch.
-+static constexpr uint64_t kIOGraphicsAcceleratorRegistryID = 0x100000439ULL;
-+
-+// The synthetic GPU entry. macOS publishes an IOPCIDevice with vendor-id/device-id
-+// properties and an accelerator child; Metal and Dawn walk that pair to identify the
-+// GPU. The host's Vulkan driver publishes nothing in the guest IORegistry, so iokitd
-+// stands one in with the host PCI IDs (or the compatibility IDs the rest of the system
-+// reports). The accelerator ID is pinned because -[MTLDevice registryID] uses it as a
-+// lookup key.
++// The synthetic GPU entries. macOS publishes an IOPCIDevice with vendor-id/device-id
++// properties and an accelerator child per GPU; Metal and Dawn walk that pair to
++// identify the GPU. The host's Vulkan driver publishes nothing in the guest
++// IORegistry, so iokitd stands one in per host card with the host PCI IDs (or the
++// compatibility IDs the rest of the system reports). Each accelerator ID is pinned to
++// IOGraphicsAcceleratorIds::registryIdFor() of the card's real PCI IDs, the value
++// -[MTLDevice registryID] reports for the card Metal renders on; Dawn resolves it
++// through IOServiceGetMatchingService(IORegistryEntryIDMatching(...)).
 +class IOPCIDevice : public IOService
 +{
 +public:
@@ -3753,10 +3751,10 @@ new file mode 100644
 +#endif
 diff --git a/src/IOGraphicsAccelerator.mm b/src/IOGraphicsAccelerator.mm
 new file mode 100644
-index 0000000..df7fcbf
+index 0000000..186d27b
 --- /dev/null
 +++ b/src/IOGraphicsAccelerator.mm
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,118 @@
 +/*
 + This file is part of Darling.
 +
@@ -3783,6 +3781,7 @@ index 0000000..df7fcbf
 +#import <Foundation/NSDictionary.h>
 +#import <Foundation/NSString.h>
 +#include <os/log.h>
++#include <cstdio>
 +#include <cstring>
 +
 +static NSData* dataForWord(uint32_t word)
@@ -3847,32 +3846,39 @@ index 0000000..df7fcbf
 +		return;
 +	registered = true;
 +
-+	// An unknown identity publishes nothing. Dawn trusts any entry it finds for
++	// No readable host card publishes nothing. Dawn trusts any entry it finds for
 +	// -[MTLDevice registryID] and reads missing or zero IDs as vendor 0; with no
 +	// entry it falls back to the Metal device name, as before this entry existed.
-+	IOGraphicsAcceleratorIds::PciId ids = IOGraphicsAcceleratorIds::acceleratorIds();
-+	if (ids.vendor == 0 && ids.device == 0)
-+		return;
++	// A software Metal device (llvmpipe) names no card's ID, so it falls back too.
++	unsigned int index = 0;
++	for (const auto& gpu : IOGraphicsAcceleratorIds::accelerators())
++	{
++		IOGraphicsAccelerator* accelerator = new IOGraphicsAccelerator;
++		// Pin before registering anything, so a refused ID leaves no orphan entry.
++		if (!accelerator->assignId(gpu.registryId))
++		{
++			os_log_error(OS_LOG_DEFAULT, "iokitd: registry ID 0x%llx is already in use",
++			             (unsigned long long) gpu.registryId);
++			accelerator->release();
++			continue;
++		}
 +
-+	IOGraphicsAccelerator* accelerator = new IOGraphicsAccelerator;
-+	IOPCIDevice* pciDevice = new IOPCIDevice(ids.vendor, ids.device);
++		IOPCIDevice* pciDevice = new IOPCIDevice(gpu.presented.vendor, gpu.presented.device);
++		char path[16];
++		snprintf(path, sizeof(path), "GFX%u@0", index++);
++		pciDevice->registerInPlane(kIOServicePlane, path, IORegistryEntry::root());
++		targetServiceRegistry->registerService(pciDevice);
 +
-+	pciDevice->registerInPlane(kIOServicePlane, "GFX0@0", IORegistryEntry::root());
-+	targetServiceRegistry->registerService(pciDevice);
-+
-+	if (!accelerator->assignId(kIOGraphicsAcceleratorRegistryID))
-+		os_log_error(OS_LOG_DEFAULT, "iokitd: registry ID 0x%llx is already in use",
-+		             (unsigned long long) kIOGraphicsAcceleratorRegistryID);
-+
-+	accelerator->registerInPlane(kIOServicePlane, "IOAccelerator", pciDevice);
-+	targetServiceRegistry->registerService(accelerator);
++		accelerator->registerInPlane(kIOServicePlane, "IOAccelerator", pciDevice);
++		targetServiceRegistry->registerService(accelerator);
++	}
 +}
 diff --git a/src/IOGraphicsAcceleratorIds.h b/src/IOGraphicsAcceleratorIds.h
 new file mode 100644
-index 0000000..50c039f
+index 0000000..b297204
 --- /dev/null
 +++ b/src/IOGraphicsAcceleratorIds.h
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,254 @@
 +/*
 + This file is part of Darling.
 +
@@ -4057,118 +4063,71 @@ index 0000000..50c039f
 +	return name.empty() ? std::string("host") : name;
 +}
 +
-+// Metal chooses a Vulkan device: /tmp/metal-gpu first, then METAL_INDIUM_GPU,
-+// then the loader's order (see deps/indium device.cpp). Only the explicit
-+// selector can be tied back to a DRM card.
-+inline bool readGpuSelector(std::string* selector)
++// The PCI IDs a host card is presented with. mac mode presents the
++// MacBookPro16,1's GPUs: Intel as its UHD Graphics 630 and the discrete
++// vendors (AMD and NVIDIA) as its Radeon Pro 5500M, which is also the name
++// Metal reports for them (MTLDeviceInfo::macGpuName in patches/metal.patch) and
++// what system_profiler shows. No Mac that runs macOS 14 has an NVIDIA GPU. Any
++// other mode, and any other vendor, keeps the host IDs.
++inline PciId presentedIds(PciId host, const std::string& mode)
 +{
-+	if (FILE* file = fopen("/tmp/metal-gpu", "r"))
-+	{
-+		char buffer[256] = { 0 };
-+		char* got = fgets(buffer, sizeof(buffer), file);
-+		fclose(file);
-+		if (got)
-+		{
-+			std::string value(buffer);
-+			while (!value.empty() && (value.back() == '\n' || value.back() == '\r'
-+			                          || value.back() == ' ' || value.back() == '\t'))
-+				value.pop_back();
-+			if (!value.empty())
-+			{
-+				*selector = value;
-+				return true;
-+			}
-+		}
-+	}
-+
-+	const char* env = getenv("METAL_INDIUM_GPU");
-+	if (env && *env)
-+	{
-+		*selector = env;
-+		return true;
-+	}
-+	return false;
-+}
-+
-+inline bool containsIgnoreCase(const std::string& text, const char* needle)
-+{
-+	return std::search(text.begin(), text.end(), needle, needle + std::strlen(needle),
-+	                   [](char left, char right) {
-+		return std::tolower((unsigned char) left) == std::tolower((unsigned char) right);
-+	}) != text.end();
-+}
-+
-+// The selector names a Vulkan device, not a card, so only a unique vendor hint
-+// can be mapped back. A numeric selector counts Vulkan devices, and the
-+// loader's order need not match the driver's card order, so it stays unknown;
-+// two cards of the hinted vendor stay unknown as well. A single card is only
-+// unambiguous without a selector: one can still name a software device.
-+inline bool cardForSelector(const std::vector<PciId>& cards, const std::string& selector,
-+                            PciId* selected)
-+{
-+	if (cards.size() == 1 && selector.empty())
-+	{
-+		*selected = cards.front();
-+		return true;
-+	}
-+	if (cards.empty() || selector.empty()
-+	    || std::all_of(selector.begin(), selector.end(),
-+	                   [](unsigned char c) { return std::isdigit(c) != 0; }))
-+		return false;
-+
-+	static const struct { const char* name; uint32_t vendor; } vendors[] = {
-+		{ "nvidia", 0x10de },
-+		{ "amd", 0x1002 },
-+		{ "radeon", 0x1002 },
-+		{ "intel", 0x8086 },
-+	};
-+	std::vector<uint32_t> matches;
-+	for (const auto& vendor : vendors)
-+		if (containsIgnoreCase(selector, vendor.name)
-+		    && std::find(matches.begin(), matches.end(), vendor.vendor) == matches.end())
-+			matches.push_back(vendor.vendor);
-+	if (matches.size() != 1)
-+		return false;
-+
-+	const PciId* found = nullptr;
-+	for (const PciId& card : cards)
-+		if (card.vendor == matches.front())
-+		{
-+			if (found)
-+				return false;
-+			found = &card;
-+		}
-+	if (!found)
-+		return false;
-+	*selected = *found;
-+	return true;
-+}
-+
-+// Pairs a card list, selector and mode with the identity to publish. Split
-+// from acceleratorIds() so the host tests can exercise every combination.
-+inline PciId acceleratorIdsFor(const std::vector<PciId>& cards, const std::string& selector,
-+                               const std::string& mode)
-+{
-+	PciId selected = { 0, 0 };
-+	if (!cardForSelector(cards, selector, &selected))
-+		return { 0, 0 };
-+
-+	// Matches system_profiler: mac mode presents the MacBookPro16,1 AMD and
-+	// Intel GPUs, an empty or host name keeps the host identity, and NVIDIA
-+	// keeps its own IDs in both profiles.
-+	if (mode != "mac" || (selected.vendor != 0x1002 && selected.vendor != 0x8086))
-+		return selected;
-+
-+	if (selected.vendor == 0x8086)
++	if (mode != "mac")
++		return host;
++	if (host.vendor == 0x8086)
 +		return { 0x8086, 0x3e9b };
-+	return { 0x1002, 0x7340 };
++	if (host.vendor == 0x1002 || host.vendor == 0x10de)
++		return { 0x1002, 0x7340 };
++	return host;
 +}
 +
-+inline PciId acceleratorIds()
++// The registry ID of a host card's accelerator, from its real PCI IDs. Metal
++// derives -[MTLDevice registryID] from the Vulkan device's vendorID/deviceID with
++// the same function (MTLDeviceInfo::registryIdFor in patches/metal.patch), so
++// whichever card Indium selects -- the loader's order, /tmp/metal-gpu or
++// METAL_INDIUM_GPU -- the ID Dawn looks up is that card's entry. Keep the two
++// copies identical. The IDs sit just above iokitd's sequential range
++// (0x100000000 upwards, a few dozen entries in practice).
++static constexpr uint64_t kRegistryIdBase = 0x100000439ULL;
++static constexpr uint32_t kRegistryIdSlots = 1021; // prime
++
++inline uint64_t registryIdFor(uint32_t vendor, uint32_t device)
 +{
-+	std::string selector;
-+	readGpuSelector(&selector);
-+	return acceleratorIdsFor(hostCards(), selector, hostGpuMode());
++	uint32_t key = ((vendor & 0xffffu) << 16) | (device & 0xffffu);
++	return kRegistryIdBase + key % kRegistryIdSlots;
++}
++
++struct Accelerator
++{
++	uint64_t registryId;
++	PciId host;
++	PciId presented;
++};
++
++// One accelerator per distinct host card, in the driver's probe order. A
++// multi-GPU host publishes every card, like a MacBookPro16,1 publishes both of
++// its GPUs, so the entry Metal names exists whichever card it renders on. Two
++// identical cards share an entry (Metal reports the same ID for either); a card
++// whose ID collides with an earlier one is left out rather than misdescribed.
++inline std::vector<Accelerator> acceleratorsFor(const std::vector<PciId>& cards,
++                                                const std::string& mode)
++{
++	std::vector<Accelerator> accelerators;
++	for (const PciId& card : cards)
++	{
++		if (card.vendor == 0 && card.device == 0)
++			continue;
++		uint64_t id = registryIdFor(card.vendor, card.device);
++		if (std::any_of(accelerators.begin(), accelerators.end(),
++		                [id](const Accelerator& existing) { return existing.registryId == id; }))
++			continue;
++		accelerators.push_back({ id, card, presentedIds(card, mode) });
++	}
++	return accelerators;
++}
++
++inline std::vector<Accelerator> accelerators()
++{
++	return acceleratorsFor(hostCards(), hostGpuMode());
 +}
 +
 +}

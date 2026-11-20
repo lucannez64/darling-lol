@@ -333,7 +333,8 @@ def main(argv=None):
     parser.add_argument('--runtime-root', type=Path, help='Runtime supplying SystemVersion.plist (default: saved SDK or /usr/local/libexec/darling)')
     parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
     parser.add_argument('--replace-known-defaults', action='store_true',
-                        help='Provision only if the prefix identity still has the shared serial or UUID; otherwise change nothing')
+                        help='Provision only if an existing prefix has no saved identity (iokitd then reports '
+                             'its DARLING- serial) or still has the shared serial or UUID; otherwise change nothing')
     parser.add_argument('--regenerate', action='store_true',
                         help='Regenerate synthetic per-prefix identifiers (serial, MLB, UUID, system-id, provisioning_UDID, ROM) while keeping model/board fields')
     parser.add_argument('--normalize-system-version', action='store_true',
@@ -378,13 +379,17 @@ def main(argv=None):
             if len(rom_oui) != 3 or rom_oui[0] & 1:
                 raise ValueError('--rom-oui requires exactly three unicast bytes')
         identity_files = [checked_path(prefix, 'private/etc/darling-smbios.conf'), destination(prefix)]
-        if args.replace_known_defaults and not any(path.exists() for path in identity_files):
-            print('No saved platform identity; nothing to replace.')
+        # Without a saved identity iokitd falls back to a host-derived UUID and a
+        # "DARLING-" serial no Mac has, so an existing prefix in that state is
+        # provisioned like one with the shared defaults. A missing prefix is left alone.
+        saved_identity = any(path.exists() for path in identity_files)
+        if args.replace_known_defaults and not saved_identity and not prefix.is_dir():
+            print('Prefix does not exist; nothing to replace.')
             return 0
         with prefix_lock(prefix) if args.write else nullcontext():
             path = destination(prefix)
             properties = {}
-            if args.replace_known_defaults and not any(
+            if args.replace_known_defaults and saved_identity and not any(
                     path.exists() and has_known_defaults(load(path)) for path in identity_files):
                 print('Platform identity has no shared defaults; nothing changed.')
                 return 0

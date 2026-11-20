@@ -83,39 +83,47 @@ static void checkGpuRegistry() {
     found->release();
 
     IOGraphicsAccelerator::registerSelf(ServiceRegistry::instance());
-    IORegistryEntry* gpu = IORegistryEntry::findById(kIOGraphicsAcceleratorRegistryID);
-    IOGraphicsAcceleratorIds::PciId expected = IOGraphicsAcceleratorIds::acceleratorIds();
-    // An unknown identity publishes no entry, so Dawn falls back to the Metal
+    auto expected = IOGraphicsAcceleratorIds::accelerators();
+    // No readable host card publishes no entry, so Dawn falls back to the Metal
     // device name instead of reading vendor 0.
-    if (expected.vendor == 0 && expected.device == 0) {
-        assert(gpu == nullptr);
+    if (expected.empty()) {
+        IORegistryEntry* none = IORegistryEntry::findById(IOGraphicsAcceleratorIds::kRegistryIdBase);
+        assert(none == nullptr);
         return;
     }
-    assert(gpu && !strcmp(gpu->className(), "IOGraphicsAccelerator2"));
-    auto parents = gpu->getParents(kIOServicePlane);
-    assert(parents.size() == 1 && !strcmp((*parents.begin())->className(), "IOPCIDevice"));
-    NSData* vendor = (*parents.begin())->getProperties()[@"vendor-id"];
-    NSData* device = (*parents.begin())->getProperties()[@"device-id"];
-    assert([vendor length] == 4 && [device length] == 4);
-    uint32_t vendorId = 0, deviceId = 0;
-    memcpy(&vendorId, [vendor bytes], 4);
-    memcpy(&deviceId, [device bytes], 4);
-    // The entry must describe the device Metal selected: never another card's
-    // IDs. Passthrough values are checked against the host identity, so any
-    // vendor works; the two compatibility substitutions are validated separately.
-    assert(vendorId == expected.vendor && deviceId == expected.device);
-    bool known = false;
-    for (const auto& card : IOGraphicsAcceleratorIds::hostCards())
-        known = known || (card.vendor == vendorId && card.device == deviceId);
-    known = known || (vendorId == 0x1002 && deviceId == 0x7340);
-    known = known || (vendorId == 0x8086 && deviceId == 0x3e9b);
-    assert(known);
-    assert(vendorId != 0);
-    gpu->release();
+    auto cards = IOGraphicsAcceleratorIds::hostCards();
+    for (const auto& card : expected) {
+        // Metal reports registryIdFor() of its Vulkan device's PCI IDs, so every
+        // host card has its own entry, whichever one Indium renders on.
+        assert(card.registryId == IOGraphicsAcceleratorIds::registryIdFor(card.host.vendor, card.host.device));
+        IORegistryEntry* gpu = IORegistryEntry::findById(card.registryId);
+        assert(gpu && !strcmp(gpu->className(), "IOGraphicsAccelerator2"));
+        auto parents = gpu->getParents(kIOServicePlane);
+        assert(parents.size() == 1 && !strcmp((*parents.begin())->className(), "IOPCIDevice"));
+        NSData* vendor = (*parents.begin())->getProperties()[@"vendor-id"];
+        NSData* device = (*parents.begin())->getProperties()[@"device-id"];
+        assert([vendor length] == 4 && [device length] == 4);
+        uint32_t vendorId = 0, deviceId = 0;
+        memcpy(&vendorId, [vendor bytes], 4);
+        memcpy(&deviceId, [device bytes], 4);
+        // The entry describes its own card, never another card's IDs: the host
+        // pair, or one of the two MacBookPro16,1 substitutions in mac mode.
+        assert(vendorId == card.presented.vendor && deviceId == card.presented.device);
+        bool known = vendorId == card.host.vendor && deviceId == card.host.device;
+        known = known || (vendorId == 0x1002 && deviceId == 0x7340);
+        known = known || (vendorId == 0x8086 && deviceId == 0x3e9b);
+        assert(known);
+        assert(vendorId != 0);
+        bool listed = false;
+        for (const auto& host : cards)
+            listed = listed || (host.vendor == card.host.vendor && host.device == card.host.device);
+        assert(listed);
+        gpu->release();
 
-    // The pinned ID is exclusive, so no later entry can steal the accelerator's.
-    ServiceFixture other;
-    assert(!other.assignId(kIOGraphicsAcceleratorRegistryID));
+        // Pinned IDs are exclusive, so no later entry can steal an accelerator's.
+        ServiceFixture other;
+        assert(!other.assignId(card.registryId));
+    }
 }
 
 static void checkIdentity() {

@@ -244,8 +244,9 @@ prepare_output() {
 	fi
 }
 
-# Older setups shipped one serial and UUID shared by every install. Give a prefix that still
-# has them its own identity; any other saved values, and prefixes without them, are left alone.
+# Older setups shipped one serial and UUID shared by every install, and prefixes set up before
+# provisioning have no saved identity at all (iokitd then reports a DARLING- serial). Give such a
+# prefix its own identity; custom saved values are left alone.
 replace_shared_identity() {
 	python3 build/runtime/tools/stop-darling-runtime.py
 	python3 tools/configure-darling-platform.py --replace-known-defaults --write ||

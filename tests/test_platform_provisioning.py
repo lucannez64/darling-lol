@@ -181,7 +181,7 @@ class ProvisioningChecks(unittest.TestCase):
     def test_replace_known_defaults_only_touches_shared_identities(self):
         replace = [sys.executable, str(SCRIPT), '--prefix', str(self.prefix), '--runtime-root',
                    str(self.runtime), '--replace-known-defaults', '--write']
-        # A prefix without identity files is not created or provisioned.
+        # A missing prefix is not created or provisioned.
         result = subprocess.run(replace, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.prefix.exists())
@@ -210,6 +210,24 @@ class ProvisioningChecks(unittest.TestCase):
         after = canonical.read_bytes()
         subprocess.run(replace, capture_output=True, text=True, check=True)
         self.assertEqual(canonical.read_bytes(), after)
+
+    def test_replace_known_defaults_provisions_a_prefix_without_identity(self):
+        # iokitd reports a DARLING- serial and a host-derived UUID when no
+        # identity is saved, so an existing prefix in that state is provisioned.
+        (self.prefix / 'private/etc').mkdir(parents=True)
+        replace = [sys.executable, str(SCRIPT), '--prefix', str(self.prefix), '--runtime-root',
+                   str(self.runtime), '--replace-known-defaults', '--write']
+        result = subprocess.run(replace, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        canonical = platform.destination(self.prefix)
+        value = platform.load(canonical)
+        self.assertFalse(platform.has_known_defaults(value))
+        self.assertFalse(value['IOPlatformSerialNumber'].startswith('DARLING-'))
+        self.assertIn('IOPlatformUUID', value)
+        # The new identity is saved, so a rerun changes nothing.
+        before = canonical.read_bytes()
+        subprocess.run(replace, capture_output=True, text=True, check=True)
+        self.assertEqual(canonical.read_bytes(), before)
 
     def test_standalone_fields_derived_from_known_uuid_are_replaced(self):
         known_id = uuid.UUID(platform.KNOWN_UUID).bytes_le
