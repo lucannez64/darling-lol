@@ -100,6 +100,9 @@ LAUNCHER_HELPERS = frozenset((
     'hide-league-client-in-game.py',
     'hide-league-splash-window.py',
 ))
+# The helpers are installed next to this supervisor. The guest shares the host
+# process table, so a same-named script from another checkout is different work.
+LAUNCHER_DIR = Path(__file__).resolve().parent
 TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
@@ -486,6 +489,14 @@ def in_container_scope(proc, unit):
         return False
 
 
+def launcher_helper(script):
+    """True when `script` is one of the helpers installed beside this module."""
+    try:
+        return Path(script).resolve().parent == LAUNCHER_DIR
+    except (OSError, RuntimeError):
+        return False
+
+
 def toolbox_state(container_id, proc_root):
     """Return the live Toolbx init identity and whether its scope is idle."""
     unit = 'libpod-%s.scope' % container_id
@@ -508,7 +519,8 @@ def toolbox_state(container_id, proc_root):
             instance = '%s:%d' % (proc.name, info[2])
             continue
         if (len(args) > 1 and Path(args[0]).name.startswith('python')
-                and Path(args[1]).name in LAUNCHER_HELPERS):
+                and Path(args[1]).name in LAUNCHER_HELPERS
+                and launcher_helper(args[1])):
             continue
         # Other supervisors serialize through the registry. A finisher can
         # still be returning its status after it removes its registration.
