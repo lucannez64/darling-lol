@@ -1,6 +1,6 @@
 ---
 name: open-pr
-description: Use when a contributor wants to turn local changes into a pull request for darling-lol: syncs main with upstream, creates the branch, writes the signed commit and the PR text, runs the checks and opens the PR against main.
+description: "Use when a contributor wants to turn local changes into a pull request for darling-lol: syncs main with upstream, creates the branch, writes the signed commit and the PR text, runs the checks and opens the PR against main."
 ---
 
 # darling-lol: branch, commit and pull request
@@ -23,17 +23,16 @@ The canonical repository is `lucannez64/darling-lol`.
 
 ## Steps
 
-1. Run `git status --short` and `git log --oneline <remote>/main..HEAD`. Uncommitted changes and commits already ahead of main are the content of the PR. If there are neither, stop and say so.
+1. Run `git fetch upstream` (or `origin` when there is no fork) first, so `<remote>/main` exists even when the remote was just added; if the fetch fails, stop and report. Then run `git status --short` and `git log --oneline <remote>/main..HEAD`. Uncommitted changes and commits already ahead of main are the content of the PR. If there are neither, stop and say so.
 2. Sync main without losing the work:
-   - `git fetch upstream` (or `origin` when there is no fork)
    - keep the commits ahead of main found in step 1; they must land on the new branch
-   - `git stash push -u -m open-pr` when the tree is dirty
+   - `git stash push -u -m open-pr` when the tree is dirty, and remember that this run created that stash
    - `git checkout main && git merge --ff-only <remote>/main`
    - `git push origin main` when `origin` is a fork
    - If the fast-forward fails, stop and report. Never reset main, rebase it or force push.
 3. Create the PR branch: `git checkout -b <type>/<slug>` from the updated main.
    - When step 1 found commits ahead of main, branch from the branch that holds them instead (`git checkout -b <type>/<slug> <branch>`) and merge the updated main into it, so those commits stay in the PR.
-   - `git stash pop` only after the branch exists and any ahead commits are on it, so the stashed changes apply on top of them.
+   - Restore the stash only when step 2 created it, once the branch exists and any ahead commits are on it. When the tree was clean, skip `git stash pop` so an unrelated stash is neither applied nor dropped.
    - Types: `fix`, `feat`, `docs`, `tests`, `scripts`, `build`, `refactor`.
    - Slug: lowercase, hyphenated, at most five words (`fix/quiet-sudo-update`, `feat/patchkit`).
 4. Run the checks the change needs and report the result:
