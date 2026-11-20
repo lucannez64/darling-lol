@@ -244,7 +244,10 @@ reports the host card name, device and VRAM. In the default `compat` profile an 
 card is reported as `AMD Radeon Pro 5500M`, vendor `0x1002`, device `0x7340`, bus
 PCIe and VRAM from `compat.gpu.vram` (4096 by default); an Intel card is reported
 as `Intel UHD Graphics 630` on bus Built-In with shared memory, and an NVIDIA
-card like an AMD one. With `compat.gpu.name=host` or `profile=host`, NVIDIA
+card like an AMD one. An AMD card beside the discrete GPU (an NVIDIA card, or an
+AMD card with a larger `mem_info_vram_total`, such as a Ryzen APU next to a
+Radeon dGPU) is reported as the `Intel UHD Graphics 630`, in IOKit and Metal too,
+so the host shows the MacBookPro16,1's pair instead of two 5500Ms. With `compat.gpu.name=host` or `profile=host`, NVIDIA
 cards keep host-derived names; the profiler uses the PCI ID database and can
 fall back to `NVIDIA Graphics`, while Metal uses the Vulkan device name, so the
 two names may differ. IOKit also publishes a synthetic `IOPCIDevice` per host
