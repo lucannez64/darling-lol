@@ -186,8 +186,36 @@ class SystemProfileTests(unittest.TestCase):
 
             for allowed in ('2\n', '-1\n'):
                 sysctl.write_text(allowed)
-                ok = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl))
+                ok = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl),
+                                               RCLOL_PERF_EVENT_OPEN_RESULT='ok')
                 self.assertNotIn('perf_event_paranoid', ok.stderr)
+                self.assertNotIn('perf_event_open is refused', ok.stderr)
+
+    def test_compat_warns_when_a_sandbox_refuses_perf_event_open(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sysctl = Path(folder) / 'perf_event_paranoid'
+            sysctl.write_text('2\n')
+            blocked = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl),
+                                                RCLOL_PERF_EVENT_OPEN_RESULT='EPERM')
+            self.assertIn('WARNING: perf_event_open is refused (EPERM)', blocked.stderr)
+            self.assertIn('seccomp', blocked.stderr)
+            # The paranoid warning already explains a refusal it causes.
+            sysctl.write_text('3\n')
+            paranoid = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl),
+                                                 RCLOL_PERF_EVENT_OPEN_RESULT='EACCES')
+            self.assertNotIn('perf_event_open is refused', paranoid.stderr)
+            # HOST never needs perf_event_open.
+            host = self.launcher_handoff_raw('host', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl),
+                                             RCLOL_PERF_EVENT_OPEN_RESULT='EPERM')
+            self.assertNotIn('perf_event_open', host.stderr)
+
+    def test_compat_runs_the_real_probe_without_an_override(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sysctl = Path(folder) / 'perf_event_paranoid'
+            sysctl.write_text('2\n')
+            result = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl))
+            # Whatever this host answers, the probe runs and never breaks the launch.
+            self.assertNotIn('Traceback', result.stderr)
 
 
 if __name__ == '__main__':

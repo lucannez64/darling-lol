@@ -49,8 +49,10 @@ valid_vram() { # positive decimal MB, bounded so the shell test cannot overflow
 displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  # HOST reports the host card. COMPAT is the default MacBookPro16,1 presentation,
  # selected by tools/system.prop; it only changes the reported identity, never
- # the host, the driver, or the GPU that actually presents frames. NVIDIA keeps
- # its own name in COMPAT so the game does not take AMD driver paths.
+ # the host, the driver, or the GPU that actually presents frames. The mac name
+ # presents Intel as the MacBookPro16,1's UHD Graphics 630 and the discrete
+ # vendors (AMD, NVIDIA) as its Radeon Pro 5500M, like iokitd and Metal do: no
+ # Mac that runs macOS 14 has an NVIDIA GPU.
  # Run outside the launcher, nothing is handed over: read the installed profile.
  prop=${RCLOL_SYSTEM_PROP:-/private/etc/darling-system.prop}
  if [ -z "${RCLOL_PLATFORM_PROFILE:-}" ] && [ -r "$prop" ]; then
@@ -95,7 +97,7 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
   [ -n "$name" ] || name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
   if [ "$mac_gpu_profile" = 1 ]; then
    case "$vendor" in
-    1002) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
+    1002|10de) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
           valid_vram "$vram" || vram=4096
           bus=pcie;;
     8086) vendor=8086; device=3e9b; name='Intel UHD Graphics 630'

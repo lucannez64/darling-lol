@@ -34,8 +34,9 @@ bundle before sharing it.
 
 The doctor also warns about diagnostic switches left on (for example
 `/tmp/rclol-input-trace`, `/tmp/metal-debug-waits` or `RCLOL_*_TRACE`
-variables), non-default tuning files, `kernel.perf_event_paranoid > 2`, and
-hybrid graphics started without
+variables), non-default tuning files, `kernel.perf_event_paranoid > 2`, a
+sandbox that refuses `perf_event_open`, a prefix without its own platform
+identity, an unsigned runtime, and hybrid graphics started without
 complete PRIME offload variables. See
 [compatibility](COMPATIBILITY.md) for what the performance numbers mean and
 for verified machines.
@@ -1251,13 +1252,16 @@ presentation. To report the real host card name and VRAM for one run:
 RCLOL_PLATFORM_PROFILE=host ./scripts/run.sh
 ```
 
-Or set `profile=host` in the installed `system.prop`. In COMPAT, AMD becomes
-`AMD Radeon Pro 5500M` and Intel becomes `Intel UHD Graphics 630`; NVIDIA keeps
-its own name so the game never takes AMD or Intel driver paths on an NVIDIA card.
+Or set `profile=host` in the installed `system.prop`. In COMPAT, AMD and NVIDIA
+become `AMD Radeon Pro 5500M` and Intel becomes `Intel UHD Graphics 630`, the
+MacBookPro16,1's two GPUs; set `compat.gpu.name=host` to keep the real card name
+with the rest of the compat profile. NVIDIA-specific runtime tuning keys on the
+real Vulkan vendor, not on the reported name.
 The working set is still the host's. `DARLING_METAL_MAC_GPU_NAME=0` and
 `DARLING_METAL_GPU_NAME` remain lower-level per-process overrides.
 
-`registryID` is a fixed non-zero value, as on a real Mac.
+`registryID` is a non-zero value derived from the card's PCI IDs; iokitd publishes
+the matching `IOGraphicsAccelerator2` entry for every host card.
 
 ### Host-side checks
 
@@ -1610,3 +1614,14 @@ lower) and `python3 tools/doctor.py`. Note that lowering
 `kernel.perf_event_paranoid` relaxes a host hardening setting for unprivileged
 users; granting `CAP_PERFMON` to the relevant account or loader is a narrower
 alternative if you prefer to keep `perf_event_paranoid` restricted.
+
+### A sandbox refuses `perf_event_open`
+
+`perf_event_paranoid` is not the only gate. The default seccomp profiles of
+Docker, Podman and Flatpak, and some security modules, refuse `perf_event_open`
+with `EPERM` whatever the sysctl says, with the same `armed 0 site(s)` result.
+`darling-lol --doctor` and `scripts/run.sh` open and close one disabled
+user-only event to find out, and warn when that fails while
+`perf_event_paranoid` allows it. Start the launcher outside that sandbox, or
+allow `perf_event_open` in its seccomp profile (Podman/Docker:
+`--security-opt seccomp=` with a profile that permits it).

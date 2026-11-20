@@ -219,9 +219,11 @@ struct darling_cpu_identity {{
     uint32_t max_ext;
     uint32_t phys_bits;
     uint32_t virt_bits;
+    uint32_t l1d_kb;
     uint32_t l2_kb;
     uint32_t l3_kb;
     uint32_t base_mhz;
+    uint32_t max_mhz;
 }};
 
 static const struct darling_cpu_identity k_id = {{
@@ -235,9 +237,11 @@ static const struct darling_cpu_identity k_id = {{
     .max_ext = 0x80000008u,
     .phys_bits = 39,
     .virt_bits = 48,
+    .l1d_kb = 32,
     .l2_kb = 256,
     .l3_kb = 12288,
     .base_mhz = 2600,
+    .max_mhz = 4500,
 }};
 
 static const struct darling_cpu_identity* rclol_identity(void) {{ return &k_id; }}
@@ -282,6 +286,74 @@ int main(void) {{
     assert((b & 0xffu) == 0u);
     assert(d == 0xbfebfbffu);
 
+    // A host APIC ID beyond the identity's 12 threads (a 32-thread or
+    // multi-CCD host) folds below the 16 IDs leaf 1 advertises, keeping SMT parity.
+    for (uint32_t host = 0; host < 256u; ++host) {{
+        a = 0; b = host << 24; c = 0; d = 0;
+        rclol_cpuid_trace_spoof(1u, 0u, &a, &b, &c, &d);
+        assert((b >> 24) < 12u);
+        assert(((b >> 24) & 1u) == (host & 1u));
+    }}
+
+    // Leaf 2: Coffee Lake descriptors, 0xff defers caches to leaf 4.
+    rclol_cpuid_trace_spoof(2u, 0u, &a, &b, &c, &d);
+    assert(a == 0x76036301u && b == 0x00f0b5ffu && c == 0u && d == 0x00c30000u);
+
+    // Leaf 4: the i7-9750H's real deterministic cache parameters.
+    static const uint32_t leaf4[5][4] = {{
+        {{ 0x1c004121u, 0x01c0003fu, 0x0000003fu, 0u }},
+        {{ 0x1c004122u, 0x01c0003fu, 0x0000003fu, 0u }},
+        {{ 0x1c004143u, 0x00c0003fu, 0x000003ffu, 0u }},
+        {{ 0x1c03c163u, 0x03c0003fu, 0x00002fffu, 6u }},
+        {{ 0u, 0u, 0u, 0u }},
+    }};
+    for (uint32_t i = 0; i < 5u; ++i) {{
+        a = b = c = d = 0xdeadbeefu;
+        rclol_cpuid_trace_spoof(4u, i, &a, &b, &c, &d);
+        assert(a == leaf4[i][0] && b == leaf4[i][1] && c == leaf4[i][2] && d == leaf4[i][3]);
+    }}
+
+    // Leaf 0xb: 2 threads per core, 12 per package, x2APIC ID folded like leaf 1.
+    a = b = c = 0xdeadbeefu; d = 29u;
+    rclol_cpuid_trace_spoof(0xbu, 0u, &a, &b, &c, &d);
+    assert(a == 1u && b == 2u && c == 0x100u && d == 5u);
+    a = b = c = 0xdeadbeefu; d = 29u;
+    rclol_cpuid_trace_spoof(0xbu, 1u, &a, &b, &c, &d);
+    assert(a == 4u && b == 12u && c == 0x201u && d == 5u);
+    a = b = c = 0xdeadbeefu; d = 29u;
+    rclol_cpuid_trace_spoof(0xbu, 2u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 2u && d == 5u);
+
+    // Leaves 0x15 and 0x16: 24 MHz * 216/2 TSC, 2600/4500/100 MHz.
+    rclol_cpuid_trace_spoof(0x15u, 0u, &a, &b, &c, &d);
+    assert(a == 2u && b == 216u && c == 0u && d == 0u);
+    rclol_cpuid_trace_spoof(0x16u, 0u, &a, &b, &c, &d);
+    assert(a == 2600u && b == 4500u && c == 100u && d == 0u);
+
+    // Above the maximum basic or extended leaf: the highest basic leaf, as on
+    // Intel; the host's AMD topology leaves never show through.
+    static const uint32_t beyond[] = {{ 0x17u, 0x1fu, 0x3fffffffu, 0x80000009u, 0x8000001du, 0x8000001eu, 0xffffffffu }};
+    for (uint32_t i = 0; i < sizeof(beyond) / sizeof(beyond[0]); ++i) {{
+        a = b = c = d = 0xdeadbeefu;
+        rclol_cpuid_trace_spoof(beyond[i], 0u, &a, &b, &c, &d);
+        assert(a == 2600u && b == 4500u && c == 100u && d == 0u);
+    }}
+    // The hypervisor range and the feature leaves pass through.
+    a = b = c = d = 0x12345678u;
+    rclol_cpuid_trace_spoof(0x40000000u, 0u, &a, &b, &c, &d);
+    assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
+    rclol_cpuid_trace_spoof(7u, 0u, &a, &b, &c, &d);
+    assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
+
+    // Leaf 0x80000001: AMD extended signature and package type cleared;
+    // 0x80000005 (AMD L1 caches) is reserved on Intel.
+    a = 0x00a20f12u; b = 0x40000000u; c = 0xffffffffu; d = 0xffffffffu;
+    rclol_cpuid_trace_spoof(0x80000001u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && (c & 0x00003fc4u) == 0u && (d & 0xc0400000u) == 0u);
+    a = b = c = d = 0xdeadbeefu;
+    rclol_cpuid_trace_spoof(0x80000005u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0u && d == 0u);
+
     // Leaf 0x80000006: Intel L2 256 KiB, 4-way (0x4), 64-byte line (0x40); EAX/EBX/EDX zero.
     a = 0xdeadbeefu; b = 0xdeadbeefu; c = 0xdeadbeefu; d = 0xdeadbeefu;
     rclol_cpuid_trace_spoof(0x80000006u, 0u, &a, &b, &c, &d);
@@ -300,7 +372,7 @@ int main(void) {{
             src_path = Path(folder) / 'cpuid_spoof_test.c'
             exe_path = Path(folder) / 'cpuid_spoof_test'
             src_path.write_text(harness)
-            subprocess.run(['cc', '-Wall', '-Wextra', str(src_path), '-o', str(exe_path)], check=True)
+            subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(src_path), '-o', str(exe_path)], check=True)
             subprocess.run([str(exe_path)], check=True)
 
     @unittest.skipUnless(shutil.which('cc'), 'C compiler required')

@@ -127,9 +127,28 @@ if [ "$profile" = compat ]; then
    ''|*[!0-9]*) ;;
    *)
     if [ "$perf_paranoid" -gt 2 ]; then
+     perf_paranoid_blocks=1
      echo "WARNING: kernel.perf_event_paranoid=$perf_paranoid blocks unprivileged perf_event_open (EACCES); profile=compat cpuid alignment will be inactive. Set it to 2 or lower: sudo sysctl kernel.perf_event_paranoid=2 (see docs/TROUBLESHOOTING.md)" >&2
     fi
     ;;
+  esac
+ fi
+ # A seccomp filter (Docker, Podman or Flatpak defaults) or a security module can
+ # still refuse the syscall; only a real call shows it. The doctor's probe opens
+ # and closes one disabled user-only event. RCLOL_PERF_EVENT_OPEN_RESULT is a
+ # test-only override of the probe's answer.
+ if [ "${perf_paranoid_blocks:-0}" = 0 ]; then
+  perf_open=${RCLOL_PERF_EVENT_OPEN_RESULT:-}
+  if [ -z "$perf_open" ] && [ -r "$runner_dir/doctor.py" ]; then
+   perf_open=$(python3 -c 'import importlib.util, sys
+spec = importlib.util.spec_from_file_location("doctor", sys.argv[1])
+doctor = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(doctor)
+print(doctor.probe_perf_event_open())' "$runner_dir/doctor.py" 2>/dev/null || true)
+  fi
+  case "$perf_open" in
+   ''|ok|unavailable) ;;
+   *) echo "WARNING: perf_event_open is refused ($perf_open) although kernel.perf_event_paranoid allows it: a seccomp filter (container or Flatpak sandbox) or a security module blocks it, so profile=compat cpuid alignment will be inactive (see docs/TROUBLESHOOTING.md)" >&2;;
   esac
  fi
 else
