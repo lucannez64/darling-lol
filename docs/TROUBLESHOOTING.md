@@ -427,9 +427,11 @@ copies, and regenerates the synthetic per-prefix identifiers via
 copy of the previous identity stays in `private/etc/`). Pass `--keep-identity`
 to keep `darling-platform.plist` and `darling-smbios.conf` unchanged,
 `--keep-game-settings` to preserve `Config/game.cfg` and `Config/input.ini`,
-and `--yes` to skip the confirmation prompt. The Darling runtime,
-`Riot Client.app`, `League of Legends.app`, product metadata and the Mesa
-shader cache are kept.
+and `--yes` to skip the confirmation prompt. A checkout installed with
+`--toolbox` is detected automatically and the cleanup re-enters its recorded
+container, so the host run can stop the container's runtime. The Darling
+runtime, `Riot Client.app`, `League of Legends.app`, product metadata and the
+Mesa shader cache are kept.
 
 ## Riot exits and League reports that it lost its connection
 
