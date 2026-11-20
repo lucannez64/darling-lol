@@ -180,15 +180,17 @@ guest probes; do not run the guest probes on your own.
 
 ## Skills
 
-Project skills carry procedures too long for this index. `open-pr` turns local
-changes into a pull request; every harness gets the same text, and
-`tests/test_agent_skills.py` keeps the copies identical.
+Project skills carry procedures too long for this index. Every harness gets
+the same text, and `tests/test_agent_skills.py` keeps the copies identical.
 
-- `.opencode/skills/open-pr/SKILL.md` for OpenCode; this is the canonical copy.
-- `.claude/skills/open-pr/SKILL.md` for Claude Code.
+- `.opencode/skills/open-pr/SKILL.md` (canonical) and
+  `.claude/skills/open-pr/SKILL.md`: branch, commit and open a pull request.
+- `.opencode/skills/codereview/SKILL.md` (canonical) and
+  `.claude/skills/codereview/SKILL.md`: plan and resolve pull request review
+  comments.
 
 Harnesses without project-skill discovery (Codex, Gemini CLI, Copilot) read the
-canonical copy before opening a pull request.
+canonical copy of the skill they need.
 
 ## Definition of done
 
