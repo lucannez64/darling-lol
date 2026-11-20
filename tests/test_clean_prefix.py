@@ -132,6 +132,9 @@ class CleanPrefixTests(unittest.TestCase):
             RIOT_GUEST_HOME=str((prefix or self.prefix) / 'Users/tester'),
             CLEAN_PREFIX_PROC_ROOT=str(self.proc),
             CLEAN_PREFIX_RUNTIME_ROOT=str(self.runtime),
+            # The re-exec itself is covered by test_clean_prefix_toolbox; keep this
+            # suite host-independent even when a real toolbox container exists.
+            CLEAN_PREFIX_REEXEC='1',
             **extra,
         )
         env.pop('DARLING_WORKSPACE', None)

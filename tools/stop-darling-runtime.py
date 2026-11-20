@@ -10,6 +10,7 @@ import time
 # prefix moved with --set-prefix lives elsewhere, and update.sh runs this
 # without DPREFIX. An unrendered copy falls back to Darling's own default.
 CONFIGURED_PREFIX = '@DPREFIX@'
+PROJECT_ROOT = '@PROJECT_ROOT@'
 prefix = Path(os.environ.get('DPREFIX')
               or (CONFIGURED_PREFIX if not CONFIGURED_PREFIX.startswith('@') else str(Path.home() / '.darling')))
 try:
@@ -90,8 +91,21 @@ def orphaned_riot():
 
 owned_riot = riot_descendants(old_pid)
 owned_riot.update(orphaned_riot())
-subprocess.run(['darling', 'shutdown'], env=dict(os.environ, DPREFIX=str(prefix)),
-               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+try:
+    subprocess.run(['darling', 'shutdown'], env=dict(os.environ, DPREFIX=str(prefix)),
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+except FileNotFoundError:
+    # install-native.sh --toolbox records the container it used for this checkout
+    container = 'darling-lol'
+    if not PROJECT_ROOT.startswith('@'):
+        try:
+            container = (Path(PROJECT_ROOT) / 'build/toolbox-container').read_text().strip() or container
+        except OSError:
+            pass
+    raise SystemExit(
+        "The 'darling' command was not found. Run this from the install that owns the prefix "
+        f"(for a Toolbox install: toolbox enter {container}). Runtime remains untouched."
+    )
 deadline = time.monotonic() + 5
 while live(old_pid) and time.monotonic() < deadline:
     time.sleep(.1)
