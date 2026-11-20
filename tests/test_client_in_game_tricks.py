@@ -45,10 +45,14 @@ class ClientInGameTricksTests(unittest.TestCase):
 
     def test_none_when_optimizations_are_off(self):
         self.write(False, True)
+        self.assertEqual(tricks.mode(self.path), 'close')
+        self.write(False, False)
         self.assertEqual(tricks.mode(self.path), 'none')
 
     def test_none_when_optimizations_are_missing_or_file_is_unreadable(self):
         self.write(None, True)
+        self.assertEqual(tricks.mode(self.path), 'close')
+        self.write(None, False)
         self.assertEqual(tricks.mode(self.path), 'none')
         self.assertEqual(tricks.mode(self.path.with_name('missing.yaml')), 'none')
 

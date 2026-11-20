@@ -26,9 +26,9 @@ constexpr int kCGLCPSwapInterval=1;
 struct Context { int egl_display=1, egl_surface=1, swap_interval=1, swap_interval_requested=0; };
 using CGLContextObj=Context*;
 static Context* current;
-static int display=1, applied=-1;
+static int display=1, applied=-1, swapIntervalCalls=0;
 static bool fail=false;
-static int swapInterval(int, int value) { if(fail) return 0; applied=value; return 1; }
+static int swapInterval(int, int value) { ++swapIntervalCalls; if(fail) return 0; applied=value; return 1; }
 static auto p_eglSwapInterval=swapInterval;
 static int p_eglSwapBuffers(int,int) { return 1; }
 static Context* CGLGetCurrentContext() { return current; }
@@ -38,14 +38,19 @@ int main() {
     current=&a;
     int interval=1;
     assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && applied==1);
+    assert(swapIntervalCalls==1);
+    assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && swapIntervalCalls==1);
     CGLFlushDrawable(&a); assert(applied==1);
     current=&b;
     CGLFlushDrawable(&b); assert(applied==0); // Another window retains its default.
     current=&a;
     interval=0;
     assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && applied==0);
+    assert(swapIntervalCalls==3);
     interval=1;
     assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && applied==1);
+    assert(swapIntervalCalls==4);
+    assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && swapIntervalCalls==4);
     current=&b; fail=true;
     assert(CGLSetParameter(&b,kCGLCPSwapInterval,&interval)==kCGLBadValue);
     assert(!b.swap_interval_requested); // Failed requests must not change policy.
