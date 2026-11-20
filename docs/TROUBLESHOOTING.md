@@ -407,9 +407,10 @@ accepted; any other directory is refused.
 
 ### Clean prefix logs, local state and platform identity
 
-To reset local Riot/League logs, `machine.cfg`, client session data/caches,
-stale runtime markers, and the prefix's synthetic platform identity without
-reinstalling the Riot Client or redownloading the game:
+To reset local Riot/League logs, `machine.cfg`, Riot Client / Electron / CEF
+profiles, unsent crash reports, local League client config/webcache, client
+caches, stale runtime markers, and the prefix's synthetic platform identity
+without reinstalling the Riot Client or redownloading the game:
 
 ```sh
 sh scripts/clean-prefix.sh
@@ -417,14 +418,17 @@ sh scripts/clean-prefix.sh
 
 Close the game and both clients first: the script refuses to run while a Riot
 Client or League process is running, stops the runtime, archives removed logs,
-`machine.cfg`, client data and previous identity files into a mode-`0600`
-tarball under `build/prefix-cleanup-backups/` (override with `--backup-dir`),
-and regenerates the synthetic per-prefix identifiers via
-`tools/configure-darling-platform.py --regenerate --write`. Pass
-`--keep-identity` to clean only logs and local client state without changing
-`darling-platform.plist` or `darling-smbios.conf`, and `--yes` to skip the
-confirmation prompt. The Darling runtime, `Riot Client.app`, `League of
-Legends.app`, product metadata and the Mesa shader cache are kept.
+`machine.cfg`, client profiles, crash reports, config files and previous
+identity files into a mode-`0600` tarball under `build/prefix-cleanup-backups/`
+(override with `--backup-dir`), removes stale `.before-platform-change` identity
+copies, and regenerates the synthetic per-prefix identifiers via
+`tools/configure-darling-platform.py --regenerate --no-backup --write` (so no
+copy of the previous identity stays in `private/etc/`). Pass `--keep-identity`
+to keep `darling-platform.plist` and `darling-smbios.conf` unchanged,
+`--keep-game-settings` to preserve `Config/game.cfg` and `Config/input.ini`,
+and `--yes` to skip the confirmation prompt. The Darling runtime,
+`Riot Client.app`, `League of Legends.app`, product metadata and the Mesa
+shader cache are kept.
 
 ## Riot exits and League reports that it lost its connection
 
