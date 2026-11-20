@@ -344,6 +344,15 @@ int main(int argc, char** argv)
         self.assertEqual(self.presented(root, prop), [(0x1002, 0x7340)])
         self.assertEqual(self.profiler_ids(root, prop), [(0x1002, 0x7340)])
 
+    def test_identical_cards_use_the_first_card_in_metal_too(self):
+        # The twins differ in VRAM: iokitd describes the shared entry by the first
+        # (8 GiB, discrete beside the 6 GiB card); Metal must name it the same way.
+        prop = self.prop('prop', 'profile=compat\ncompat.gpu.name=mac\n')
+        gib = 1 << 30
+        root = self.card('twins-vram', ('0x1002', '0x1002', '0x1002'), ('0x1111', '0x1111', '0x2222'),
+                         (8 * gib, 4 * gib, 6 * gib))
+        self.assertEqual(self.presented(root, prop), [(0x1002, 0x7340), (0x8086, 0x3e9b)])
+
     def test_identical_cards_share_one_entry(self):
         prop = self.prop('prop', 'profile=compat\ncompat.gpu.name=host\n')
         root = self.card('twins', ('0x10de', '0x10de'), ('0x2204', '0x2204'))

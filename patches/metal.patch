@@ -3779,10 +3779,10 @@ new file mode 100644
 +#endif
 diff --git a/private-include/Metal/MTLDeviceInfo.h b/private-include/Metal/MTLDeviceInfo.h
 new file mode 100644
-index 0000000..eabc8a4
+index 0000000..cc3c993
 --- /dev/null
 +++ b/private-include/Metal/MTLDeviceInfo.h
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,297 @@
 +// SPDX-FileCopyrightText: 2026 Darling Developers
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -4013,11 +4013,12 @@ index 0000000..eabc8a4
 +}
 +
 +// The Mac GPU name of the host card with these Vulkan (PCI) IDs: an AMD card beside the
-+// discrete GPU is the Mac's UHD Graphics 630, any other card goes by its vendor.
++// discrete GPU is the Mac's UHD Graphics 630, any other card goes by its vendor. Identical
++// cards share one iokitd entry, described by the first of them, so the first match decides.
 +static inline const char* macGpuName(uint32_t vendorID, uint32_t deviceID, const std::vector<HostCard>& cards) {
 +	for (const HostCard& card : cards) {
-+		if (card.vendor == vendorID && card.device == deviceID && presentedAsIntegrated(card, cards)) {
-+			return "Intel UHD Graphics 630";
++		if (card.vendor == vendorID && card.device == deviceID) {
++			return presentedAsIntegrated(card, cards) ? "Intel UHD Graphics 630" : macGpuName(vendorID);
 +		}
 +	}
 +	return macGpuName(vendorID);
