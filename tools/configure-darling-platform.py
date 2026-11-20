@@ -23,6 +23,8 @@ EMULATED_PRODUCT_VERSION = '14.7'
 EMULATED_BUILD_VERSION = '23H124'
 KNOWN_SERIAL = 'C02ZL0GVMD6N'
 KNOWN_UUID = '6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B'
+GENERATED_KEYS = ('IOPlatformSerialNumber', 'mlb-serial-number', 'IOPlatformUUID',
+                  'provisioning_UDID', 'system-id', 'ROM')
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64}
 BYTES = {'ROM': 6, 'system-id': 16}
@@ -328,16 +330,22 @@ def main(argv=None):
     parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
     parser.add_argument('--replace-known-defaults', action='store_true',
                         help='Provision only if the prefix identity still has the shared serial or UUID; otherwise change nothing')
+    parser.add_argument('--regenerate', action='store_true',
+                        help='Regenerate synthetic per-prefix identifiers (serial, MLB, UUID, system-id, provisioning_UDID, ROM) while keeping model/board fields')
     parser.add_argument('--normalize-system-version', action='store_true',
                         help='Normalize an existing prefix SystemVersion.plist to the emulated macOS version without changing identity files')
     parser.add_argument('--write', action='store_true', help='Write validated overrides to a stopped prefix (otherwise preview only)')
     args = parser.parse_args(argv)
     if args.normalize_system_version and (
-            args.source or args.set or args.provision or args.replace_known_defaults or args.rom_oui):
+            args.source or args.set or args.provision or args.replace_known_defaults or args.regenerate or args.rom_oui):
         parser.error('--normalize-system-version cannot be combined with identity-changing options')
+    if args.replace_known_defaults and args.regenerate:
+        parser.error('--replace-known-defaults cannot be combined with --regenerate')
     if args.replace_known_defaults:
         if args.source or args.set:
             parser.error('--replace-known-defaults cannot be combined with --import or --set')
+        args.provision = True
+    if args.regenerate:
         args.provision = True
     config = Path(__file__).resolve().parents[1] / 'build/config.json'
     saved = json.loads(config.read_text()) if config.exists() else {}
@@ -384,6 +392,9 @@ def main(argv=None):
                     properties.pop('system-id', None)
                     properties.pop('provisioning_UDID', None)
                 properties.update(incoming)
+            if args.regenerate:
+                for key in GENERATED_KEYS:
+                    properties.pop(key, None)
             if args.source:
                 incoming = load(args.source)
                 if 'IOPlatformUUID' in incoming:

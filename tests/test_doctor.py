@@ -32,6 +32,7 @@ def facts(**overrides):
         'prefix_socket': True,
         'prefix_state': {'pid': 0, 'state': 'absent', 'stale_markers': 0},
         'psr': '0',
+        'perf_event_paranoid': '2',
         'core_limit': '0',
         'environment': {},
         'trace_env': [],
@@ -98,6 +99,30 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(doctor.check_core_dumps(facts(core_limit='0'))[0], 'ok')
         self.assertEqual(doctor.check_psr(facts(psr='1'))[0], 'warn')
         self.assertEqual(doctor.check_psr(facts(psr='0'))[0], 'ok')
+
+    def test_perf_event_paranoid(self):
+        for allowed in ('-1', '0', '1', '2', '', 'non-numeric'):
+            self.assertEqual(doctor.check_perf_event_paranoid(facts(perf_event_paranoid=allowed))[0], 'ok')
+        for blocked in ('3', '4'):
+            status, message = doctor.check_perf_event_paranoid(facts(perf_event_paranoid=blocked))
+            self.assertEqual(status, 'warn')
+            self.assertIn(f'kernel.perf_event_paranoid={blocked}', message)
+            self.assertIn('sudo sysctl kernel.perf_event_paranoid=2', message)
+            self.assertIn('docs/TROUBLESHOOTING.md', message)
+
+    def test_gather_reads_perf_event_paranoid(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            proc_root = root / 'proc'
+            sysctl_dir = proc_root / 'sys/kernel'
+            sysctl_dir.mkdir(parents=True)
+            (sysctl_dir / 'perf_event_paranoid').write_text('3\n')
+            data = doctor.gather(prefix=root / 'prefix', env={}, proc_root=proc_root,
+                                 sys_root=root / 'sys', host_tmp=root / 'tmp',
+                                 which=lambda name: None)
+            self.assertEqual(data['perf_event_paranoid'], '3')
+            by_id = {result['id']: result for result in doctor.run_checks(data)}
+            self.assertEqual(by_id['perf_event_paranoid']['status'], 'warn')
 
     def test_prefix_must_be_installed(self):
         self.assertEqual(doctor.check_prefix(facts(prefix_exists=False))[0], 'fail')

@@ -281,6 +281,7 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'prefix_socket': socket.exists(),
         'prefix_state': prefix_state(prefix, proc_root),
         'psr': read_text(sys_root / 'module/i915/parameters/enable_psr').strip(),
+        'perf_event_paranoid': read_text(proc_root / 'sys/kernel/perf_event_paranoid').strip(),
         'core_limit': _core_limit(),
         'environment': {key: env[key] for key in ENV_ALLOWLIST if key in env},
         'trace_env': sorted(key for key, value in env.items() if value and TRACE_ENV.match(key)),
@@ -416,6 +417,24 @@ def check_psr(facts):
     return 'ok', 'Panel self-refresh is off or not applicable'
 
 
+def check_perf_event_paranoid(facts):
+    raw = str(facts.get('perf_event_paranoid', '')).strip()
+    if not raw:
+        return 'ok', 'kernel.perf_event_paranoid unavailable'
+    try:
+        value = int(raw)
+    except ValueError:
+        return 'ok', 'kernel.perf_event_paranoid=%s' % raw
+    if value > 2:
+        return 'warn', (
+            'kernel.perf_event_paranoid=%d blocks unprivileged perf_event_open (EACCES), '
+            'so profile=compat cannot align guest cpuid (common on Debian and hardened kernels). '
+            'Set it to 2 or lower with `sudo sysctl kernel.perf_event_paranoid=2` '
+            '(or persist in /etc/sysctl.d/99-darling-lol.conf); see docs/TROUBLESHOOTING.md' % value
+        )
+    return 'ok', 'kernel.perf_event_paranoid=%d' % value
+
+
 def check_prefix(facts):
     if not facts['prefix_exists']:
         return 'fail', 'Prefix %s does not exist; run the installer first' % facts['prefix']
@@ -453,6 +472,7 @@ CHECKS = (
     ('switches', 'Diagnostic switches', check_switches),
     ('core', 'Core dumps', check_core_dumps),
     ('psr', 'Panel self-refresh', check_psr),
+    ('perf_event_paranoid', 'Perf event access', check_perf_event_paranoid),
     ('prefix', 'Darling prefix', check_prefix),
     ('runtime', 'Darling runtime', check_runtime),
     ('markers', 'Runtime markers', check_stale_markers),

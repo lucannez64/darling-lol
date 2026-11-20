@@ -303,6 +303,83 @@ int main(void) {{
             subprocess.run(['cc', '-Wall', '-Wextra', str(src_path), '-o', str(exe_path)], check=True)
             subprocess.run([str(exe_path)], check=True)
 
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_log_uuid_formats_hex_without_width_specifiers(self):
+        src = cpuid_trace_source()
+        start = src.index('static void rclol_log_uuid(')
+        end = src.index('// ---------------------------------------------------------------------------\n// Config parsing')
+        fn = src[start:end]
+        self.assertNotIn('%02x', fn)
+
+        harness = f"""
+#include <assert.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static char captured[256];
+static int write_calls = 0;
+
+static void rclol_write_str(const char* s) {{
+    write_calls++;
+    strncpy(captured, s, sizeof(captured) - 1);
+    captured[sizeof(captured) - 1] = '\\0';
+}}
+
+static int __simple_snprintf(char* buf, size_t size, const char* fmt, ...) {{
+    // Darling's __simple_snprintf does not support width/zero-padding specifiers
+    // like %02x; reject them here so the regression cannot silently return.
+    assert(strstr(fmt, "%0") == NULL);
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    return n;
+}}
+
+{fn}
+
+int main(void) {{
+    uint8_t img[128];
+    memset(img, 0, sizeof(img));
+    uint32_t* mh = (uint32_t*) img;
+    mh[0] = 0xfeedfacfU;
+    mh[4] = 1;
+    mh[5] = 24;
+
+    uint8_t* cmd = img + 32;
+    *(uint32_t*) (cmd + 0) = 0x1bU;
+    *(uint32_t*) (cmd + 4) = 24U;
+    const uint8_t uuid[16] = {{
+        0x01, 0x23, 0x45, 0x67, 0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0xaa, 0xbc, 0xff
+    }};
+    memcpy(cmd + 8, uuid, 16);
+
+    rclol_log_uuid(img);
+    assert(write_calls == 1);
+    char expected[256];
+    snprintf(expected, sizeof(expected),
+             "cpuid-trace: image base=0x%lx uuid=01234567-0809-0a0b-0c0d-0e0f10aabcff\\n",
+             (unsigned long) img);
+    assert(strcmp(captured, expected) == 0);
+
+    // Truncated LC_UUID load command must be skipped without reading out of bounds.
+    *(uint32_t*) (cmd + 4) = 16U;
+    write_calls = 0;
+    rclol_log_uuid(img);
+    assert(write_calls == 0);
+    return 0;
+}}
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            src_path = Path(folder) / 'cpuid_uuid_test.c'
+            exe_path = Path(folder) / 'cpuid_uuid_test'
+            src_path.write_text(harness)
+            subprocess.run(['cc', '-Wall', '-Wextra', str(src_path), '-o', str(exe_path)], check=True)
+            subprocess.run([str(exe_path)], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

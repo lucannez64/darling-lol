@@ -172,6 +172,18 @@ canonical identity is saved first so rerunning after interruption completes
 provisioning with the same identity. Concurrent CLI writers serialize through
 a per-prefix lock. Repeated writes preserve identifiers and unchanged files.
 Previewing a fresh identity generates a sample; only `--write` makes it stable.
+To explicitly regenerate the synthetic per-prefix identifiers (serial, MLB,
+UUID, `system-id`, `provisioning_UDID` and ROM) on a stopped prefix while
+keeping any configured `model`, `product-name`, `board-id` or `manufacturer`,
+pass `--regenerate`:
+
+```sh
+python3 tools/configure-darling-platform.py --prefix /absolute/prefix --regenerate --write
+```
+
+`scripts/clean-prefix.sh` wraps that step together with archiving and clearing
+the prefix's local Riot/League logs, `machine.cfg`, client session data and
+caches without removing the Darling runtime or the installed game.
 To restore host-derived defaults after provisioning, remove both identity files
 while stopped, so a later provisioning run cannot reimport the legacy copy.
 

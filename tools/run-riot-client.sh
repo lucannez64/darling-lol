@@ -117,6 +117,21 @@ if [ "$profile" = compat ]; then
  case "$gpu_vram" in ''|*[!0-9]*) ;; *) export DARLING_METAL_VRAM_MB="${DARLING_METAL_VRAM_MB:-$gpu_vram}";; esac
  # The kernel patch defaults to unified memory; 0 is the compatibility value.
  export DARLING_METAL_HOST_UNIFIED_MEMORY="${DARLING_METAL_HOST_UNIFIED_MEMORY:-0}"
+ # profile=compat aligns guest cpuid via perf_event_open; Debian and hardened
+ # kernels default kernel.perf_event_paranoid > 2 and reject it with EACCES.
+ # RCLOL_PERF_EVENT_PARANOID_PATH is a test-only override.
+ perf_paranoid_path=${RCLOL_PERF_EVENT_PARANOID_PATH:-/proc/sys/kernel/perf_event_paranoid}
+ if [ -r "$perf_paranoid_path" ]; then
+  perf_paranoid=$(tr -d '[:space:]' 2>/dev/null < "$perf_paranoid_path" || true)
+  case "$perf_paranoid" in
+   ''|*[!0-9]*) ;;
+   *)
+    if [ "$perf_paranoid" -gt 2 ]; then
+     echo "WARNING: kernel.perf_event_paranoid=$perf_paranoid blocks unprivileged perf_event_open (EACCES); profile=compat cpuid alignment will be inactive. Set it to 2 or lower: sudo sysctl kernel.perf_event_paranoid=2 (see docs/TROUBLESHOOTING.md)" >&2
+    fi
+    ;;
+  esac
+ fi
 else
  # HOST leaves the Metal name to the real host card and asks it to report the
  # host's memory model. User-supplied DARLING_METAL_* overrides still win.

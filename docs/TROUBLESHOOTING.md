@@ -34,7 +34,8 @@ bundle before sharing it.
 
 The doctor also warns about diagnostic switches left on (for example
 `/tmp/rclol-input-trace`, `/tmp/metal-debug-waits` or `RCLOL_*_TRACE`
-variables), non-default tuning files, and hybrid graphics started without
+variables), non-default tuning files, `kernel.perf_event_paranoid > 2`, and
+hybrid graphics started without
 complete PRIME offload variables. See
 [compatibility](COMPATIBILITY.md) for what the performance numbers mean and
 for verified machines.
@@ -403,6 +404,27 @@ and keeps the Darling runtime (overlays, certificate store) and the Mesa shader
 cache. `--keep-game` keeps the game and its product metadata instead of
 removing it, and `--all` removes the whole prefix. Only a Darling prefix is
 accepted; any other directory is refused.
+
+### Clean prefix logs, local state and platform identity
+
+To reset local Riot/League logs, `machine.cfg`, client session data/caches,
+stale runtime markers, and the prefix's synthetic platform identity without
+reinstalling the Riot Client or redownloading the game:
+
+```sh
+sh scripts/clean-prefix.sh
+```
+
+Close the game and both clients first: the script refuses to run while a Riot
+Client or League process is running, stops the runtime, archives removed logs,
+`machine.cfg`, client data and previous identity files into a mode-`0600`
+tarball under `build/prefix-cleanup-backups/` (override with `--backup-dir`),
+and regenerates the synthetic per-prefix identifiers via
+`tools/configure-darling-platform.py --regenerate --write`. Pass
+`--keep-identity` to clean only logs and local client state without changing
+`darling-platform.plist` or `darling-smbios.conf`, and `--yes` to skip the
+confirmation prompt. The Darling runtime, `Riot Client.app`, `League of
+Legends.app`, product metadata and the Mesa shader cache are kept.
 
 ## Riot exits and League reports that it lost its connection
 
@@ -1545,3 +1567,42 @@ python3 tools/run-riot-native-check.py riot-display-link-isolation-check
 ```
 
 The probe does not launch Riot or League.
+
+## Debian and hardened kernels block cpuid alignment (`kernel.perf_event_paranoid > 2`)
+
+Under the default `profile=compat`, the guest aligns the game's direct `cpuid`
+sites with the compatibility CPU identity (`sysctl`/`host_info`/`iokitd`) using
+hardware execute breakpoints opened through `perf_event_open`. Upstream Linux
+allows unprivileged `perf_event_open` at `kernel.perf_event_paranoid <= 2`, but
+Debian kernels and hardened kernels (such as `linux-hardened`) ship a patch that
+defaults `kernel.perf_event_paranoid` to `3` or `4`, causing `perf_event_open`
+to fail with `EACCES` (`-13`).
+
+When blocked, `/tmp/rclol-cpuid-trace.log` (if diagnostic tracing is enabled)
+records:
+
+```text
+cpuid-trace: ARM FAILED cookie=0x... runtime=0x... err=-13
+cpuid-trace: armed 0 site(s) fake=1
+```
+
+Both `darling-lol --doctor` and `scripts/run.sh` warn when
+`/proc/sys/kernel/perf_event_paranoid` is greater than `2`. Lower it to `2` for
+the current boot:
+
+```sh
+sudo sysctl kernel.perf_event_paranoid=2
+```
+
+To keep the setting across reboots:
+
+```sh
+printf 'kernel.perf_event_paranoid = 2\n' | sudo tee /etc/sysctl.d/99-darling-lol.conf
+sudo sysctl --system
+```
+
+Verify with `cat /proc/sys/kernel/perf_event_paranoid` (should print `2` or
+lower) and `python3 tools/doctor.py`. Note that lowering
+`kernel.perf_event_paranoid` relaxes a host hardening setting for unprivileged
+users; granting `CAP_PERFMON` to the relevant account or loader is a narrower
+alternative if you prefer to keep `perf_event_paranoid` restricted.
