@@ -211,7 +211,10 @@ same Metal-to-Vulkan layer on every vendor. `compat.gpu.name=host` keeps the rea
 card name and IDs while the rest of the profile stays compat. The cache sysctls
 (`hw.cacheconfig`, `hw.cachesize`) and the game's cache and topology `cpuid`
 leaves report the i7-9750H's 6 cores / 12 threads and its 32 KiB / 256 KiB /
-12 MiB caches, whatever the host CPU. `profile=host` reports the real host CPU,
+12 MiB caches, whatever the host CPU. Leaf 1 and `machdep.cpu.features` report
+the i7-9750H's feature words: its EDX, and its ECX with each instruction-set bit
+kept only when the host has it, plus the ring-0-only bits (VMX, EST, PCID,
+x2APIC...) every Coffee Lake reports. `profile=host` reports the real host CPU,
 GPU, VRAM and memory. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
 file for diagnostics.

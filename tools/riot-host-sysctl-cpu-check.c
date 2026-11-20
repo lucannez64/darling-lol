@@ -409,23 +409,34 @@ static void machdep_string(const char* name, char* buf, unsigned long size) {
     buf[size - 1] = '\0';
 }
 
-static const char feature_names[32][7] = {
-    "FPU", "VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "", "SEP",
-    "MTRR", "PGE", "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI",
-    "MMX", "FXSR", "SSE", "SSE2", "SS", "HTT", "TM", "IA64", "PBE"
+// xnu's feature_map order and names (osfmk/i386/cpuid.c): leaf 1 EDX, then
+// ECX (bits 32..63), as macOS prints machdep.cpu.features.
+static const struct { int bit; const char* name; } feature_names[] = {
+    {0, "FPU"}, {1, "VME"}, {2, "DE"}, {3, "PSE"}, {4, "TSC"}, {5, "MSR"}, {6, "PAE"},
+    {7, "MCE"}, {8, "CX8"}, {9, "APIC"}, {11, "SEP"}, {12, "MTRR"}, {13, "PGE"},
+    {14, "MCA"}, {15, "CMOV"}, {16, "PAT"}, {17, "PSE36"}, {18, "PSN"}, {19, "CLFSH"},
+    {21, "DS"}, {22, "ACPI"}, {23, "MMX"}, {24, "FXSR"}, {25, "SSE"}, {26, "SSE2"},
+    {27, "SS"}, {28, "HTT"}, {29, "TM"}, {31, "PBE"},
+    {32, "SSE3"}, {33, "PCLMULQDQ"}, {34, "DTES64"}, {35, "MON"}, {36, "DSCPL"},
+    {37, "VMX"}, {38, "SMX"}, {39, "EST"}, {40, "TM2"}, {41, "SSSE3"}, {42, "CID"},
+    {44, "FMA"}, {45, "CX16"}, {46, "TPR"}, {47, "PDCM"}, {51, "SSE4.1"},
+    {52, "SSE4.2"}, {53, "x2APIC"}, {54, "MOVBE"}, {55, "POPCNT"}, {57, "AES"},
+    {49, "PCID"}, {50, "DCA"}, {58, "XSAVE"}, {59, "OSXSAVE"}, {43, "SEGLIM64"},
+    {56, "TSCTMR"}, {60, "AVX1.0"}, {62, "RDRAND"}, {61, "F16C"}, {63, "VMM"},
 };
 
-// The same list the check builds from a feature word, independently of the
+// The same list the check builds from the feature words, independently of the
 // source under test (the source used to decode the vendor ASCII as bits).
-static void feature_string(unsigned int edx, char* out, size_t size) {
+static void feature_string(unsigned int edx, unsigned int ecx, char* out, size_t size) {
     size_t length = 0;
     out[0] = '\0';
-    for (int i = 0; i < 32; ++i) {
-        if (i == 10 || i == 20 || !(edx & (1u << i)))
+    for (size_t i = 0; i < sizeof(feature_names) / sizeof(feature_names[0]); ++i) {
+        unsigned int word = feature_names[i].bit < 32 ? edx : ecx;
+        if (!(word & (1u << (feature_names[i].bit & 31))))
             continue;
         if (length != 0 && length + 1 < size)
             out[length++] = ' ';
-        for (const char* p = feature_names[i]; *p && length + 1 < size; ++p)
+        for (const char* p = feature_names[i].name; *p && length + 1 < size; ++p)
             out[length++] = *p;
     }
     out[length] = '\0';
@@ -433,8 +444,8 @@ static void feature_string(unsigned int edx, char* out, size_t size) {
 
 static int machdep_mode(int compat) {
     unsigned int leaf0[4], leaf1[4];
-    unsigned int max_basic, signature, edx;
-    char vendor[16], features[256], expected[256], brand[64];
+    unsigned int max_basic, signature, edx, ecx;
+    char vendor[16], features[512], expected[512], brand[64];
     char label[32];
 
     ref_cpuid(0, leaf0);
@@ -445,12 +456,16 @@ static int machdep_mode(int compat) {
         max_basic = 0x16u;
         signature = 0x000906eau;
         edx = 0xbfebfbffu;
+        // The i7-9750H's ECX: its instruction-set bits the host has, plus the
+        // ring-0-only bits (VMX, EST, PCID, x2APIC...) whatever the host.
+        ecx = (leaf1[2] & 0x7ffafbbfu) | 0x0122c9b4u;
         snprintf(vendor, sizeof(vendor), "GenuineIntel");
         snprintf(label, sizeof(label), "compat");
     } else {
         max_basic = leaf0[0];
         signature = leaf1[0];
         edx = leaf1[3];
+        ecx = leaf1[2];
         snprintf(vendor, sizeof(vendor), "%c%c%c%c%c%c%c%c%c%c%c%c",
                  leaf0[1] & 0xff, (leaf0[1] >> 8) & 0xff, (leaf0[1] >> 16) & 0xff, leaf0[1] >> 24,
                  leaf0[3] & 0xff, (leaf0[3] >> 8) & 0xff, (leaf0[3] >> 16) & 0xff, leaf0[3] >> 24,
@@ -479,10 +494,24 @@ static int machdep_mode(int compat) {
     }
 
     machdep_string("features", features, sizeof(features));
-    feature_string(edx, expected, sizeof(expected));
+    feature_string(edx, ecx, expected, sizeof(expected));
     if (strcmp(features, expected) != 0) {
         fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=features '%s' expected '%s'\n", features, expected);
         return 1;
+    }
+    // On a host with every instruction set a 9750H has (any Zen or recent
+    // Intel), compat prints exactly what a real MacBookPro16,1 prints.
+    if (compat && (leaf1[2] & 0x7ffafbbfu & ~0x0122c9b4u) == (0x7ffafbbfu & ~0x0122c9b4u)) {
+        static const char mac[] =
+            "FPU VME DE PSE TSC MSR PAE MCE CX8 APIC SEP MTRR PGE MCA CMOV PAT PSE36 CLFSH DS "
+            "ACPI MMX FXSR SSE SSE2 SS HTT TM PBE SSE3 PCLMULQDQ DTES64 MON DSCPL VMX EST TM2 "
+            "SSSE3 FMA CX16 TPR PDCM SSE4.1 SSE4.2 x2APIC MOVBE POPCNT AES PCID XSAVE OSXSAVE "
+            "SEGLIM64 TSCTMR AVX1.0 RDRAND F16C";
+        if (strcmp(features, mac) != 0) {
+            fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=features '%s' expected the Mac's '%s'\n",
+                    features, mac);
+            return 1;
+        }
     }
 
     if (compat) {
