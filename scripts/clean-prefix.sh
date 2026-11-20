@@ -181,9 +181,10 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 		if [ "$confirmed" = 1 ]; then
 			set -- "$@" --yes
 		fi
-		set -- env CLEAN_PREFIX_REEXEC=1 "$@"
+		set -- CLEAN_PREFIX_REEXEC=1 "$@"
 		# `toolbox run` uses the container environment, so pass through the
-		# overrides a caller may have set for this checkout.
+		# overrides a caller may have set for this checkout. They go after
+		# `env` (added below): `toolbox run` would run `NAME=value` as a command.
 		if [ -n "${DPREFIX+x}" ]; then
 			set -- DPREFIX="$DPREFIX" "$@"
 		fi
@@ -199,6 +200,7 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 		if [ -n "${NO_COLOR+x}" ]; then
 			set -- NO_COLOR="$NO_COLOR" "$@"
 		fi
+		set -- env "$@"
 		exec toolbox run --container "$name" "$@"
 	fi
 fi
@@ -307,7 +309,7 @@ if [ "$keep_game_settings" = 1 ]; then
 	note 'Config/game.cfg and Config/input.ini kept (--keep-game-settings).'
 else
 	info 'Game settings:'
-	note ' Config/game.cfg and Config/input.ini backed up and removed.'
+	note 'Config/game.cfg and Config/input.ini backed up and removed.'
 fi
 printf '\n'
 if [ "$keep_identity" = 1 ]; then

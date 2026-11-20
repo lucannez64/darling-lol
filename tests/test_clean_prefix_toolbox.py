@@ -68,7 +68,7 @@ class CleanPrefixToolboxTests(unittest.TestCase):
         self.env['PATH'] = f'{self.bindir}:{self.env["PATH"]}'
         for name in ('DARLING_WORKSPACE', 'CLEAN_PREFIX_REEXEC', 'DPREFIX',
                      'RIOT_GUEST_HOME', 'CLEAN_PREFIX_PROC_ROOT',
-                     'CLEAN_PREFIX_RUNTIME_ROOT'):
+                     'CLEAN_PREFIX_RUNTIME_ROOT', 'NO_COLOR'):
             self.env.pop(name, None)
 
     def run_clean(self, *args, cwd=None, **overrides):
@@ -212,15 +212,23 @@ class CleanPrefixToolboxTests(unittest.TestCase):
             RIOT_GUEST_HOME='/custom/prefix/Users/tester',
             CLEAN_PREFIX_PROC_ROOT='/custom/proc',
             CLEAN_PREFIX_RUNTIME_ROOT='/custom/runtime',
+            NO_COLOR='1',
             FAKE_TOOLBOX_CONTAINER_OK='1',
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         line = next(line for line in self.argv_lines() if 'clean-prefix.sh' in line)
-        for pair in ('DPREFIX=/custom/prefix',
-                     'RIOT_GUEST_HOME=/custom/prefix/Users/tester',
-                     'CLEAN_PREFIX_PROC_ROOT=/custom/proc',
-                     'CLEAN_PREFIX_RUNTIME_ROOT=/custom/runtime'):
-            self.assertIn(pair, line)
+        words = line.split()
+        # `toolbox run` executes its first argument, so the assignments must follow `env`
+        self.assertEqual(words[:4], ['run', '--container', 'mycont', 'env'], line)
+        assignments = words[4:words.index('sh')]
+        self.assertEqual(sorted(assignments), sorted([
+            'CLEAN_PREFIX_REEXEC=1',
+            'DPREFIX=/custom/prefix',
+            'RIOT_GUEST_HOME=/custom/prefix/Users/tester',
+            'CLEAN_PREFIX_PROC_ROOT=/custom/proc',
+            'CLEAN_PREFIX_RUNTIME_ROOT=/custom/runtime',
+            'NO_COLOR=1',
+        ]), line)
 
 
 if __name__ == '__main__':
