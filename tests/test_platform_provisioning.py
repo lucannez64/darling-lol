@@ -315,6 +315,17 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(override.returncode, 0, override.stderr)
         self.assertEqual(platform.load(canonical)['IOPlatformUUID'], explicit_uuid)
 
+        # --no-backup skips writing *.before-platform-change inside the prefix.
+        for backup in (
+            canonical.with_name(canonical.name + '.before-platform-change'),
+            self.prefix / 'private/etc/darling-smbios.conf.before-platform-change',
+        ):
+            backup.unlink(missing_ok=True)
+        no_backup = subprocess.run([*regen, '--no-backup', '--write'], capture_output=True, text=True)
+        self.assertEqual(no_backup.returncode, 0, no_backup.stderr)
+        self.assertFalse(canonical.with_name(canonical.name + '.before-platform-change').exists())
+        self.assertFalse((self.prefix / 'private/etc/darling-smbios.conf.before-platform-change').exists())
+
         # Rejects conflicting flags and live prefixes.
         for bad in (['--replace-known-defaults'], ['--normalize-system-version']):
             conflict = subprocess.run([*regen, *bad], capture_output=True, text=True)

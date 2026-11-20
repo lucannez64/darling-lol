@@ -46,17 +46,29 @@ class CleanPrefixTests(unittest.TestCase):
 
     def build_prefix(self):
         prefix, guest, outside = self.prefix, self.guest, self.outside
+        lol = prefix / 'Applications/League of Legends.app/Contents/LoL'
         for folder in (
             prefix / 'private/etc',
-            prefix / 'Applications/League of Legends.app/Contents/LoL/Logs/GameLogs',
-            prefix / 'Applications/League of Legends.app/Contents/LoL/Config',
+            lol / 'Logs/GameLogs',
+            lol / 'Config',
+            lol / 'Saved/webcache',
             prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS',
             prefix / 'Users/Shared/Riot Games/Metadata/league_of_legends.live',
             guest / 'Library/Application Support/Riot Games/Riot Client/Config',
             guest / 'Library/Application Support/Riot Games/Riot Client/Data',
+            guest / 'Library/Application Support/Riot Games/Riot Client/Crashes',
+            guest / 'Library/Application Support/Riot Games/League of Legends/Config',
+            guest / 'Library/Application Support/Riot Games/League of Legends/Data',
+            guest / 'Library/Application Support/Riot Games/League of Legends/LeagueClient/Crashes',
+            guest / 'Library/Application Support/Riot Client/Local Storage/leveldb',
+            guest / 'Library/Application Support/riot-client-ux/sentry',
+            guest / 'Library/Application Support/riot-client-ux/Crashpad',
+            guest / 'Library/Application Support/CEF',
+            guest / 'Library/Application Support/Other',
             guest / 'Library/Logs/Riot Games/Riot Client',
             guest / 'Library/Caches/com.riotgames.RiotClient',
             guest / 'Library/Caches/mesa',
+            guest / 'Library/Preferences',
             outside / 'external-logs',
         ):
             folder.mkdir(parents=True)
@@ -79,22 +91,40 @@ class CleanPrefixTests(unittest.TestCase):
             f'SMBIOS_SERIAL_NUMBER={self.old_serial}\nSMBIOS_PLATFORM_UUID={self.old_uuid}\n')
         (prefix / 'private/etc/darling-platform.plist.before-platform-change').write_text('first-plist\n')
         (prefix / 'private/etc/darling-smbios.conf.before-platform-change').write_text('first-conf\n')
-        (prefix / 'Applications/League of Legends.app/Contents/LoL/game.bin').write_text('game\n')
-        (prefix / 'Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/r3dlog.txt').write_text('match\n')
+        (lol / 'game.bin').write_text('game\n')
+        (lol / 'Logs/GameLogs/r3dlog.txt').write_text('match\n')
+        (lol / 'Config/LeagueClientSettings.yaml').write_text('install-identifier: old-id\n')
+        (lol / 'Config/LCUAccountPreferences.yaml').write_text('account: old\n')
+        (lol / 'Config/PersistedSettings.json').write_text('{"old": true}\n')
+        (lol / 'Config/game.cfg').write_text('[General]\n')
+        (lol / 'Config/input.ini').write_text('[GameEvents]\n')
+        (lol / 'Config/LCULocalPreferences.yaml').write_text('potatoModeEnabled: true\n')
+        (lol / 'Saved/webcache/Cookies').write_text('cookie\n')
         (prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices').write_text('bin\n')
         (prefix / 'Users/Shared/Riot Games/machine.cfg').write_text('machine-shared\n')
         (guest / 'Library/Application Support/Riot Games/machine.cfg').write_text('machine-user\n')
-        (guest / 'Library/Application Support/Riot Games/Riot Client/Config/machine.cfg').write_text('machine-cfg\n')
-        (guest / 'Library/Application Support/Riot Games/Riot Client/Config/RiotClientSettings.yaml').write_text('locale: en_US\n')
+        (guest / 'Library/Application Support/Riot Games/Riot Client/Config/RiotClientSettings.yaml').write_text('installation_id: old\n')
         (guest / 'Library/Application Support/Riot Games/Riot Client/Data/RiotGamesPrivateSettings.yaml').write_text('session\n')
+        (guest / 'Library/Application Support/Riot Games/Riot Client/Crashes/rc.dmp').write_text('dmp\n')
+        (guest / 'Library/Application Support/Riot Games/League of Legends/Config/cfg.yaml').write_text('cfg\n')
+        (guest / 'Library/Application Support/Riot Games/League of Legends/Data/data.bin').write_text('data\n')
+        (guest / 'Library/Application Support/Riot Games/League of Legends/LeagueClient/Crashes/lc.dmp').write_text('dmp\n')
+        (guest / 'Library/Application Support/Riot Client/Cookies').write_text('hmt_id\n')
+        (guest / 'Library/Application Support/Riot Client/Local Storage/leveldb/000003.log').write_text('statsig\n')
+        (guest / 'Library/Application Support/riot-client-ux/sentry/scope_v3.json').write_text('{"user":{"id":"old"}}\n')
+        (guest / 'Library/Application Support/riot-client-ux/Crashpad/settings.dat').write_text('crashpad\n')
+        (guest / 'Library/Application Support/CEF/cache.dat').write_text('cef\n')
+        (guest / 'Library/Application Support/Other/keep.txt').write_text('keep\n')
         (guest / 'Library/Logs/Riot Games/Riot Client/rc.log').write_text('riot log\n')
         (guest / 'Library/Caches/com.riotgames.RiotClient/cache.bin').write_text('cache\n')
         (guest / 'Library/Caches/mesa/shader').write_text('shader\n')
+        (guest / 'Library/Preferences/com.riotgames.RiotClient.plist').write_text('pref\n')
+        (guest / 'Library/Preferences/other.plist').write_text('keep\n')
         (prefix / '.init.pid.stale-1-2').write_text('1\n')
         (outside / 'external-logs/secret.log').write_text('keep\n')
         os.symlink(outside / 'external-logs', guest / 'Library/Logs/Riot Client')
 
-    def run_script(self, *arguments, answer=None, prefix=None, **extra):
+    def run_script(self, *arguments, answer=None, prefix=None, cwd=None, **extra):
         env = dict(
             os.environ,
             HOME=str(self.home),
@@ -107,12 +137,12 @@ class CleanPrefixTests(unittest.TestCase):
         env.pop('DARLING_WORKSPACE', None)
         command = ['sh', str(self.repo / 'scripts/clean-prefix.sh'), *arguments]
         if answer is None:
-            return subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+            return subprocess.run(command, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
                                   text=True, check=False, env=env, timeout=60)
         master, slave = pty.openpty()
         try:
             os.write(master, answer.encode() + b'\n')
-            return subprocess.run(command, stdin=slave, capture_output=True,
+            return subprocess.run(command, cwd=cwd, stdin=slave, capture_output=True,
                                   text=True, check=False, env=env, timeout=60)
         finally:
             os.close(master)
@@ -131,16 +161,34 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertEqual(archives[0].stat().st_mode & 0o777, 0o600)
         with tarfile.open(archives[0], 'r:gz') as tar:
             names = set(tar.getnames())
-        self.assertIn('Users/tester/Library/Logs/Riot Games/Riot Client/rc.log', names)
-        self.assertIn('Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/r3dlog.txt', names)
-        self.assertIn('Users/Shared/Riot Games/machine.cfg', names)
-        self.assertIn('Users/tester/Library/Application Support/Riot Games/machine.cfg', names)
-        self.assertIn('Users/tester/Library/Application Support/Riot Games/Riot Client/Config/machine.cfg', names)
-        self.assertIn('Users/tester/Library/Application Support/Riot Games/Riot Client/Data/RiotGamesPrivateSettings.yaml', names)
-        self.assertIn('private/etc/darling-platform.plist', names)
-        self.assertIn('private/etc/darling-smbios.conf', names)
-        self.assertIn('private/etc/darling-platform.plist.before-platform-change', names)
-        self.assertIn('private/etc/darling-smbios.conf.before-platform-change', names)
+        for archived in (
+            'Users/tester/Library/Logs/Riot Games/Riot Client/rc.log',
+            'Applications/League of Legends.app/Contents/LoL/Logs/GameLogs/r3dlog.txt',
+            'Users/Shared/Riot Games/machine.cfg',
+            'Users/tester/Library/Application Support/Riot Games/machine.cfg',
+            'Users/tester/Library/Application Support/Riot Games/Riot Client/Config/RiotClientSettings.yaml',
+            'Users/tester/Library/Application Support/Riot Games/Riot Client/Data/RiotGamesPrivateSettings.yaml',
+            'Users/tester/Library/Application Support/Riot Games/Riot Client/Crashes/rc.dmp',
+            'Users/tester/Library/Application Support/Riot Games/League of Legends/Config/cfg.yaml',
+            'Users/tester/Library/Application Support/Riot Games/League of Legends/Data/data.bin',
+            'Users/tester/Library/Application Support/Riot Games/League of Legends/LeagueClient/Crashes/lc.dmp',
+            'Users/tester/Library/Application Support/Riot Client/Cookies',
+            'Users/tester/Library/Application Support/Riot Client/Local Storage/leveldb/000003.log',
+            'Users/tester/Library/Application Support/riot-client-ux/sentry/scope_v3.json',
+            'Users/tester/Library/Application Support/riot-client-ux/Crashpad/settings.dat',
+            'Users/tester/Library/Application Support/CEF/cache.dat',
+            'Users/tester/Library/Preferences/com.riotgames.RiotClient.plist',
+            'Applications/League of Legends.app/Contents/LoL/Config/LeagueClientSettings.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/LCUAccountPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/PersistedSettings.json',
+            'Applications/League of Legends.app/Contents/LoL/Config/game.cfg',
+            'Applications/League of Legends.app/Contents/LoL/Config/input.ini',
+            'private/etc/darling-platform.plist',
+            'private/etc/darling-smbios.conf',
+            'private/etc/darling-platform.plist.before-platform-change',
+            'private/etc/darling-smbios.conf.before-platform-change',
+        ):
+            self.assertIn(archived, names, archived)
         # Escaping symlink must not be archived and its external target must remain intact.
         self.assertFalse(any('secret.log' in name for name in names))
         self.assertEqual((self.outside / 'external-logs/secret.log').read_text(), 'keep\n')
@@ -149,26 +197,34 @@ class CleanPrefixTests(unittest.TestCase):
             'Users/tester/Library/Logs/Riot Games',
             'Users/tester/Library/Logs/Riot Client',
             'Applications/League of Legends.app/Contents/LoL/Logs',
+            'Applications/League of Legends.app/Contents/LoL/Saved/webcache',
+            'Applications/League of Legends.app/Contents/LoL/Config/LeagueClientSettings.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/LCUAccountPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/PersistedSettings.json',
+            'Applications/League of Legends.app/Contents/LoL/Config/game.cfg',
+            'Applications/League of Legends.app/Contents/LoL/Config/input.ini',
             'Users/Shared/Riot Games/machine.cfg',
-            'Users/tester/Library/Application Support/Riot Games/machine.cfg',
-            'Users/tester/Library/Application Support/Riot Games/Riot Client/Config/machine.cfg',
-            'Users/tester/Library/Application Support/Riot Games/Riot Client/Data',
+            'Users/tester/Library/Application Support/Riot Games',
+            'Users/tester/Library/Application Support/Riot Client',
+            'Users/tester/Library/Application Support/riot-client-ux',
+            'Users/tester/Library/Application Support/CEF',
+            'Users/tester/Library/Preferences/com.riotgames.RiotClient.plist',
             'Users/tester/Library/Caches/com.riotgames.RiotClient',
             '.init.pid.stale-1-2',
+            # No *.before-platform-change identity copies left readable inside the prefix.
+            'private/etc/darling-platform.plist.before-platform-change',
+            'private/etc/darling-smbios.conf.before-platform-change',
         ):
             self.assertFalse(os.path.lexists(self.prefix / gone), gone)
-        # Stale pre-reset .before-platform-change copies were replaced by the fresh backup of the prior identity.
-        self.assertNotEqual(
-            (self.prefix / 'private/etc/darling-platform.plist.before-platform-change').read_text(errors='ignore'),
-            'first-plist\n',
-        )
 
         for kept in (
             'private/etc/darling-system.prop',
             'Applications/League of Legends.app/Contents/LoL/game.bin',
+            'Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml',
             'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices',
             'Users/Shared/Riot Games/Metadata/league_of_legends.live',
-            'Users/tester/Library/Application Support/Riot Games/Riot Client/Config/RiotClientSettings.yaml',
+            'Users/tester/Library/Application Support/Other/keep.txt',
+            'Users/tester/Library/Preferences/other.plist',
             'Users/tester/Library/Caches/mesa/shader',
         ):
             self.assertTrue((self.prefix / kept).exists(), kept)
@@ -177,6 +233,16 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertNotEqual(updated['IOPlatformUUID'], self.old_uuid)
         self.assertNotEqual(updated['IOPlatformSerialNumber'], self.old_serial)
         self.assertEqual(updated['model'], 'MacBookPro16,1')
+
+    def test_keep_game_settings_preserves_game_cfg_and_input_ini(self):
+        result = self.run_script('--keep-identity', '--keep-game-settings', '--yes')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lol_cfg = self.prefix / 'Applications/League of Legends.app/Contents/LoL/Config'
+        self.assertTrue((lol_cfg / 'game.cfg').exists())
+        self.assertTrue((lol_cfg / 'input.ini').exists())
+        self.assertFalse((lol_cfg / 'LeagueClientSettings.yaml').exists())
+        self.assertFalse((lol_cfg / 'LCUAccountPreferences.yaml').exists())
+        self.assertFalse((lol_cfg / 'PersistedSettings.json').exists())
 
     def test_keep_identity_and_custom_backup_dir_do_not_overwrite_archives(self):
         custom_dir = self.root / 'my backups'
@@ -187,8 +253,9 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual((self.prefix / 'private/etc/darling-platform.plist').read_bytes(), before_plist)
         self.assertEqual((self.prefix / 'private/etc/darling-smbios.conf').read_bytes(), before_conf)
+        self.assertTrue((self.prefix / 'private/etc/darling-platform.plist.before-platform-change').exists())
 
-        # Recreate a log and run again in the same second; the first archive must survive.
+        # Recreate a file and run again in the same second; the first archive must survive.
         (self.prefix / 'Users/Shared/Riot Games/machine.cfg').write_text('second\n')
         second = self.run_script('--keep-identity', f'--backup-dir={custom_dir}', '--yes')
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
@@ -245,15 +312,17 @@ class CleanPrefixTests(unittest.TestCase):
 
         result = self.run_script('--keep-identity', '--yes')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        # External directory behind the symlinked parent must remain completely untouched.
+        # External directory behind the symlinked parent must remain completely untouched
+        # and the skip must be reported rather than happening silently.
         self.assertEqual((external_logs / 'Riot Games/keep.log').read_text(), 'precious\n')
+        self.assertIn('Skipped (outside prefix):', result.stderr)
         archives = sorted((self.repo / 'build/prefix-cleanup-backups').glob('prefix-cleanup-*.tar.gz'))
         self.assertEqual(len(archives), 1)
         with tarfile.open(archives[0], 'r:gz') as tar:
             names = set(tar.getnames())
         self.assertFalse(any('keep.log' in name for name in names))
 
-    def test_backup_dir_validation_preserves_existing_mode_and_resolves_relative_to_cwd(self):
+    def test_backup_dir_validation_preserves_existing_mode_and_resolves_paths(self):
         # Backup directory inside prefix (e.g. cache glob) must be refused before stopping runtime.
         inside_cache = self.guest / 'Library/Caches/com.riotgames.backups'
         refused = self.run_script('--backup-dir', str(inside_cache), '--yes')
@@ -274,24 +343,17 @@ class CleanPrefixTests(unittest.TestCase):
         (self.prefix / 'Users/Shared/Riot Games/machine.cfg').write_text('rel\n')
         caller_cwd = self.root / 'caller cwd'
         caller_cwd.mkdir()
-        env = dict(
-            os.environ,
-            HOME=str(self.home),
-            DPREFIX=str(self.prefix),
-            RIOT_GUEST_HOME=str(self.guest),
-            CLEAN_PREFIX_PROC_ROOT=str(self.proc),
-            CLEAN_PREFIX_RUNTIME_ROOT=str(self.runtime),
-        )
-        env.pop('DARLING_WORKSPACE', None)
-        rel_run = subprocess.run(
-            ['sh', str(self.repo / 'scripts/clean-prefix.sh'), '--keep-identity',
-             '--backup-dir', 'rel-backups', '--yes'],
-            cwd=str(caller_cwd), stdin=subprocess.DEVNULL, capture_output=True,
-            text=True, check=False, env=env, timeout=60,
-        )
+        rel_run = self.run_script('--keep-identity', '--backup-dir', 'rel-backups', '--yes', cwd=str(caller_cwd))
         self.assertEqual(rel_run.returncode, 0, rel_run.stdout + rel_run.stderr)
         self.assertEqual(len(list((caller_cwd / 'rel-backups').glob('prefix-cleanup-*.tar.gz'))), 1)
         self.assertFalse((self.repo / 'rel-backups').exists())
+
+        # --backup-dir=~/... expands against HOME rather than creating a literal '~' directory.
+        (self.prefix / 'Users/Shared/Riot Games/machine.cfg').write_text('tilde\n')
+        tilde_run = self.run_script('--keep-identity', '--backup-dir=~/tilde-backups', '--yes', cwd=str(caller_cwd))
+        self.assertEqual(tilde_run.returncode, 0, tilde_run.stdout + tilde_run.stderr)
+        self.assertEqual(len(list((self.home / 'tilde-backups').glob('prefix-cleanup-*.tar.gz'))), 1)
+        self.assertFalse((caller_cwd / '~').exists())
 
 
 if __name__ == '__main__':

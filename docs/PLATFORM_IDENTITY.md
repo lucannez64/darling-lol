@@ -182,8 +182,11 @@ python3 tools/configure-darling-platform.py --prefix /absolute/prefix --regenera
 ```
 
 `scripts/clean-prefix.sh` wraps that step together with archiving and clearing
-the prefix's local Riot/League logs, `machine.cfg`, client session data and
-caches without removing the Darling runtime or the installed game.
+the prefix's local Riot/League logs, `machine.cfg`, client profiles, crash
+reports, local config/caches and `.before-platform-change` identity copies
+(passing `--no-backup` so no copy of the replaced identity stays in
+`private/etc/`; the host-side cleanup archive is mode `0600` for the same user)
+without removing the Darling runtime or the installed game.
 To restore host-derived defaults after provisioning, remove both identity files
 while stopped, so a later provisioning run cannot reimport the legacy copy.
 

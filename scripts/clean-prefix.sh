@@ -1,9 +1,11 @@
 #!/bin/sh
-# Backs up and removes local Riot/League logs, machine.cfg and client session
-# data/caches from the Darling prefix, and regenerates the prefix's synthetic
-# platform identity (darling-platform.plist / darling-smbios.conf).
-# Keeps the Darling runtime, Riot Client, League of Legends game files and
-# Mesa shader cache intact. Nothing is stopped or modified before every
+# Backs up and removes local Riot/League logs, machine.cfg, client profiles,
+# crash reports, local config/caches and stale runtime markers from the Darling
+# prefix, and regenerates the prefix's synthetic platform identity
+# (darling-platform.plist / darling-smbios.conf) without leaving
+# *.before-platform-change identity copies behind in private/etc.
+# Keeps the Darling runtime, Riot Client.app, League of Legends.app, Metadata
+# and Mesa shader cache intact. Nothing is stopped or modified before every
 # refusal and the confirmation have passed.
 set -eu
 umask 077
@@ -13,28 +15,33 @@ cd "$repo"
 
 usage() {
 	cat <<'EOF' >&2
-Usage: sh scripts/clean-prefix.sh [--keep-identity] [--backup-dir DIR] [--yes]
+Usage: sh scripts/clean-prefix.sh [--keep-identity] [--keep-game-settings] [--backup-dir DIR] [--yes]
 
-Cleans local Riot/League logs, machine.cfg, client data/caches, and refreshes
-the prefix's synthetic platform identity while keeping the Darling runtime,
-Riot Client and League of Legends binaries installed. Removed logs, config
-and previous identity files are archived (mode 0600) before deletion.
+Cleans local Riot/League logs, machine.cfg, Riot Client / Electron / CEF
+profiles, unsent crash reports, local client config/caches and stale runtime
+markers, and refreshes the prefix's synthetic platform identity while keeping
+the Darling runtime, Riot Client and League of Legends binaries installed.
+Removed logs, config, profiles and previous identity files are archived
+(mode 0600) before deletion.
 
-  --keep-identity   Keep darling-platform.plist and darling-smbios.conf unchanged
-  --backup-dir DIR  Directory for timestamped backup archives
-                    (default: build/prefix-cleanup-backups)
-  --yes             Do not ask for confirmation (required without a terminal)
+  --keep-identity       Keep darling-platform.plist and darling-smbios.conf unchanged
+  --keep-game-settings  Keep League of Legends Config/game.cfg and Config/input.ini
+  --backup-dir DIR      Directory for timestamped backup archives
+                        (default: build/prefix-cleanup-backups)
+  --yes                 Do not ask for confirmation (required without a terminal)
 EOF
 	exit 1
 }
 
 keep_identity=0
+keep_game_settings=0
 backup_dir=$repo/build/prefix-cleanup-backups
 custom_backup_dir=0
 confirmed=0
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--keep-identity) keep_identity=1; shift ;;
+	--keep-game-settings) keep_game_settings=1; shift ;;
 	--backup-dir)
 		[ "$#" -ge 2 ] && [ -n "$2" ] || usage
 		backup_dir=$2
@@ -55,7 +62,7 @@ done
 
 if [ "$custom_backup_dir" = 1 ]; then
 	case "$backup_dir" in
-	/*) ;;
+	/* | '~' | '~/'*) ;;
 	*) backup_dir=$caller_pwd/$backup_dir ;;
 	esac
 fi
@@ -135,17 +142,23 @@ fi
 echo "Darling prefix: $prefix"
 echo "Backup directory: $backup_dir"
 cat <<'EOF'
-Will be backed up and cleaned: Riot/League logs, machine.cfg and Riot Client
-  local session data.
-Will be cleaned without backup: client caches (com.riotgames.*) and stale
-  runtime markers.
+Will be backed up and cleaned: Riot/League logs, machine.cfg, Riot Games /
+  Riot Client / riot-client-ux / CEF Application Support profiles and crash
+  reports, com.riotgames.*.plist preferences, and League client Config files.
+Will be cleaned without backup: client caches (com.riotgames.*), League
+  Saved/webcache, and stale runtime markers.
 EOF
+if [ "$keep_game_settings" = 1 ]; then
+	echo 'Game settings: Config/game.cfg and Config/input.ini kept (--keep-game-settings).'
+else
+	echo 'Game settings: Config/game.cfg and Config/input.ini backed up and removed.'
+fi
 if [ "$keep_identity" = 1 ]; then
 	echo 'Platform identity: kept unchanged (--keep-identity).'
 else
-	echo 'Platform identity: previous files backed up and synthetic identifiers regenerated.'
+	echo 'Platform identity: previous files backed up, *.before-platform-change removed, and synthetic identifiers regenerated.'
 fi
-echo 'Will be kept: the Darling runtime, Riot Client.app, League of Legends.app, Metadata and the shader cache.'
+echo 'Will be kept: the Darling runtime, Riot Client.app, League of Legends.app game files, Metadata and the shader cache.'
 echo 'The Darling runtime is stopped first.'
 
 if [ "$confirmed" != 1 ]; then
@@ -162,10 +175,12 @@ fi
 
 python3 build/runtime/tools/stop-darling-runtime.py
 
-# Archive existing logs, local machine/session config and previous platform
-# identity to a mode-0600 tarball before deleting anything. Every target is
-# checked so neither archival nor deletion follows symlinks outside the prefix.
-cleaned_count=$(python3 - "$prefix" "$guest" "$backup_dir" "$keep_identity" <<'PY'
+# Archive existing logs, local client profiles/config/crashes and previous
+# platform identity to a mode-0600 tarball before deleting anything. Every
+# target is checked so neither archival nor deletion follows symlinks outside
+# the prefix.
+cleaned_count=$(python3 - "$prefix" "$guest" "$backup_dir" "$keep_identity" "$keep_game_settings" <<'PY'
+import errno
 import os
 import shutil
 import sys
@@ -178,6 +193,7 @@ prefix = Path(sys.argv[1]).resolve()
 guest = Path(sys.argv[2])
 backup_dir = Path(sys.argv[3]).expanduser()
 keep_identity = sys.argv[4] == '1'
+keep_game_settings = sys.argv[5] == '1'
 
 def safe_within(path):
     try:
@@ -203,19 +219,44 @@ def ensure_private_dir(path):
         folder.mkdir(mode=0o700, exist_ok=True)
         os.chmod(folder, 0o700)
 
-archive_targets = [
+lol_root = prefix / 'Applications/League of Legends.app/Contents/LoL'
+lol_config = lol_root / 'Config'
+lol_config_files = [
+    lol_config / 'LeagueClientSettings.yaml',
+    lol_config / 'LCUAccountPreferences.yaml',
+    lol_config / 'PersistedSettings.json',
+]
+if not keep_game_settings:
+    lol_config_files.extend([
+        lol_config / 'game.cfg',
+        lol_config / 'input.ini',
+    ])
+
+prefs_files = []
+prefs_dir = guest / 'Library/Preferences'
+if os.path.lexists(prefs_dir) and not prefs_dir.is_symlink() and parent_within_prefix(prefs_dir) and safe_within(prefs_dir):
+    for entry in sorted(prefs_dir.iterdir()):
+        if entry.name.startswith('com.riotgames.') and entry.name.endswith('.plist'):
+            prefs_files.append(entry)
+
+backed_up_targets = [
     guest / 'Library/Logs/Riot Games',
     guest / 'Library/Logs/Riot Client',
-    prefix / 'Applications/League of Legends.app/Contents/LoL/Logs',
+    lol_root / 'Logs',
     prefix / 'Users/Shared/Riot Games/machine.cfg',
-    guest / 'Library/Application Support/Riot Games/machine.cfg',
-    guest / 'Library/Application Support/Riot Games/Riot Client/Config/machine.cfg',
-    guest / 'Library/Application Support/Riot Games/Riot Client/Data',
+    guest / 'Library/Application Support/Riot Games',
+    guest / 'Library/Application Support/Riot Client',
+    guest / 'Library/Application Support/riot-client-ux',
+    guest / 'Library/Application Support/CEF',
+    *prefs_files,
+    *lol_config_files,
 ]
 identity_backups = [
     prefix / 'private/etc/darling-platform.plist.before-platform-change',
     prefix / 'private/etc/darling-smbios.conf.before-platform-change',
 ]
+
+archive_targets = list(backed_up_targets)
 if not keep_identity:
     archive_targets.extend([
         prefix / 'private/etc/darling-platform.plist',
@@ -269,10 +310,28 @@ if to_archive:
                 dest = backup_dir / name
                 try:
                     os.link(tmp_path, dest)
+                    tmp_path.unlink(missing_ok=True)
                     break
                 except FileExistsError:
                     suffix += 1
-            tmp_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    if exc.errno not in (errno.EPERM, errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS):
+                        raise
+                    try:
+                        out_fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    except FileExistsError:
+                        suffix += 1
+                        continue
+                    try:
+                        with os.fdopen(out_fd, 'wb') as out_f, tmp_path.open('rb') as in_f:
+                            shutil.copyfileobj(in_f, out_f)
+                            out_f.flush()
+                            os.fsync(out_f.fileno())
+                    except Exception:
+                        dest.unlink(missing_ok=True)
+                        raise
+                    tmp_path.unlink(missing_ok=True)
+                    break
             print(f'Saved backup in {dest}', file=sys.stderr)
         else:
             tmp_path.unlink(missing_ok=True)
@@ -281,13 +340,8 @@ if to_archive:
         raise
 
 remove_targets = [
-    guest / 'Library/Logs/Riot Games',
-    guest / 'Library/Logs/Riot Client',
-    prefix / 'Applications/League of Legends.app/Contents/LoL/Logs',
-    prefix / 'Users/Shared/Riot Games/machine.cfg',
-    guest / 'Library/Application Support/Riot Games/machine.cfg',
-    guest / 'Library/Application Support/Riot Games/Riot Client/Config/machine.cfg',
-    guest / 'Library/Application Support/Riot Games/Riot Client/Data',
+    *backed_up_targets,
+    lol_root / 'Saved/webcache',
 ]
 if not keep_identity:
     remove_targets.extend(identity_backups)
@@ -308,10 +362,12 @@ for target in remove_targets:
         continue
     # Never delete through a parent directory symlink pointing outside the prefix.
     if not parent_within_prefix(target):
+        print(f'Skipped (outside prefix): {target}', file=sys.stderr)
         continue
     if target.is_symlink():
         target.unlink()
     elif not safe_within(target):
+        print(f'Skipped (outside prefix): {target}', file=sys.stderr)
         continue
     elif target.is_dir():
         shutil.rmtree(target)
@@ -332,10 +388,10 @@ fi
 if [ "$keep_identity" != 1 ]; then
 	if [ -n "${CLEAN_PREFIX_RUNTIME_ROOT:-}" ]; then
 		python3 tools/configure-darling-platform.py --prefix "$prefix" \
-			--runtime-root "$CLEAN_PREFIX_RUNTIME_ROOT" --regenerate --write
+			--runtime-root "$CLEAN_PREFIX_RUNTIME_ROOT" --regenerate --no-backup --write
 	else
 		python3 tools/configure-darling-platform.py --prefix "$prefix" \
-			--regenerate --write
+			--regenerate --no-backup --write
 	fi
 	cleaned=1
 fi
