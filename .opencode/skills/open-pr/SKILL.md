@@ -7,6 +7,8 @@ description: Use when a contributor wants to turn local changes into a pull requ
 
 Takes local changes to an open pull request that follows `CONTRIBUTING.md` and `AGENTS.md`. Read both first if they were not read in this session; their rules win over this file. Commit messages and PR text are in English.
 
+Each harness keeps its own copy and `tests/test_agent_skills.py` requires them to be identical: edit `.opencode/skills/open-pr/SKILL.md` and copy it over `.claude/skills/open-pr/SKILL.md`.
+
 ## Remotes
 
 The canonical repository is `lucannez64/darling-lol`.
@@ -21,14 +23,17 @@ The canonical repository is `lucannez64/darling-lol`.
 
 ## Steps
 
-1. Run `git status --short`. Uncommitted changes and commits ahead of main are the content of the PR. If there are none, stop and say so.
+1. Run `git status --short` and `git log --oneline <remote>/main..HEAD`. Uncommitted changes and commits already ahead of main are the content of the PR. If there are neither, stop and say so.
 2. Sync main without losing the work:
    - `git fetch upstream` (or `origin` when there is no fork)
+   - keep the commits ahead of main found in step 1; they must land on the new branch
    - `git stash push -u -m open-pr` when the tree is dirty
    - `git checkout main && git merge --ff-only <remote>/main`
    - `git push origin main` when `origin` is a fork
    - If the fast-forward fails, stop and report. Never reset main, rebase it or force push.
-3. Create the branch from the updated main: `git checkout -b <type>/<slug>`, then `git stash pop` if stashed.
+3. Create the PR branch: `git checkout -b <type>/<slug>` from the updated main.
+   - When step 1 found commits ahead of main, branch from the branch that holds them instead (`git checkout -b <type>/<slug> <branch>`) and merge the updated main into it, so those commits stay in the PR.
+   - `git stash pop` only after the branch exists and any ahead commits are on it, so the stashed changes apply on top of them.
    - Types: `fix`, `feat`, `docs`, `tests`, `scripts`, `build`, `refactor`.
    - Slug: lowercase, hyphenated, at most five words (`fix/quiet-sudo-update`, `feat/patchkit`).
 4. Run the checks the change needs and report the result:
