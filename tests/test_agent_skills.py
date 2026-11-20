@@ -15,12 +15,35 @@ def skill_names(directory):
     return {path.parent.name for path in skill_paths(directory)}
 
 
+def quoted_scalar(value):
+    """Return True when value is a quoted scalar with valid escapes."""
+    quote, body = value[0], value[1:]
+    if not body.endswith(quote):
+        return False
+    inner = body[:-1]
+    index = 0
+    while index < len(inner):
+        char = inner[index]
+        if quote == '"' and char == '\\':
+            index += 2
+            continue
+        if char == quote:
+            if quote == "'" and inner[index + 1:index + 2] == "'":
+                index += 2
+                continue
+            return False
+        index += 1
+    return index == len(inner)
+
+
 def frontmatter(text):
     """Return the frontmatter fields, or None when the header is malformed.
 
     CI installs no YAML library, so the few scalars a skill needs are checked
-    against the plain-scalar rules: a value with a colon and a space must be
-    quoted, as must a value that starts with a YAML indicator.
+    against the plain-scalar and quoting rules: a value with a colon and a
+    space must be quoted, a value that starts with a YAML indicator must be
+    quoted, and a quoted value must close with its own quote and escape any
+    copy of that quote inside.
     """
     if not text.startswith('---\n'):
         return None
@@ -38,7 +61,7 @@ def frontmatter(text):
         if not colon or not key.strip() or not value:
             return None
         if value[0] in '"\'':
-            if len(value) < 2 or value[-1] != value[0]:
+            if not quoted_scalar(value):
                 return None
         elif ': ' in value or value.endswith(':') or value[0] in '&*?|>!%@`{[':
             return None
@@ -79,6 +102,24 @@ class SkillLayoutTests(unittest.TestCase):
         for name in sorted(skill_names(SKILL_DIRS[0])):
             with self.subTest(skill=name):
                 self.assertIn(f'{SKILL_DIRS[0]}/{name}/SKILL.md', guide)
+
+
+class FrontmatterTests(unittest.TestCase):
+    def test_rejects_unescaped_quotes(self):
+        text = '---\nname: x\ndescription: "Open "review" comments"\n---\n'
+        self.assertIsNone(frontmatter(text))
+
+    def test_accepts_escaped_quotes(self):
+        text = '---\nname: x\ndescription: "Open \\"review\\" comments"\n---\n'
+        self.assertIsNotNone(frontmatter(text))
+
+    def test_accepts_single_quoted_escapes(self):
+        text = "---\nname: x\ndescription: 'it''s fine'\n---\n"
+        self.assertIsNotNone(frontmatter(text))
+
+    def test_rejects_unterminated_quotes(self):
+        text = '---\nname: x\ndescription: "unterminated\n---\n'
+        self.assertIsNone(frontmatter(text))
 
 
 if __name__ == '__main__':
