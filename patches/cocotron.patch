@@ -14137,7 +14137,7 @@ index 5ad375f..c8e8381 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b3..0eefc59 100644
+index d6f86b31..bfed6710 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
 @@ -31,6 +31,14 @@
@@ -14429,7 +14429,7 @@ index d6f86b3..0eefc59 100644
  
  	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for internal image");
-@@ -380,37 +581,121 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -380,37 +581,123 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  		abort();
  	}
  
@@ -14521,6 +14521,8 @@ index d6f86b3..0eefc59 100644
 +				glImportSemaphoreFdEXT(_persistentGlSemaphore, GL_HANDLE_TYPE_OPAQUE_FD_EXT, semFd);
 +				const GLenum semImportErr = glGetError();
 +				if (semImportErr != GL_NO_ERROR) {
++					// A failed import leaves the FD owned by us.
++					close(semFd);
 +					glDeleteSemaphoresEXT(1, &_persistentGlSemaphore);
 +					_persistentGlSemaphore = 0;
 +					_persistentPresentationSemaphore.reset();
@@ -14556,7 +14558,7 @@ index d6f86b3..0eefc59 100644
  	glDeleteTextures(1, &_textureID);
  	reportGLErrors();
  	glDeleteMemoryObjectsEXT(1, &_memoryObject);
-@@ -427,6 +712,18 @@ GLuint CAMetalDrawableTexture::glTexture() const {
+@@ -427,6 +714,18 @@ GLuint CAMetalDrawableTexture::glTexture() const {
  	return _textureID;
  };
  
@@ -14575,7 +14577,7 @@ index d6f86b3..0eefc59 100644
  VkImageView CAMetalDrawableTexture::imageView() {
  	return _imageView;
  };
-@@ -558,6 +855,14 @@ bool CAMetalDrawableTexture::needsExportablePresentationSemaphore() const {
+@@ -558,6 +857,14 @@ bool CAMetalDrawableTexture::needsExportablePresentationSemaphore() const {
  	return true;
  };
  
@@ -14590,7 +14592,7 @@ index d6f86b3..0eefc59 100644
  //
  // drawable
  //
-@@ -605,35 +910,16 @@ void CAMetalDrawableActual::present() {
+@@ -605,35 +912,16 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -14632,7 +14634,7 @@ index d6f86b3..0eefc59 100644
  	}
  }
  
-@@ -662,6 +948,10 @@ void CAMetalDrawableActual::disown() {
+@@ -662,6 +950,10 @@ void CAMetalDrawableActual::disown() {
  };
  
  void CAMetalDrawableActual::didPresent() {
@@ -14643,7 +14645,7 @@ index d6f86b3..0eefc59 100644
  	_presentedTime = CACurrentMediaTime();
  
  	if (_didPresentCallback) {
-@@ -671,6 +961,10 @@ void CAMetalDrawableActual::didPresent() {
+@@ -671,6 +963,10 @@ void CAMetalDrawableActual::didPresent() {
  };
  
  void CAMetalDrawableActual::didDrop() {
@@ -14654,7 +14656,7 @@ index d6f86b3..0eefc59 100644
  	_presentedTime = 0;
  
  	if (_didPresentCallback) {
-@@ -694,6 +988,7 @@ void CAMetalDrawableActual::reset() {
+@@ -694,6 +990,7 @@ void CAMetalDrawableActual::reset() {
  		reportGLErrors();
  	}
  
@@ -14662,7 +14664,7 @@ index d6f86b3..0eefc59 100644
  	_semaphore = nullptr;
  	_wantsToPresentCallback = nullptr;
  	_didPresentCallback = nullptr;
-@@ -702,9 +997,55 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +999,55 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {

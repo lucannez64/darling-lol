@@ -51,6 +51,8 @@ int main() {
     assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && applied==1);
     assert(swapIntervalCalls==4);
     assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && swapIntervalCalls==4);
+    current=&b; // EGL applies the interval to the current surface: never skip it for a non-current context.
+    assert(CGLSetParameter(&a,kCGLCPSwapInterval,&interval)==0 && swapIntervalCalls==5);
     current=&b; fail=true;
     assert(CGLSetParameter(&b,kCGLCPSwapInterval,&interval)==kCGLBadValue);
     assert(!b.swap_interval_requested); // Failed requests must not change policy.

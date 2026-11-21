@@ -657,7 +657,7 @@ a game that is GPU-bound, a client with no active UI work, or a different
 desktop may show less benefit. The hidden window can also need a moment to
 repaint after it is shown.
 
-With client optimizations enabled and close-during-game enabled, the close
+With close-during-game enabled, the close
 helper remains the more aggressive option when in-client chat during the match
 is not needed.
 

@@ -6947,7 +6947,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe0..f3dbc41 100644
+index ffd7fe054..b66f3a612 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -7920,13 +7920,16 @@ index ffd7fe0..f3dbc41 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -395,9 +1090,13 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -395,9 +1090,16 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
      if (parameter == kCGLCPSwapInterval)
      {
          GLint v = *value;
 -        EGLBoolean success = eglSwapInterval(display, v);
 -        if (success)
-+        if (context && context->swap_interval_requested && context->swap_interval == v)
++        /* eglSwapInterval applies to the surface current on this thread, so the
++         * cached value only stands for this context while it is current. */
++        if (context && context->swap_interval_requested && context->swap_interval == v &&
++            CGLGetCurrentContext() == context)
 +            return kCGLNoError;
 +        EGLBoolean success = p_eglSwapInterval(display, v);
 +        if (success) {
@@ -7936,7 +7939,7 @@ index ffd7fe0..f3dbc41 100644
          return success ? kCGLNoError : kCGLBadValue;
      }
      fprintf(stderr, "CGLSetParameter unimplemented for parameter %d\n", parameter);
-@@ -417,14 +1116,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1119,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -14473,16 +14476,3 @@ index 256cd54ec..f24c27f6c 100644
  		)
  
  		if (NOT TARGET ${bareName}_xtrace_mig AND NOT MIG_NO_XTRACE)
-diff --git a/src/frameworks/ApplicationServices/HIServices/src/Processes.cpp b/src/frameworks/ApplicationServices/HIServices/src/Processes.cpp
-index 7b228249..e16c65d1 100644
---- a/src/frameworks/ApplicationServices/HIServices/src/Processes.cpp
-+++ b/src/frameworks/ApplicationServices/HIServices/src/Processes.cpp
-@@ -155,7 +155,7 @@ Boolean IsProcessVisible(const ProcessSerialNumber* psn)
- 
- OSErr KillProcess(const ProcessSerialNumber* psn)
- {
--	if (kill(psn->lowLongOfPSN, SIGTERM) == -1)
-+	if (kill(psn->lowLongOfPSN, SIGKILL) == -1)
- 		return makeOSStatus(errno);
- 	
- 	return noErr;
