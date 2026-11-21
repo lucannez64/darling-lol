@@ -10545,3 +10545,124 @@ index 407996e..4bcdfa8 100644
 +bool darling_process_name(int pid, char* out, unsigned long size);
 +
  #endif // _SYSCTL_PROC_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/gethostuuid.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/gethostuuid.c
+index 8e38a5e..0000001 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/gethostuuid.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/gethostuuid.c
+@@ -11,13 +11,116 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
+ 
++#define DARLING_PLATFORM_PLIST_PATH "/private/etc/darling-platform.plist"
++#define DARLING_PLATFORM_PLIST_MAX 4096
++
+ static int hex2bin(const char* str, unsigned char* uuid_buf);
++static int read_platform_plist_uuid(unsigned char* uuid_buf);
++
++static int is_hex_digit(char c)
++{
++	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
++}
++
++static int parse_platform_plist_uuid(const char* buf, int len, unsigned char* uuid_buf)
++{
++	static const char key[] = "<key>IOPlatformUUID</key>";
++	static const char open_tag[] = "<string>";
++	static const char close_tag[] = "</string>";
++	const int key_len = (int) (sizeof(key) - 1);
++	const int open_len = (int) (sizeof(open_tag) - 1);
++	const int close_len = (int) (sizeof(close_tag) - 1);
++	char hex[32];
++	int pos = -1;
++	int i, h = 0;
++	unsigned char any_nonzero = 0;
++
++	for (i = 0; i <= len - key_len; i++)
++	{
++		int j;
++		for (j = 0; j < key_len; j++)
++		{
++			if (buf[i + j] != key[j])
++				break;
++		}
++		if (j == key_len)
++		{
++			pos = i + key_len;
++			break;
++		}
++	}
++	if (pos < 0)
++		return -1;
++
++	while (pos < len && (buf[pos] == ' ' || buf[pos] == '\t' || buf[pos] == '\r' || buf[pos] == '\n'))
++		pos++;
++	if (pos + open_len + 36 + close_len > len)
++		return -1;
++	for (i = 0; i < open_len; i++)
++	{
++		if (buf[pos + i] != open_tag[i])
++			return -1;
++	}
++	pos += open_len;
++
++	for (i = 0; i < 36; i++)
++	{
++		char c = buf[pos + i];
++		if (i == 8 || i == 13 || i == 18 || i == 23)
++		{
++			if (c != '-')
++				return -1;
++		}
++		else
++		{
++			if (!is_hex_digit(c))
++				return -1;
++			hex[h++] = c;
++		}
++	}
++	for (i = 0; i < close_len; i++)
++	{
++		if (buf[pos + 36 + i] != close_tag[i])
++			return -1;
++	}
++
++	hex2bin(hex, uuid_buf);
++	for (i = 0; i < 16; i++)
++		any_nonzero |= uuid_buf[i];
++	return any_nonzero ? 0 : -1;
++}
++
++static int read_platform_plist_uuid(unsigned char* uuid_buf)
++{
++	char buf[DARLING_PLATFORM_PLIST_MAX];
++	int fd, total = 0;
++
++	fd = sys_open(DARLING_PLATFORM_PLIST_PATH, O_RDONLY, 0);
++	if (fd < 0)
++		return -1;
++	while (total < (int) sizeof(buf))
++	{
++		int got = sys_read(fd, buf + total, sizeof(buf) - total);
++		if (got <= 0)
++			break;
++		total += got;
++	}
++	close_internal(fd);
++	if (total <= 0)
++		return -1;
++	return parse_platform_plist_uuid(buf, total, uuid_buf);
++}
+ 
+ long sys_gethostuuid(unsigned char* uuid_buf, void* timeout)
+ {
+ 	int ret, fd;
+ 	char buf[32];
+ 
++	// Prefer the prefix's provisioned IOPlatformUUID so gethostuuid(2) agrees
++	// with IOKit's IOPlatformExpertDevice and rotates with clean-prefix.sh.
++	if (read_platform_plist_uuid(uuid_buf) == 0)
++		return 0;
++
+ 	fd = sys_open("/Volumes/SystemRoot/etc/machine-id", O_RDONLY, 0);
+ 	if (fd < 0)
+ 		return fd;

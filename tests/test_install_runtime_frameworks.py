@@ -31,10 +31,19 @@ class InstallRuntimeFrameworkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             prefix = root / 'prefix'
-            kernel = prefix / 'usr/lib/system/libsystem_kernel.dylib'
-            kernel.parent.mkdir(parents=True)
-            # Thin 64-bit Mach-O header (MH_MAGIC_64, filetype != MH_OBJECT).
-            kernel.write_bytes(b'\xcf\xfa\xed\xfe' + b'\x00' * 12)
+            thin_macho = b'\xcf\xfa\xed\xfe' + b'\x00' * 12
+            targets = [
+                prefix / 'usr/lib/system/libsystem_kernel.dylib',
+                prefix / 'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices',
+                prefix / 'System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore',
+                prefix / 'System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib',
+                prefix / 'Users/tester/Library/Audio/Plug-Ins/Components/DarlingRiotAudio.component/Contents/MacOS/CoreAudio',
+                prefix / 'Users/tester/libDarlingXShm.dylib',
+                prefix / 'Users/tester/libDarlingWayland.dylib',
+            ]
+            for target in targets:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(thin_macho)
 
             stub_dcc = root / 'dc-codesign'
             stub_dcc.write_text('#!/bin/sh\nexit 1\n')
@@ -58,7 +67,8 @@ class InstallRuntimeFrameworkTests(unittest.TestCase):
                 text=True,
                 check=True,
             )
-            self.assertIn(f'would sign: {kernel}', result.stdout)
+            for target in targets:
+                self.assertIn(f'would sign: {target}', result.stdout)
 
     def test_existing_prefixes_normalize_system_version_after_stopping_runtime(self):
         stop = self.script.index('stop-darling-runtime.py')
