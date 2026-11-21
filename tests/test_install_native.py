@@ -901,6 +901,72 @@ class ArchUpgradeTests(unittest.TestCase):
         self.assertIn('pacman -Syu', result.stderr)
         self.assertIn('Installation cancelled', result.stderr)
 
+    def test_omarchy_skips_the_upgrade_warning(self):
+        snippet = self.PROMPT_SNIPPET.format(container=0).replace(
+            'FAMILY=arch\n', 'FAMILY=arch\nIS_OMARCHY=1\n')
+        result = run_sourced(snippet)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('DONE', result.stdout)
+        self.assertNotIn('full system upgrade', result.stdout)
+
+
+class OmarchyTests(unittest.TestCase):
+    """Omarchy's pacman hook refuses 'pacman -Syu' (issue #289)."""
+
+    def detect(self, os_release):
+        with tempfile.TemporaryDirectory(prefix='install-native-omarchy ') as folder:
+            release_file = Path(folder) / 'os-release'
+            release_file.write_text(os_release)
+            snippet = (
+                'source "$INSTALLER"\n'
+                'CONTAINER_INSTALL=0\n'
+                'detect_distribution\n'
+                'printf "FAMILY=%s IS_OMARCHY=%s\\n" "$FAMILY" "$IS_OMARCHY"\n'
+            )
+            return run_sourced(snippet, DARLING_OS_RELEASE=str(release_file),
+                               PATH='/usr/bin:/bin')
+
+    def test_detects_omarchy_from_os_release(self):
+        for release in ('ID=omarchy\nID_LIKE=arch\n', 'ID=arch\nID_LIKE=omarchy\n'):
+            result = self.detect(release)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('FAMILY=arch IS_OMARCHY=1', result.stdout)
+
+    def test_plain_arch_is_not_omarchy(self):
+        result = self.detect('ID=arch\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FAMILY=arch IS_OMARCHY=0', result.stdout)
+
+    def install(self, *, omarchy_command):
+        with tempfile.TemporaryDirectory(prefix='install-native-omarchy ') as folder:
+            bin_dir = Path(folder) / 'bin'
+            bin_dir.mkdir()
+            calls = Path(folder) / 'calls'
+            names = ['sudo', 'git'] + (['omarchy'] if omarchy_command else [])
+            for name in names:
+                stub = bin_dir / name
+                stub.write_text(f'#!/bin/sh\nprintf "%s %s\\n" {name} "$*" >>"{calls}"\n')
+                stub.chmod(0o755)
+            snippet = (
+                'source "$INSTALLER"\n'
+                'FAMILY=arch\nIS_OMARCHY=1\nYES=1\nPACKAGES=(cmake clang)\n'
+                'install_packages\n'
+            )
+            result = run_sourced(snippet, PATH=f'{bin_dir}:/usr/bin:/bin')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return calls.read_text()
+
+    def test_uses_omarchy_pkg_add(self):
+        calls = self.install(omarchy_command=True)
+        self.assertIn('omarchy pkg add cmake clang', calls)
+        self.assertNotIn('pacman', calls)
+        self.assertIn('git lfs install --skip-repo', calls)
+
+    def test_falls_back_to_pacman_without_full_upgrade(self):
+        calls = self.install(omarchy_command=False)
+        self.assertIn('sudo pacman -S --needed --noconfirm -- cmake clang', calls)
+        self.assertNotIn('-Syu', calls)
+
 
 class DesktopEntryTests(unittest.TestCase):
     def create_entry(self, *, inside_toolbox=0, name='darling-lol', helper=True,
