@@ -41,6 +41,21 @@ python3 scripts/preflight.py                # host/build prerequisites
 python3 scripts/prepare.py --check-only --source /path/to/darling-src
 ```
 
+To judge a suite run, save the whole output to a file and read the summary
+back from it. Do not pipe the suite through `tail`: with stdout piped, Python
+block-buffers the test output while the `Ran ...`/`OK`/`FAILED` summary goes to
+stderr, so the summary can flush first and `tail` drops it.
+
+```sh
+log=$(mktemp)
+echo "log=$log"
+status=0
+python3 -m unittest discover -s tests >"$log" 2>&1 || status=$?
+echo "exit=$status"
+grep -E '^(Ran |OK|FAILED)' "$log" || true
+[ "$status" -eq 0 ]
+```
+
 Run the patch check when patches or pins change. Pass a prepared Darling
 checkout with the component revisions from `upstream/manifest.json`. On a
 fresh clone or after changing pins, use `scripts/prepare.py --source
@@ -184,6 +199,7 @@ guest probes; do not run the guest probes on your own.
 
 - [ ] Focused diff with tests.
 - [ ] `python3 scripts/validate.py` passes.
-- [ ] Relevant `unittest` files pass (full suite when feasible).
+- [ ] Relevant `unittest` files pass (full suite when feasible), with the
+  `Ran`/`OK`/`FAILED` summary read from a saved log rather than through `tail`.
 - [ ] `python3 scripts/prepare.py --check-only --source /path/to/darling-src` when a patch or pin changed.
 - [ ] No generated/local artifacts; commit signed off with `-s`.
