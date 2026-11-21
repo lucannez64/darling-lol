@@ -77,6 +77,52 @@ int main(void)
                            check=True)
             subprocess.run([str(binary)], check=True)
 
+    def test_optional_feature_goes_through_compat_profile_switch(self):
+        hw = added_lines(f'{EMULATION}/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c')
+        body = function(hw, 'static long optional_feature(')
+        self.assertIn('darling_compat_profile_enabled()', body)
+        self.assertIn('compat_optional_feature(leaf, reg, bit, regs[reg])', body)
+
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_compat_optional_feature_masks_avx512f_and_leaf1(self):
+        header = added_lines(f'{EMULATION}/include/common/cpu_identity.h')
+        table_source = added_lines(f'{EMULATION}/src/common/cpu_identity.c')
+        start = table_source.index('#define DARLING_COMPAT_BRAND')
+        table = table_source[start:table_source.index('};', start) + 2]
+        hw = added_lines(f'{EMULATION}/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c')
+        helper = function(hw, 'static int compat_optional_feature(')
+
+        harness = f"""
+#include <assert.h>
+{header}
+{table}
+const struct darling_cpu_identity* darling_compat_cpu_identity(void) {{ return &g_compat_identity; }}
+{helper}
+int main(void)
+{{
+    /* Coffee Lake i7-9750H has no AVX-512F, even on a Zen 4/5 or Tiger Lake host. */
+    assert(compat_optional_feature(7, 1, 16, 0xffffffffu) == 0);
+    /* BMI1 (3), AVX2 (5), BMI2 (8) reflect the host capability. */
+    assert(compat_optional_feature(7, 1, 3, 1u << 3) == 1);
+    assert(compat_optional_feature(7, 1, 5, 1u << 5) == 1);
+    assert(compat_optional_feature(7, 1, 8, 1u << 8) == 1);
+    assert(compat_optional_feature(7, 1, 5, 0u) == 0);
+    /* Leaf 1 ECX/EDX mask against the compat part's feature words. */
+    assert(compat_optional_feature(1, 2, 28, 0xffffffffu) == 1); /* AVX1.0 */
+    assert(compat_optional_feature(1, 2, 28, 0u) == 0);
+    assert(compat_optional_feature(1, 2, 31, 0xffffffffu) == 0); /* hypervisor bit */
+    assert(compat_optional_feature(1, 3, 26, 0xffffffffu) == 1); /* SSE2 */
+    return 0;
+}}
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'optional.c'
+            binary = Path(folder) / 'optional'
+            source.write_text(harness)
+            subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(binary)],
+                           check=True)
+            subprocess.run([str(binary)], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

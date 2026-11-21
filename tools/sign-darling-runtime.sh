@@ -6,7 +6,7 @@
 #
 #   --sdk             add /usr/local/libexec/darling (needs root)
 #   --prefix          add the per-user prefix overlays (RuntimeLibraries,
-#                     RuntimeFrameworks) under ~/.darling
+#                     RuntimeFrameworks, usr/lib/system) under ~/.darling
 #   --dry-run         list what would be signed
 #   --force           re-sign files that already have a signature
 #   --verify          verify after signing (default)
@@ -78,7 +78,7 @@ while [ $# -gt 0 ]; do
 	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; sdk_selected=1 ;;
 	--prefix)
 		prefix_root=${DPREFIX:-${HOME}/.darling}
-		for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
+		for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks "$prefix_root"/usr/lib/system; do
 			[ -d "$d" ] && roots="$roots $d"
 		done
 		explicit=1 ;;
@@ -104,7 +104,7 @@ if [ "$explicit" -eq 0 ]; then
 	sdk_selected=1
 	roots="/usr/local/libexec/darling"
 	prefix_root=${DPREFIX:-${HOME}/.darling}
-	for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
+	for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks "$prefix_root"/usr/lib/system; do
 		[ -d "$d" ] && roots="$roots $d"
 	done
 fi

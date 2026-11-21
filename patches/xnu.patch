@@ -3049,7 +3049,7 @@ index f273989..7ecb675 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +49,78 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +49,94 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -3058,6 +3058,19 @@ index f273989..7ecb675 100644
 +static sysctl_handler(handle_cpufrequency_compat);
 +static sysctl_handler(handle_cacheconfig);
 +static sysctl_handler(handle_cachesize);
++
++static int compat_optional_feature(unsigned int leaf, int reg, int bit, unsigned int host_word)
++{
++	const struct darling_cpu_identity* id = darling_compat_cpu_identity();
++
++	if (leaf == 1 && reg == 2)
++		return ((host_word & id->leaf1_ecx) >> bit) & 1;
++	if (leaf == 1 && reg == 3)
++		return ((host_word & id->leaf1_edx) >> bit) & 1;
++	if (leaf == 7 && reg == 1 && bit == 16)
++		return 0; /* i7-9750H (Coffee Lake) has no AVX-512F */
++	return (host_word >> bit) & 1;
++}
 +
 +/* hw.optional: CPUID leaf, output register (0-3 = eax-edx) and bit */
 +static long optional_feature(void* old, unsigned long* oldlen, unsigned int leaf, int reg, int bit)
@@ -3068,7 +3081,10 @@ index f273989..7ecb675 100644
 +#if defined(__i386__) || defined(__x86_64__)
 +	unsigned int regs[4];
 +	__asm__("cpuid" : "=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]), "=d" (regs[3]) : "0" (leaf), "2" (0));
-+	value = (regs[reg] >> bit) & 1;
++	if (darling_compat_profile_enabled())
++		value = compat_optional_feature(leaf, reg, bit, regs[reg]);
++	else
++		value = (regs[reg] >> bit) & 1;
 +#endif
 +	*((int*) old) = value;
 +	return 0;
@@ -3129,7 +3145,7 @@ index f273989..7ecb675 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,27 +132,98 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +148,98 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -3231,7 +3247,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_availcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -83,6 +231,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +247,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3245,7 +3261,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +266,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +282,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3263,7 +3279,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +335,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +351,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3328,7 +3344,7 @@ index f273989..7ecb675 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +400,130 @@ sysctl_handler(handle_machine)
+@@ -193,3 +416,130 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
