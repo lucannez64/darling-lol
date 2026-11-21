@@ -51,7 +51,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 
 ## Requirements
 
-- **OS:** x86-64 Linux **5.14+**, X11 session or Xwayland.
+- **OS:** x86-64 Linux **5.14+**, X11 session or Xwayland (optional opt-in experimental native Wayland via `RCLOL_WAYLAND=game` or `1`, see [setup](docs/SETUP.md#experimental-native-wayland-windows-rclol_wayland)).
 - **GPU:** Working hardware Vulkan/OpenGL driver. AMD RADV and NVIDIA (proprietary and open modules) have been exercised; others are not validated. See [NVIDIA](docs/TROUBLESHOOTING.md#nvidia). Hybrid laptops usually render on the iGPU unless started with PRIME offload: see [hybrid graphics](docs/TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
 - **Tools:** Git + Git LFS (2.13+), Bash, curl, unzip, CMake 3.20+, Make, Clang/LLD, LLVM dev files (16+; 22/23 is what the Metal overlays are tested with), C/C++ compiler, Python 3.10+. Node.js only for offline JavaScript checks.
 - **Libs:** X11/XCB/SHM development files.

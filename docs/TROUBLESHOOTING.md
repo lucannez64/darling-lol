@@ -1341,6 +1341,84 @@ complete Hyprland window record (`class`, `title`, `mapped`, `hidden`). A second
 process scan after window inspection must find the same client identities and
 no game. Missing information or shutdown failure leaves normal launch in charge.
 
+## Experimental native Wayland windows (`RCLOL_WAYLAND`)
+
+This opt-in path is experimental (`0` by default); the setup, requirements and
+scopes (`game` vs `1`) are in
+[setup](SETUP.md#experimental-native-wayland-windows-rclol_wayland). `RCLOL_WAYLAND=game`
+moves only the game window and is recommended when you still want
+`RCLOL_GPU_DIRECT_PRESENT` and X11 helpers for the clients. `RCLOL_WAYLAND=1`
+also moves the League client and Riot Client windows to native Wayland.
+
+### Client windows with `RCLOL_WAYLAND=1`
+
+- Popups, menus and tooltips are Wayland popups positioned relative to their
+  window.
+- Windows are moved by the compositor: drag the title area.
+- When covered on a compositor with `xdg_wm_base` v6+ (`XDG_TOPLEVEL_STATE_SUSPENDED`),
+  Wayland client windows report occlusion to AppKit and pause `wl_shm` remote-frame
+  uploads until visible again.
+- X11 window helpers cannot see Wayland windows and do nothing for them:
+  `RCLOL_HIDE_CLIENT_IN_GAME`, `RCLOL_HIDE_RIOT_CLIENT_IN_GAME`,
+  `RCLOL_HIDE_LEAGUE_SPLASH`, and the X11 occlusion of client windows. Client
+  frames also use CPU readback + `wl_shm` rather than `RCLOL_GPU_DIRECT_PRESENT`.
+  The process-based `RCLOL_CLOSE_CLIENT_IN_GAME` helper still works.
+- The session supervisor finds client windows through X11 too, so the
+  client-window idle stop (`RCLOL_STOP_AFTER_CLIENT_SECONDS`) is off in this
+  scope, and the session can stay up after the client windows close. Ctrl+C in
+  the launcher terminal stops it.
+- GNOME still decides focus. A client cannot take focus by itself (for example
+  when a match is found) without a recent user interaction. Expect a "ready"
+  notification instead of the client coming to the front.
+- If a client misbehaves (missing popups, wrong focus, stuck windows, heavier
+  lobby CPU), use `RCLOL_WAYLAND=game` for the game window alone, or
+  `RCLOL_WAYLAND=0`, and start again. Include the scope and the symptom in any
+  report.
+
+### The game stays on X11
+
+Start with the launcher's first `wayland:` line:
+
+- `wayland: RCLOL_WAYLAND=1 but no Wayland socket at <path>` (or `=game`): the path
+  is not a socket. Check `echo "$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR"` in the terminal
+  you launch from. A shell or menu entry without the desktop session variables
+  resolves a different path.
+- `wayland: RCLOL_WAYLAND=<value> is not 0, 1 or game; treating it as 0`: the
+  value is misspelled. Only `0`, `1` and `game` are recognised, and any other value
+  is treated as `0`.
+- No `wayland:` line: the launcher did not see `RCLOL_WAYLAND=1` or `game`. Shortcut
+  entries need it in the entry, for example
+  `scripts/create-shortcuts.sh --env RCLOL_WAYLAND=game`.
+- The socket line appears but the game still runs on X11: the library may be
+  missing. `darling-lol --doctor` reports whether `build/libdarling-wayland.so`
+  exists; without it, install the host packages listed in
+  [setup](SETUP.md#experimental-native-wayland-windows-rclol_wayland) and
+  rebuild the runtime.
+
+Search the launch output and the guest logs for lines that start with
+`darling-wayland:`. Those lines come from the guest library. If the socket line
+appears and no such line is logged, the game process did not load the library;
+include that in the report.
+
+### Known limits
+
+- With `RCLOL_WAYLAND=game` only the game window is native; the Riot Client and
+  League client stay on Xwayland. With `RCLOL_WAYLAND=1` the client windows are
+  native too, with the limits in the client section above.
+- Windowed (titled) game windows and the 512x216 splash may stay on X11.
+- GNOME has no tearing control (`wp_tearing_control_manager_v1`), so "VSync off"
+  does not behave as it does on X11 there.
+- KDE Plasma, Hyprland and sway, AMD/Intel Mesa, hybrid NVIDIA (PRIME) laptops
+  and Nix builds are untested.
+
+### Comparing with X11
+
+Make the two runs as alike as you can: the same Practice Tool scene, the same
+FPS cap, the same display refresh and the same fullscreen or windowed mode. Do
+one run with `RCLOL_WAYLAND` unset and one with `RCLOL_WAYLAND=game` (or `1`),
+then record the session type, GPU, driver, compositor and the frame times each
+run reports. Do not automate input during either run.
+
 ## Variable refresh rate (VRR)
 
 Full-window borderless game layers now use the opaque managed X11 parent

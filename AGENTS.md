@@ -151,6 +151,7 @@ guest probes; do not run the guest probes on your own.
 | `RCLOL_HIDE_CLIENT_IN_GAME` | `0` | low-level hide helper |
 | `RCLOL_HIDE_RIOT_CLIENT_IN_GAME` | `0` | also hide the Riot Client with the close helper |
 | `RCLOL_HIDE_LEAGUE_SPLASH` | `0` | hide the 512x216 splash window |
+| `RCLOL_WAYLAND` | `0` | `1`: experimental native Wayland for the game, League client and Riot Client windows; `game`: game window only |
 | `RCLOL_DISCORD_RPC` | `1` | `0` removes the Discord IPC links |
 | `RCLOL_FILTER_HOST_ENV` | `0` | drop host desktop-session variables before the guest |
 | `RCLOL_KEEP_HOST_ENV` | empty | names kept by `RCLOL_FILTER_HOST_ENV` |
