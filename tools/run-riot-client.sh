@@ -325,7 +325,7 @@ if [ -z "${RIOT_LAUNCHER_HOST:-}" ]; then
     python3 "$runner_dir/hide-league-client-in-game.py" --detach &
     ;;
    *)
-    echo 'client-in-game-tricks: no action (client optimizations disabled or preferences missing/invalid)' >&2
+    echo 'client-in-game-tricks: no action (close-during-game off with client optimizations off, or preferences missing/invalid)' >&2
     ;;
   esac
  elif [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then

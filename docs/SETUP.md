@@ -151,11 +151,14 @@ environment, stat entry or parent cannot be read. See
 
 `RCLOL_CLIENT_IN_GAME_TRICKS=1` opts in to automatic client handling during a
 match. It reads `lol-user-experience` from the installed client's
-`LCULocalPreferences.yaml`: with `potatoModeEnabled: true`, it closes the client
-UI when `closeLeagueClientDuringGame: true`, and hides the managed
-`LeagueClientUx`/`Riot Client` X11 windows when that value is false. Missing or
-invalid preference values, disabled client optimizations and unreadable files
-select no action. The low-level `RCLOL_CLOSE_CLIENT_IN_GAME=1` and
+`LCULocalPreferences.yaml`: it closes the client UI when
+`closeLeagueClientDuringGame: true` (even when `potatoModeEnabled` is false, so
+the pre-match UX process does not hold CEF's `LOCK` when Riot launches a fresh
+UX process after the match), and hides the managed `LeagueClientUx`/`Riot Client`
+X11 windows when `closeLeagueClientDuringGame: false` and
+`potatoModeEnabled: true`. Missing or invalid preference values, disabled client
+optimizations with close disabled, and unreadable files select no action. The
+low-level `RCLOL_CLOSE_CLIENT_IN_GAME=1` and
 `RCLOL_HIDE_CLIENT_IN_GAME=1` switches remain available when the automatic
 switch is not set. The feature is off by default, requires X11/Xwayland, and
 does not patch client binaries, CEF or the game. The hide helper exits after ten

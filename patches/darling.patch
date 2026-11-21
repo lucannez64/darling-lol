@@ -6947,7 +6947,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..84a478de0 100644
+index ffd7fe054..b66f3a612 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -7301,7 +7301,7 @@ index ffd7fe054..84a478de0 100644
      struct _CGLDisplay* disp = getCGLDisplay(cid);
      if (!disp)
          return kCGLBadConnection;
-@@ -152,7 +385,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -152,16 +385,17 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
      if (!window)
          return kCGLBadWindow;
  
@@ -7309,8 +7309,10 @@ index ffd7fe054..84a478de0 100644
 +    gl->egl_surface = p_eglCreateWindowSurface(gl->egl_display, gl->egl_config, window, NULL);
      if (gl->egl_surface == EGL_NO_SURFACE)
          return kCGLBadState;
++    gl->swap_interval_requested = 0;
      return kCGLNoError;
-@@ -161,7 +394,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+ }
+ 
  CGLWindowRef CGLGetWindow(void *native_window) {
  
      EGLNativeWindowType window = (EGLNativeWindowType) native_window;
@@ -7319,7 +7321,7 @@ index ffd7fe054..84a478de0 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -170,15 +403,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +404,57 @@ CGLWindowRef CGLGetWindow(void *native_window) {
      return (CGLWindowRef) surface;
  }
  
@@ -7365,17 +7367,21 @@ index ffd7fe054..84a478de0 100644
  CGL_EXPORT CGLError CGLContextMakeCurrentAndAttachToWindow(CGLContextObj context, CGLWindowRef window) {
      if (!context)
          return kCGLBadContext;
++    if (context->egl_surface == (EGLSurface) window && CGLGetCurrentContext() == context)
++        return kCGLNoError;
 +    EGLSurface oldSurface = context->egl_surface;
      context->egl_surface = (EGLSurface) window;
 -    return CGLSetCurrentContext(context);
 +    CGLError result = CGLSetCurrentContext(context);
 +    if (result != kCGLNoError)
 +        context->egl_surface = oldSurface;
++    else if (oldSurface != (EGLSurface) window)
++        context->swap_interval_requested = 0;
 +    return result;
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +469,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +474,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -7423,7 +7429,7 @@ index ffd7fe054..84a478de0 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +518,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +523,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -7438,7 +7444,7 @@ index ffd7fe054..84a478de0 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +548,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +553,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -7449,7 +7455,7 @@ index ffd7fe054..84a478de0 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -303,37 +604,99 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -303,37 +609,99 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
      return pixelFormat->retain_count;
  }
  
@@ -7552,7 +7558,7 @@ index ffd7fe054..84a478de0 100644
      return context;
  }
  
-@@ -342,11 +705,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +710,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -7573,7 +7579,7 @@ index ffd7fe054..84a478de0 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +723,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +728,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -7586,7 +7592,7 @@ index ffd7fe054..84a478de0 100644
  
      free(context);
  }
-@@ -384,8 +757,325 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -384,8 +762,325 @@ CGLError CGLUnlockContext(CGLContextObj context) {
  }
  
  CGLError CGLFlushDrawable(CGLContextObj context) {
@@ -7914,12 +7920,17 @@ index ffd7fe054..84a478de0 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -395,9 +1085,11 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -395,9 +1090,16 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
      if (parameter == kCGLCPSwapInterval)
      {
          GLint v = *value;
 -        EGLBoolean success = eglSwapInterval(display, v);
 -        if (success)
++        /* eglSwapInterval applies to the surface current on this thread, so the
++         * cached value only stands for this context while it is current. */
++        if (context && context->swap_interval_requested && context->swap_interval == v &&
++            CGLGetCurrentContext() == context)
++            return kCGLNoError;
 +        EGLBoolean success = p_eglSwapInterval(display, v);
 +        if (success) {
              context->swap_interval = v;
@@ -7928,7 +7939,7 @@ index ffd7fe054..84a478de0 100644
          return success ? kCGLNoError : kCGLBadValue;
      }
      fprintf(stderr, "CGLSetParameter unimplemented for parameter %d\n", parameter);
-@@ -417,14 +1109,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1119,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
