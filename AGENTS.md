@@ -48,9 +48,12 @@ stderr, so the summary can flush first and `tail` drops it.
 
 ```sh
 log=$(mktemp)
-python3 -m unittest discover -s tests >"$log" 2>&1
-echo "exit=$?"
-grep -E '^(Ran |OK|FAILED)' "$log"
+echo "log=$log"
+status=0
+python3 -m unittest discover -s tests >"$log" 2>&1 || status=$?
+echo "exit=$status"
+grep -E '^(Ran |OK|FAILED)' "$log" || true
+[ "$status" -eq 0 ]
 ```
 
 Run the patch check when patches or pins change. Pass a prepared Darling
