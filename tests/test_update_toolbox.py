@@ -21,7 +21,22 @@ case "${1:-}" in
   *) exit 0 ;;
 esac
 case "${1:-}" in
-  true) [ "${FAKE_TOOLBOX_CONTAINER_OK:-0}" = 1 ] || exit 1 ;;
+  true)
+    # FAKE_TOOLBOX_STOPPED=1: the first probe finds the container stopped and
+    # the next one succeeds, as `toolbox run` would after starting it.
+    # FAKE_TOOLBOX_STOPPED=never: the container never becomes reachable.
+    if [ "${FAKE_TOOLBOX_STOPPED:-0}" != 0 ]; then
+      count_file="${FAKE_TOOLBOX_LOG}.true-count"
+      count=$(cat "$count_file" 2>/dev/null || printf 0)
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      if [ "${FAKE_TOOLBOX_STOPPED}" = never ] || [ "$count" -lt 2 ]; then
+        exit 1
+      fi
+      exit 0
+    fi
+    [ "${FAKE_TOOLBOX_CONTAINER_OK:-0}" = 1 ] || exit 1
+    ;;
   sh) [ "${FAKE_TOOLBOX_HAS_DARLING:-0}" = 1 ] || exit 1 ;;
 esac
 exit 0
@@ -68,12 +83,13 @@ class UpdateToolboxTests(unittest.TestCase):
         self.env.pop('DARLING_WORKSPACE', None)
         self.env.pop('DARLING_LOL_UPDATE_REEXEC', None)
 
-    def run_update(self, *args, **overrides):
+    def run_update(self, *args, input_text=None, **overrides):
         env = dict(self.env)
         env.update(overrides)
         return subprocess.run(
             [SH, str(self.repo / 'scripts' / 'update.sh'), *args],
             capture_output=True, text=True, check=False, env=env,
+            input=input_text,
         )
 
     def argv_lines(self):
@@ -154,11 +170,33 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('No existing build', result.stderr)
         self.assert_no_reexec()
 
-    def test_container_unreachable_exits_1_with_hint(self):
+    def test_container_unreachable_prompts_and_starts_it_by_default(self):
         self.write_marker('gone')
-        result = self.run_update(FAKE_TOOLBOX_CONTAINER_OK='0')
+        result = self.run_update(input_text='\n', FAKE_TOOLBOX_STOPPED='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('is not reachable', result.stdout)
+        self.assertIn('[Y/n]', result.stdout)
+        self.assertIn("Starting Toolbox container 'gone'", result.stdout)
+        self.assert_reexec_into('gone')
+        # The failed probe and the successful start are both recorded.
+        self.assertEqual(
+            sum(1 for line in self.argv_lines() if line.endswith(' true')), 2)
+
+    def test_container_unreachable_declined_exits_1_with_hint(self):
+        self.write_marker('gone')
+        result = self.run_update(input_text='n\n', FAKE_TOOLBOX_STOPPED='1')
         self.assertEqual(result.returncode, 1)
         self.assertIn('that container is not', result.stderr)
+        self.assertIn('toolbox enter gone', result.stderr)
+        self.assert_no_reexec()
+
+    def test_container_that_never_starts_exits_1_with_hint(self):
+        self.write_marker('gone')
+        # Keep the retry delay out of the test.
+        self.stub(self.bindir / 'sleep', 'exit 0')
+        result = self.run_update(input_text='\n', FAKE_TOOLBOX_STOPPED='never')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Toolbox container 'gone' could not be started", result.stderr)
         self.assertIn('toolbox enter gone', result.stderr)
         self.assert_no_reexec()
 

@@ -372,10 +372,32 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			printf '  inside the container: toolbox enter %s\n' "$name" >&2
 			exit 1
 		fi
+		# `toolbox run` starts a stopped container, but that start can still
+		# fail transiently (for example while another Toolbox session is
+		# shutting down). Ask before giving up, defaulting to starting it.
 		if ! toolbox run -c "$name" true 2>/dev/null; then
-			error "This checkout was installed via Toolbox container '$name', but that container is not"
-			printf '  reachable. Start it and run the update inside it: toolbox enter %s\n' "$name" >&2
-			exit 1
+			printf '\n%s%s%s Toolbox container %s is not reachable. Start it and continue the update? [Y/n] ' \
+				"$YELLOW" "$ICON_WARN" "$RESET" "'$name'"
+			reply=''
+			read -r reply || reply=''
+			case "$reply" in
+			n | N | no | No | NO)
+				error "This checkout was installed via Toolbox container '$name', but that container is not"
+				printf '  reachable. Start it and run the update inside it: toolbox enter %s\n' "$name" >&2
+				exit 1
+				;;
+			esac
+			info "Starting Toolbox container '$name'..."
+			attempt=0
+			until toolbox run -c "$name" true 2>/dev/null; do
+				attempt=$((attempt + 1))
+				if [ "$attempt" -ge 3 ]; then
+					error "Toolbox container '$name' could not be started. Start it and run the"
+					printf '  update inside it: toolbox enter %s\n' "$name" >&2
+					exit 1
+				fi
+				sleep 1
+			done
 		fi
 		info "Toolbox install detected; running the update inside container '$name'..."
 		if [ "$VERBOSE" = 1 ]; then
