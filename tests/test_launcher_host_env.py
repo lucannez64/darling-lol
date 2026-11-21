@@ -118,8 +118,30 @@ class WaylandGameWindow(HostEnvFixture):
                                      XDG_RUNTIME_DIR=str(self.runtime), XDG_ACTIVATION_TOKEN='token-1')
         self.assertEqual(values, [socket_path, self.GUEST_PATH + '/libDarlingWayland.dylib', 'token-1', 'all'])
         self.assertEqual(stderr, 'wayland: experimental native Wayland for the game and client windows '
-                                 '(socket %s)\n' % socket_path)
+                                 '(socket %s)\n' % socket_path +
+                         'wayland: the client-window idle stop cannot see Wayland windows; it is off for this session\n')
         self.assertNotIn('token-1', stderr)
+
+    def idle_stop_seconds(self, **env):
+        """Run only the launcher block; return RCLOL_STOP_AFTER_CLIENT_SECONDS as it leaves the block."""
+        script = Path(self.tmp.name) / 'wayland idle.sh'
+        script.write_text('set -eu\nguest_path=' + self.GUEST_PATH + '\n' + self.BLOCK +
+                          'printf "%s\\n" "${RCLOL_STOP_AFTER_CLIENT_SECONDS-unset}"\n')
+        base = {'PATH': str(self.bin), 'HOME': str(self.home), 'XDG_RUNTIME_DIR': str(self.runtime),
+                'WAYLAND_DISPLAY': 'wayland-1'}
+        base.update(env)
+        result = subprocess.run([SH, str(script)], env=base, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_client_scope_turns_off_the_x11_window_idle_stop(self):
+        self.listen(self.runtime / 'wayland-1')
+        self.assertEqual(self.idle_stop_seconds(RCLOL_WAYLAND='1'), '0')
+        self.assertEqual(self.idle_stop_seconds(RCLOL_WAYLAND='1', RCLOL_STOP_AFTER_CLIENT_SECONDS='90'), '0')
+        # The game scope keeps client windows on X11, where the supervisor can see them.
+        self.assertEqual(self.idle_stop_seconds(RCLOL_WAYLAND='game'), 'unset')
+        self.assertEqual(self.idle_stop_seconds(RCLOL_WAYLAND='game', RCLOL_STOP_AFTER_CLIENT_SECONDS='90'), '90')
+        self.assertEqual(self.idle_stop_seconds(RCLOL_WAYLAND='0'), 'unset')
 
     def test_flag_game_passes_scope_game_with_the_game_only_line(self):
         socket_path = self.listen(self.runtime / 'wayland-1')

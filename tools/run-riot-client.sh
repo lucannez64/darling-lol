@@ -296,6 +296,12 @@ if [ "$wayland_mode" != 0 ]; then
   if [ "$wayland_mode" = 1 ]; then
    wayland_scope=all
    echo "wayland: experimental native Wayland for the game and client windows (socket $wayland_path)" >&2
+   # The supervisor finds client windows through X11 _NET_CLIENT_LIST, where Wayland windows never appear,
+   # so its window idle stop would end the session about a minute after launch.
+   if [ "${RCLOL_STOP_AFTER_CLIENT_SECONDS:-60}" != 0 ]; then
+    echo "wayland: the client-window idle stop cannot see Wayland windows; it is off for this session" >&2
+   fi
+   RCLOL_STOP_AFTER_CLIENT_SECONDS=0
   else
    wayland_scope=game
    echo "wayland: experimental native Wayland for the game window (socket $wayland_path)" >&2

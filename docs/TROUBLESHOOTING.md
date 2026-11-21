@@ -1363,6 +1363,10 @@ also moves the League client and Riot Client windows to native Wayland.
   `RCLOL_HIDE_LEAGUE_SPLASH`, and the X11 occlusion of client windows. Client
   frames also use CPU readback + `wl_shm` rather than `RCLOL_GPU_DIRECT_PRESENT`.
   The process-based `RCLOL_CLOSE_CLIENT_IN_GAME` helper still works.
+- The session supervisor finds client windows through X11 too, so the
+  client-window idle stop (`RCLOL_STOP_AFTER_CLIENT_SECONDS`) is off in this
+  scope, and the session can stay up after the client windows close. Ctrl+C in
+  the launcher terminal stops it.
 - GNOME still decides focus. A client cannot take focus by itself (for example
   when a match is found) without a recent user interaction. Expect a "ready"
   notification instead of the client coming to the front.

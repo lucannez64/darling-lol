@@ -35,12 +35,21 @@ class ActivationTimeChecks(unittest.TestCase):
         self.assertIn('if (activationTime == CurrentTime)\n            XSetInputFocus(_display, window, RevertToPointerRoot, activationTime);', method)
         self.assertNotIn('RevertToPointerRoot, CurrentTime);', method)
 
+    def test_user_time_activation_needs_the_wayland_opt_in(self):
+        source = self.patched('cocotron', 'AppKit/X11.backend/X11Display.m')
+        gate = body(source, 'static BOOL rclolUserTimeActivation(void)')
+        self.assertIn('getenv("RCLOL_WAYLAND_SOCKET")', gate)
+        helper = body(source, 'static void rclolNoteUserInput(Display *display, Window window, Time userTime)')
+        self.assertIn('if (userTime == CurrentTime || !rclolUserTimeActivation()) return;', helper)
+        activation = body(source, 'Time X11ActivationTime(Display *display)')
+        self.assertLess(activation.index('if (!rclolUserTimeActivation()) return CurrentTime;'),
+                        activation.index('return rclolLastUserTime;'))
+
     def test_input_events_record_their_time(self):
         source = self.patched('cocotron', 'AppKit/X11.backend/X11Display.m')
         method = body(source, '- (void) postXEvent: (XEvent *) ev')
         self.assertIn('rclolNoteUserInput(_display, ev->xany.window', method)
         helper = body(source, 'static void rclolNoteUserInput(Display *display, Window window, Time userTime)')
-        self.assertIn('if (userTime == CurrentTime) return;', helper)
 
 
 if __name__ == '__main__':
