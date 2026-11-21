@@ -626,10 +626,10 @@ It reads `lol-user-experience` from the installed client's
 
 | Client preference | Launcher action |
 |---|---|
-| `potatoModeEnabled: false` or unreadable | no client-in-game helper |
-| `potatoModeEnabled: true`, close preference missing or invalid | no action |
-| `potatoModeEnabled: true`, `closeLeagueClientDuringGame: true` | close the client UI |
+| `closeLeagueClientDuringGame: true` | close the client UI |
 | `potatoModeEnabled: true`, `closeLeagueClientDuringGame: false` | hide the client windows |
+| `potatoModeEnabled: false` or unreadable, `closeLeagueClientDuringGame: false` | no action |
+| close preference missing, invalid or unreadable | no action |
 
 The hide path unmaps the `LeagueClientUx` and `Riot Client` X11 windows and maps
 them again when the game process ends. The client is not closed, the League
@@ -657,7 +657,7 @@ a game that is GPU-bound, a client with no active UI work, or a different
 desktop may show less benefit. The hidden window can also need a moment to
 repaint after it is shown.
 
-With client optimizations enabled and close-during-game enabled, the close
+With close-during-game enabled, the close
 helper remains the more aggressive option when in-client chat during the match
 is not needed.
 

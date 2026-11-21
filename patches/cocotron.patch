@@ -2377,7 +2377,7 @@ index f102391..7a18ff4 100644
      [_nextResponder performSelector: _cmd withObject: event];
  }
 diff --git a/AppKit/NSRunningApplication.m b/AppKit/NSRunningApplication.m
-index 6c3d268..de49da9 100644
+index 6c3d2688..b42c2137 100644
 --- a/AppKit/NSRunningApplication.m
 +++ b/AppKit/NSRunningApplication.m
 @@ -1,4 +1,10 @@
@@ -2391,7 +2391,7 @@ index 6c3d268..de49da9 100644
  
  // DUMMY
  
-@@ -19,6 +25,42 @@
+@@ -19,6 +25,52 @@
  
  @implementation NSRunningApplication
  
@@ -2429,6 +2429,16 @@ index 6c3d268..de49da9 100644
 +            return NO;
 +        @throw;
 +    }
++}
++
++- (BOOL) terminate {
++    if (_processIdentifier <= 0) return NO;
++    return kill(_processIdentifier, SIGTERM) == 0;
++}
++
++- (BOOL) forceTerminate {
++    if (_processIdentifier <= 0) return NO;
++    return kill(_processIdentifier, SIGKILL) == 0;
 +}
 +
  + (NSArray<NSRunningApplication *> *) runningApplicationsWithBundleIdentifier: (NSString *) bundleIdentifier {
@@ -9782,7 +9792,7 @@ index 11dfac8..e4214da 100644
  - (void) rightMouseDown: (NSEvent *) event;
  - (void) rightMouseDragged: (NSEvent *) event;
 diff --git a/AppKit/include/AppKit/NSRunningApplication.h b/AppKit/include/AppKit/NSRunningApplication.h
-index c577764..9a1586e 100644
+index c577764b..ff91f0f0 100644
 --- a/AppKit/include/AppKit/NSRunningApplication.h
 +++ b/AppKit/include/AppKit/NSRunningApplication.h
 @@ -18,6 +18,7 @@
@@ -9793,7 +9803,7 @@ index c577764..9a1586e 100644
  
  typedef enum {
      NSApplicationActivationPolicyRegular,
-@@ -26,7 +27,15 @@ typedef enum {
+@@ -26,7 +27,17 @@ typedef enum {
  } NSApplicationActivationPolicy;
  
  @interface NSRunningApplication : NSObject
@@ -9807,6 +9817,8 @@ index c577764..9a1586e 100644
 +- (pid_t) processIdentifier;
 +- (BOOL) isTerminated;
 +- (BOOL) activateWithOptions: (NSUInteger) options;
++- (BOOL) terminate;
++- (BOOL) forceTerminate;
  
  @end
 diff --git a/AppKit/include/AppKit/NSSavePanel.h b/AppKit/include/AppKit/NSSavePanel.h
@@ -14468,7 +14480,7 @@ index 5ad375f..c8e8381 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b3..88ee7bb 100644
+index d6f86b31..bfed6710 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
 @@ -31,6 +31,14 @@
@@ -14663,24 +14675,24 @@ index d6f86b3..88ee7bb 100644
  		}
  
 -		if (!framebufferOnly && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+-			continue;
 +		const bool hostVisible = (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 +		if (legacy == SIZE_MAX && (framebufferOnly || hostVisible)) {
 +			legacy = i;
-+		}
-+
-+		if (!gpuOnly && !hostVisible) {
- 			continue;
  		}
  
 -		if (!framebufferOnly && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
--			continue;
-+		if (firstFit == SIZE_MAX) {
-+			firstFit = i;
++		if (!gpuOnly && !hostVisible) {
+ 			continue;
  		}
  
 -		// okay, this is good enough
 -		targetIndex = i;
 -		break;
++		if (firstFit == SIZE_MAX) {
++			firstFit = i;
++		}
++
 +		// no early exit: the scan continues to find the legacy choice for the log
 +		if (targetIndex == SIZE_MAX && (!gpuOnly || (type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0)) {
 +			targetIndex = i;
@@ -14760,7 +14772,7 @@ index d6f86b3..88ee7bb 100644
  
  	if (targetIndex == SIZE_MAX) {
  		throw std::runtime_error("No suitable memory region found for internal image");
-@@ -380,31 +581,70 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -380,37 +581,123 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  		abort();
  	}
  
@@ -14835,8 +14847,95 @@ index d6f86b3..88ee7bb 100644
 +	}
  
  	glBindTexture(GL_TEXTURE_2D, prevTex);
++
++	// Create one persistent exportable semaphore for the lifetime of this drawable texture so
++	// steady-state frames avoid per-frame vkCreateSemaphore / vkGetSemaphoreFdKHR / glImportSemaphoreFdEXT.
++	if (!!(_device->features() & Indium::PrivateDevice::Feature::ExternalSemaphoreFD)) {
++		_persistentPresentationSemaphore = _device->getWrappedBinarySemaphore(true);
++		int semFd = -1;
++		VkSemaphoreGetFdInfoKHR semFdInfo {};
++		semFdInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
++		semFdInfo.semaphore = _persistentPresentationSemaphore->semaphore;
++		semFdInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
++		if (DynamicVK::vkGetSemaphoreFdKHR(_device->device(), &semFdInfo, &semFd) == VK_SUCCESS && semFd >= 0) {
++			drainGLErrors();
++			glGenSemaphoresEXT(1, &_persistentGlSemaphore);
++			if (_persistentGlSemaphore != 0) {
++				glImportSemaphoreFdEXT(_persistentGlSemaphore, GL_HANDLE_TYPE_OPAQUE_FD_EXT, semFd);
++				const GLenum semImportErr = glGetError();
++				if (semImportErr != GL_NO_ERROR) {
++					// A failed import leaves the FD owned by us.
++					close(semFd);
++					glDeleteSemaphoresEXT(1, &_persistentGlSemaphore);
++					_persistentGlSemaphore = 0;
++					_persistentPresentationSemaphore.reset();
++					static std::atomic<unsigned> persistFailures {0};
++					if (persistFailures.fetch_add(1, std::memory_order_relaxed) < 5) {
++						char line[160];
++						snprintf(line, sizeof(line), "drawable GL persistent semaphore import failed gl_error=0x%x (falling back to per-frame)", semImportErr);
++						appendDeviceLog(line);
++					}
++				} else {
++					static std::atomic<bool> loggedPersist {false};
++					if (!loggedPersist.exchange(true, std::memory_order_relaxed)) {
++						appendDeviceLog("drawable GL persistent semaphore import ok");
++					}
++				}
++			} else {
++				close(semFd);
++				_persistentPresentationSemaphore.reset();
++			}
++		} else {
++			_persistentPresentationSemaphore.reset();
++		}
++	}
  };
-@@ -605,35 +845,16 @@ void CAMetalDrawableActual::present() {
+ 
+ CAMetalDrawableTexture::~CAMetalDrawableTexture() {
+ 	reportGLErrors();
++	if (_persistentGlSemaphore != 0) {
++		glDeleteSemaphoresEXT(1, &_persistentGlSemaphore);
++		_persistentGlSemaphore = 0;
++	}
++	_persistentPresentationSemaphore.reset();
+ 	glDeleteTextures(1, &_textureID);
+ 	reportGLErrors();
+ 	glDeleteMemoryObjectsEXT(1, &_memoryObject);
+@@ -427,6 +714,18 @@ GLuint CAMetalDrawableTexture::glTexture() const {
+ 	return _textureID;
+ };
+ 
++GLuint CAMetalDrawableTexture::persistentGlSemaphore() const {
++	return _persistentGlSemaphore;
++};
++
++const std::shared_ptr<Indium::BinarySemaphore>& CAMetalDrawableTexture::persistentPresentationSemaphore() const {
++	return _persistentPresentationSemaphore;
++};
++
++void CAMetalDrawableTexture::releasePersistentPresentationSemaphore() {
++	_persistentSemaphoreInFlight.store(false, std::memory_order_release);
++};
++
+ VkImageView CAMetalDrawableTexture::imageView() {
+ 	return _imageView;
+ };
+@@ -558,6 +857,14 @@ bool CAMetalDrawableTexture::needsExportablePresentationSemaphore() const {
+ 	return true;
+ };
+ 
++std::shared_ptr<Indium::BinarySemaphore> CAMetalDrawableTexture::acquirePresentationSemaphore() {
++	if (_persistentPresentationSemaphore && _persistentGlSemaphore != 0 &&
++	    !_persistentSemaphoreInFlight.exchange(true, std::memory_order_acq_rel)) {
++		return _persistentPresentationSemaphore;
++	}
++	return Indium::PrivateTexture::acquirePresentationSemaphore();
++};
++
+ //
+ // drawable
+ //
+@@ -605,35 +912,16 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -14847,12 +14946,7 @@ index d6f86b3..88ee7bb 100644
 -		if (_semaphore) {
 -			int fd = -1;
 -			VkSemaphoreGetFdInfoKHR info {};
-+        // present() may run on the deferred encoding worker. The window's
-+        // EGL context remains current on the main thread, so attempting to
-+        // import a semaphore here fails and leaks the exported syncobj FD.
-+        // Import it in synchronizeRender(), with the compositor context
-+        // current, immediately before the GPU-side wait.
- 
+-
 -			info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
 -			info.semaphore = _semaphore->semaphore;
 -			info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
@@ -14864,7 +14958,12 @@ index d6f86b3..88ee7bb 100644
 -
 -			CGLContextObj prev = CGLGetCurrentContext();
 -			CGLSetCurrentContext(_glContext);
--
++        // present() may run on the deferred encoding worker. The window's
++        // EGL context remains current on the main thread, so attempting to
++        // import a semaphore here fails and leaks the exported syncobj FD.
++        // Import it in synchronizeRender(), with the compositor context
++        // current, immediately before the GPU-side wait.
+ 
 -			reportGLErrors();
 -			glGenSemaphoresEXT(1, &_glSemaphore);
 -			reportGLErrors();
@@ -14878,7 +14977,37 @@ index d6f86b3..88ee7bb 100644
  	}
  }
  
-@@ -702,9 +923,46 @@ void CAMetalDrawableActual::reset() {
+@@ -662,6 +950,10 @@ void CAMetalDrawableActual::disown() {
+ };
+ 
+ void CAMetalDrawableActual::didPresent() {
++	if (_waitedPersistentSemaphore) {
++		_waitedPersistentSemaphore = false;
++		_texture->releasePersistentPresentationSemaphore();
++	}
+ 	_presentedTime = CACurrentMediaTime();
+ 
+ 	if (_didPresentCallback) {
+@@ -671,6 +963,10 @@ void CAMetalDrawableActual::didPresent() {
+ };
+ 
+ void CAMetalDrawableActual::didDrop() {
++	if (_waitedPersistentSemaphore) {
++		_waitedPersistentSemaphore = false;
++		_texture->releasePersistentPresentationSemaphore();
++	}
+ 	_presentedTime = 0;
+ 
+ 	if (_didPresentCallback) {
+@@ -694,6 +990,7 @@ void CAMetalDrawableActual::reset() {
+ 		reportGLErrors();
+ 	}
+ 
++	_waitedPersistentSemaphore = false;
+ 	_semaphore = nullptr;
+ 	_wantsToPresentCallback = nullptr;
+ 	_didPresentCallback = nullptr;
+@@ -702,9 +999,55 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {
@@ -14886,6 +15015,15 @@ index d6f86b3..88ee7bb 100644
 -	GLenum layout = GL_LAYOUT_GENERAL_EXT;
 -	glWaitSemaphoreEXT(_glSemaphore, 0, NULL, 1, &tex, &layout);
 +    if (!_semaphore) return;
++    if (_texture->persistentPresentationSemaphore() &&
++        _semaphore == _texture->persistentPresentationSemaphore() &&
++        _texture->persistentGlSemaphore() != 0) {
++        GLuint tex = _texture->glTexture();
++        GLenum layout = GL_LAYOUT_GENERAL_EXT;
++        glWaitSemaphoreEXT(_texture->persistentGlSemaphore(), 0, NULL, 1, &tex, &layout);
++        _waitedPersistentSemaphore = true;
++        return;
++    }
 +    // GL errors of the import and wait are checked for the first imports of the
 +    // process only: glGetError can stall a threaded GL driver, and this runs every frame.
 +    static std::atomic<unsigned> checkedImports {0};
@@ -14929,7 +15067,7 @@ index d6f86b3..88ee7bb 100644
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
 diff --git a/QuartzCore/CAMetalLayer.mm b/QuartzCore/CAMetalLayer.mm
-index b81e2e1..8d7ca14 100644
+index b81e2e14..3bf4cfd9 100644
 --- a/QuartzCore/CAMetalLayer.mm
 +++ b/QuartzCore/CAMetalLayer.mm
 @@ -25,7 +25,79 @@
@@ -15201,7 +15339,7 @@ index b81e2e1..8d7ca14 100644
  	[_drawableCondition lock];
  	_usableDrawablesBitmap |= 1u << drawableID;
  	[_drawableCondition signal];
-@@ -455,7 +653,7 @@ static void reportGLErrors(void) {
+@@ -455,9 +653,21 @@ static void reportGLErrors(void) {
  	}
  	_usableDrawablesBitmap = 0;
  
@@ -15209,8 +15347,34 @@ index b81e2e1..8d7ca14 100644
 +	if (!_device || !_context || !_context.glContext || _drawableSize.width == 0 || _drawableSize.height == 0) {
  		// can't create new drawables
  		[_drawableCondition unlock];
++		CGLContextObj prev = _context && _context.glContext ? CGLGetCurrentContext() : NULL;
++		if (_context && _context.glContext && prev != _context.glContext)
++			CGLSetCurrentContext(_context.glContext);
++		@synchronized(self) {
++			if (_lastPresentedDrawable) {
++				_lastPresentedDrawable->disown();
++				_lastPresentedDrawable->didDrop();
++				_lastPresentedDrawable = nullptr;
++			}
++		}
++		if (_context && _context.glContext && prev != _context.glContext)
++			CGLSetCurrentContext(prev);
  		return;
-@@ -506,6 +704,10 @@ static void reportGLErrors(void) {
+ 	}
+ 
+@@ -493,6 +703,11 @@ static void reportGLErrors(void) {
+ 	[_drawableCondition unlock];
+ 
+ 	@synchronized(self) {
++		if (_lastPresentedDrawable) {
++			_lastPresentedDrawable->disown();
++			_lastPresentedDrawable->didDrop();
++			_lastPresentedDrawable = nullptr;
++		}
+ 		// resize the render texture
+ 		if (_tex != 0) {
+ 			reportGLErrors();
+@@ -506,6 +721,10 @@ static void reportGLErrors(void) {
  			glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -15221,7 +15385,7 @@ index b81e2e1..8d7ca14 100644
  			reportGLErrors();
  		}
  	}
-@@ -516,6 +718,10 @@ static void reportGLErrors(void) {
+@@ -516,6 +735,10 @@ static void reportGLErrors(void) {
  - (void)prepareRender
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
@@ -15232,7 +15396,7 @@ index b81e2e1..8d7ca14 100644
  
  	[_drawableCondition lock];
  	if (_queuedDrawableCount > 0) {
-@@ -528,11 +734,62 @@ static void reportGLErrors(void) {
+@@ -528,27 +751,81 @@ static void reportGLErrors(void) {
  	if (drawable) {
  		// wait for the drawable to be fully rendered before copying it to the render texture
  		// (this is a GPU-side wait)
@@ -15240,7 +15404,10 @@ index b81e2e1..8d7ca14 100644
  		drawable->synchronizeRender();
 +		darlingMetalTiming("synchronizeRender", CACurrentMediaTime() - syncStart);
  
-+		reportGLErrors();
+ 		reportGLErrors();
+-		glCopyImageSubData(drawable->texture()->glTexture(), GL_TEXTURE_2D, 0, 0, 0, 0, _tex, GL_TEXTURE_2D, 0, 0, 0, 0, _drawableSize.width, _drawableSize.height, 1);
+-		reportGLErrors();
+-	}
 +		{
 +			// Diagnostic: statistics of the imported Vulkan image itself, before the copy
 +			static unsigned long sourceCounter = 0;
@@ -15257,10 +15424,6 @@ index b81e2e1..8d7ca14 100644
 +				darlingMetalTrace("source-stats", (long) lit, (long) (total / (width * height)));
 +			}
 +		}
- 		reportGLErrors();
- 		glCopyImageSubData(drawable->texture()->glTexture(), GL_TEXTURE_2D, 0, 0, 0, 0, _tex, GL_TEXTURE_2D, 0, 0, 0, 0, _drawableSize.width, _drawableSize.height, 1);
- 		reportGLErrors();
-+
 +		// Diagnostic: every 150th presented frame, log pixel statistics of what is about to be shown
 +		// and save a few of them as /tmp/metal-frame-<n>.ppm.
 +		static unsigned long frameCounter = 0;
@@ -15268,7 +15431,7 @@ index b81e2e1..8d7ca14 100644
 +		if (darlingMetalDebug() && access("/tmp/metal-debug-frames", F_OK) == 0 && (frameCounter <= 30 || frameCounter % 150 == 0) && frameCounter <= 1800) {
 +			size_t width = _drawableSize.width, height = _drawableSize.height;
 +			std::vector<uint8_t> pixels(width * height * 4);
-+			glGetTextureImage(_tex, 0, GL_RGBA, GL_UNSIGNED_BYTE, (GLsizei) pixels.size(), pixels.data());
++			glGetTextureImage(drawable->texture()->glTexture(), 0, GL_RGBA, GL_UNSIGNED_BYTE, (GLsizei) pixels.size(), pixels.data());
 +			unsigned long nonBlack = 0, sum = 0;
 +			for (size_t i = 0; i < pixels.size(); i += 4) {
 +				unsigned v = pixels[i] + pixels[i + 1] + pixels[i + 2];
@@ -15292,10 +15455,41 @@ index b81e2e1..8d7ca14 100644
 +				}
 +			}
 +		}
- 	}
  
- 	@synchronized(self) {
-@@ -575,6 +832,11 @@ static void reportGLErrors(void) {
+-	@synchronized(self) {
+-		// FIXME: this is wrong, but there's no good way to tell when the texture is actually fully rendered/presented.
+-		//        this is at least close enough. it should balance out in the long run since we're supposed to be invoked on vsync
+-		//        or at least a fixed interval.
+-		if (_lastPresentedDrawable) {
+-			_lastPresentedDrawable->didPresent();
++		// CARenderer samples drawable->texture()->glTexture() directly once rotated below.
++		@synchronized(self) {
++			if (_lastPresentedDrawable) {
++				_lastPresentedDrawable->didPresent();
++			}
++			_lastPresentedDrawable = drawable;
+ 		}
+-		_lastPresentedDrawable = drawable;
+ 	}
+ }
+ 
+ - (NSNumber*)_textureId
+ {
+-	return [NSNumber numberWithUnsignedInt: _tex];
++	GLuint tex = _tex;
++	@synchronized(self) {
++		if (_lastPresentedDrawable) {
++			GLuint drawableTex = _lastPresentedDrawable->texture()->glTexture();
++			if (drawableTex != 0) {
++				tex = drawableTex;
++			}
++		}
++	}
++	return [NSNumber numberWithUnsignedInt: tex];
+ }
+ 
+ //
+@@ -575,6 +852,11 @@ static void reportGLErrors(void) {
  {
  	[super _setContext: context];
  
@@ -15307,7 +15501,7 @@ index b81e2e1..8d7ca14 100644
  	if (_tex == 0) {
  		// create our textures now using the context's CGLContext
  		CGLContextObj prev = CGLGetCurrentContext();
-@@ -589,10 +851,15 @@ static void reportGLErrors(void) {
+@@ -589,10 +871,15 @@ static void reportGLErrors(void) {
  		glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -19065,3 +19259,52 @@ index 0000000..f24e230
 +        slot->mappingSize = 0;
 +    }
 +}
+diff --git a/QuartzCore/CAMetalDrawableInternal.h b/QuartzCore/CAMetalDrawableInternal.h
+index 757dd8c9..ad98c3dc 100644
+--- a/QuartzCore/CAMetalDrawableInternal.h
++++ b/QuartzCore/CAMetalDrawableInternal.h
+@@ -27,6 +27,8 @@
+ 
+ #include <indium/indium.private.hpp>
+ 
++#include <atomic>
++
+ @class CAMetalLayerInternal;
+ 
+ class CAMetalDrawableTexture: public Indium::PrivateTexture {
+@@ -36,6 +38,9 @@ class CAMetalDrawableTexture: public Indium::PrivateTexture {
+ 	VkImageView _imageView = VK_NULL_HANDLE;
+ 	GLuint _textureID = 0;
+ 	GLuint _memoryObject = 0;
++	std::shared_ptr<Indium::BinarySemaphore> _persistentPresentationSemaphore;
++	GLuint _persistentGlSemaphore = 0;
++	std::atomic<bool> _persistentSemaphoreInFlight {false};
+ 	Indium::PixelFormat _pixelFormat;
+ 	VkImage _internalImage = VK_NULL_HANDLE;
+ 	VkDeviceMemory _internalMemory = VK_NULL_HANDLE;
+@@ -46,6 +51,9 @@ public:
+ 	virtual ~CAMetalDrawableTexture();
+ 
+ 	GLuint glTexture() const;
++	GLuint persistentGlSemaphore() const;
++	const std::shared_ptr<Indium::BinarySemaphore>& persistentPresentationSemaphore() const;
++	void releasePersistentPresentationSemaphore();
+ 
+ 	virtual VkImageView imageView() override;
+ 	virtual VkImage image() override;
+@@ -67,6 +75,7 @@ public:
+ 
+ 	virtual void precommit(std::shared_ptr<Indium::PrivateCommandBuffer> cmdbuf) override;
+ 	virtual bool needsExportablePresentationSemaphore() const override;
++	virtual std::shared_ptr<Indium::BinarySemaphore> acquirePresentationSemaphore() override;
+ };
+ 
+ class CAMetalDrawableActual: public Indium::Drawable {
+@@ -80,6 +89,7 @@ private:
+ 	NSUInteger _drawableID = NSUIntegerMax;
+ 	CFTimeInterval _presentedTime = 0;
+ 	bool _queued = false;
++	bool _waitedPersistentSemaphore = false;
+ 	CGLContextObj _glContext = nullptr;
+ 
+ public:

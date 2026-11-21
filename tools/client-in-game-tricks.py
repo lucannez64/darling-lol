@@ -4,11 +4,13 @@
 The public launcher switch is RCLOL_CLIENT_IN_GAME_TRICKS=1. It reads
 `lol-user-experience` from LCULocalPreferences.yaml:
 
-- potatoModeEnabled must be true (client optimizations enabled);
-- closeLeagueClientDuringGame true  -> close the client UI while a match runs;
-- closeLeagueClientDuringGame false -> hide the client windows instead;
-- missing or invalid closeLeagueClientDuringGame or potatoModeEnabled -> no action
-  (none).
+- closeLeagueClientDuringGame true -> close the client UI while a match runs
+  (independent of Low Spec Mode, because Riot's backend launches a second CEF
+  instance after a match whenever closeLeagueClientDuringGame is true);
+- closeLeagueClientDuringGame false with potatoModeEnabled true -> hide the
+  client windows instead;
+- missing or invalid closeLeagueClientDuringGame, or closeLeagueClientDuringGame
+  false with potatoModeEnabled false/missing/invalid -> no action (none).
 
 Only the named `lol-user-experience` section is considered, so identical keys
 in another section cannot select a helper. This helper only selects a mode; it
@@ -83,18 +85,18 @@ def read_bool(path, key, section=SECTION):
 
 def mode(path):
     try:
-        optimization = read_bool(path, OPTIMIZATION_KEY)
-    except (OSError, UnicodeError):
-        return 'none'
-    if optimization is not True:
-        return 'none'
-    try:
         close = read_bool(path, CLOSE_KEY)
     except (OSError, UnicodeError):
         return 'none'
     if close is True:
         return 'close'
-    if close is False:
+    if close is not False:
+        return 'none'
+    try:
+        optimization = read_bool(path, OPTIMIZATION_KEY)
+    except (OSError, UnicodeError):
+        return 'none'
+    if optimization is True:
         return 'hide'
     return 'none'
 
