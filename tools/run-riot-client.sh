@@ -458,9 +458,10 @@ fi
 guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
 if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  host_ipc=${XDG_RUNTIME_DIR:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}}
+ discord_found=0
  for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do
   for n in 0 1 2 3 4 5 6 7 8 9; do
-   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; break 2; fi
+   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; discord_found=1; break 2; fi
   done
  done
  # The guest has its own PID namespace, so the PID the client sends with SET_ACTIVITY means
@@ -469,7 +470,8 @@ if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  # ($$ becomes the session supervisor below). RCLOL_DISCORD_PID_RELAY=0 links straight to Discord.
  relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)"
  relayed=''
- if [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then
+ # Without a running Discord there is nothing to relay: keep the direct links for a later start.
+ if [ "$discord_found" = 1 ] && [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then
   relayed=$(python3 "$runner_dir/discord-ipc-relay.py" --host-dir "$host_ipc" \
    --relay-dir "$relay_dir" --watch-pid "$$") || relayed=''
  fi
