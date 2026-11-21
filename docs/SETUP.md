@@ -247,6 +247,15 @@ found when running at launch; otherwise native is assumed. Discord must be
 running on the host. `RCLOL_DISCORD_RPC=0` skips the links and removes ones
 left by an earlier launch.
 
+The guest runs in its own PID namespace, so the process ID a client sends with
+its activity is unknown to the host Discord, which then shows no status. While
+Discord is running at launch, the slots it serves are linked to a small host
+relay (`tools/discord-ipc-relay.py`, sockets in
+`$XDG_RUNTIME_DIR/darling-lol-discord-<uid>`) that forwards every frame
+unchanged except the `pid` argument of `SET_ACTIVITY`, replaced with the
+client's host PID. It logs nothing and exits with the session.
+`RCLOL_DISCORD_PID_RELAY=0` links straight to the Discord sockets instead.
+
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
 GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),

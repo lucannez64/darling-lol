@@ -463,8 +463,20 @@ if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
    if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; break 2; fi
   done
  done
+ # The guest has its own PID namespace, so the PID the client sends with SET_ACTIVITY means
+ # nothing to the host Discord, which then shows no activity (#286). The relay forwards the
+ # slots it prints and swaps that PID for the client's host PID; it exits with this session
+ # ($$ becomes the session supervisor below). RCLOL_DISCORD_PID_RELAY=0 links straight to Discord.
+ relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)"
+ relayed=''
+ if [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then
+  relayed=$(python3 "$runner_dir/discord-ipc-relay.py" --host-dir "$host_ipc" \
+   --relay-dir "$relay_dir" --watch-pid "$$") || relayed=''
+ fi
  (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
-  ln -sfn "/Volumes/SystemRoot$host_ipc/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
+  target=$host_ipc
+  case " $relayed " in *" $n "*) target=$relay_dir ;; esac
+  ln -sfn "/Volumes/SystemRoot$target/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
  done) || echo 'discord-rpc: could not link the Discord IPC sockets; continuing without them' >&2
 else
  # Only links this launcher made: they point through /Volumes/SystemRoot. The guest searches

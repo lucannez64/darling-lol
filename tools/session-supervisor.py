@@ -97,6 +97,7 @@ STOP_REQUESTED = 'stop-requested'
 STOP_QUEUED = 'stop-queued'
 LAUNCHER_HELPERS = frozenset((
     'close-league-client-in-game.py',
+    'discord-ipc-relay.py',
     'hide-league-client-in-game.py',
     'hide-league-splash-window.py',
 ))
