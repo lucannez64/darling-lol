@@ -468,7 +468,8 @@ if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  # nothing to the host Discord, which then shows no activity (#286). The relay forwards the
  # slots it prints and swaps that PID for the client's host PID; it exits with this session
  # ($$ becomes the session supervisor below). RCLOL_DISCORD_PID_RELAY=0 links straight to Discord.
- relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)"
+ # One directory per session: a relay leaves with its own session, so it is never shared.
+ relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)/$$"
  relayed=''
  # Without a running Discord there is nothing to relay: keep the direct links for a later start.
  if [ "$discord_found" = 1 ] && [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then

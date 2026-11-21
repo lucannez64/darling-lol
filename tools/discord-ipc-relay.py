@@ -126,21 +126,21 @@ def host_sockets(host_dir):
 
 
 def bind_relays(relay_dir, slots):
+    """Bind one socket per slot in this session's own directory.
+
+    Each session gets its own directory (the launcher passes one per
+    supervisor PID) and never reuses another session's relay, which exits
+    with that session. A leftover socket is from a dead session whose PID was
+    reused, so it is replaced.
+    """
+    parent = os.path.dirname(relay_dir.rstrip('/'))
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    os.chmod(parent, 0o700)
     os.makedirs(relay_dir, mode=0o700, exist_ok=True)
     os.chmod(relay_dir, 0o700)
     listeners = {}
     for n in slots:
         path = os.path.join(relay_dir, f'discord-ipc-{n}')
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            probe.connect(path)
-        except OSError:
-            pass
-        else:
-            # Another session's relay already serves this slot.
-            probe.close()
-            continue
-        probe.close()
         try:
             os.unlink(path)
         except FileNotFoundError:
@@ -163,7 +163,7 @@ def process_alive(pid):
     return True
 
 
-def serve(listeners, host_paths, watch_pid, poll=1.0):
+def serve(listeners, host_paths, watch_pid, relay_dir, poll=1.0):
     selector = selectors.DefaultSelector()
     for n, (listener, _path) in listeners.items():
         selector.register(listener, selectors.EVENT_READ, n)
@@ -184,6 +184,10 @@ def serve(listeners, host_paths, watch_pid, poll=1.0):
                 os.unlink(path)
             except OSError:
                 pass
+        try:
+            os.rmdir(relay_dir)
+        except OSError:
+            pass
 
 
 def main(argv=None):
@@ -204,11 +208,9 @@ def main(argv=None):
     except OSError as error:
         print(f'discord-rpc: cannot create the relay sockets: {error}', file=sys.stderr)
         return 1
-    # Print the relayed slots (ours or a live relay's), then detach: the
-    # launcher links only those to the relay directory.
-    print(' '.join(str(n) for n in sorted(host_paths)), flush=True)
-    if not listeners:
-        return 0
+    # Print the relayed slots, then detach: the launcher links only those to
+    # the relay directory.
+    print(' '.join(str(n) for n in sorted(listeners)), flush=True)
     if not args.foreground:
         if os.fork():
             os._exit(0)
@@ -220,7 +222,7 @@ def main(argv=None):
         os.close(devnull)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    serve(listeners, host_paths, args.watch_pid)
+    serve(listeners, host_paths, args.watch_pid, args.relay_dir)
     return 0
 
 

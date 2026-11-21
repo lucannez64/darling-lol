@@ -251,7 +251,7 @@ The guest runs in its own PID namespace, so the process ID a client sends with
 its activity is unknown to the host Discord, which then shows no status. While
 Discord is running at launch, the slots it serves are linked to a small host
 relay (`tools/discord-ipc-relay.py`, sockets in
-`$XDG_RUNTIME_DIR/darling-lol-discord-<uid>`) that forwards every frame
+`$XDG_RUNTIME_DIR/darling-lol-discord-<uid>/<session>`, one per session) that forwards every frame
 unchanged except the `pid` argument of `SET_ACTIVITY`, replaced with the
 client's host PID. It logs nothing and exits with the session.
 `RCLOL_DISCORD_PID_RELAY=0` links straight to the Discord sockets instead.

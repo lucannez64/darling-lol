@@ -60,7 +60,7 @@ class RelayProcessTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix='discord relay ')
         self.addCleanup(tmp.cleanup)
         self.host_dir = Path(tmp.name) / 'host'
-        self.relay_dir = Path(tmp.name) / 'relay'
+        self.relay_dir = Path(tmp.name) / 'relay' / '4242'
         self.host_dir.mkdir()
         self.discord = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(self.discord.close)
@@ -81,6 +81,7 @@ class RelayProcessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), '0')
         self.assertEqual(os.stat(self.relay_dir).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(self.relay_dir.parent).st_mode & 0o777, 0o700)
 
         guest = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(guest.close)
@@ -111,6 +112,27 @@ class RelayProcessTests(unittest.TestCase):
         while (self.relay_dir / 'discord-ipc-0').exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertFalse((self.relay_dir / 'discord-ipc-0').exists())
+        while self.relay_dir.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(self.relay_dir.exists())
+
+    def test_a_stale_socket_from_a_dead_session_is_replaced(self):
+        self.relay_dir.mkdir(parents=True)
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(self.relay_dir / 'discord-ipc-0'))
+        stale.close()
+        sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        result = self.start_relay(sleeper.pid)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '0')
+        guest = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(guest.close)
+        guest.connect(str(self.relay_dir / 'discord-ipc-0'))
+        self.discord.settimeout(10)
+        server, _ = self.discord.accept()
+        server.close()
 
     def test_no_discord_socket_means_no_relay(self):
         self.discord.close()
@@ -128,6 +150,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('--watch-pid "$$"', text)
         self.assertIn('RCLOL_DISCORD_PID_RELAY', text)
         self.assertIn('target=$relay_dir', text)
+        self.assertIn('darling-lol-discord-$(id -u)/$$"', text)
+        self.assertIn('"$discord_found" = 1', text)
 
 
 if __name__ == '__main__':
