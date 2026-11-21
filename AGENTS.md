@@ -178,6 +178,20 @@ guest probes; do not run the guest probes on your own.
 - Add or update a test for every behavior change; run the closest test file
   first, then the full suite when practical.
 
+## Skills
+
+Project skills carry procedures too long for this index. Every harness gets
+the same text, and `tests/test_agent_skills.py` keeps the copies identical.
+
+- `.opencode/skills/open-pr/SKILL.md` (canonical) and
+  `.claude/skills/open-pr/SKILL.md`: branch, commit and open a pull request.
+- `.opencode/skills/codereview/SKILL.md` (canonical) and
+  `.claude/skills/codereview/SKILL.md`: plan and resolve pull request review
+  comments.
+
+Harnesses without project-skill discovery (Codex, Gemini CLI, Copilot) read the
+canonical copy of the skill they need.
+
 ## Definition of done
 
 - [ ] Focused diff with tests.
