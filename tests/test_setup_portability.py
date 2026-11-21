@@ -172,6 +172,72 @@ exec REAL_INSTALL "$@"'''.replace('REAL_INSTALL', shutil.which('install')))
         self.assertFalse(target.is_symlink())
 
 
+    def test_configure_leaves_unchanged_runtime_sources_in_place(self):
+        self.configure()
+        folder = self.root / 'build/runtime/tools'
+        before = {path.name: (path.stat().st_ino, path.stat().st_mtime_ns)
+                  for path in folder.iterdir() if path.is_file()}
+        config = (self.root / 'build/config.json').stat()
+        self.configure()
+        after = {path.name: (path.stat().st_ino, path.stat().st_mtime_ns)
+                 for path in folder.iterdir() if path.is_file()}
+        self.assertEqual(after, before, 'configure rewrote runtime sources whose content and mode matched')
+        again = (self.root / 'build/config.json').stat()
+        self.assertEqual((again.st_ino, again.st_mtime_ns), (config.st_ino, config.st_mtime_ns))
+        self.assertFalse([path.name for path in folder.iterdir() if path.name.endswith('.tmp')])
+
+    def test_configure_replaces_changed_runtime_source_without_a_missing_window(self):
+        self.configure()
+        source = self.root / 'tools/run-riot-client.sh'
+        source.write_text(source.read_text() + '# fixture change\n')
+        report = Path(self.tmp.name) / 'publish report.json'
+        observer = Path(self.tmp.name) / 'observe configure.py'
+        # Record every unlink and rename configure.py performs, and whether the destination
+        # still existed at the moment of the rename: a reader must never see it missing.
+        observer.write_text('''import json, os, runpy, sys
+calls = []
+real_replace, real_unlink = os.replace, os.unlink
+def replace(src, dst, *args, **kwargs):
+    calls.append(['replace', os.fspath(dst), os.path.lexists(dst)])
+    return real_replace(src, dst, *args, **kwargs)
+def unlink(path, *args, **kwargs):
+    calls.append(['unlink', os.fspath(path), None])
+    return real_unlink(path, *args, **kwargs)
+os.replace, os.unlink = replace, unlink
+script = sys.argv[1]
+sys.argv = [script]
+sys.path.insert(0, os.path.dirname(script))
+try:
+    runpy.run_path(script, run_name='__main__')
+finally:
+    with open(os.environ['PUBLISH_REPORT'], 'w') as handle:
+        json.dump(calls, handle)
+''')
+        result = subprocess.run([sys.executable, str(observer), str(self.root / 'scripts/configure.py')],
+                                env=dict(self.env, PUBLISH_REPORT=str(report)),
+                                text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(report.read_text())
+        generated = str(self.root / 'build/runtime/tools/run-riot-client.sh')
+        self.assertNotIn(['unlink', generated, None], calls, 'the generated launcher was unlinked before rewrite')
+        self.assertIn(['replace', generated, True], calls)
+        published = [name for kind, name, _ in calls if kind == 'replace']
+        self.assertEqual(published, [generated], 'only the changed runtime source is republished')
+        self.assertIn('# fixture change', Path(generated).read_text())
+
+    def test_configure_replaces_live_symlink_without_writing_its_target(self):
+        self.configure()
+        target = self.root / 'build/runtime/tools/run-riot-client.sh'
+        victim = self.home / 'existing victim'
+        victim.write_text('untouched\n')
+        target.unlink()
+        target.symlink_to(victim)
+        self.configure()
+        self.assertEqual(victim.read_text(), 'untouched\n')
+        self.assertFalse(target.is_symlink())
+        self.assertIn('--region=', target.read_text())
+
+
     def write_config(self, **changes):
         (self.root / 'build/config.json').write_text(json.dumps(dict(self.config, **changes)))
 
