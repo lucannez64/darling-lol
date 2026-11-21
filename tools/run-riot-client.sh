@@ -458,13 +458,28 @@ fi
 guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
 if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  host_ipc=${XDG_RUNTIME_DIR:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}}
+ discord_found=0
  for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do
   for n in 0 1 2 3 4 5 6 7 8 9; do
-   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; break 2; fi
+   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; discord_found=1; break 2; fi
   done
  done
+ # The guest has its own PID namespace, so the PID the client sends with SET_ACTIVITY means
+ # nothing to the host Discord, which then shows no activity (#286). The relay forwards the
+ # slots it prints and swaps that PID for the client's host PID; it exits with this session
+ # ($$ becomes the session supervisor below). RCLOL_DISCORD_PID_RELAY=0 links straight to Discord.
+ # One directory per session: a relay leaves with its own session, so it is never shared.
+ relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)/$$"
+ relayed=''
+ # Without a running Discord there is nothing to relay: keep the direct links for a later start.
+ if [ "$discord_found" = 1 ] && [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then
+  relayed=$(python3 "$runner_dir/discord-ipc-relay.py" --host-dir "$host_ipc" \
+   --relay-dir "$relay_dir" --watch-pid "$$") || relayed=''
+ fi
  (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
-  ln -sfn "/Volumes/SystemRoot$host_ipc/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
+  target=$host_ipc
+  case " $relayed " in *" $n "*) target=$relay_dir ;; esac
+  ln -sfn "/Volumes/SystemRoot$target/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
  done) || echo 'discord-rpc: could not link the Discord IPC sockets; continuing without them' >&2
 else
  # Only links this launcher made: they point through /Volumes/SystemRoot. The guest searches
