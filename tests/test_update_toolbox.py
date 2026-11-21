@@ -1,5 +1,6 @@
 """Exercise updater re-exec and step handling in a disposable checkout."""
 import os
+import pty
 import shutil
 import subprocess
 import tempfile
@@ -92,6 +93,33 @@ class UpdateToolboxTests(unittest.TestCase):
             input=input_text,
         )
 
+    def run_update_in_terminal(self, answer, *args, **overrides):
+        """Run the updater with a pseudo-terminal on stdin, as a user would."""
+        env = dict(self.env)
+        env.update(overrides)
+        master, slave = pty.openpty()
+        try:
+            proc = subprocess.Popen(
+                [SH, str(self.repo / 'scripts' / 'update.sh'), *args],
+                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env,
+            )
+            os.close(slave)
+            slave = -1
+            os.write(master, answer.encode())
+            try:
+                stdout, stderr = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                raise
+        finally:
+            os.close(master)
+            if slave != -1:
+                os.close(slave)
+        return subprocess.CompletedProcess(proc.args, proc.returncode,
+                                           stdout, stderr)
+
     def argv_lines(self):
         if not self.log.exists():
             return []
@@ -172,7 +200,7 @@ class UpdateToolboxTests(unittest.TestCase):
 
     def test_container_unreachable_prompts_and_starts_it_by_default(self):
         self.write_marker('gone')
-        result = self.run_update(input_text='\n', FAKE_TOOLBOX_STOPPED='1')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('is not reachable', result.stdout)
         self.assertIn('[Y/n]', result.stdout)
@@ -182,9 +210,19 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertEqual(
             sum(1 for line in self.argv_lines() if line.endswith(' true')), 2)
 
+    def test_nonterminal_input_keeps_the_default(self):
+        self.write_marker('gone')
+        # A pipe is not a terminal, so a piped answer is ignored and the
+        # default (start the container) applies instead of blocking or
+        # declining.
+        result = self.run_update(input_text='n\n', FAKE_TOOLBOX_STOPPED='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Starting Toolbox container 'gone'", result.stdout)
+        self.assert_reexec_into('gone')
+
     def test_container_unreachable_declined_exits_1_with_hint(self):
         self.write_marker('gone')
-        result = self.run_update(input_text='n\n', FAKE_TOOLBOX_STOPPED='1')
+        result = self.run_update_in_terminal('n\n', FAKE_TOOLBOX_STOPPED='1')
         self.assertEqual(result.returncode, 1)
         self.assertIn('that container is not', result.stderr)
         self.assertIn('toolbox enter gone', result.stderr)

@@ -379,7 +379,11 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			printf '\n%s%s%s Toolbox container %s is not reachable. Start it and continue the update? [Y/n] ' \
 				"$YELLOW" "$ICON_WARN" "$RESET" "'$name'"
 			reply=''
-			read -r reply || reply=''
+			# Only a terminal can answer. Pipes and a closed stdin keep the
+			# default, so a non-interactive update never blocks here.
+			if [ -t 0 ]; then
+				read -r reply || reply=''
+			fi
 			case "$reply" in
 			n | N | no | No | NO)
 				error "This checkout was installed via Toolbox container '$name', but that container is not"
