@@ -198,7 +198,9 @@
         "src/PlatformIdentity.h",
         "src/IOGraphicsAccelerator.h",
         "src/IOGraphicsAccelerator.mm",
-        "src/IOGraphicsAcceleratorIds.h"
+        "src/IOGraphicsAcceleratorIds.h",
+        "src/IOEthernetInterface.h",
+        "src/IOEthernetInterface.mm"
       ]
     },
     {

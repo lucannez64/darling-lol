@@ -68,6 +68,9 @@ python3 build/runtime/tools/install-darling-system-profiler.py
 python3 tools/build-riot-electron43-frameworks.py --install
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
 python3 build/runtime/tools/validate-riot-runtime.py
+# Mirror per-user overlays to canonical prefix paths (/System/Library/Frameworks,
+# /usr/lib) so the launcher can run without DYLD_LIBRARY_PATH/DYLD_FRAMEWORK_PATH.
+python3 "$repo/tools/sync-canonical-runtime-overlays.py" --prefix "$prefix_dir" --guest-home "$guest_home"
 # Sign the installed runtime and populate the local trust store. The base SDK
 # is signed only when this process can actually write it; the per-user
 # RuntimeLibraries/RuntimeFrameworks overlays are always signed.
