@@ -1,0 +1,29 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 55144f764..4fb7a278d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -52,11 +52,23 @@ set(cxx_sources
+ add_darling_object_library(cxx_obj ${cxx_sources})
+ make_fat(cxx_obj)
+ 
++# std::filesystem (the std::__1::__fs::filesystem exports of Apple's
++# libc++.1.dylib). Guest libraries such as libVoicemodUSDK.dylib bind these
++# and fail to load with RTLD_NOW when they are missing. The shared library
++# only: dyld links cxx_static and does not need them.
++set(cxx_fs_sources
++	src/filesystem/operations.cpp
++	src/filesystem/directory_iterator.cpp
++)
++add_darling_object_library(cxx_fs_obj ${cxx_fs_sources})
++make_fat(cxx_fs_obj)
++target_compile_options(cxx_fs_obj PRIVATE -std=c++17)
++
+ set(DYLIB_INSTALL_NAME "/usr/lib/libc++.1.dylib")
+ set(DYLIB_COMPAT_VERSION "1.0.0")
+ set(DYLIB_CURRENT_VERSION "1.0.0")
+ 
+-add_darling_library(cxx SHARED $<TARGET_OBJECTS:cxx_obj>)
++add_darling_library(cxx SHARED $<TARGET_OBJECTS:cxx_obj> $<TARGET_OBJECTS:cxx_fs_obj>)
+ make_fat(cxx)
+ target_link_libraries(cxx PRIVATE system cxxabi)
+ set_target_properties(cxx PROPERTIES OUTPUT_NAME "c++.1")
