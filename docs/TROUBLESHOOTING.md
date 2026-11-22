@@ -929,6 +929,14 @@ XAUTHORITY=$(ls /var/run/sddm/* | head -1) DISPLAY=:0 EGL_PLATFORM=x11 darling s
 
 `bash tools/env-check.sh` now probes the display with `xdpyinfo` in the environment Darling inherits, tries the `:0` fallback that `iokitd` uses, and warns only when both fail. That check is advisory: without X11/EGL the runtime still boots, but the game cannot render.
 
+## Push-to-talk does nothing
+
+Riot's voice chat reads the push-to-talk key through a macOS session event tap, which sees keys and mouse buttons whatever window is in front ([#285](https://github.com/lucannez64/darling-lol/issues/285)). Under Darling each process that creates a tap starts one thread that reads XInput2 raw key and button events from the X server, so the key works while the game window has focus. It needs `libXi` on the host (`scripts/install-native.sh` installs it) and an X11 display. If either is missing, the Riot Client output shows `CGEventTap: global input unavailable (…)` once, and push-to-talk stays off; voice activation still works.
+
+Under XWayland, X11 programs only receive input while an X11 window has focus. Push-to-talk therefore works while the game or a client window is in front, but not while a native Wayland window has focus. That includes the game itself when it runs with `RCLOL_WAYLAND=1` or `RCLOL_WAYLAND=game`.
+
+The client log line `Push-to-talk registration failed, process is not trusted` comes from an older runtime: run `scripts/update.sh`.
+
 ## Blocky video or flickering startup logo
 
 The first dynamically resolved GL call could lose floating-point arguments during ELF symbol lookup. Chromium's linear sampler request then failed and left nearest sampling. The generated resolver now preserves those registers. Install both the rebuilt native `libGL.dylib` in `RuntimeLibraries` and the OpenGL framework's library copy using the paired runtime installer; the framework alone is insufficient.
