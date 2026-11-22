@@ -180,17 +180,15 @@ guest probes; do not run the guest probes on your own.
 
 ## Skills
 
-Project skills carry procedures too long for this index. Every harness gets
-the same text, and `tests/test_agent_skills.py` keeps the copies identical.
+Project skills carry procedures too long for this index. They live in
+`docs/skills/` as a single opt-in copy: harnesses do not load that directory
+automatically, so a contributor points their agent at the file or symlinks it
+into the harness's skill directory. `tests/test_agent_skills.py` checks the
+layout and frontmatter.
 
-- `.opencode/skills/open-pr/SKILL.md` (canonical) and
-  `.claude/skills/open-pr/SKILL.md`: branch, commit and open a pull request.
-- `.opencode/skills/codereview/SKILL.md` (canonical) and
-  `.claude/skills/codereview/SKILL.md`: plan and resolve pull request review
+- `docs/skills/open-pr/SKILL.md`: branch, commit and open a pull request.
+- `docs/skills/codereview/SKILL.md`: plan and resolve pull request review
   comments.
-
-Harnesses without project-skill discovery (Codex, Gemini CLI, Copilot) read the
-canonical copy of the skill they need.
 
 ## Definition of done
 

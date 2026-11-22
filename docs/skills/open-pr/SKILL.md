@@ -7,7 +7,7 @@ description: "Use when a contributor wants to turn local changes into a pull req
 
 Takes local changes to an open pull request that follows `CONTRIBUTING.md` and `AGENTS.md`. Read both first if they were not read in this session; their rules win over this file. Commit messages and PR text are in English.
 
-Each harness keeps its own copy and `tests/test_agent_skills.py` requires them to be identical: edit `.opencode/skills/open-pr/SKILL.md` and copy it over `.claude/skills/open-pr/SKILL.md`.
+This is the single copy, kept in `docs/skills/` so harnesses do not load it automatically. A contributor opts in by pointing their agent at this file or symlinking it into the harness's skill directory. `tests/test_agent_skills.py` checks the layout and frontmatter.
 
 ## Remotes
 

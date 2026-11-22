@@ -1,9 +1,10 @@
-"""Project skills: harness layout, frontmatter and identical copies."""
+"""Project skills: opt-in layout, frontmatter and entrypoint."""
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_DIRS = ('.opencode/skills', '.claude/skills')
+SKILL_DIR = 'docs/skills'
+AUTOLOAD_DIRS = ('.opencode/skills', '.claude/skills')
 ENTRYPOINT = 'AGENTS.md'
 
 
@@ -70,38 +71,33 @@ def frontmatter(text):
 
 
 class SkillLayoutTests(unittest.TestCase):
-    def test_every_harness_ships_the_same_skills(self):
-        reference = skill_names(SKILL_DIRS[0])
-        self.assertTrue(reference, 'no project skills found')
-        for directory in SKILL_DIRS[1:]:
-            with self.subTest(directory=directory):
-                self.assertEqual(skill_names(directory), reference)
-
-    def test_copies_are_identical(self):
-        for directory in SKILL_DIRS[1:]:
-            for name in sorted(skill_names(SKILL_DIRS[0])):
-                with self.subTest(skill=name, directory=directory):
-                    canonical = ROOT / SKILL_DIRS[0] / name / 'SKILL.md'
-                    copy = ROOT / directory / name / 'SKILL.md'
-                    self.assertEqual(copy.read_bytes(), canonical.read_bytes(),
-                                     f'{copy} drifted from {canonical}')
+    def test_skills_are_opt_in(self):
+        names = skill_names(SKILL_DIR)
+        self.assertTrue(names, 'no project skills found')
+        for directory in AUTOLOAD_DIRS:
+            for name in sorted(names):
+                with self.subTest(directory=directory, skill=name):
+                    path = ROOT / directory / name / 'SKILL.md'
+                    self.assertFalse(
+                        path.exists(),
+                        f'{path.relative_to(ROOT)} would autoload; keep the '
+                        f'single copy in {SKILL_DIR}')
 
     def test_frontmatter_names_the_directory(self):
-        for directory in SKILL_DIRS:
-            for path in skill_paths(directory):
-                with self.subTest(path=str(path.relative_to(ROOT))):
-                    fields = frontmatter(path.read_text(encoding='utf-8'))
-                    self.assertIsNotNone(fields, f'{path} has malformed frontmatter')
-                    self.assertEqual(fields['name'].strip('"\''), path.parent.name)
-                    description = fields['description'].strip('"\'')
-                    self.assertTrue(description, f'{path} has an empty description')
-                    self.assertLessEqual(len(description), 1024)
+        for path in skill_paths(SKILL_DIR):
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                fields = frontmatter(path.read_text(encoding='utf-8'))
+                self.assertIsNotNone(fields, f'{path} has malformed frontmatter')
+                self.assertEqual(fields['name'].strip('"\''), path.parent.name)
+                description = fields['description'].strip('"\'')
+                self.assertTrue(description, f'{path} has an empty description')
+                self.assertLessEqual(len(description), 1024)
 
-    def test_entrypoint_points_at_every_canonical_copy(self):
+    def test_entrypoint_points_at_every_skill(self):
         guide = (ROOT / ENTRYPOINT).read_text(encoding='utf-8')
-        for name in sorted(skill_names(SKILL_DIRS[0])):
+        for name in sorted(skill_names(SKILL_DIR)):
             with self.subTest(skill=name):
-                self.assertIn(f'{SKILL_DIRS[0]}/{name}/SKILL.md', guide)
+                self.assertIn(f'{SKILL_DIR}/{name}/SKILL.md', guide)
 
 
 class FrontmatterTests(unittest.TestCase):
