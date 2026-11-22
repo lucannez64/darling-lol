@@ -1935,7 +1935,7 @@ new file mode 100644
 index 0000000..1b8d54e
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,971 @@
+@@ -0,0 +1,1150 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2195,9 +2195,10 @@ index 0000000..1b8d54e
 +// with hw.cacheconfig, hw.cachesize and leaf 1 whatever the host's core count.
 +// A leaf above the identity's maximum basic or extended leaf returns the
 +// highest basic leaf, as Intel parts do, instead of the host's own AMD leaves
-+// (0x8000001d/0x8000001e topology and the like). The hypervisor range
-+// (0x40000000..0x4fffffff) and the feature leaves (7, 0xd) pass through, so
-+// capability detection still sees what this CPU really supports.
++// (0x8000001d/0x8000001e topology and the like). Leaf 7 is masked to the
++// compatibility profile's Coffee Lake feature set so newer host extensions
++// (AVX-512, SHA, etc.) do not contradict the profile; the hypervisor range
++// (0x40000000..0x4fffffff) and XSAVE leaf (0xd) pass through.
 +//
 +// The identity itself lives in one table shared with the sysctls
 +// (common/cpu_identity.h, src/common/cpu_identity.c). The brand string there is
@@ -2365,6 +2366,22 @@ index 0000000..1b8d54e
 +	case 0x00000004u:
 +		rclol_cache_leaf(id, subleaf, eax, ebx, ecx, edx);
 +		break;
++	case 0x00000007u:
++		/* Structured extended features: Coffee Lake-H has only subleaf 0.
++		 * Mask host EBX to Coffee Lake's feature set so AVX-512/SHA on newer
++		 * hosts do not contradict the i7-9750H identity, while never offering
++		 * an instruction the host lacks. */
++		*eax = 0;
++		if (subleaf == 0u) {
++			*ebx &= 0x029c6fbfu;
++			*ecx = 0;
++			*edx = 0;
++		} else {
++			*ebx = 0;
++			*ecx = 0;
++			*edx = 0;
++		}
++		break;
 +	case 0x0000000bu: {
 +		/* Extended topology: SMT level, then core level, then invalid levels.
 +		 * EDX is the x2APIC ID of the CPU, folded like leaf 1's. */
@@ -2502,7 +2519,7 @@ index 0000000..1b8d54e
 +				"cpuid t=%llu tid=%ld site=0x%lx off=0x%lx in[eax=0x%x ecx=0x%x] "
 +				"out[eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x] n=%lu\n",
 +				rclol_monotonic_ns(), rclol_gettid(), cookie,
-+				cookie - RCLOL_IMAGE_TEXT_BASE, in_eax, in_ecx,
++				cookie >= RCLOL_IMAGE_TEXT_BASE ? cookie - RCLOL_IMAGE_TEXT_BASE : cookie, in_eax, in_ecx,
 +				oa, ob, oc, od, n);
 +			rclol_write_str(line);
 +		} else if (n == RCLOL_LOG_FIRST_N) {
@@ -2659,6 +2676,57 @@ index 0000000..1b8d54e
 +	return rclol_arm_group1_scan(text_start, text_end, slide);
 +}
 +
++// Scan mvg.framework's __TEXT,__text for cpuinfo's two generic cpuid/cpuidex
++// helpers and arm hardware execute breakpoints on their cpuid instructions.
++// Both helpers bracket cpuid (0f a2) at +12 with xchg rbx, rsi (48 87 f3).
++static int rclol_arm_mvg_cpuinfo(const void* base, unsigned long slide)
++{
++	static const unsigned char pat_cpuid[17] = {
++		0x48, 0x89, 0xe5, 0x89, 0x7d, 0xec, 0x8b, 0x45,
++		0xec, 0x48, 0x87, 0xf3, 0x0f, 0xa2, 0x48, 0x87, 0xf3
++	};
++	static const unsigned char pat_cpuidex[17] = {
++		0x89, 0x75, 0xe8, 0x8b, 0x45, 0xec, 0x8b, 0x4d,
++		0xe8, 0x48, 0x87, 0xf3, 0x0f, 0xa2, 0x48, 0x87, 0xf3
++	};
++	unsigned long text_start = 0, text_end = 0;
++	if (!rclol_find_text_section(base, slide, &text_start, &text_end))
++		return 0;
++	if (text_end <= text_start || text_end - text_start < 17UL)
++		return 0;
++
++	const unsigned char* scan_start = (const unsigned char*) text_start;
++	const unsigned char* scan_end = (const unsigned char*) (text_end - 17UL);
++	int armed = 0;
++	int found_cpuid = 0;
++	int found_cpuidex = 0;
++
++	for (const unsigned char* p = scan_start; p <= scan_end; ++p) {
++		if (p[12] != 0x0f || p[13] != 0xa2 || p[14] != 0x48 || p[15] != 0x87 || p[16] != 0xf3)
++			continue;
++		int match_cpuid = !found_cpuid;
++		int match_cpuidex = !found_cpuidex;
++		for (int i = 0; i < 12 && (match_cpuid || match_cpuidex); ++i) {
++			if (match_cpuid && p[i] != pat_cpuid[i])
++				match_cpuid = 0;
++			if (match_cpuidex && p[i] != pat_cpuidex[i])
++				match_cpuidex = 0;
++		}
++		if (match_cpuid || match_cpuidex) {
++			unsigned long site_rt = (unsigned long) (p + 12);
++			if (rclol_cpuid_trace_arm(site_rt, site_rt - slide) >= 0)
++				++armed;
++			if (match_cpuid)
++				found_cpuid = 1;
++			if (match_cpuidex)
++				found_cpuidex = 1;
++			if (found_cpuid && found_cpuidex)
++				break;
++		}
++	}
++	return armed;
++}
++
 +static void rclol_log_uuid(const void* base)
 +{
 +	// mach_header_64: magic,cputype,cpusubtype,filetype,ncmds,sizeofcmds,flags,reserved
@@ -2763,6 +2831,90 @@ index 0000000..1b8d54e
 +	return best;
 +}
 +
++static bool rclol_ends_with_suffix(const char* p, unsigned long len, const char* suffix, unsigned long slen)
++{
++	if (!p || len < slen)
++		return false;
++	const char* tail = p + (len - slen);
++	for (unsigned long i = 0; i < slen; ++i)
++		if (tail[i] != suffix[i])
++			return false;
++	return true;
++}
++
++static bool rclol_ends_with_mvg(const char* p, unsigned long len)
++{
++	static const char s1[] = "mvg.framework/mvg";
++	static const char s2[] = "mvg.framework/Versions/A/mvg";
++	return rclol_ends_with_suffix(p, len, s1, sizeof(s1) - 1) ||
++	       rclol_ends_with_suffix(p, len, s2, sizeof(s2) - 1);
++}
++
++// Find a mapped mvg.framework dylib in /proc/self/maps and return its lowest
++// readable Mach-O 64-bit header address (slide == base since dylib __TEXT
++// vmaddr is 0). Returns 0 if mvg.framework is not mapped in this process.
++static unsigned long rclol_find_mvg_base(void)
++{
++	long fd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) "/proc/self/maps", 0 /*O_RDONLY*/, 0, 0, 0);
++	if (fd < 0)
++		return 0;
++
++	unsigned long best = 0;
++	char buf[4096];
++	char line[512];
++	unsigned int ll = 0;
++	long got;
++	while ((got = rclol_sys(__NR_read, fd, (long) buf, (long) sizeof(buf), 0, 0, 0)) > 0) {
++		for (long i = 0; i < got; ++i) {
++			char ch = buf[i];
++			if (ch != '\n') {
++				if (ll < sizeof(line) - 1)
++					line[ll++] = ch;
++				continue;
++			}
++			line[ll] = '\0';
++			unsigned long start = 0, end = 0;
++			unsigned int j = 0;
++			for (; j < ll; ++j) {
++				char hc = line[j];
++				unsigned d;
++				if (hc >= '0' && hc <= '9') d = (unsigned) (hc - '0');
++				else if (hc >= 'a' && hc <= 'f') d = (unsigned) (hc - 'a' + 10);
++				else if (hc >= 'A' && hc <= 'F') d = (unsigned) (hc - 'A' + 10);
++				else break;
++				start = start * 16 + d;
++			}
++			if (j < ll && line[j] == '-') {
++				++j;
++				for (; j < ll; ++j) {
++					char hc = line[j];
++					unsigned d;
++					if (hc >= '0' && hc <= '9') d = (unsigned) (hc - '0');
++					else if (hc >= 'a' && hc <= 'f') d = (unsigned) (hc - 'a' + 10);
++					else if (hc >= 'A' && hc <= 'F') d = (unsigned) (hc - 'A' + 10);
++					else break;
++					end = end * 16 + d;
++				}
++			}
++			int readable = (j + 1 < ll && line[j] == ' ' && line[j + 1] == 'r');
++			const char* path = NULL;
++			unsigned long path_len = 0;
++			for (; j < ll; ++j) {
++				if (line[j] == '/') { path = &line[j]; path_len = ll - j; break; }
++			}
++			if (readable && end > start && end - start >= 32UL &&
++			    path && rclol_ends_with_mvg(path, path_len) &&
++			    *(const uint32_t*) start == 0xfeedfacfU /* MH_MAGIC_64 */) {
++				if (best == 0 || start < best)
++					best = start;
++			}
++			ll = 0;
++		}
++	}
++	rclol_sys(__NR_close, fd, 0, 0, 0, 0, 0);
++	return best;
++}
++
 +// Read a leading 0x.. / decimal number from *s, advancing *s. Returns value.
 +static unsigned long rclol_parse_num(const char** s)
 +{
@@ -2836,10 +2988,37 @@ index 0000000..1b8d54e
 +		contents[got] = '\0';
 +	}
 +
-+	// Only the League game process has sites to arm.
++	// Arm LeagueofLegends when present; otherwise arm mvg.framework in
++	// client processes so its cpuinfo helper sees the same compat CPU identity.
 +	unsigned long base = rclol_find_league_base();
-+	if (base == 0)
++	if (base == 0) {
++		unsigned long mvg_base = rclol_find_mvg_base();
++		if (mvg_base == 0)
++			return;
++		rclol_log_uuid((const void*) mvg_base);
++		{
++			char line[160];
++			__simple_snprintf(line, sizeof(line),
++				"cpuid-trace: setup mvg pid=%ld base=0x%lx flag=\"%s\"\n",
++				rclol_sys(__NR_getpid, 0, 0, 0, 0, 0, 0), mvg_base, contents);
++			rclol_write_str(line);
++		}
++		{
++			const char* fake = rclol_flag_value(contents, "fake=");
++			if (fake && (fake[0] == '1' || fake[0] == 'y' || fake[0] == 'Y'))
++				g_fake = 1;
++		}
++		if (!g_fake && compat)
++			g_fake = 1;
++		rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);
++		{
++			char line[96];
++			__simple_snprintf(line, sizeof(line),
++				"cpuid-trace: armed %d site(s) fake=%d\n", g_site_count, g_fake);
++			rclol_write_str(line);
++		}
 +		return;
++	}
 +	unsigned long slide = base - RCLOL_IMAGE_TEXT_BASE;
 +
 +	rclol_log_uuid((const void*) base);

@@ -641,8 +641,11 @@ def check_runtime_signing(facts):
         return 'ok', 'Runtime not installed yet'
     if facts.get('trust_store'):
         return 'ok', 'Runtime trust store present'
-    return 'warn', ('No runtime signing trust store found, so the installed runtime is probably unsigned; '
-                    'rerun scripts/install-runtime.sh (it builds tools/dc-codesign and signs the overlays)')
+    return 'warn', (
+        'No runtime signing trust store found, so the base Darling SDK is probably unsigned; '
+        'run `sudo env RCODESIGN="$(sh tools/install-rcodesign.sh)" sh tools/sign-darling-runtime.sh --sdk` '
+        '(inside the Toolbox container for Toolbox installs) or `sh scripts/update.sh`'
+    )
 
 
 def check_prefix(facts):
