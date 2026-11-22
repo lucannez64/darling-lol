@@ -41,6 +41,21 @@ python3 scripts/preflight.py                # host/build prerequisites
 python3 scripts/prepare.py --check-only --source /path/to/darling-src
 ```
 
+To judge a suite run, save the whole output to a file and read the summary
+back from it. Do not pipe the suite through `tail`: with stdout piped, Python
+block-buffers the test output while the `Ran ...`/`OK`/`FAILED` summary goes to
+stderr, so the summary can flush first and `tail` drops it.
+
+```sh
+log=$(mktemp)
+echo "log=$log"
+status=0
+python3 -m unittest discover -s tests >"$log" 2>&1 || status=$?
+echo "exit=$status"
+grep -E '^(Ran |OK|FAILED)' "$log" || true
+[ "$status" -eq 0 ]
+```
+
 Run the patch check when patches or pins change. Pass a prepared Darling
 checkout with the component revisions from `upstream/manifest.json`. On a
 fresh clone or after changing pins, use `scripts/prepare.py --source
@@ -181,10 +196,23 @@ guest probes; do not run the guest probes on your own.
 - Add or update a test for every behavior change; run the closest test file
   first, then the full suite when practical.
 
+## Skills
+
+Project skills carry procedures too long for this index. They live in
+`docs/skills/` as a single opt-in copy: harnesses do not load that directory
+automatically, so a contributor points their agent at the file or symlinks it
+into the harness's skill directory. `tests/test_agent_skills.py` checks the
+layout and frontmatter.
+
+- `docs/skills/open-pr/SKILL.md`: branch, commit and open a pull request.
+- `docs/skills/codereview/SKILL.md`: plan and resolve pull request review
+  comments.
+
 ## Definition of done
 
 - [ ] Focused diff with tests.
 - [ ] `python3 scripts/validate.py` passes.
-- [ ] Relevant `unittest` files pass (full suite when feasible).
+- [ ] Relevant `unittest` files pass (full suite when feasible), with the
+  `Ran`/`OK`/`FAILED` summary read from a saved log rather than through `tail`.
 - [ ] `python3 scripts/prepare.py --check-only --source /path/to/darling-src` when a patch or pin changed.
 - [ ] No generated/local artifacts; commit signed off with `-s`.

@@ -431,16 +431,21 @@ def verify_hunk_counts(patch_text: str, label: str = "<patch>") -> list[str]:
 
 
 def patch_file_inventory(patch_text: str) -> tuple[int, list[str]]:
-    """Return (modified_files_count, new_files_list) matching manifest.json."""
+    """Return (modified_files_count, new_files_list) matching manifest.json.
+
+    Counts distinct paths: a patch may touch one file in several sections, and
+    a later section on a file the patch creates still counts as new.
+    """
     _, sections = split_patch_sections(patch_text)
-    modified = 0
+    modified: set[str] = set()
     new_files: list[str] = []
     for sec in sections:
         if sec.is_new:
-            new_files.append(sec.new_path)
+            if sec.new_path not in new_files:
+                new_files.append(sec.new_path)
         else:
-            modified += 1
-    return modified, new_files
+            modified.add(sec.new_path)
+    return len(modified - set(new_files)), new_files
 
 
 def manifest_drift(manifest: dict[str, Any], root: Path = ROOT) -> list[dict[str, Any]]:

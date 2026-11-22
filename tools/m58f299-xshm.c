@@ -295,34 +295,51 @@ DarlingXShmStart(void *handle, Drawable target, GC gc, const char *path) {
   f->target = target;
   f->gc = f->privateGC;
   f->running = 1;
-  if(f->width>=256 && f->height>=256) {
+  XSelectInput(f->display, target, ExposureMask);
+  if (f->width >= 256 && f->height >= 256) {
     XVisualInfo gpuVisual;
-    if(XMatchVisualInfo(f->display,DefaultScreen(f->display),32,TrueColor,&gpuVisual)){
-      f->gpuColormap=XCreateColormap(f->display,DefaultRootWindow(f->display),gpuVisual.visual,AllocNone);
-      XSetWindowAttributes attrs={.colormap=f->gpuColormap,.border_pixel=0,.background_pixmap=None};
-      f->gpuWindow=XCreateWindow(f->display,target,0,0,f->width,f->height,0,32,InputOutput,gpuVisual.visual,CWColormap|CWBorderPixel|CWBackPixmap,&attrs);
-      XShapeCombineRectangles(f->display,f->gpuWindow,ShapeInput,0,0,NULL,0,ShapeSet,Unsorted);
-      f->visualID=gpuVisual.visualid;
+    if (XMatchVisualInfo(f->display, DefaultScreen(f->display), 32, TrueColor, &gpuVisual)) {
+      f->gpuColormap = XCreateColormap(f->display, DefaultRootWindow(f->display), gpuVisual.visual, AllocNone);
+      XSetWindowAttributes attrs = {.colormap = f->gpuColormap, .border_pixel = 0, .background_pixmap = None};
+      f->gpuWindow = XCreateWindow(f->display, target, 0, 0, f->width, f->height, 0, 32, InputOutput, gpuVisual.visual, CWColormap | CWBorderPixel | CWBackPixmap, &attrs);
+      XShapeCombineRectangles(f->display, f->gpuWindow, ShapeInput, 0, 0, NULL, 0, ShapeSet, Unsorted);
+      f->visualID = gpuVisual.visualid;
     }
-    const char *directory=getenv("DARLING_GPU_TARGET_DIRECTORY");if(!directory)directory="/dev/shm";
-    snprintf(f->gpuTargetPath,sizeof(f->gpuTargetPath),"%s/darling-ca-gpu-target-%u-%u-%u",directory,getuid(),f->width,f->height);
-    int fd=open(f->gpuTargetPath,O_CREAT|O_RDWR,0600);
-    if(fd>=0){
-      if(!ftruncate(fd,sizeof(DarlingNativePresentTarget))){
-        void *p=mmap(NULL,sizeof(DarlingNativePresentTarget),PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-        if(p!=MAP_FAILED){f->gpuTarget=p;DarlingNativePresentTarget record={.target=f->gpuWindow?f->gpuWindow:target,.width=f->width,.height=f->height,.visual=f->visualID,.flags=getenv("DARLING_GPU_SYNTHETIC_TARGET")?0x54455354:0};
-          memcpy(p,&record,sizeof(record));__atomic_store_n(&f->gpuTarget->magic,DARLING_NATIVE_PRESENT_MAGIC,__ATOMIC_RELEASE);
+    /* Ensure the X server has created gpuWindow before publishing it to GPU processes. */
+    XSync(f->display, False);
+    const char *directory = getenv("DARLING_GPU_TARGET_DIRECTORY");
+    if (!directory)
+      directory = "/dev/shm";
+    snprintf(f->gpuTargetPath, sizeof(f->gpuTargetPath), "%s/darling-ca-gpu-target-%u-%u-%u", directory, getuid(), f->width, f->height);
+    int fd = open(f->gpuTargetPath, O_CREAT | O_RDWR, 0600);
+    if (fd >= 0) {
+      if (!ftruncate(fd, sizeof(DarlingNativePresentTarget))) {
+        void *p = mmap(NULL, sizeof(DarlingNativePresentTarget), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (p != MAP_FAILED) {
+          f->gpuTarget = p;
+          __atomic_store_n(&f->gpuTarget->magic, 0, __ATOMIC_RELEASE);
+          f->gpuTarget->target = f->gpuWindow ? f->gpuWindow : target;
+          f->gpuTarget->width = f->width;
+          f->gpuTarget->height = f->height;
+          f->gpuTarget->ready = 0;
+          f->gpuTarget->presenter = 0;
+          f->gpuTarget->sequence = 0;
+          f->gpuTarget->visual = f->visualID;
+          f->gpuTarget->flags = getenv("DARLING_GPU_SYNTHETIC_TARGET") ? 0x54455354 : 0;
+          memset(f->gpuTarget->reserved, 0, sizeof(f->gpuTarget->reserved));
         }
       }
       close(fd);
     }
+  } else {
+    XFlush(f->display);
   }
-  XSelectInput(f->display, target, ExposureMask);
-  XFlush(f->display);
   if (pthread_create(&f->worker, NULL, pumpFrames, f)) {
     f->running = 0;
     return 0;
   }
+  if (f->gpuTarget)
+    __atomic_store_n(&f->gpuTarget->magic, DARLING_NATIVE_PRESENT_MAGIC, __ATOMIC_RELEASE);
   f->started = 1;
   return 1;
 }

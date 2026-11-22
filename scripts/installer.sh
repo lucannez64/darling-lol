@@ -9,7 +9,7 @@ fi
 export PATH="${DARLING_RUNNER_DIR:+$DARLING_RUNNER_DIR:}$repo/usr-local/bin:/usr/local/bin:$PATH"
 region=${1:-euw}
 case "$region" in lan) region=la1;; las) region=la2;; oce) region=oc1;; esac
-case "$region" in euw|eune|na|br|kr|jp|la1|la2|oc1|ru|tr) ;; *) echo 'Use a Riot installer region code' >&2; exit 1;; esac
+case "$region" in euw|eune|na|br|kr|jp|la1|la2|oc1|ru|tr|sg2) ;; *) echo 'Use a Riot installer region code' >&2; exit 1;; esac
 python3 scripts/configure.py >/dev/null
 
 # The prefix the installed client must appear in. runtime-paths.sh honors
