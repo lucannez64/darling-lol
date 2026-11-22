@@ -47,6 +47,9 @@ if [[ ${DARLING_LOL_WINDOW_ENTRIES:-0} == 1 ]]; then WINDOW_ENTRIES=1; fi
 YES=0
 NO_CONFIRM=0
 FAMILY=''
+# 1 on Omarchy: its pacman hook refuses a direct full upgrade (pacman -Syu),
+# so dependencies go through 'omarchy pkg add' without upgrading the system.
+IS_OMARCHY=0
 PACKAGE_MANAGER=''
 PACKAGES=()
 REGION=''
@@ -421,8 +424,11 @@ detect_distribution() {
         fail 'Fedora 44 or newer is required (FFmpeg 8 or 9).'
       FAMILY=fedora
       ;;
-    *' arch '*)
+    *' arch '*|*' omarchy '*)
       FAMILY=arch
+      if [[ $ids == *' omarchy '* ]] || command -v omarchy-pkg-add >/dev/null 2>&1; then
+        IS_OMARCHY=1
+      fi
       ;;
     *' debian '*|*' ubuntu '*)
       if [[ $os_id == ubuntu ]]; then
@@ -950,6 +956,9 @@ confirm_arch_upgrade() {
   # warning only applies when the host itself runs the build.
   [[ $CONTAINER_INSTALL == 0 ]] || return 0
   [[ $FAMILY == arch ]] || return 0
+  # Omarchy installs only the missing packages and leaves upgrades to
+  # 'omarchy update', so there is no full upgrade to confirm.
+  (( ! IS_OMARCHY )) || return 0
   if (( YES )); then
     return 0
   fi
@@ -969,6 +978,17 @@ install_packages() {
       sudo dnf install -y "${PACKAGES[@]}" || return $?
       ;;
     arch)
+      if (( IS_OMARCHY )); then
+        if command -v omarchy >/dev/null 2>&1; then
+          omarchy pkg add "${PACKAGES[@]}" || return $?
+        else
+          local omarchy_opts=(-S --needed)
+          if (( YES )); then omarchy_opts+=(--noconfirm); fi
+          sudo pacman "${omarchy_opts[@]}" -- "${PACKAGES[@]}" || return $?
+        fi
+        git lfs install --skip-repo
+        return
+      fi
       local pacman_opts=(-Syu --needed)
       if (( YES )); then pacman_opts+=(--noconfirm); fi
       sudo pacman "${pacman_opts[@]}" -- "${PACKAGES[@]}" || return $?
