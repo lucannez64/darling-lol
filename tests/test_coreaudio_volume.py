@@ -133,6 +133,7 @@ struct TestDevice {{
     AudioObjectID m_myId;
     std::atomic<Float32> m_volumeScalar{{1.0f}};
     std::atomic<UInt32> m_muted{{0}};
+    std::atomic<UInt32> m_volumeGeneration{{0}};
 
     explicit TestDevice(AudioObjectID id) : m_myId(id) {{}}
 
@@ -215,9 +216,13 @@ int main() {{
     m = 99; size = sizeof(m);
     assert(dev.getPropertyData(&muteAddr, &size, &m) == noErr && m == 0);
 
+    // Reads never mark the volume as client-set.
+    assert(dev.m_volumeGeneration.load() == 0);
+
     // Setting scalar persists and updates decibels.
     Float32 half = 0.5f;
     assert(dev.setPropertyData(&scalarAddr, sizeof(half), &half) == noErr);
+    assert(dev.m_volumeGeneration.load() == 1);
     size = sizeof(f);
     assert(dev.getPropertyData(&scalarAddr, &size, &f) == noErr && std::fabs(f - 0.5f) < 1e-6f);
     size = sizeof(f);
@@ -226,15 +231,17 @@ int main() {{
     // Setting decibels persists and updates scalar.
     Float32 minus20 = -20.0f;
     assert(dev.setPropertyData(&dbAddr, sizeof(minus20), &minus20) == noErr);
+    assert(dev.m_volumeGeneration.load() == 2);
     size = sizeof(f);
     assert(dev.getPropertyData(&scalarAddr, &size, &f) == noErr && std::fabs(f - 0.1f) < 1e-5f);
     size = sizeof(f);
     assert(dev.getPropertyData(&dbAddr, &size, &f) == noErr && std::fabs(f - (-20.0f)) < 1e-3f);
 
-    // Clamping and NaN rejection.
+    // Clamping and NaN rejection; a rejected write leaves the generation alone.
     Float32 nan = std::numeric_limits<Float32>::quiet_NaN();
     assert(dev.setPropertyData(&scalarAddr, sizeof(nan), &nan) == paramErr);
     assert(dev.setPropertyData(&dbAddr, sizeof(nan), &nan) == paramErr);
+    assert(dev.m_volumeGeneration.load() == 2);
     size = sizeof(f);
     assert(dev.getPropertyData(&scalarAddr, &size, &f) == noErr && std::fabs(f - 0.1f) < 1e-5f);
 
@@ -259,7 +266,9 @@ int main() {{
 
     // Mute normalizes non-zero to 1 and persists.
     UInt32 muteOn = 42, muteOff = 0;
+    const UInt32 beforeMute = dev.m_volumeGeneration.load();
     assert(dev.setPropertyData(&muteAddr, sizeof(muteOn), &muteOn) == noErr);
+    assert(dev.m_volumeGeneration.load() == beforeMute + 1);
     size = sizeof(m);
     assert(dev.getPropertyData(&muteAddr, &size, &m) == noErr && m == 1);
     assert(dev.setPropertyData(&muteAddr, sizeof(muteOff), &muteOff) == noErr);
@@ -282,6 +291,131 @@ int main() {{
             subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                             '-Wno-multichar', '-o', str(exe), str(src)],
                            check=True)
+            subprocess.run([str(exe)], check=True)
+
+
+class PulseInputVolumeTests(unittest.TestCase):
+    """Issue #285: a client-set input volume must reach the PulseAudio record stream.
+
+    Voice SDKs lower a Mac mic's input volume (automatic gain control, or the client's
+    input slider). Darling stored the value and never applied it, so the mic stayed at
+    full level. The stream now mirrors it onto its source output, but only once a client
+    has set it.
+    """
+
+    STREAM = 'src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp'
+
+    def test_read_callback_applies_the_volume_before_delivering_audio(self):
+        # The patch holds hunks, not the whole file; both calls sit in paStreamReadCB's hunks.
+        stream = postimage(patch_section(self.STREAM))
+        self.assertLess(stream.index('This->applyDeviceVolume(spec);'), stream.index('This->m_callback('))
+
+    def test_apply_device_volume_runtime(self):
+        compiler = shutil.which('c++')
+        if compiler is None or not Path('/usr/include/pulse/volume.h').exists():
+            self.skipTest('needs a C++17 compiler and the libpulse headers')
+        stream = postimage(patch_section(self.STREAM))
+        functions = extract_between(stream, 'static pa_volume_t paInputVolume',
+                                    'AudioHardwareStreamPAInput::AudioHardwareStreamPAInput(')
+
+        program = f'''
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <pulse/def.h>
+#include <pulse/volume.h>
+
+using UInt32 = uint32_t;
+using Float32 = float;
+typedef struct pa_stream pa_stream;
+typedef struct pa_context pa_context;
+typedef struct pa_operation pa_operation;
+
+static uint32_t g_index = PA_INVALID_INDEX;
+static int g_calls = 0;
+static pa_cvolume g_last;
+static pa_operation* g_op = reinterpret_cast<pa_operation*>(0x10);
+static int g_unrefs = 0;
+
+static uint32_t fake_index(pa_stream*) {{ return g_index; }}
+static pa_context* fake_context(pa_stream*) {{ return reinterpret_cast<pa_context*>(0x20); }}
+static pa_operation* fake_set(pa_context* c, uint32_t idx, const pa_cvolume* v, void*, void*) {{
+    assert(c == reinterpret_cast<pa_context*>(0x20) && idx == g_index);
+    g_last = *v; g_calls++; return g_op;
+}}
+static void fake_unref(pa_operation* op) {{ assert(op == g_op); g_unrefs++; }}
+#define pa_stream_get_index fake_index
+#define pa_stream_get_context fake_context
+#define pa_context_set_source_output_volume fake_set
+#define pa_operation_unref fake_unref
+static bool rclolAudioTraceEnabled() {{ return false; }}
+static void rclolAudioTrace(const char*, ...) {{}}
+
+struct FakeHw {{
+    UInt32 generation = 0; Float32 scalar = 1.0f; bool mute = false;
+    UInt32 volumeGeneration() const {{ return generation; }}
+    Float32 volumeScalar() const {{ return scalar; }}
+    bool muted() const {{ return mute; }}
+    UInt32 id() const {{ return 7; }}
+}};
+
+struct AudioHardwareStreamPAInput {{
+    FakeHw* m_hw;
+    pa_stream* m_stream = reinterpret_cast<pa_stream*>(0x30);
+    UInt32 m_appliedVolumeGeneration = 0;
+    void applyDeviceVolume(const pa_sample_spec* spec);
+}};
+
+{functions}
+
+int main() {{
+    FakeHw hw;
+    AudioHardwareStreamPAInput s{{&hw}};
+    pa_sample_spec spec{{PA_SAMPLE_FLOAT32LE, 44100, 2}};
+
+    // Nobody set a volume: the user's mixer level is left alone.
+    g_index = 3;
+    s.applyDeviceVolume(&spec);
+    assert(g_calls == 0);
+
+    // A client lowers the volume before the stream has an index: retried later.
+    hw.generation = 1; hw.scalar = 0.25f;
+    g_index = PA_INVALID_INDEX;
+    s.applyDeviceVolume(&spec);
+    assert(g_calls == 0);
+
+    g_index = 3;
+    s.applyDeviceVolume(&spec);
+    assert(g_calls == 1 && g_unrefs == 1);
+    assert(g_last.channels == 2);
+    assert(g_last.values[0] == pa_sw_volume_from_linear(0.25) && g_last.values[1] == g_last.values[0]);
+    assert(g_last.values[0] < PA_VOLUME_NORM);
+
+    // Applied once per change.
+    s.applyDeviceVolume(&spec);
+    assert(g_calls == 1);
+
+    // Full scale is PA's 100 %, never an amplification.
+    hw.generation = 2; hw.scalar = 1.0f;
+    s.applyDeviceVolume(&spec);
+    assert(g_calls == 2 && g_last.values[0] == PA_VOLUME_NORM);
+
+    // Mute and a zero scalar silence the stream.
+    hw.generation = 3; hw.mute = true;
+    s.applyDeviceVolume(&spec);
+    assert(g_last.values[0] == PA_VOLUME_MUTED);
+    hw.generation = 4; hw.mute = false; hw.scalar = 0.0f;
+    s.applyDeviceVolume(&spec);
+    assert(g_calls == 4 && g_last.values[0] == PA_VOLUME_MUTED);
+    return 0;
+}}
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / 'input_volume_test.cpp'
+            exe = Path(folder) / 'input_volume_test'
+            src.write_text(program)
+            subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
+                            '-o', str(exe), str(src), '-lpulse'], check=True)
             subprocess.run([str(exe)], check=True)
 
 
