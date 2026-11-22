@@ -1116,7 +1116,7 @@ index 7243e6a62..647c8aff7 100644
  
  OSStatus AudioObjectRemovePropertyListener(AudioObjectID inObjectID,
 diff --git a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp b/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
-index f006ba51e..78356fc30 100644
+index f006ba51e..9abefbea0 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
 +++ b/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
 @@ -18,11 +18,38 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -1307,7 +1307,7 @@ index f006ba51e..78356fc30 100644
  			return kAudioHardwareNoError;
  		}
  	}
-@@ -253,20 +365,57 @@ OSStatus AudioHardwareImpl::getPropertyString(CFStringRef str, UInt32* ioDataSiz
+@@ -253,20 +365,60 @@ OSStatus AudioHardwareImpl::getPropertyString(CFStringRef str, UInt32* ioDataSiz
  OSStatus AudioHardwareImpl::setPropertyData(const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize,
  	const void* inQualifierData, UInt32 inDataSize, const void* inData)
  {
@@ -1343,6 +1343,7 @@ index f006ba51e..78356fc30 100644
 +			if (std::isnan(value))
 +				return paramErr;
 +			m_volumeScalar.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed);
++			m_volumeGeneration.fetch_add(1, std::memory_order_release);
  			return kAudioHardwareNoError;
  		}
  		case kAudioDevicePropertyVolumeDecibels:
@@ -1355,6 +1356,7 @@ index f006ba51e..78356fc30 100644
 +			if (std::isnan(db))
 +				return paramErr;
 +			m_volumeScalar.store(volumeDecibelsToScalar(db), std::memory_order_relaxed);
++			m_volumeGeneration.fetch_add(1, std::memory_order_release);
 +			return kAudioHardwareNoError;
 +		}
 +		case kAudioDevicePropertyMute:
@@ -1364,10 +1366,11 @@ index f006ba51e..78356fc30 100644
 +			if (!inData || inDataSize != sizeof(UInt32))
 +				return kAudioHardwareBadPropertySizeError;
 +			m_muted.store(*static_cast<const UInt32*>(inData) ? 1u : 0u, std::memory_order_relaxed);
++			m_volumeGeneration.fetch_add(1, std::memory_order_release);
  			return kAudioHardwareNoError;
  		}
  		case kAudioDevicePropertyStreamFormat:
-@@ -283,7 +432,9 @@ OSStatus AudioHardwareImpl::setPropertyData(const AudioObjectPropertyAddress* in
+@@ -283,7 +435,9 @@ OSStatus AudioHardwareImpl::setPropertyData(const AudioObjectPropertyAddress* in
  			memcpy(&m_asbd, setting, sizeof(m_asbd));
  
  			m_asbd.mFramesPerPacket = 1;
@@ -1379,7 +1382,7 @@ index f006ba51e..78356fc30 100644
  			return kAudioHardwareNoError;
  		}
 diff --git a/src/CoreAudio/CoreAudio/AudioHardwareImpl.h b/src/CoreAudio/CoreAudio/AudioHardwareImpl.h
-index f74d9b0c3..fc9894bf3 100644
+index f74d9b0c3..60c11286b 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardwareImpl.h
 +++ b/src/CoreAudio/CoreAudio/AudioHardwareImpl.h
 @@ -21,6 +21,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -1390,7 +1393,19 @@ index f74d9b0c3..fc9894bf3 100644
  #include <map>
  #include <mutex>
  #include "AudioHardwareStream.h"
-@@ -86,8 +87,9 @@ protected:
+@@ -70,6 +71,11 @@ public:
+ 
+ 	AudioObjectID id() const { return m_myId; }
+ 	const AudioStreamBasicDescription& asbd() const { return m_asbd; }
++	// Volume/mute as a client last set them. The generation stays 0 until a client
++	// writes either property, so untouched devices keep the user's mixer level.
++	Float32 volumeScalar() const { return m_volumeScalar.load(std::memory_order_relaxed); }
++	bool muted() const { return m_muted.load(std::memory_order_relaxed) != 0; }
++	UInt32 volumeGeneration() const { return m_volumeGeneration.load(std::memory_order_acquire); }
+ private:
+ 	static OSStatus getPropertyCFString(CFStringRef str, UInt32* ioDataSize, void* outData);
+ 	static OSStatus getPropertyString(CFStringRef str, UInt32* ioDataSize, void* outData);
+@@ -86,8 +92,10 @@ protected:
  	uint32_t m_bufferSize = 8192;
  
  	CFStringRef m_name = CFSTR("unknown"), m_uid = CFSTR("unknown"), m_manufacturer = CFSTR("unknown"), m_modelUid = CFSTR("unknown");
@@ -1398,6 +1413,7 @@ index f74d9b0c3..fc9894bf3 100644
 +	AudioStreamBasicDescription m_asbd = {};
 +	std::atomic<Float32> m_volumeScalar{1.0f};
 +	std::atomic<UInt32> m_muted{0};
++	std::atomic<UInt32> m_volumeGeneration{0};
  };
  
  #endif /* AUDIOHARDWAREIMPL_H */
@@ -1787,10 +1803,10 @@ index 0425ae97f..fdf08d2dc 100644
  #endif /* AUDIOHARDWARESTREAMPA_H */
 -
 diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp
-index d6825f1d5..fd9efc988 100644
+index d6825f1d5..2a24b28de 100644
 --- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp
 +++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.cpp
-@@ -21,10 +21,37 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -21,10 +21,72 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
  #include "AudioHardwareImplPA.h"
  #include <iostream>
  #include <vector>
@@ -1820,6 +1836,41 @@ index d6825f1d5..fd9efc988 100644
 +	unsigned n = g_readEvents++;
 +	return n < 40 || n % 1000 == 0;
 +}
++
++// CoreAudio input volume -> PulseAudio source-output volume. Darling treats the scalar as
++// linear amplitude (AudioHardwareImpl's dB conversion is 20*log10(scalar)).
++static pa_volume_t paInputVolume(Float32 scalar, bool muted)
++{
++	if (muted || !(scalar > 0.0f))
++		return PA_VOLUME_MUTED;
++	if (scalar >= 1.0f)
++		return PA_VOLUME_NORM;
++	return pa_sw_volume_from_linear(scalar);
++}
++
++// A Mac mic's input volume is a hardware gain that voice SDKs lower (automatic gain
++// control) or the user sets in the client. Apply it to this record stream once a client
++// has set it; until then leave the stream at the level the user chose in their mixer.
++void AudioHardwareStreamPAInput::applyDeviceVolume(const pa_sample_spec* spec)
++{
++	const UInt32 generation = m_hw->volumeGeneration();
++	if (generation == m_appliedVolumeGeneration)
++		return;
++	const uint32_t index = pa_stream_get_index(m_stream);
++	if (index == PA_INVALID_INDEX)
++		return;
++	m_appliedVolumeGeneration = generation;
++
++	const Float32 scalar = m_hw->volumeScalar();
++	const bool muted = m_hw->muted();
++	pa_cvolume volume;
++	pa_cvolume_set(&volume, spec->channels, paInputVolume(scalar, muted));
++	if (pa_operation* op = pa_context_set_source_output_volume(pa_stream_get_context(m_stream), index, &volume, nullptr, nullptr))
++		pa_operation_unref(op);
++	if (rclolAudioTraceEnabled())
++		rclolAudioTrace("PA_IN volume device=%u scalar=%.3f muted=%d pa=%u\n", (unsigned) m_hw->id(), scalar,
++			(int) muted, (unsigned) volume.values[0]);
++}
  
  AudioHardwareStreamPAInput::AudioHardwareStreamPAInput(AudioHardwareImplPA* hw, AudioDeviceIOProc callback, void* clientData)
  : AudioHardwareStreamPA(hw, callback, clientData)
@@ -1828,7 +1879,7 @@ index d6825f1d5..fd9efc988 100644
  	// m_dump.open("/tmp/dump.raw", std::ios_base::out | std::ios_base::binary);
  }
  
-@@ -32,25 +59,26 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
+@@ -32,25 +94,27 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
  {
  	AudioHardwareStreamPAInput* This = static_cast<AudioHardwareStreamPAInput*>(self);
  
@@ -1843,6 +1894,7 @@ index d6825f1d5..fd9efc988 100644
 +	const double rate = spec ? double(spec->rate) : 0;
 +	if (!frameBytes || rate <= 0)
 +		return;
++	This->applyDeviceVolume(spec);
 +
  	AudioBufferList* abl = static_cast<AudioBufferList*>(alloca(sizeof(AudioBufferList) + sizeof(AudioBuffer)));
 -	std::vector<uint8_t> hole;
@@ -1863,7 +1915,7 @@ index d6825f1d5..fd9efc988 100644
  
  		if (rv < 0 || !nbytes)
  		{
-@@ -58,29 +86,82 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
+@@ -58,29 +122,82 @@ void AudioHardwareStreamPAInput::paStreamReadCB(pa_stream* s, size_t length, voi
  			break;
  		}
  
@@ -1884,13 +1936,13 @@ index d6825f1d5..fd9efc988 100644
 +			latencyNs = uint64_t(pa_bytes_to_usec(std::max(readable, nbytes), spec)) * 1000;
  		}
 -		abl->mBuffers[0].mDataByteSize = nbytes;
--
++		const uint64_t nowHost = mach_absolute_time();
+ 
 -		// This->m_dump.write((char*) abl->mBuffers[0].mData, nbytes);
 -		// This->m_dump.flush();
 -		if (This->m_convertSignedUnsigned)
 -			This->transformSignedUnsigned(abl);
-+		const uint64_t nowHost = mach_absolute_time();
- 
+-
 -		// std::cout << "AudioHardwareStreamPAInput::paStreamReadCB(): bytes=" << nbytes << std::endl;
 -		OSStatus status = This->m_callback(This->m_hw->id(), &fake, abl, &fake, nullptr, nullptr, This->m_clientData);
 -
@@ -1963,7 +2015,7 @@ index d6825f1d5..fd9efc988 100644
  	}
  }
  
-@@ -88,10 +169,19 @@ void AudioHardwareStreamPAInput::start()
+@@ -88,10 +205,19 @@ void AudioHardwareStreamPAInput::start()
  {
  	struct pa_buffer_attr battr;
  
@@ -1986,7 +2038,7 @@ index d6825f1d5..fd9efc988 100644
  	battr.tlength = uint32_t(-1);
  
  	// std::cout << "AudioHardwareStreamPAInput::start()\n";
-@@ -101,6 +191,9 @@ void AudioHardwareStreamPAInput::start()
+@@ -101,6 +227,9 @@ void AudioHardwareStreamPAInput::start()
  	int rv = pa_stream_connect_record(m_stream, nullptr, &battr,
  		pa_stream_flags_t(PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_ADJUST_LATENCY | PA_STREAM_AUTO_TIMING_UPDATE)
  	);
@@ -12735,7 +12787,7 @@ index c1fd1d402..777ca7c38 100644
  				abl->mNumberBuffers = 1;
  				abl->mBuffers[0].mNumberChannels = 2;
 diff --git a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h
-index 87db50d12..01a7b2a3e 100644
+index 87db50d12..c8ec80d43 100644
 --- a/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h
 +++ b/src/CoreAudio/CoreAudio/pulse/AudioHardwareStreamPAInput.h
 @@ -21,6 +21,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -12747,19 +12799,21 @@ index 87db50d12..01a7b2a3e 100644
  
  class AudioHardwareStreamPAInput : public AudioHardwareStreamPA
  {
-@@ -30,6 +32,12 @@ private:
+@@ -29,6 +31,14 @@ public:
+ private:
  	void start() override;
  	static void paStreamReadCB(pa_stream* s, size_t length, void* self);
- 
++	void applyDeviceVolume(const pa_sample_spec* spec);
++
 +	// Only touched on the PA queue.
++	UInt32 m_appliedVolumeGeneration = 0;
 +	uint64_t m_frames = 0;
 +	uint64_t m_lastInputHost = 0;
 +	size_t m_blockBytes = 0;
 +	std::vector<uint8_t> m_scratch;
-+
+ 
  	// std::ofstream m_dump;
  };
- 
 diff --git a/src/startup/mldr/CMakeLists.txt b/src/startup/mldr/CMakeLists.txt
 index 5e4271a..ef6488e 100644
 --- a/src/startup/mldr/CMakeLists.txt
