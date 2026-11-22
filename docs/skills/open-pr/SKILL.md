@@ -62,13 +62,13 @@ The canonical repository is `lucannez64/darling-lol`.
 
 The title is the commit title when the PR has one commit, otherwise the same format summarizing the whole PR.
 
-There is no template. Write plain prose in this order:
+Write the body in Markdown with short `##` sections, one topic each, and plain, direct sentences. No preamble and no marketing tone. Use these sections and drop one that has nothing to say:
 
-1. Problem: the compatibility issue or failure the user sees, and when it happens.
-2. Fix: what changes and the main design decision.
-3. Flags: new or changed environment variables, defaults and opt-out. Keep an old variable name as a deprecated alias for at least one release.
-4. Validation: the checks that passed and the ones not run, such as a real Toolbox run or a guest probe.
-5. Credit: when carrying work from another PR or author, link it and say authorship is preserved.
+- `## Problem`: the compatibility issue or failure the user sees, and when it happens.
+- `## Fix`: what changes and the main design decision.
+- `## Flags`: new or changed environment variables with defaults and opt-out. Keep an old variable name as a deprecated alias for at least one release.
+- `## Validation`: the checks that passed and the ones not run, such as a real Toolbox run or a guest probe.
+- `## Credit`: when carrying work from another PR or author, link it and say authorship is preserved.
 
 Mention explicitly any change that touches platform identity, sandbox or AMFI probes, anti-cheat or account risk. Use "compatibility issue", "client check" and "platform identity". Never write "stealth", "evasion", "spoofing", "bypass" or "unbannable".
 
