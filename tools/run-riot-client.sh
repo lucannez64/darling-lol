@@ -262,6 +262,54 @@ case "$guest_home" in
  "$prefix"/*) guest_path=/${guest_home#"$prefix"/} ;;
  *) echo "RIOT_GUEST_HOME must be inside DPREFIX" >&2; exit 1 ;;
 esac
+# Experimental native Wayland, off by default. RCLOL_WAYLAND=1 covers the game window and the
+# League client and Riot Client windows (scope all); RCLOL_WAYLAND=game covers the game window
+# only (scope game), and the clients stay on Xwayland. The game process loads
+# libDarlingWayland.dylib next to libDarlingXShm.dylib and talks to the host compositor socket.
+# Native code uses host Linux paths, so the socket is passed unchanged (no /Volumes/SystemRoot).
+# Prints the socket for WAYLAND_DISPLAY $1 in XDG_RUNTIME_DIR $2; an absolute $1 is used as it is.
+wayland_socket_path() {
+ case "$1" in
+  /*) printf '%s\n' "$1" ;;
+  *) printf '%s/%s\n' "$2" "${1:-wayland-0}" ;;
+ esac
+}
+wayland_mode=${RCLOL_WAYLAND:-0}
+case "$wayland_mode" in
+ 0|'') wayland_mode=0 ;;
+ 1|game) ;;
+ *) echo "wayland: RCLOL_WAYLAND=$wayland_mode is not 0, 1 or game; treating it as 0" >&2; wayland_mode=0 ;;
+esac
+# Only the values below reach the guest; an inherited value must not survive a launch without them.
+unset RCLOL_WAYLAND_SOCKET RCLOL_WAYLAND_ACTIVATION_TOKEN RCLOL_WAYLAND_SCOPE
+wayland_socket=
+wayland_library=
+wayland_token=
+wayland_scope=
+if [ "$wayland_mode" != 0 ]; then
+ wayland_path=$(wayland_socket_path "${WAYLAND_DISPLAY:-}" "${XDG_RUNTIME_DIR:-}")
+ if [ -S "$wayland_path" ]; then
+  wayland_socket=$wayland_path
+  wayland_library=${DARLING_WAYLAND_LIBRARY:-$guest_path/libDarlingWayland.dylib}
+  # The activation token is short-lived; it is forwarded for xdg-activation focus and never printed.
+  wayland_token=${XDG_ACTIVATION_TOKEN:-}
+  if [ "$wayland_mode" = 1 ]; then
+   wayland_scope=all
+   echo "wayland: experimental native Wayland for the game and client windows (socket $wayland_path)" >&2
+   # The supervisor finds client windows through X11 _NET_CLIENT_LIST, where Wayland windows never appear,
+   # so its window idle stop would end the session about a minute after launch.
+   if [ "${RCLOL_STOP_AFTER_CLIENT_SECONDS:-60}" != 0 ]; then
+    echo "wayland: the client-window idle stop cannot see Wayland windows; it is off for this session" >&2
+   fi
+   RCLOL_STOP_AFTER_CLIENT_SECONDS=0
+  else
+   wayland_scope=game
+   echo "wayland: experimental native Wayland for the game window (socket $wayland_path)" >&2
+  fi
+ else
+  echo "wayland: RCLOL_WAYLAND=$wayland_mode but no Wayland socket at $wayland_path; the game stays on X11" >&2
+ fi
+fi
 # The client saves its locale in RiotClientSettings.yaml and prefers it over --locale, so
 # an explicit RCLOL_LOCALE is ignored once a session has run in another language. The
 # in-client language switch needs a self-restart, which closes the client under Darling,
@@ -325,7 +373,7 @@ if [ -z "${RIOT_LAUNCHER_HOST:-}" ]; then
     python3 "$runner_dir/hide-league-client-in-game.py" --detach &
     ;;
    *)
-    echo 'client-in-game-tricks: no action (client optimizations disabled or preferences missing/invalid)' >&2
+    echo 'client-in-game-tricks: no action (close-during-game off with client optimizations off, or preferences missing/invalid)' >&2
     ;;
   esac
  elif [ "${RCLOL_CLOSE_CLIENT_IN_GAME:-0}" = 1 ]; then
@@ -410,13 +458,28 @@ fi
 guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
 if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  host_ipc=${XDG_RUNTIME_DIR:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}}
+ discord_found=0
  for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do
   for n in 0 1 2 3 4 5 6 7 8 9; do
-   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; break 2; fi
+   if [ -S "$dir/discord-ipc-$n" ]; then host_ipc=$dir; discord_found=1; break 2; fi
   done
  done
+ # The guest has its own PID namespace, so the PID the client sends with SET_ACTIVITY means
+ # nothing to the host Discord, which then shows no activity (#286). The relay forwards the
+ # slots it prints and swaps that PID for the client's host PID; it exits with this session
+ # ($$ becomes the session supervisor below). RCLOL_DISCORD_PID_RELAY=0 links straight to Discord.
+ # One directory per session: a relay leaves with its own session, so it is never shared.
+ relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)/$$"
+ relayed=''
+ # Without a running Discord there is nothing to relay: keep the direct links for a later start.
+ if [ "$discord_found" = 1 ] && [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then
+  relayed=$(python3 "$runner_dir/discord-ipc-relay.py" --host-dir "$host_ipc" \
+   --relay-dir "$relay_dir" --watch-pid "$$") || relayed=''
+ fi
  (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
-  ln -sfn "/Volumes/SystemRoot$host_ipc/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
+  target=$host_ipc
+  case " $relayed " in *" $n "*) target=$relay_dir ;; esac
+  ln -sfn "/Volumes/SystemRoot$target/discord-ipc-$n" "$guest_ipc/discord-ipc-$n" || exit 1
  done) || echo 'discord-rpc: could not link the Discord IPC sockets; continuing without them' >&2
 else
  # Only links this launcher made: they point through /Volumes/SystemRoot. The guest searches
@@ -448,6 +511,10 @@ exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}" \
   DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}" \
   DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}" \
+  ${wayland_socket:+RCLOL_WAYLAND_SOCKET="$wayland_socket"} \
+  ${wayland_socket:+RCLOL_WAYLAND_SCOPE="$wayland_scope"} \
+  ${wayland_socket:+DARLING_WAYLAND_LIBRARY="$wayland_library"} \
+  ${wayland_token:+RCLOL_WAYLAND_ACTIVATION_TOKEN="$wayland_token"} \
   "$darling_bin" "$A" --region="${RCLOL_REGION:-@REGION@}" --locale="${RCLOL_LOCALE:-@LOCALE@}" \
     "$@" \
     --log-dir="$guest_path/Library/Logs/Riot Games/Riot Client"

@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 116,
+      "modified_files": 117,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -66,7 +66,7 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 134,
+      "modified_files": 138,
       "new_files": [
         "QuartzCore/include/QuartzCore/CATransformLayer.h",
         "AppKit/NSGeometryTrace.h",
@@ -83,7 +83,16 @@
         "AppKit/include/AppKit/NSMenuItemBadge.h",
         "AppKit/include/AppKit/NSPreviewRepresentingActivityItem.h",
         "QuartzCore/CAEDRMetadata.m",
-        "QuartzCore/include/QuartzCore/CAEDRMetadata.h"
+        "QuartzCore/include/QuartzCore/CAEDRMetadata.h",
+        "AppKit/X11.backend/DarlingWaylandAPI.h",
+        "AppKit/X11.backend/WaylandBackend.h",
+        "AppKit/X11.backend/WaylandSubWindow.h",
+        "AppKit/X11.backend/WaylandSubWindow.m",
+        "AppKit/X11.backend/WaylandWindow.h",
+        "AppKit/X11.backend/WaylandWindow.m",
+        "AppKit/X11.backend/X11DisplayWayland.m",
+        "AppKit/X11.backend/RemoteFrameSlot.h",
+        "AppKit/X11.backend/RemoteFrameSlot.m"
       ]
     },
     {
@@ -133,7 +142,7 @@
       "revision": "89751e64bc6c2082f7725061824ee0e33395b0de",
       "repository": "https://github.com/darlinghq/darlingserver.git",
       "patch": "patches/darlingserver.patch",
-      "modified_files": 38,
+      "modified_files": 40,
       "new_files": [
         "duct-tape/src/fileport.c",
         "include/darlingserver/cs_state.h",
@@ -143,7 +152,9 @@
         "src/dc_codesign.h",
         "internal-include/darlingserver/trustcache.hpp",
         "src/trustcache.cpp",
-        "include/darlingserver/dc_entitlements.h"
+        "include/darlingserver/dc_entitlements.h",
+        "internal-include/darlingserver/uring.hpp",
+        "src/uring.cpp"
       ]
     },
     {
@@ -357,7 +368,7 @@
       "revision": "8423a7d2f053167030d2bc4a227f96243c740667",
       "repository": "https://github.com/darlinghq/indium.git",
       "patch": "patches/metal--deps--indium.patch",
-      "modified_files": 40,
+      "modified_files": 42,
       "new_files": [
         "private-include/indium/counters.private.hpp",
         "private-include/indium/deferred-render-encoder.private.hpp",

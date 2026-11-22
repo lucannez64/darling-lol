@@ -449,6 +449,8 @@ show_flag_reference() {
     "$BOLD" "$RESET"
   printf '  RCLOL_HIDE_LEAGUE_SPLASH=1        Hide the splash window that can appear over the client\n'
   printf '  RCLOL_CLIENT_IN_GAME_TRICKS=1     Close or hide the client automatically during a match\n'
+  printf '  RCLOL_WAYLAND=1                   Experimental: native Wayland for the game and client windows\n'
+  printf '  RCLOL_WAYLAND=game                Experimental: native Wayland for the game window only\n'
   printf '  RCLOL_CLOSE_CLIENT_IN_GAME=1      Close the League client during a match (low-level)\n'
   printf '  RCLOL_HIDE_CLIENT_IN_GAME=1       Hide the League client during a match (low-level)\n'
   printf '  RCLOL_HIDE_RIOT_CLIENT_IN_GAME=1  Hide the Riot Client during a match\n'
@@ -460,6 +462,7 @@ show_flag_reference() {
   printf '  RCLOL_STOP_AFTER_CLIENT_SECONDS=N  Stop the runtime N seconds after the last window closes (default: 60)\n'
   printf '  RCLOL_STOP_TOOLBOX=0              Keep the Toolbox container running after the session\n'
   printf '  RCLOL_DISCORD_RPC=0               Disable the Discord Rich Presence links\n'
+  printf '  RCLOL_DISCORD_PID_RELAY=0         Link straight to Discord (no host-PID relay)\n'
   printf '  RCLOL_FILTER_HOST_ENV=1           Remove host desktop-session variables at launch\n'
   printf '  RCLOL_FINISH_LEAGUE_LOAD=0        Disable the League load finish workaround\n'
   printf '  RCLOL_PLATFORM_PROFILE=host       Override the platform identity profile (host|compat)\n'

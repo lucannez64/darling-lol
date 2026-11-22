@@ -1116,10 +1116,15 @@ index 7243e6a62..647c8aff7 100644
  
  OSStatus AudioObjectRemovePropertyListener(AudioObjectID inObjectID,
 diff --git a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp b/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
-index f006ba51e..e0e4b4984 100644
+index f006ba51e..78356fc30 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
 +++ b/src/CoreAudio/CoreAudio/AudioHardwareImpl.cpp
-@@ -21,6 +21,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+@@ -18,11 +18,38 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
+ #include "AudioHardwareImpl.h"
++#include <algorithm>
++#include <cmath>
  #include <typeinfo>
  #include <iostream>
  #include <cstring>
@@ -1127,8 +1132,33 @@ index f006ba51e..e0e4b4984 100644
 +#include <CoreFoundation/CFRunLoop.h>
  #include <CarbonCore/MacErrors.h>
  
++static constexpr Float32 kVolumeMinDecibels = -96.0f;
++static constexpr Float32 kVolumeMaxDecibels = 0.0f;
++
++static Float32 volumeScalarToDecibels(Float32 scalar)
++{
++	if (scalar <= 0.0f)
++		return kVolumeMinDecibels;
++	if (scalar >= 1.0f)
++		return kVolumeMaxDecibels;
++	Float32 db = 20.0f * std::log10(scalar);
++	return std::clamp(db, kVolumeMinDecibels, kVolumeMaxDecibels);
++}
++
++static Float32 volumeDecibelsToScalar(Float32 db)
++{
++	if (db <= kVolumeMinDecibels)
++		return 0.0f;
++	if (db >= kVolumeMaxDecibels)
++		return 1.0f;
++	Float32 scalar = std::pow(10.0f, db / 20.0f);
++	return std::clamp(scalar, 0.0f, 1.0f);
++}
++
  AudioHardwareImpl::AudioHardwareImpl(AudioObjectID myId)
-@@ -33,7 +35,7 @@ AudioHardwareImpl::AudioHardwareImpl(AudioObjectID myId)
+ : m_myId(myId)
+ {
+@@ -33,7 +60,7 @@ AudioHardwareImpl::AudioHardwareImpl(AudioObjectID myId)
  	m_asbd.mFormatID = kAudioFormatLinearPCM;
  	m_asbd.mFormatFlags = kLinearPCMFormatFlagIsFloat | kAudioFormatFlagsNativeEndian;
  	m_asbd.mFramesPerPacket = 1;
@@ -1137,7 +1167,7 @@ index f006ba51e..e0e4b4984 100644
  }
  
  
-@@ -132,6 +134,9 @@ OSStatus AudioHardwareImpl::isPropertySettable(const AudioObjectPropertyAddress*
+@@ -132,10 +159,21 @@ OSStatus AudioHardwareImpl::isPropertySettable(const AudioObjectPropertyAddress*
  {
  	switch (inAddress->mSelector)
  	{
@@ -1146,8 +1176,20 @@ index f006ba51e..e0e4b4984 100644
 +            *outIsSettable=true;return noErr;
  		case kAudioDevicePropertyVolumeScalar:
  		case kAudioDevicePropertyVolumeDecibels:
++		case kAudioDevicePropertyMute:
++			if (m_myId == kAudioObjectSystemObject)
++				break;
  			*outIsSettable = true;
-@@ -151,6 +156,12 @@ OSStatus AudioHardwareImpl::getPropertyData(const AudioObjectPropertyAddress* in
+ 			return kAudioHardwareNoError;
++		case kAudioDevicePropertyVolumeRangeDecibels:
++			if (m_myId == kAudioObjectSystemObject)
++				break;
++			*outIsSettable = false;
++			return kAudioHardwareNoError;
+ 	}
+ 
+ 	*outIsSettable = false;
+@@ -151,6 +189,12 @@ OSStatus AudioHardwareImpl::getPropertyData(const AudioObjectPropertyAddress* in
  {
  	switch (inAddress->mSelector)
  	{
@@ -1160,7 +1202,7 @@ index f006ba51e..e0e4b4984 100644
  		case kAudioDevicePropertyStreamFormat: // returns AudioStreamBasicDescription
  		{
  			if (AudioStreamBasicDescription* asbd = static_cast<AudioStreamBasicDescription*>(outData); asbd && *ioDataSize >= sizeof(AudioStreamBasicDescription))
-@@ -160,6 +171,23 @@ OSStatus AudioHardwareImpl::getPropertyData(const AudioObjectPropertyAddress* in
+@@ -160,6 +204,23 @@ OSStatus AudioHardwareImpl::getPropertyData(const AudioObjectPropertyAddress* in
  			*ioDataSize = sizeof(AudioStreamBasicDescription);
  			return kAudioHardwareNoError;
  		}
@@ -1184,7 +1226,7 @@ index f006ba51e..e0e4b4984 100644
  		case kAudioDevicePropertyDeviceManufacturer:
  			return getPropertyString(m_manufacturer, ioDataSize, outData);
  		case kAudioDevicePropertyDeviceManufacturerCFString:
-@@ -206,12 +234,26 @@ OSStatus AudioHardwareImpl::getPropertyData(const AudioObjectPropertyAddress* in
+@@ -206,25 +267,76 @@ OSStatus AudioHardwareImpl::getPropertyData(const AudioObjectPropertyAddress* in
  			*ioDataSize = sizeof(int);
  			return kAudioHardwareNoError;
  		}
@@ -1213,7 +1255,59 @@ index f006ba51e..e0e4b4984 100644
  			}
  			*ioDataSize = sizeof(UInt32)*2;
  			return kAudioHardwareNoError;
-@@ -253,12 +295,26 @@ OSStatus AudioHardwareImpl::getPropertyString(CFStringRef str, UInt32* ioDataSiz
+ 		}
+ 		case kAudioDevicePropertyVolumeScalar:
+ 		{
+-			if (Float32* v = static_cast<Float32*>(outData); outData && *ioDataSize >= sizeof(Float32))
+-				*v = 1.0f; // TODO: Ask for real volume from PulseAudio
++			if (m_myId == kAudioObjectSystemObject)
++				return kAudioHardwareUnknownPropertyError;
++			if (outData && *ioDataSize < sizeof(Float32))
++				return kAudioHardwareBadPropertySizeError;
++			if (outData)
++				*static_cast<Float32*>(outData) = m_volumeScalar.load(std::memory_order_relaxed);
+ 			*ioDataSize = sizeof(Float32);
+ 			return kAudioHardwareNoError;
+ 		}
+ 		case kAudioDevicePropertyVolumeDecibels:
+ 		{
++			if (m_myId == kAudioObjectSystemObject)
++				return kAudioHardwareUnknownPropertyError;
++			if (outData && *ioDataSize < sizeof(Float32))
++				return kAudioHardwareBadPropertySizeError;
++			if (outData)
++				*static_cast<Float32*>(outData) = volumeScalarToDecibels(m_volumeScalar.load(std::memory_order_relaxed));
++			*ioDataSize = sizeof(Float32);
++			return kAudioHardwareNoError;
++		}
++		case kAudioDevicePropertyVolumeRangeDecibels:
++		{
++			if (m_myId == kAudioObjectSystemObject)
++				return kAudioHardwareUnknownPropertyError;
++			if (outData && *ioDataSize < sizeof(AudioValueRange))
++				return kAudioHardwareBadPropertySizeError;
++			if (outData)
++			{
++				auto* range = static_cast<AudioValueRange*>(outData);
++				range->mMinimum = kVolumeMinDecibels;
++				range->mMaximum = kVolumeMaxDecibels;
++			}
++			*ioDataSize = sizeof(AudioValueRange);
++			return kAudioHardwareNoError;
++		}
++		case kAudioDevicePropertyMute:
++		{
++			if (m_myId == kAudioObjectSystemObject)
++				return kAudioHardwareUnknownPropertyError;
++			if (outData && *ioDataSize < sizeof(UInt32))
++				return kAudioHardwareBadPropertySizeError;
++			if (outData)
++				*static_cast<UInt32*>(outData) = m_muted.load(std::memory_order_relaxed);
++			*ioDataSize = sizeof(UInt32);
+ 			return kAudioHardwareNoError;
+ 		}
+ 	}
+@@ -253,20 +365,57 @@ OSStatus AudioHardwareImpl::getPropertyString(CFStringRef str, UInt32* ioDataSiz
  OSStatus AudioHardwareImpl::setPropertyData(const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize,
  	const void* inQualifierData, UInt32 inDataSize, const void* inData)
  {
@@ -1239,8 +1333,41 @@ index f006ba51e..e0e4b4984 100644
 +        }
  		case kAudioDevicePropertyVolumeScalar:
  		{
- 			// TODO: Implement setting the volume
-@@ -283,7 +339,9 @@ OSStatus AudioHardwareImpl::setPropertyData(const AudioObjectPropertyAddress* in
+-			// TODO: Implement setting the volume
+-			// Note: qualifier contains the channel ID (from kAudioDevicePropertyPreferredChannelsForStereo)
++			if (m_myId == kAudioObjectSystemObject)
++				return kAudioHardwareUnknownPropertyError;
++			if (!inData || inDataSize != sizeof(Float32))
++				return kAudioHardwareBadPropertySizeError;
++			Float32 value = *static_cast<const Float32*>(inData);
++			if (std::isnan(value))
++				return paramErr;
++			m_volumeScalar.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed);
+ 			return kAudioHardwareNoError;
+ 		}
+ 		case kAudioDevicePropertyVolumeDecibels:
+ 		{
++			if (m_myId == kAudioObjectSystemObject)
++				return kAudioHardwareUnknownPropertyError;
++			if (!inData || inDataSize != sizeof(Float32))
++				return kAudioHardwareBadPropertySizeError;
++			Float32 db = *static_cast<const Float32*>(inData);
++			if (std::isnan(db))
++				return paramErr;
++			m_volumeScalar.store(volumeDecibelsToScalar(db), std::memory_order_relaxed);
++			return kAudioHardwareNoError;
++		}
++		case kAudioDevicePropertyMute:
++		{
++			if (m_myId == kAudioObjectSystemObject)
++				return kAudioHardwareUnknownPropertyError;
++			if (!inData || inDataSize != sizeof(UInt32))
++				return kAudioHardwareBadPropertySizeError;
++			m_muted.store(*static_cast<const UInt32*>(inData) ? 1u : 0u, std::memory_order_relaxed);
+ 			return kAudioHardwareNoError;
+ 		}
+ 		case kAudioDevicePropertyStreamFormat:
+@@ -283,7 +432,9 @@ OSStatus AudioHardwareImpl::setPropertyData(const AudioObjectPropertyAddress* in
  			memcpy(&m_asbd, setting, sizeof(m_asbd));
  
  			m_asbd.mFramesPerPacket = 1;
@@ -1252,15 +1379,25 @@ index f006ba51e..e0e4b4984 100644
  			return kAudioHardwareNoError;
  		}
 diff --git a/src/CoreAudio/CoreAudio/AudioHardwareImpl.h b/src/CoreAudio/CoreAudio/AudioHardwareImpl.h
-index f74d9b0c3..655e90d51 100644
+index f74d9b0c3..fc9894bf3 100644
 --- a/src/CoreAudio/CoreAudio/AudioHardwareImpl.h
 +++ b/src/CoreAudio/CoreAudio/AudioHardwareImpl.h
-@@ -86,8 +86,7 @@ protected:
+@@ -21,6 +21,7 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ #define AUDIOHARDWAREIMPL_H
+ #include <CoreAudio/AudioHardware.h>
+ #include <CoreFoundation/CFString.h>
++#include <atomic>
+ #include <map>
+ #include <mutex>
+ #include "AudioHardwareStream.h"
+@@ -86,8 +87,9 @@ protected:
  	uint32_t m_bufferSize = 8192;
  
  	CFStringRef m_name = CFSTR("unknown"), m_uid = CFSTR("unknown"), m_manufacturer = CFSTR("unknown"), m_modelUid = CFSTR("unknown");
 -	AudioStreamBasicDescription m_asbd;
 +	AudioStreamBasicDescription m_asbd = {};
++	std::atomic<Float32> m_volumeScalar{1.0f};
++	std::atomic<UInt32> m_muted{0};
  };
  
  #endif /* AUDIOHARDWAREIMPL_H */
@@ -6947,7 +7084,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe054..84a478de0 100644
+index ffd7fe054..75ac9ddfb 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,22 @@
@@ -7212,9 +7349,19 @@ index ffd7fe054..84a478de0 100644
      g_displays = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
  }
  
-@@ -93,41 +294,71 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
+@@ -91,43 +292,151 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
+     return result;
+ }
  
++/* darling-lol Wayland (RCLOL_WAYLAND=1): once the Wayland display is up it owns
++ * the process's EGL state. The game process keeps an X11 connection for other
++ * things, so X11 registration and per-connection lookups must not replace it. */
++static int wayland_mode;
++static struct _CGLDisplay wayland_cgl_display;
++
  CGLError CGLRegisterNativeDisplay(void *native_display) {
++    if (wayland_mode)
++        return kCGLNoError;
  
 -    display = eglGetDisplay(native_display);
 +    ensure_native_egl();
@@ -7235,12 +7382,79 @@ index ffd7fe054..84a478de0 100644
      return kCGLNoError;
  }
  
++/* A config can back an OpenGL window surface: EGL_WINDOW_BIT and EGL_OPENGL_BIT. */
++static int configIsWindowGL(EGLDisplay disp, EGLConfig cfg) {
++    EGLint surface_type = 0, renderable = 0;
++    return cfg != NULL && p_eglGetConfigAttrib &&
++        p_eglGetConfigAttrib(disp, cfg, EGL_SURFACE_TYPE, &surface_type) &&
++        p_eglGetConfigAttrib(disp, cfg, EGL_RENDERABLE_TYPE, &renderable) &&
++        (surface_type & EGL_WINDOW_BIT) && (renderable & EGL_OPENGL_BIT);
++}
++
++static CGLError waylandDisplayFailed(EGLint error) {
++    fprintf(stderr, "darling-wayland: EGL Wayland display failed (0x%x)\n", (unsigned) error);
++    return kCGLBadConnection;
++}
++
++/* Only assigns the globals after every step succeeds; a failure leaves the
++ * previously registered display in place. */
++CGLError CGLRegisterNativeWaylandDisplay(void *wl_display) {
++    ensure_native_egl();
++    if (!p_eglGetPlatformDisplay || !p_eglInitialize || !p_eglChooseConfig || !p_eglBindAPI)
++        return waylandDisplayFailed(0);
++
++    EGLDisplay disp = p_eglGetPlatformDisplay(0x31D8 /* EGL_PLATFORM_WAYLAND_KHR */, wl_display, NULL);
++    if (disp == EGL_NO_DISPLAY)
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++    if (!p_eglInitialize(disp, NULL, NULL))
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++
++    EGLConfig cfg = NULL;
++    EGLint count = 0;
++    chooseDefaultConfig(disp, &cfg, &count, "CGLRegisterNativeWaylandDisplay");
++    if (!configIsWindowGL(disp, cfg)) {
++        /* The default query can pick a GLES1-only config; ask for an OpenGL window config. */
++        EGLConfig fallback = NULL;
++        EGLint fallback_count = 0;
++        if (p_eglChooseConfig(disp, gl_window_attribute_list, &fallback, 1, &fallback_count) &&
++            fallback_count > 0 && configIsWindowGL(disp, fallback)) {
++            cfg = fallback;
++            count = fallback_count;
++        } else {
++            cfg = NULL;
++        }
++    }
++    if (cfg == NULL)
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++
++    if (!p_eglBindAPI(EGL_OPENGL_API))
++        return waylandDisplayFailed(p_eglGetError ? (EGLint) p_eglGetError() : 0);
++
++    display = disp;
++    config = cfg;
++    num_config = count;
++    wayland_cgl_display.display = disp;
++    wayland_cgl_display.config = cfg;
++    wayland_cgl_display.num_config = count;
++    wayland_mode = 1;
++
++    const char *vendor = p_eglQueryString ? p_eglQueryString(disp, EGL_VENDOR) : NULL;
++    fprintf(stderr, "darling-wayland: EGL on the Wayland display (vendor %s)\n", vendor ? vendor : "?");
++    return kCGLNoError;
++}
++
++int CGLUsesWaylandDisplay(void) {
++    return wayland_mode;
++}
++
 +/* darling-lol M57: processes that create a CGL context without first calling
 + * CGLRegisterNativeDisplay (e.g. Chromium's GPU process) previously got
 + * display==0/config==0 and CGLCreateContext always failed. Lazily initialise a
 + * default EGL display so context creation can proceed. */
 +static void ensureDefaultDisplay(void) {
 +    ensure_native_egl();
++    if (wayland_mode)
++        return;
 +    if (display != EGL_NO_DISPLAY && display != NULL && config != NULL)
 +        return;
 +
@@ -7268,6 +7482,9 @@ index ffd7fe054..84a478de0 100644
      struct _CGLDisplay* rv;
  
 +    ensure_native_egl();
++    /* Wayland mode: reuse the registered Wayland display, not a per-connection X11 one. */
++    if (wayland_mode)
++        return &wayland_cgl_display;
      pthread_mutex_lock(&g_displaysMutex);
      rv = (struct _CGLDisplay*) CFDictionaryGetValue(g_displays, (const void*)(unsigned long) cid);
      pthread_mutex_unlock(&g_displaysMutex);
@@ -7292,7 +7509,7 @@ index ffd7fe054..84a478de0 100644
  
          pthread_mutex_lock(&g_displaysMutex);
          CFDictionaryAddValue(g_displays, (const void*)(unsigned long) cid, rv);
-@@ -139,6 +370,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
+@@ -139,6 +448,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
  
  CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid)
  {
@@ -7301,7 +7518,7 @@ index ffd7fe054..84a478de0 100644
      struct _CGLDisplay* disp = getCGLDisplay(cid);
      if (!disp)
          return kCGLBadConnection;
-@@ -152,7 +385,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -152,16 +463,17 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
      if (!window)
          return kCGLBadWindow;
  
@@ -7309,8 +7526,10 @@ index ffd7fe054..84a478de0 100644
 +    gl->egl_surface = p_eglCreateWindowSurface(gl->egl_display, gl->egl_config, window, NULL);
      if (gl->egl_surface == EGL_NO_SURFACE)
          return kCGLBadState;
++    gl->swap_interval_requested = 0;
      return kCGLNoError;
-@@ -161,7 +394,7 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+ }
+ 
  CGLWindowRef CGLGetWindow(void *native_window) {
  
      EGLNativeWindowType window = (EGLNativeWindowType) native_window;
@@ -7319,13 +7538,34 @@ index ffd7fe054..84a478de0 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -170,15 +403,53 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +482,78 @@ CGLWindowRef CGLGetWindow(void *native_window) {
      return (CGLWindowRef) surface;
  }
  
++/* Wayland windows have no X visual to match: take the best config with at least
++ * 8 alpha bits, or the default config when there is none. */
++static CGLWindowRef waylandWindowWithAlpha(void *native_window) {
++    static EGLint const wayland_alpha_list[] = {
++        EGL_ALPHA_SIZE, 8,
++        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
++        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
++        EGL_NONE
++    };
++    EGLConfig alpha = NULL;
++    EGLint count = 0;
++    EGLSurface surface = EGL_NO_SURFACE;
++    if (p_eglChooseConfig(display, wayland_alpha_list, &alpha, 1, &count) && count > 0 && alpha != NULL)
++        surface = p_eglCreateWindowSurface(display, alpha, (EGLNativeWindowType) native_window, NULL);
++    if (surface == EGL_NO_SURFACE)
++        surface = p_eglCreateWindowSurface(display, config, (EGLNativeWindowType) native_window, NULL);
++    return surface == EGL_NO_SURFACE ? NULL : (CGLWindowRef) surface;
++}
++
 +/* The default config has no alpha, and NVIDIA rejects it on 32-bit windows (EGL_BAD_CONFIG).
 + * Translucent windows need an alpha config whose native visual is the window's. */
 +CGLWindowRef CGLGetWindowWithAlpha(void *native_window, unsigned long visual_id) {
++    if (wayland_mode)
++        return waylandWindowWithAlpha(native_window);
 +    static EGLint const alpha_attribute_list[] = {
 +        EGL_RED_SIZE, 1,
 +        EGL_GREEN_SIZE, 1,
@@ -7365,17 +7605,21 @@ index ffd7fe054..84a478de0 100644
  CGL_EXPORT CGLError CGLContextMakeCurrentAndAttachToWindow(CGLContextObj context, CGLWindowRef window) {
      if (!context)
          return kCGLBadContext;
++    if (context->egl_surface == (EGLSurface) window && CGLGetCurrentContext() == context)
++        return kCGLNoError;
 +    EGLSurface oldSurface = context->egl_surface;
      context->egl_surface = (EGLSurface) window;
 -    return CGLSetCurrentContext(context);
 +    CGLError result = CGLSetCurrentContext(context);
 +    if (result != kCGLNoError)
 +        context->egl_surface = oldSurface;
++    else if (oldSurface != (EGLSurface) window)
++        context->swap_interval_requested = 0;
 +    return result;
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +469,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +573,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -7423,7 +7667,7 @@ index ffd7fe054..84a478de0 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +518,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +622,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -7438,7 +7682,7 @@ index ffd7fe054..84a478de0 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +548,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +652,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -7449,7 +7693,7 @@ index ffd7fe054..84a478de0 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -303,37 +604,99 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -303,37 +708,99 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
      return pixelFormat->retain_count;
  }
  
@@ -7552,7 +7796,7 @@ index ffd7fe054..84a478de0 100644
      return context;
  }
  
-@@ -342,11 +705,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +809,17 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -7573,7 +7817,7 @@ index ffd7fe054..84a478de0 100644
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +723,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +827,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -7586,7 +7830,7 @@ index ffd7fe054..84a478de0 100644
  
      free(context);
  }
-@@ -384,8 +757,325 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -384,8 +861,327 @@ CGLError CGLUnlockContext(CGLContextObj context) {
  }
  
  CGLError CGLFlushDrawable(CGLContextObj context) {
@@ -7727,7 +7971,9 @@ index ffd7fe054..84a478de0 100644
 + * acknowledges suspension of CPU writes before the first GL swap. Fallback
 + * leaves the existing readback path available and restores all GL bindings. */
 +CGL_EXPORT int CGLPresentIOSurface(IOSurfaceRef surface) {
-+    if(!surface || !getenv("RCLOL_GPU_DIRECT_PRESENT") || IOSurfaceGetPlaneCount(surface)>1 ||
++    /* Its native present surface is an X11 window from the shared target; the
++     * Wayland display cannot take it, so report "not presented" in Wayland mode. */
++    if(wayland_mode || !surface || !getenv("RCLOL_GPU_DIRECT_PRESENT") || IOSurfaceGetPlaneCount(surface)>1 ||
 +       IOSurfaceGetBytesPerElement(surface)!=4)return 0;
 +    size_t width=IOSurfaceGetWidth(surface),height=IOSurfaceGetHeight(surface);
 +    if(width<256 || height<256)return 0;
@@ -7914,12 +8160,17 @@ index ffd7fe054..84a478de0 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -395,9 +1085,11 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -395,9 +1191,16 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
      if (parameter == kCGLCPSwapInterval)
      {
          GLint v = *value;
 -        EGLBoolean success = eglSwapInterval(display, v);
 -        if (success)
++        /* eglSwapInterval applies to the surface current on this thread, so the
++         * cached value only stands for this context while it is current. */
++        if (context && context->swap_interval_requested && context->swap_interval == v &&
++            CGLGetCurrentContext() == context)
++            return kCGLNoError;
 +        EGLBoolean success = p_eglSwapInterval(display, v);
 +        if (success) {
              context->swap_interval = v;
@@ -7928,7 +8179,7 @@ index ffd7fe054..84a478de0 100644
          return success ? kCGLNoError : kCGLBadValue;
      }
      fprintf(stderr, "CGLSetParameter unimplemented for parameter %d\n", parameter);
-@@ -417,14 +1109,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1220,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -7955,11 +8206,17 @@ index ffd7fe054..84a478de0 100644
 \ No newline at end of file
 +}
 diff --git a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
-index 1d0b10e65..5cdd9a89c 100644
+index 1d0b10e6..c09a8ba4 100644
 --- a/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
 +++ b/src/frameworks/OpenGL/include/OpenGL/CGLInternal.h
-@@ -14,8 +14,12 @@ typedef void *CGLWindowRef;
+@@ -12,10 +12,18 @@ extern "C" {
+ typedef void *CGLWindowRef;
+ 
  CGL_EXPORT CGLError CGLRegisterNativeDisplay(void *native_display);
++// Experimental (RCLOL_WAYLAND=1): EGL on a host wl_display. Once it succeeds, the
++// X11 registration and lookups keep this display. Window pointers are wl_egl_window*.
++CGL_EXPORT CGLError CGLRegisterNativeWaylandDisplay(void *wl_display);
++CGL_EXPORT int CGLUsesWaylandDisplay(void);
  
  CGL_EXPORT CGLWindowRef CGLGetWindow(void *native_window);
 +// A surface with an alpha channel, for a window created with the given 32-bit visual.
@@ -8810,7 +9067,7 @@ index d9a7aea96..bfb6ce45d 100644
  
  	*cpu_caps = (uint32_t) my_caps;
  	*cpu_caps64 = my_caps;
-@@ -79,79 +107,55 @@ void commpage_setup(bool _64bit)
+@@ -79,79 +107,64 @@ void commpage_setup(bool _64bit)
  	{
  		uint64_t* memsize = (uint64_t*)CGET(_COMM_PAGE_MEMORY_SIZE);
  		*memsize = si.totalram * si.mem_unit;
@@ -8929,6 +9186,15 @@ index d9a7aea96..bfb6ce45d 100644
 +        unsigned int c, d;
 +        __cpuid_count(0x80000001u, 0, a, b, c, d);
 +        long_mode = !!(d & (1u << 29));
++    }
++    const char* profile = getenv("RCLOL_PLATFORM_PROFILE");
++    if (profile != NULL && strcmp(profile, "compat") == 0) {
++        // Mask host features to the i7-9750H (Coffee Lake) capability set so
++        // the commpage agrees with the compat profile without advertising any
++        // instruction the host CPU lacks.
++        ecx1 &= 0x7ffafbbfu;
++        edx1 &= 0xbfebfbffu;
++        ebx7 &= 0x000c4b3cu;
 +    }
 +    return commpage_decode_cpu_caps(ecx1, edx1, ebx7, xcr0, long_mode);
  }
@@ -14465,3 +14731,15 @@ index 256cd54ec..f24c27f6c 100644
  		)
  
  		if (NOT TARGET ${bareName}_xtrace_mig AND NOT MIG_NO_XTRACE)
+diff --git a/src/CoreAudio/include/CoreAudio/AudioHardware.h b/src/CoreAudio/include/CoreAudio/AudioHardware.h
+index cb7d010e8..24038fc53 100644
+--- a/src/CoreAudio/include/CoreAudio/AudioHardware.h
++++ b/src/CoreAudio/include/CoreAudio/AudioHardware.h
+@@ -125,6 +125,7 @@ enum {
+ enum {
+     kAudioDevicePropertyVolumeScalar = 'volm',
+     kAudioDevicePropertyVolumeDecibels = 'vold',
++    kAudioDevicePropertyVolumeRangeDecibels = 'vdb#',
+     kAudioDevicePropertyVolumeDecibelsToScalar = 'db2v',
+     kAudioDevicePropertyVolumeScalarToDecibels = 'v2db',
+     kAudioDevicePropertyMute = 'mute',

@@ -151,17 +151,93 @@ environment, stat entry or parent cannot be read. See
 
 `RCLOL_CLIENT_IN_GAME_TRICKS=1` opts in to automatic client handling during a
 match. It reads `lol-user-experience` from the installed client's
-`LCULocalPreferences.yaml`: with `potatoModeEnabled: true`, it closes the client
-UI when `closeLeagueClientDuringGame: true`, and hides the managed
-`LeagueClientUx`/`Riot Client` X11 windows when that value is false. Missing or
-invalid preference values, disabled client optimizations and unreadable files
-select no action. The low-level `RCLOL_CLOSE_CLIENT_IN_GAME=1` and
+`LCULocalPreferences.yaml`: it closes the client UI when
+`closeLeagueClientDuringGame: true` (even when `potatoModeEnabled` is false, so
+the pre-match UX process does not hold CEF's `LOCK` when Riot launches a fresh
+UX process after the match), and hides the managed `LeagueClientUx`/`Riot Client`
+X11 windows when `closeLeagueClientDuringGame: false` and
+`potatoModeEnabled: true`. Missing or invalid preference values, disabled client
+optimizations with close disabled, and unreadable files select no action. The
+low-level `RCLOL_CLOSE_CLIENT_IN_GAME=1` and
 `RCLOL_HIDE_CLIENT_IN_GAME=1` switches remain available when the automatic
 switch is not set. The feature is off by default, requires X11/Xwayland, and
-does not patch client binaries, CEF or the game. The hide helper exits after ten
+does not patch client binaries, CEF or the game. With `RCLOL_WAYLAND` unset, `0` or
+`game` the clients still run on Xwayland, so these helpers still apply. With
+`RCLOL_WAYLAND=1` the client windows are native Wayland windows that the X11 helpers
+cannot see (see the native Wayland section below). The hide helper exits after ten
 minutes without a client or match once it has seen one. See
 [the troubleshooting measurement](TROUBLESHOOTING.md#automatic-client-handling-during-a-match)
 for the measured CPU effect and limitations.
+
+### Experimental native Wayland windows (`RCLOL_WAYLAND`)
+
+`RCLOL_WAYLAND` opts in to a native Wayland path. It has three settings:
+
+| Setting | Windows on native Wayland |
+|---|---|
+| `0` (default, or unset) | none; everything stays on X11/Xwayland |
+| `game` | the League game window only (recommended Wayland mode for daily play); clients stay on Xwayland |
+| `1` | the League game window, the League client window and the Riot Client window |
+
+```sh
+RCLOL_WAYLAND=game ./scripts/run.sh   # game window only (clients keep GPU-direct Xwayland)
+RCLOL_WAYLAND=1 ./scripts/run.sh      # game, League client and Riot Client
+```
+
+The game process loads `libDarlingWayland.dylib` from the guest home, next to
+`libDarlingXShm.dylib`, and talks to the host compositor (`libdarling-wayland.so`).
+It supports xdg-activation focus, fullscreen direct-scanout opaque regions,
+native pointer lock, confinement and relative motion, `wp_pointer_warp_v1`,
+and native Wayland EGL presentation.
+
+This path is experimental and off (`0`) by default. On GNOME/Mutter with a
+discrete NVIDIA GPU (`RCLOL_WAYLAND=game` keeps clients on Xwayland), post-game
+reloading and gameplay were exercised; KDE Plasma, Hyprland, Sway, AMD/Intel
+Mesa, hybrid NVIDIA (PRIME) laptops, and Nix builds remain untested. GNOME has
+no tearing-control protocol (`wp_tearing_control_manager_v1`), so disabling
+VSync behaves differently than on unthrottled X11/Xwayland. Windowed (titled)
+game windows and the 512x216 splash may stay on X11.
+
+Requirements: a Wayland session whose compositor socket is at an absolute
+`$WAYLAND_DISPLAY` or at `$WAYLAND_DISPLAY` under `$XDG_RUNTIME_DIR`. The runtime
+build needs the host packages `wayland-devel` (or `libwayland-dev`),
+`wayland-protocols`, `libxkbcommon` and `wayland-scanner` (and Wayland EGL headers).
+When they are missing, the runtime build skips the library and says so, and the
+game stays on X11.
+
+#### Game-only vs full client Wayland (`game` vs `1`)
+
+- **`RCLOL_WAYLAND=game`:** Recommended for everyday play when testing Wayland.
+  Only the game window connects directly to Wayland; the Riot Client and League
+  client remain on Xwayland so they keep `RCLOL_GPU_DIRECT_PRESENT=1` (no CPU
+  readback for client frames) and X11 helpers such as
+  `RCLOL_HIDE_RIOT_CLIENT_IN_GAME` and `RCLOL_HIDE_LEAGUE_SPLASH`.
+- **`RCLOL_WAYLAND=1`:** Moves the League client and Riot Client windows to
+  native Wayland too (`xdg_toplevel` and relative `xdg_popup` menus/tooltips,
+  compositor-driven window dragging, `wayland-handoff` activation tokens, and
+  `XDG_TOPLEVEL_STATE_SUSPENDED` occlusion notification / remote-frame upload
+  pausing while covered on `xdg_wm_base` v6+ compositors). Because Chromium's
+  GPU process stays on X11 EGL, client frames use CPU readback plus `wl_shm`
+  instead of GPU-direct presentation, and X11 window helpers (`RCLOL_HIDE_CLIENT_IN_GAME`,
+  `RCLOL_HIDE_RIOT_CLIENT_IN_GAME`, `RCLOL_HIDE_LEAGUE_SPLASH`) do not see
+  Wayland windows. (`RCLOL_CLOSE_CLIENT_IN_GAME` works from the process list and
+  still applies.) GNOME still decides focus: a client cannot steal focus without
+  recent user input. If clients misbehave, switch to `RCLOL_WAYLAND=game` or `0`.
+
+#### What the launcher prints
+
+When the socket is found, the launcher prints one `wayland:` line. For `1` it is
+`wayland: experimental native Wayland for the game and client windows (socket <path>)`;
+for `game` it is `wayland: experimental native Wayland for the game window (socket <path>)`.
+Otherwise it prints one line saying the game stays on X11 and passes nothing to the
+guest. Any other value prints a warning and is treated as `0`. To turn it off, unset
+`RCLOL_WAYLAND` (or set it to `0`) and start again.
+
+When reporting a result, include the `wayland:` line, the session type, the
+desktop and compositor, the GPU and driver, and the output of
+`darling-lol --doctor` (its "Experimental Wayland game window" line). See
+[troubleshooting](TROUBLESHOOTING.md#experimental-native-wayland-windows-rclol_wayland)
+for what to check and how to compare with X11.
 
 Discord Rich Presence: before each launch the launcher links `discord-ipc-0`…`9`
 into the prefix at the guest's `$XDG_RUNTIME_DIR` (or `/private/tmp` when it is
@@ -170,6 +246,15 @@ Flatpak (`app/com.discordapp.Discord`), Vesktop Flatpak and Snap Discord are
 found when running at launch; otherwise native is assumed. Discord must be
 running on the host. `RCLOL_DISCORD_RPC=0` skips the links and removes ones
 left by an earlier launch.
+
+The guest runs in its own PID namespace, so the process ID a client sends with
+its activity is unknown to the host Discord, which then shows no status. While
+Discord is running at launch, the slots it serves are linked to a small host
+relay (`tools/discord-ipc-relay.py`, sockets in
+`$XDG_RUNTIME_DIR/darling-lol-discord-<uid>/<session>`, one per session) that forwards every frame
+unchanged except the `pid` argument of `SET_ACTIVITY`, replaced with the
+client's host PID. It logs nothing and exits with the session.
+`RCLOL_DISCORD_PID_RELAY=0` links straight to the Discord sockets instead.
 
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,

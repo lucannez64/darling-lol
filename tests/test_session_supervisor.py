@@ -517,6 +517,7 @@ class ToolboxSessionTests(unittest.TestCase):
 
     def test_launcher_helpers_do_not_block_the_stop(self):
         for pid, name in enumerate(('close-league-client-in-game.py',
+                                    'discord-ipc-relay.py',
                                     'hide-league-client-in-game.py',
                                     'hide-league-splash-window.py'), start=12400):
             self.launcher_helper(pid, name)

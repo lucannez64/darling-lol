@@ -43,12 +43,16 @@ class ClientInGameTricksTests(unittest.TestCase):
             self.write(True, value)
             self.assertEqual(tricks.mode(self.path), 'none', value)
 
-    def test_none_when_optimizations_are_off(self):
+    def test_optimizations_off_close_only_when_close_preference_is_true(self):
         self.write(False, True)
+        self.assertEqual(tricks.mode(self.path), 'close')
+        self.write(False, False)
         self.assertEqual(tricks.mode(self.path), 'none')
 
-    def test_none_when_optimizations_are_missing_or_file_is_unreadable(self):
+    def test_optimizations_missing_close_only_when_close_preference_is_true(self):
         self.write(None, True)
+        self.assertEqual(tricks.mode(self.path), 'close')
+        self.write(None, False)
         self.assertEqual(tricks.mode(self.path), 'none')
         self.assertEqual(tricks.mode(self.path.with_name('missing.yaml')), 'none')
 

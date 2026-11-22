@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import socket
 import tempfile
 import unittest
 from unittest import mock
@@ -409,6 +410,94 @@ class GpuAndVulkanTests(unittest.TestCase):
             self.assertIn(str(icd / 'intel.json'), found)
             self.assertIn(str(second / 'radeon.json'), found)
             self.assertEqual(len(found), len(set(found)))
+
+
+class WaylandCheckTests(unittest.TestCase):
+    def wayland(self, **fields):
+        base = {'requested': '', 'session_type': 'x11', 'socket': '/run/user/1000/wayland-1',
+                'socket_found': False, 'library': '/checkout/build/libdarling-wayland.so',
+                'library_found': False}
+        base.update(fields)
+        return facts(wayland=base)
+
+    def test_unset_flag_on_x11_is_informational_ok(self):
+        self.assertEqual(doctor.check_wayland(self.wayland())[0], 'ok')
+        self.assertEqual(doctor.check_wayland(facts())[0], 'ok')
+
+    def test_wayland_session_reports_the_facts_without_failing(self):
+        status, message = doctor.check_wayland(self.wayland(session_type='wayland'))
+        self.assertEqual(status, 'ok')
+        self.assertIn('socket /run/user/1000/wayland-1 (missing)', message)
+        self.assertIn('library /checkout/build/libdarling-wayland.so (missing)', message)
+
+    def test_flag_on_with_socket_and_library_is_ok(self):
+        status, message = doctor.check_wayland(self.wayland(
+            requested='1', session_type='wayland', socket_found=True, library_found=True))
+        self.assertEqual(status, 'ok')
+        self.assertIn('RCLOL_WAYLAND=1', message)
+
+    def test_flag_on_without_socket_or_library_warns_and_never_fails(self):
+        for fields in ({'socket_found': False, 'library_found': True},
+                       {'socket_found': True, 'library_found': False},
+                       {'socket_found': False, 'library_found': False}):
+            status, message = doctor.check_wayland(self.wayland(requested='1', **fields))
+            self.assertEqual(status, 'warn', fields)
+            self.assertIn('stays on X11', message)
+
+    def test_game_scope_is_a_valid_on_value(self):
+        status, message = doctor.check_wayland(self.wayland(
+            requested='game', session_type='wayland', socket_found=True, library_found=True))
+        self.assertEqual(status, 'ok')
+        self.assertIn('RCLOL_WAYLAND=game', message)
+        status, message = doctor.check_wayland(self.wayland(requested='game', socket_found=False,
+                                                            library_found=True))
+        self.assertEqual(status, 'warn')
+        self.assertIn('stays on X11', message)
+
+    def test_invalid_value_warns_as_off(self):
+        status, message = doctor.check_wayland(self.wayland(requested='yes'))
+        self.assertEqual(status, 'warn')
+        self.assertIn('is not 0, 1 or game', message)
+        self.assertIn('treats it as 0', message)
+
+    def test_socket_rule_matches_the_launcher(self):
+        self.assertEqual(doctor.wayland_socket_path({'WAYLAND_DISPLAY': '/tmp/w/sock',
+                                                     'XDG_RUNTIME_DIR': '/run/user/1000'}), '/tmp/w/sock')
+        self.assertEqual(doctor.wayland_socket_path({'WAYLAND_DISPLAY': 'wayland-2',
+                                                     'XDG_RUNTIME_DIR': '/run/user/1000'}),
+                         '/run/user/1000/wayland-2')
+        self.assertEqual(doctor.wayland_socket_path({'XDG_RUNTIME_DIR': '/run/user/1000'}),
+                         '/run/user/1000/wayland-0')
+
+    def test_gather_finds_a_real_socket_and_the_workspace_library(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            runtime = root / 'runtime'
+            runtime.mkdir()
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(runtime / 'wayland-1'))
+                workspace = root / 'workspace'
+                (workspace / 'build').mkdir(parents=True)
+                (workspace / 'build/libdarling-wayland.so').write_bytes(b'')
+                env = {'RCLOL_WAYLAND': '1', 'WAYLAND_DISPLAY': 'wayland-1',
+                       'XDG_RUNTIME_DIR': str(runtime), 'XDG_SESSION_TYPE': 'wayland',
+                       'DARLING_WORKSPACE': str(workspace)}
+                data = doctor.gather(prefix=root / 'prefix', env=env, host_tmp=root,
+                                     which=lambda name: None)
+            finally:
+                listener.close()
+            wayland = data['wayland']
+            self.assertTrue(wayland['socket_found'])
+            self.assertTrue(wayland['library_found'])
+            self.assertEqual(wayland['library'], str(workspace / 'build/libdarling-wayland.so'))
+            self.assertEqual(doctor.check_wayland(data)[0], 'ok')
+            self.assertIn('RCLOL_WAYLAND', data['environment'])
+            self.assertIn('wayland', [check[0] for check in doctor.CHECKS])
+
+    def test_run_checks_includes_the_wayland_check(self):
+        results = doctor.run_checks(facts())
+        self.assertIn('wayland', {result['id'] for result in results})
 
 
 class ReportTests(unittest.TestCase):
