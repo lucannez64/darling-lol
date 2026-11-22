@@ -26,6 +26,7 @@ readonly -a REGIONS=(
   'LAS|Latin America South'
   'TR|Turkey'
   'RU|Russia'
+  'SG2|Southeast Asia'
 )
 # Locales the Riot Client ships; keep in sync with LOCALES in scripts/common.py
 # (tests/test_install_native.py compares the two lists).
@@ -216,6 +217,7 @@ region_for_country() {
     TR) printf 'TR' ;;
     RU|BY|KZ) printf 'RU' ;;
     AU|NZ|FJ|PG) printf 'OCE' ;;
+    SG|MY|PH|TH|ID) printf 'SG2' ;;
     PL|CZ|SK|HU|RO|BG|HR|SI|RS|BA|MK|AL|ME|EE|LV|LT|UA|MD|SE|NO|DK|FI|IS) printf 'EUNE' ;;
     *) return 1 ;;
   esac
