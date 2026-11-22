@@ -75,11 +75,11 @@ case "$profile" in
   ;;
 esac
 export RCLOL_PLATFORM_PROFILE="$profile"
-# Under profile=compat, enable Darling's SIP enforcement (M7/M8) unless the caller
-# already chose DARLING_SIP_ENFORCE or opted out with RCLOL_SIP_ENFORCE=0, so
-# csr_get_active_config() truthfully reports SIP enabled instead of all-disabled.
+# Opt-in Darling SIP enforcement (M7/M8) via RCLOL_SIP_ENFORCE=1 when
+# DARLING_SIP_ENFORCE is unset. Kept off by default because sip.c currently
+# blocks writes to /private/var/db and /private/etc, aborting launchd daemons.
 if [ "$profile" = compat ] && [ -z "${DARLING_SIP_ENFORCE+x}" ]; then
- if [ "${RCLOL_SIP_ENFORCE:-1}" != 0 ]; then
+ if [ "${RCLOL_SIP_ENFORCE:-0}" = 1 ]; then
   export DARLING_SIP_ENFORCE=1
  fi
 fi
