@@ -164,7 +164,10 @@ class CheckTests(unittest.TestCase):
 
     def test_runtime_signing_needs_a_trust_store(self):
         self.assertEqual(doctor.check_runtime_signing(facts())[0], 'ok')
-        self.assertEqual(doctor.check_runtime_signing(facts(trust_store=''))[0], 'warn')
+        status, message = doctor.check_runtime_signing(facts(trust_store=''))
+        self.assertEqual(status, 'warn')
+        self.assertIn('sign-darling-runtime.sh --sdk', message)
+        self.assertIn('scripts/update.sh', message)
         self.assertEqual(doctor.check_runtime_signing(facts(trust_store='', prefix_launchd=False))[0], 'ok')
         with tempfile.TemporaryDirectory() as folder:
             store = Path(folder) / 'cfg/darling/trustcache'
