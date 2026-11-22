@@ -508,16 +508,31 @@ fi
 # gone for N seconds with no game running.
 export RCLOL_STOP_AFTER_CLIENT_SECONDS="${RCLOL_STOP_AFTER_CLIENT_SECONDS:-60}"
 
+# Prefer canonical prefix overlays (/System/Library/Frameworks, /usr/lib) when
+# synced by install-runtime.sh so guest processes run without DYLD_LIBRARY_PATH
+# or DYLD_FRAMEWORK_PATH (issue #31). Fall back to RuntimeLibraries/Frameworks
+# on unsynced prefixes, explicit DYLD_* overrides, or RCLOL_CANONICAL_OVERLAYS=0.
+dyld_library_path=
+dyld_framework_path=
+if [ "${RCLOL_CANONICAL_OVERLAYS:-1}" = 0 ] ||
+   [ -n "${DYLD_LIBRARY_PATH:-}" ] || [ -n "${DYLD_FRAMEWORK_PATH:-}" ] ||
+   [ ! -f "$prefix_dir/System/Library/Frameworks/Metal.framework/Versions/A/Metal" ] ||
+   [ ! -f "$prefix_dir/usr/lib/darling/libindium.dylib" ]; then
+ dyld_library_path=${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}
+ dyld_framework_path=${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}
+fi
+
 exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   --darling "${darling_bin:-darling}" --runtime-at-start "$runtime_at_start" \
   --guest-log "$prefix_dir$guest_path/Library/Logs/Riot Games/Riot Client" -- \
-  python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES EGL_PLATFORM=x11 \
+  python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES \
+  -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH EGL_PLATFORM=x11 \
   MAC_CHROMIUM_TMPDIR="${MAC_CHROMIUM_TMPDIR:-/private/tmp}" \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
   mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-false}}" \
   XMODIFIERS="${RCLOL_XMODIFIERS:-@im=none}" DISPLAY="${DISPLAY:-:1}" \
-  DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-$guest_path/RuntimeLibraries}" \
-  DYLD_FRAMEWORK_PATH="${DYLD_FRAMEWORK_PATH:-$guest_path/RuntimeFrameworks}" \
+  ${dyld_library_path:+DYLD_LIBRARY_PATH="$dyld_library_path"} \
+  ${dyld_framework_path:+DYLD_FRAMEWORK_PATH="$dyld_framework_path"} \
   DARLING_XSHM_LIBRARY="${DARLING_XSHM_LIBRARY:-$guest_path/libDarlingXShm.dylib}" \
   ${wayland_socket:+RCLOL_WAYLAND_SOCKET="$wayland_socket"} \
   ${wayland_socket:+RCLOL_WAYLAND_SCOPE="$wayland_scope"} \
