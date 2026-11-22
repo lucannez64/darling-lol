@@ -35,24 +35,35 @@ def current_clang(values):
     return [re.sub(r"/usr/lib/clang/\d+/include", resource_dir + "/include", value) for value in values]
 
 
-def build(library, object_dir, link_dir, output):
-    folder = root / "build/darling-src/build/src/external" / library
-    source = root / "build/darling-src/src/external" / library
-    flags_text = (folder / ("CMakeFiles/%s/flags.make" % object_dir)).read_text()
+def read_flags(folder, object_dir):
     flags = {}
-    for line in flags_text.splitlines():
+    for line in (folder / ("CMakeFiles/%s/flags.make" % object_dir)).read_text().splitlines():
         if line.startswith("CXX_") and " = " in line:
             key, value = line.split(" = ", 1)
             flags[key] = current_clang(shlex.split(value))
+    return flags
+
+
+def build(library, object_dirs, link_dir, output):
+    """Recompile every object of object_dirs on the link line, each with its own target's flags.
+
+    libcxx links two object libraries: cxx_obj (C++11) and cxx_fs_obj
+    (std::filesystem, C++17).
+    """
+    folder = root / "build/darling-src/build/src/external" / library
+    source = root / "build/darling-src/src/external" / library
+    flags_by_dir = {object_dir: read_flags(folder, object_dir) for object_dir in object_dirs}
     link_text = (folder / ("CMakeFiles/%s/link.txt" % link_dir)).read_text()
     link = shlex.split(link_text)
     jobs = []
     for index, argument in enumerate(link):
-        if argument.startswith("CMakeFiles/%s/" % object_dir) and argument.endswith(".o"):
-            relative = argument[len("CMakeFiles/%s/" % object_dir):-2]
-            obj = root / ("build/riot-opt-%s-%s.o" % (library, relative.replace("/", "_")))
-            jobs.append((relative, obj))
-            link[index] = str(obj)
+        for object_dir in object_dirs:
+            prefix = "CMakeFiles/%s/" % object_dir
+            if argument.startswith(prefix) and argument.endswith(".o"):
+                relative = argument[len(prefix):-2]
+                obj = root / ("build/riot-opt-%s-%s.o" % (library, relative.replace("/", "_")))
+                jobs.append((object_dir, relative, obj))
+                link[index] = str(obj)
     # Wait for a quiet machine before hashing (and later compiling).
     riot_build_gate.wait_until_free()
 
@@ -63,12 +74,13 @@ def build(library, object_dir, link_dir, output):
         # source's content, and the headers the previous dependency files list.
         chunks = [riot_build_cache.digest_text(Path(__file__).read_text()),
                   riot_build_cache.digest_text("\0".join(
-                      key + "=" + " ".join(flags[key]) for key in sorted(flags))),
+                      object_dir + ":" + key + "=" + " ".join(flags[key])
+                      for object_dir, flags in sorted(flags_by_dir.items()) for key in sorted(flags))),
                   riot_build_cache.digest_text(link_text)]
-        for relative, obj in jobs:
+        for _, relative, obj in jobs:
             chunks.append(relative + "\0" + riot_build_cache.digest_file(source / relative))
         chunks.append(riot_build_cache.dependency_chunk(
-            [Path(str(obj) + ".d") for _, obj in jobs]))
+            [Path(str(obj) + ".d") for _, _, obj in jobs]))
         return chunks
 
     stamp = root / ("build/riot-cxx-%s-build.json" % library)
@@ -82,7 +94,8 @@ def build(library, object_dir, link_dir, output):
     print(library, "recompiling", len(jobs), "objects at -O3", flush=True)
 
     def compile_one(job):
-        relative, obj = job
+        object_dir, relative, obj = job
+        flags = flags_by_dir[object_dir]
         cxx_flags = [f for f in flags["CXX_FLAGS"] if f not in ("-g", "-O0", "-O1", "-O2")]
         subprocess.run(["clang++", *flags["CXX_DEFINES"], *flags["CXX_INCLUDES"], *cxx_flags,
                         "-O3", "-march=native", "-mtune=generic", "-fno-strict-aliasing",
@@ -105,5 +118,5 @@ def build(library, object_dir, link_dir, output):
 
 
 if __name__ == "__main__":
-    build("libcxxabi", "cxxabi_obj.dir", "cxxabi.dir", "riot-libc++abi.dylib")
-    build("libcxx", "cxx_obj.dir", "cxx.dir", "riot-libc++.1.dylib")
+    build("libcxxabi", ("cxxabi_obj.dir",), "cxxabi.dir", "riot-libc++abi.dylib")
+    build("libcxx", ("cxx_obj.dir", "cxx_fs_obj.dir"), "cxx.dir", "riot-libc++.1.dylib")

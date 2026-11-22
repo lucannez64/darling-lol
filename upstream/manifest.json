@@ -204,6 +204,14 @@
       ]
     },
     {
+      "path": "src/external/libcxx",
+      "revision": "c47677d3ba33bdabbfb07e75f531831579355a2d",
+      "repository": "https://github.com/darlinghq/darling-libcxx.git",
+      "patch": "patches/libcxx.patch",
+      "modified_files": 1,
+      "new_files": []
+    },
+    {
       "path": "src/external/libcxxabi",
       "revision": "c9c851718eb304a9aefa097aeaaf8c3bd1dff1bc",
       "repository": "https://github.com/darlinghq/darling-libcxxabi.git",
