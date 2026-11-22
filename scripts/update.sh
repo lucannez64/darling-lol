@@ -306,6 +306,73 @@ sign_sdk_runtime() {
 	fi
 }
 
+# A container that podman still reports as running can be unreachable: after a
+# host suspend or an interrupted runtime restart every `toolbox run` fails even
+# though the container's init process is alive. Stopping and starting it again
+# is the recovery that keeps the runtime installed inside the container.
+toolbox_container_running() {
+	command -v podman >/dev/null 2>&1 || return 1
+	[ "$(podman container inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]
+}
+
+restart_toolbox_container() {
+	container=$1
+	if ! podman stop --time 10 "$container" >/dev/null 2>&1; then
+		# Rootless podman signals the container through its runtime. When that
+		# pidfd signal is refused (`operation not permitted`, seen when a
+		# container's user namespace outlived a suspend) the host can still
+		# signal the recorded init PID, as `podman stop` would.
+		pid=$(podman container inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)
+		case "$pid" in
+		'' | 0 | *[!0-9]*) ;;
+		*)
+			warning "Podman could not stop Toolbox container '$container'; signaling PID $pid."
+			kill -TERM "$pid" 2>/dev/null || true
+			attempt=0
+			while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+				sleep 1
+				attempt=$((attempt + 1))
+			done
+			;;
+		esac
+	fi
+	attempt=0
+	until podman start "$container" >/dev/null 2>&1; do
+		attempt=$((attempt + 1))
+		if [ "$attempt" -ge 15 ]; then
+			warning "Podman could not start Toolbox container '$container'."
+			return 0
+		fi
+		sleep 1
+	done
+}
+
+# The install steps shut Darling down and stop leftover Riot processes, so
+# refuse rather than end a session. The same probe guards a container restart,
+# which would end a session still running inside an unreachable container.
+riot_or_league_running() {
+	python3 - <<'PY'
+from pathlib import Path
+for entry in Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        command_line = (entry / 'cmdline').read_bytes()
+    except OSError:
+        continue
+    if b'/Riot Client.app/' in command_line or b'/League of Legends.app/' in command_line:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+reject_running_clients() {
+	if riot_or_league_running; then
+		error 'A Riot Client or League process is running; exit the game and both clients, then run this again.'
+		exit 1
+	fi
+}
+
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	python3 scripts/nix-idle.py
 	# Initial setup and upgrades use the same supported user-owned install path.
@@ -374,10 +441,19 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 		fi
 		# `toolbox run` starts a stopped container, but that start can still
 		# fail transiently (for example while another Toolbox session is
-		# shutting down). Ask before giving up, defaulting to starting it.
+		# shutting down). A container that podman reports as running yet stays
+		# unreachable needs a stop/start instead, because `toolbox run` alone
+		# cannot recover it. Ask before giving up, defaulting to the fix.
 		if ! toolbox run -c "$name" true 2>/dev/null; then
-			printf '\n%s%s%s Toolbox container %s is not reachable. Start it and continue the update? [Y/n] ' \
-				"$YELLOW" "$ICON_WARN" "$RESET" "'$name'"
+			if toolbox_container_running "$name"; then
+				state='running but not reachable'
+				action='Restart'
+			else
+				state='not reachable'
+				action='Start'
+			fi
+			printf '\n%s%s%s Toolbox container %s is %s. %s it and continue the update? [Y/n] ' \
+				"$YELLOW" "$ICON_WARN" "$RESET" "'$name'" "$state" "$action"
 			reply=''
 			# Only a terminal can answer. Pipes and a closed stdin keep the
 			# default, so a non-interactive update never blocks here.
@@ -386,18 +462,37 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			fi
 			case "$reply" in
 			n | N | no | No | NO)
-				error "This checkout was installed via Toolbox container '$name', but that container is not"
-				printf '  reachable. Start it and run the update inside it: toolbox enter %s\n' "$name" >&2
+				if [ "$action" = Restart ]; then
+					error "This checkout was installed via Toolbox container '$name', but that container is"
+					printf '  running but unreachable. Restart it and run the update inside it: podman restart %s\n' "$name" >&2
+				else
+					error "This checkout was installed via Toolbox container '$name', but that container is not"
+					printf '  reachable. Start it and run the update inside it: toolbox enter %s\n' "$name" >&2
+				fi
 				exit 1
 				;;
 			esac
-			info "Starting Toolbox container '$name'..."
+			if [ "$action" = Restart ] && riot_or_league_running; then
+				error 'A Riot Client or League process is running; exit the game and both clients, then run this again.'
+				printf '  Toolbox container %s was left untouched.\n' "'$name'" >&2
+				exit 1
+			fi
+			if [ "$action" = Restart ]; then
+				info "Restarting Toolbox container '$name'..."
+				restart_toolbox_container "$name"
+			else
+				info "Starting Toolbox container '$name'..."
+			fi
 			attempt=0
 			until toolbox run -c "$name" true 2>/dev/null; do
 				attempt=$((attempt + 1))
-				if [ "$attempt" -ge 3 ]; then
-					error "Toolbox container '$name' could not be started. Start it and run the"
-					printf '  update inside it: toolbox enter %s\n' "$name" >&2
+				if [ "$attempt" -ge 10 ]; then
+					error "Toolbox container '$name' could not be started."
+					if [ "$action" = Restart ]; then
+						printf '  Restart it and run the update inside it: podman restart %s\n' "$name" >&2
+					else
+						printf '  Start it and run the update inside it: toolbox enter %s\n' "$name" >&2
+					fi
 					exit 1
 				fi
 				sleep 1
@@ -431,18 +526,7 @@ if [ ! -d build/darling-src/build ]; then
 	exit 1
 fi
 # The install steps shut Darling down and stop leftover Riot processes, so refuse rather than end a session.
-python3 - <<'PY'
-from pathlib import Path
-for entry in Path('/proc').iterdir():
-    if not entry.name.isdigit():
-        continue
-    try:
-        command_line = (entry / 'cmdline').read_bytes()
-    except OSError:
-        continue
-    if b'/Riot Client.app/' in command_line or b'/League of Legends.app/' in command_line:
-        raise SystemExit('A Riot Client or League process is running; exit the game and both clients, then run this again.')
-PY
+reject_running_clients
 
 if ! command -v sudo >/dev/null 2>&1; then
 	error 'sudo is required to install the system components.'

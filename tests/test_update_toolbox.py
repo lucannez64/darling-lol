@@ -44,6 +44,27 @@ exit 0
 """
 
 
+FAKE_PODMAN = """#!/bin/sh
+# Fake podman: reports the container state from FAKE_PODMAN_RUNNING, can fail a
+# stop, and records every call so a restart can be asserted.
+printf '%s\\n' "$*" >> "${FAKE_PODMAN_LOG:?}"
+case "${1:-}" in container) shift ;; esac
+case "${1:-}" in
+  inspect)
+    [ "${FAKE_PODMAN_RUNNING:-0}" = 1 ] || exit 1
+    case "${3:-}" in
+      *State.Pid*) printf '%s\\n' "${FAKE_PODMAN_PID:-0}" ;;
+      *) printf 'true\\n' ;;
+    esac
+    ;;
+  stop)
+    if [ "${FAKE_PODMAN_STOP_FAIL:-0}" = 1 ]; then exit 1; fi
+    ;;
+esac
+exit 0
+"""
+
+
 def tool_sandbox(folder, *names):
     """Return a PATH dir exposing only the given host tools."""
     bindir = Path(folder) / 'tools'
@@ -72,14 +93,18 @@ class UpdateToolboxTests(unittest.TestCase):
         self.home = folder / 'home'
         self.bindir = folder / 'bin'
         self.log = folder / 'toolbox.log'
+        self.podman_log = folder / 'podman.log'
         (self.repo / 'scripts').mkdir(parents=True)
         self.home.mkdir()
         self.bindir.mkdir()
         shutil.copy2(UPDATE, self.repo / 'scripts' / 'update.sh')
         (self.bindir / 'toolbox').write_text(FAKE_TOOLBOX)
         (self.bindir / 'toolbox').chmod(0o755)
+        (self.bindir / 'podman').write_text(FAKE_PODMAN)
+        (self.bindir / 'podman').chmod(0o755)
         self.env = dict(os.environ)
-        self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log))
+        self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
+                        FAKE_PODMAN_LOG=str(self.podman_log))
         self.env['PATH'] = f'{self.bindir}:{self.env["PATH"]}'
         self.env.pop('DARLING_WORKSPACE', None)
         self.env.pop('DARLING_LOL_UPDATE_REEXEC', None)
@@ -124,6 +149,11 @@ class UpdateToolboxTests(unittest.TestCase):
         if not self.log.exists():
             return []
         return self.log.read_text().splitlines()
+
+    def podman_lines(self):
+        if not self.podman_log.exists():
+            return []
+        return self.podman_log.read_text().splitlines()
 
     def write_marker(self, name):
         build = self.repo / 'build'
@@ -238,6 +268,87 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('toolbox enter gone', result.stderr)
         self.assert_no_reexec()
 
+    def test_running_but_unreachable_container_is_restarted_by_default(self):
+        self.write_marker('stuck')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('is running but not reachable', result.stdout)
+        self.assertIn('Restart it and continue the update? [Y/n]', result.stdout)
+        self.assertIn("Restarting Toolbox container 'stuck'", result.stdout)
+        self.assertIn('container inspect --format {{.State.Running}} stuck',
+                      self.podman_lines())
+        self.assertIn('stop --time 10 stuck', self.podman_lines())
+        self.assertIn('start stuck', self.podman_lines())
+        self.assert_reexec_into('stuck')
+
+    def test_running_container_restart_declined_exits_1_with_restart_hint(self):
+        self.write_marker('stuck')
+        result = self.run_update_in_terminal('n\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('unreachable', result.stderr)
+        self.assertIn('podman restart stuck', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_nonterminal_running_container_restarts_it_by_default(self):
+        self.write_marker('stuck')
+        result = self.run_update(input_text='n\n', FAKE_TOOLBOX_STOPPED='1',
+                                 FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Restarting Toolbox container 'stuck'", result.stdout)
+        self.assert_reexec_into('stuck')
+
+    def test_stopped_container_is_started_without_a_restart(self):
+        self.write_marker('gone')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('is not reachable. Start it and continue the update?',
+                      result.stdout)
+        self.assertIn("Starting Toolbox container 'gone'", result.stdout)
+        self.assertNotIn('stop --time 10 gone', self.podman_lines())
+        self.assertNotIn('start gone', self.podman_lines())
+        self.assert_reexec_into('gone')
+
+    def test_running_container_that_never_recovers_hints_a_restart(self):
+        self.write_marker('stuck')
+        self.stub(self.bindir / 'sleep', 'exit 0')
+        result = self.run_update(input_text='\n', FAKE_TOOLBOX_STOPPED='never',
+                                 FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Toolbox container 'stuck' could not be started", result.stderr)
+        self.assertIn('podman restart stuck', result.stderr)
+        self.assert_no_reexec()
+
+    def test_stop_failure_falls_back_to_signaling_the_recorded_pid(self):
+        self.write_marker('stuck')
+        # Keep the retry delay out of the test, and give the updater a real
+        # process that its SIGTERM fallback can stop.
+        self.stub(self.bindir / 'sleep', 'exit 0')
+        victim = subprocess.Popen(['sleep', '30'])
+        self.addCleanup(victim.wait)
+        self.addCleanup(victim.kill)
+        result = self.run_update_in_terminal(
+            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            FAKE_PODMAN_STOP_FAIL='1', FAKE_PODMAN_PID=str(victim.pid))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"signaling PID {victim.pid}", result.stderr)
+        self.assertIn('start stuck', self.podman_lines())
+        self.assert_reexec_into('stuck')
+
+    def test_running_container_is_left_alone_while_clients_are_open(self):
+        self.write_marker('stuck')
+        # Pretend the Riot Client probe found a live session.
+        self.stub(self.bindir / 'python3', 'exit 0')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('A Riot Client or League process is running', result.stderr)
+        self.assertIn('was left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
     def test_toolbox_missing_gives_distinct_message(self):
         self.write_marker('mycont')
         # PATH must not contain the fake toolbox (nor a real one): only the
@@ -291,7 +402,8 @@ class UpdateToolboxTests(unittest.TestCase):
         self.stub(self.repo / 'scripts/build.sh',
                   f'echo build-diagnostic >&2\nexit {build_exit}')
         self.stub(self.repo / 'scripts/install-runtime.sh', 'echo overlay-ran')
-        self.stub(self.bindir / 'python3', 'exit 0')
+        self.stub(self.bindir / 'python3',
+                  'if [ "$1" = - ]; then exit 1; fi\nexit 0')
         self.stub(self.bindir / 'sudo', 'echo sudo-foreground')
         # A privileged command must never go through the detachment wrapper.
         self.stub(self.bindir / 'setsid',
