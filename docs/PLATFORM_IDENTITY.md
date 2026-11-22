@@ -141,10 +141,14 @@ UUIDs use RFC4122 v4; `system-id` contains the UUID's 16 little-endian bytes.
 For this project `provisioning_UDID` is the uppercase platform UUID alias, not
 a separate Apple provisioning credential or a claim about hardware UDIDs.
 
-Missing ROMs default to six random bytes with the local/unicast bits set. You
+Missing ROMs default to a random Apple-registered OUI followed by three random
+bytes. iokitd publishes the ROM as en0's `IOMACAddress`, and a Mac's built-in
+interface never has a locally administered address, so the earlier
+locally-administered default was a compatibility discrepancy (issue #31). You
 can explicitly supply a three-byte OUI using `--rom-oui AA:BB:CC` (replace the
-example with your chosen unicast OUI). It only affects a missing ROM. An OUI
-does not make a generated identity Apple-issued.
+example with your chosen unicast OUI). It only affects a missing ROM; run
+`scripts/clean-prefix.sh` to regenerate an existing one. An OUI does not make a
+generated identity Apple-issued.
 
 Provisioning replaces the known shared serial `C02ZL0GVMD6N` and UUID
 `6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B`, along with the latter's derived fields
