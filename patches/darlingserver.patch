@@ -1782,10 +1782,18 @@ index d46bdb4..9a58727 100644
  		};
  	};
 diff --git a/internal-include/darlingserver/message.hpp b/internal-include/darlingserver/message.hpp
-index 708f3f3..eba72a1 100644
+index 708f3f3..0052d2e 100644
 --- a/internal-include/darlingserver/message.hpp
 +++ b/internal-include/darlingserver/message.hpp
-@@ -28,6 +28,7 @@
+@@ -22,12 +22,15 @@
+ 
+ #include <sys/socket.h>
+ #include <sys/un.h>
++#include <algorithm>
+ #include <vector>
+ #include <cstdint>
++#include <cstring>
+ #include <deque>
  #include <mutex>
  #include <optional>
  #include <functional>
@@ -1793,7 +1801,173 @@ index 708f3f3..eba72a1 100644
  
  namespace DarlingServer {
  	class Address {
-@@ -71,6 +72,11 @@ namespace DarlingServer {
+@@ -46,18 +49,164 @@ namespace DarlingServer {
+ 		void setRawSize(size_t newRawSize);
+ 	};
+ 
++	class MessageDataBuffer {
++	public:
++		static constexpr size_t inlineCapacity = 256;
++
++	private:
++		alignas(16) uint8_t _inline[inlineCapacity];
++		uint8_t* _heap = nullptr;
++		size_t _size = 0;
++		size_t _capacity = inlineCapacity;
++
++	public:
++		MessageDataBuffer() noexcept = default;
++		~MessageDataBuffer() {
++			delete[] _heap;
++		}
++
++		MessageDataBuffer(const MessageDataBuffer&) = delete;
++		MessageDataBuffer& operator=(const MessageDataBuffer&) = delete;
++
++		MessageDataBuffer(MessageDataBuffer&& other) noexcept {
++			if (other._heap) {
++				_heap = other._heap;
++				_size = other._size;
++				_capacity = other._capacity;
++				other._heap = nullptr;
++				other._size = 0;
++				other._capacity = inlineCapacity;
++			} else {
++				_size = std::min(other._size, inlineCapacity);
++				if (_size > 0) {
++					std::memcpy(_inline, other._inline, _size);
++				}
++				other._size = 0;
++			}
++		}
++
++		MessageDataBuffer& operator=(MessageDataBuffer&& other) noexcept {
++			if (this == &other) {
++				return *this;
++			}
++			delete[] _heap;
++			_heap = nullptr;
++			_capacity = inlineCapacity;
++			if (other._heap) {
++				_heap = other._heap;
++				_size = other._size;
++				_capacity = other._capacity;
++				other._heap = nullptr;
++				other._size = 0;
++				other._capacity = inlineCapacity;
++			} else {
++				_size = std::min(other._size, inlineCapacity);
++				if (_size > 0) {
++					std::memcpy(_inline, other._inline, _size);
++				}
++				other._size = 0;
++			}
++			return *this;
++		}
++
++		uint8_t* data() noexcept {
++			return _heap ? _heap : _inline;
++		}
++
++		const uint8_t* data() const noexcept {
++			return _heap ? _heap : _inline;
++		}
++
++		size_t size() const noexcept {
++			return _size;
++		}
++
++		bool empty() const noexcept {
++			return _size == 0;
++		}
++
++		size_t capacity() const noexcept {
++			return _capacity;
++		}
++
++		uint8_t& operator[](size_t index) noexcept {
++			return data()[index];
++		}
++
++		const uint8_t& operator[](size_t index) const noexcept {
++			return data()[index];
++		}
++
++		uint8_t* begin() noexcept {
++			return data();
++		}
++
++		const uint8_t* begin() const noexcept {
++			return data();
++		}
++
++		uint8_t* end() noexcept {
++			return data() + _size;
++		}
++
++		const uint8_t* end() const noexcept {
++			return data() + _size;
++		}
++
++		void resize(size_t newSize) {
++			if (newSize > _capacity) {
++				uint8_t* newHeap = new uint8_t[newSize];
++				if (_size > 0) {
++					std::memcpy(newHeap, data(), _size);
++				}
++				std::memset(newHeap + _size, 0, newSize - _size);
++				delete[] _heap;
++				_heap = newHeap;
++				_capacity = newSize;
++			} else if (newSize > _size) {
++				std::memset(data() + _size, 0, newSize - _size);
++			}
++			_size = newSize;
++		}
++
++		void prepareReceive(size_t newSize) {
++			if (newSize > _capacity) {
++				uint8_t* newHeap = new uint8_t[newSize];
++				if (_size > 0) {
++					std::memcpy(newHeap, data(), _size);
++				}
++				delete[] _heap;
++				_heap = newHeap;
++				_capacity = newSize;
++			}
++			_size = newSize;
++		}
++	};
++
+ 	/**
+ 	 * A C++ wrapper for local (Unix) SOCK_DGRAM/SOCK_SEQPACKET socket messages, with support for file descriptors (SCM_RIGHTS) and credentials (SCM_CREDENTIALS).
+ 	 */
+ 	class Message {
+ 	private:
++		static constexpr size_t inlineControlDescriptors = 4;
++		static constexpr size_t inlineControlCapacity = CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int) * inlineControlDescriptors);
++
++		struct ReceiveTag {};
++
+ 		struct msghdr _header;
+ 		struct iovec _dataDescriptor;
+-		std::vector<uint8_t> _buffer;
++		MessageDataBuffer _buffer;
++		alignas(struct cmsghdr) uint8_t _inlineControl[inlineControlCapacity];
+ 		struct cmsghdr* _controlHeader = nullptr;
+ 		Address _socketAddress;
+ 		std::function<void()> _sendNotificationCallback = nullptr;
+ 
++		Message(ReceiveTag, size_t bufferSpace, size_t descriptorSpace);
++
++		bool _usingInlineControl() const noexcept {
++			return static_cast<const void*>(_controlHeader) == static_cast<const void*>(_inlineControl);
++		}
++
+ 		void _initWithOther(Message&&);
+ 		void _cleanupSelf();
+ 
+@@ -71,6 +220,16 @@ namespace DarlingServer {
  		void _ensureDescriptorHeader(size_t descriptorSpace);
  
  	public:
@@ -1802,10 +1976,31 @@ index 708f3f3..eba72a1 100644
 +		 * users retain live credentials unless they explicitly initialize this cache.
 +		 */
 +		static void initializeServerCredentials();
++		/**
++		 * Creates a Message pre-sized for recvmsg/IORING_OP_RECVMSG without outgoing
++		 * credential lookup or -1 descriptor prefilling.
++		 */
++		static Message forReceive(size_t bufferSpace = 256, size_t descriptorSpace = 4);
  		/**
  		 * Default-initializes a Message.
  		 *
-@@ -161,13 +167,34 @@ namespace DarlingServer {
+@@ -94,11 +253,11 @@ namespace DarlingServer {
+ 		struct msghdr& rawHeader();
+ 		const struct msghdr& rawHeader() const;
+ 
+-		std::vector<uint8_t>& data();
+-		const std::vector<uint8_t>& data() const;
++		MessageDataBuffer& data();
++		const MessageDataBuffer& data() const;
+ 
+-		Address address() const;
+-		void setAddress(Address address);
++		const Address& address() const;
++		void setAddress(const Address& address);
+ 
+ 		bool copyCredentialsOut(struct ucred& outputCredentials) const;
+ 		void copyCredentialsIn(const struct ucred& inputCredentials);
+@@ -161,13 +320,34 @@ namespace DarlingServer {
  	class MessageQueue {
  	private:
  		std::deque<Message> _messages;
@@ -2011,7 +2206,7 @@ index b960f17..16f651a 100644
  };
  
 diff --git a/internal-include/darlingserver/thread.hpp b/internal-include/darlingserver/thread.hpp
-index 57117f2..fd55fee 100644
+index 57117f2..837a4ad 100644
 --- a/internal-include/darlingserver/thread.hpp
 +++ b/internal-include/darlingserver/thread.hpp
 @@ -21,6 +21,7 @@
@@ -2031,6 +2226,15 @@ index 57117f2..fd55fee 100644
  		bool _processingSignal = false;
  		bool _pendingCallOverride = false;
  		dtape_semaphore_t* _s2cPerformSempahore = nullptr;
+@@ -188,7 +191,7 @@ namespace DarlingServer {
+ 		EternalID eternalID() const;
+ 
+ 		Address address() const;
+-		void setAddress(Address address);
++		void setAddress(const Address& address);
+ 
+ 		void doWork();
+ 
 diff --git a/scripts/generate-rpc-wrappers.py b/scripts/generate-rpc-wrappers.py
 index e35221c..cb399e1 100755
 --- a/scripts/generate-rpc-wrappers.py
@@ -3179,7 +3383,7 @@ index 7b8000f..dbaf832 100644
  	}
  
 diff --git a/src/message.cpp b/src/message.cpp
-index 414c1d6..224d49e 100644
+index 414c1d6..5799721 100644
 --- a/src/message.cpp
 +++ b/src/message.cpp
 @@ -24,6 +24,25 @@
@@ -3208,16 +3412,27 @@ index 414c1d6..224d49e 100644
  
  DarlingServer::Address::Address() {
  	_address.sun_family = AF_UNIX;
-@@ -55,6 +74,8 @@ void DarlingServer::Address::setRawSize(size_t newRawSize) {
+@@ -55,20 +74,23 @@ void DarlingServer::Address::setRawSize(size_t newRawSize) {
  DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std::function<void()> sendNotificationCallback):
  	_sendNotificationCallback(sendNotificationCallback)
  {
-+	// Allocate the vector first: if it throws, there is no raw control buffer to leak.
++	// Resize the data buffer first: if it throws, there is no heap control buffer to leak.
 +	_buffer.resize(bufferSpace);
  	size_t controlLen = CMSG_SPACE(sizeof(struct ucred)) + (descriptorSpace > 0 ? CMSG_SPACE(sizeof(int) * descriptorSpace) : 0);
- 	_controlHeader = static_cast<decltype(_controlHeader)>(malloc(controlLen));
+-	_controlHeader = static_cast<decltype(_controlHeader)>(malloc(controlLen));
+-
+-	if (!_controlHeader) {
+-		throw std::bad_alloc();
++	if (controlLen <= inlineControlCapacity) {
++		_controlHeader = reinterpret_cast<decltype(_controlHeader)>(_inlineControl);
++	} else {
++		_controlHeader = static_cast<decltype(_controlHeader)>(malloc(controlLen));
++		if (!_controlHeader) {
++			throw std::bad_alloc();
++		}
+ 	}
++	memset(_controlHeader, 0, controlLen);
  
-@@ -65,10 +86,7 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
  	_controlHeader->cmsg_len = CMSG_LEN(sizeof(struct ucred));
  	_controlHeader->cmsg_level = SOL_SOCKET;
  	_controlHeader->cmsg_type = SCM_CREDENTIALS;
@@ -3229,28 +3444,391 @@ index 414c1d6..224d49e 100644
  	// the cmsg man page says memcpy should be used with CMSG_DATA instead of direct pointer access
  	memcpy(CMSG_DATA(_controlHeader), &ourCreds, sizeof(ourCreds));
  
-@@ -83,8 +101,6 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
+@@ -83,7 +105,31 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
  		}
  	}
  
 -	_buffer.resize(bufferSpace);
--
++	_header.msg_name = &_socketAddress.raw();
++	_header.msg_namelen = _socketAddress.rawSize();
++	_header.msg_iov = &_dataDescriptor;
++	_header.msg_iovlen = 1;
++	_header.msg_control = _controlHeader;
++	_header.msg_controllen = controlLen;
++	_header.msg_flags = 0;
++
++	_dataDescriptor.iov_base = _buffer.data();
++	_dataDescriptor.iov_len = _buffer.size();
++};
++
++DarlingServer::Message::Message(ReceiveTag, size_t bufferSpace, size_t descriptorSpace) {
++	_buffer.prepareReceive(bufferSpace);
++	size_t controlLen = CMSG_SPACE(sizeof(struct ucred)) + (descriptorSpace > 0 ? CMSG_SPACE(sizeof(int) * descriptorSpace) : 0);
++	if (controlLen <= inlineControlCapacity) {
++		_controlHeader = reinterpret_cast<decltype(_controlHeader)>(_inlineControl);
++	} else {
++		_controlHeader = static_cast<decltype(_controlHeader)>(malloc(controlLen));
++		if (!_controlHeader) {
++			throw std::bad_alloc();
++		}
++	}
++	// Zero the leading cmsghdr so destroying an unused receive slot sees cmsg_len == 0 and closes 0 FDs.
++	memset(_controlHeader, 0, sizeof(struct cmsghdr));
+ 
  	_header.msg_name = &_socketAddress.raw();
  	_header.msg_namelen = _socketAddress.rawSize();
+@@ -97,17 +143,48 @@ DarlingServer::Message::Message(size_t bufferSpace, size_t descriptorSpace, std:
+ 	_dataDescriptor.iov_len = _buffer.size();
+ };
+ 
++DarlingServer::Message DarlingServer::Message::forReceive(size_t bufferSpace, size_t descriptorSpace) {
++	return Message(ReceiveTag{}, bufferSpace, descriptorSpace);
++};
++
+ void DarlingServer::Message::_initWithOther(Message&& other) {
+ 	_sendNotificationCallback = std::move(other._sendNotificationCallback);
+ 	other._sendNotificationCallback = nullptr;
+ 
+ 	_buffer = std::move(other._buffer);
+ 	_socketAddress = std::move(other._socketAddress);
+-	_controlHeader = std::move(other._controlHeader);
++	_header = other._header;
+ 
+-	other._controlHeader = nullptr;
++	if (!other._controlHeader) {
++		_controlHeader = nullptr;
++		_header.msg_control = nullptr;
++		_header.msg_controllen = 0;
++	} else if (other._usingInlineControl()) {
++		size_t copyLen = std::min<size_t>(other._header.msg_controllen, inlineControlCapacity);
++		if (copyLen > 0) {
++			memcpy(_inlineControl, other._inlineControl, copyLen);
++		}
++		_controlHeader = reinterpret_cast<decltype(_controlHeader)>(_inlineControl);
++		_header.msg_control = _controlHeader;
++		other._controlHeader = nullptr;
++		other._header.msg_control = nullptr;
++		other._header.msg_controllen = 0;
++	} else {
++		_controlHeader = other._controlHeader;
++		_header.msg_control = _controlHeader;
++		other._controlHeader = nullptr;
++		other._header.msg_control = nullptr;
++		other._header.msg_controllen = 0;
++	}
++
++	other._header.msg_name = &other._socketAddress.raw();
++	other._header.msg_namelen = 0;
++	other._header.msg_iov = &other._dataDescriptor;
++	other._header.msg_iovlen = 1;
++	other._header.msg_flags = 0;
++	other._dataDescriptor.iov_base = other._buffer.data();
++	other._dataDescriptor.iov_len = 0;
+ 
+-	_header = std::move(other._header);
+ 	_header.msg_name = &_socketAddress.raw();
  	_header.msg_iov = &_dataDescriptor;
-@@ -348,10 +364,7 @@ void DarlingServer::Message::_ensureCredentialsHeader() {
- 	credHeader->cmsg_level = SOL_SOCKET;
- 	credHeader->cmsg_type = SCM_CREDENTIALS;
+ 
+@@ -127,9 +204,13 @@ void DarlingServer::Message::_cleanupSelf() {
+ 				}
+ 			}
+ 		}
+-		free(_controlHeader);
++		if (!_usingInlineControl()) {
++			free(_controlHeader);
++		}
+ 		_controlHeader = nullptr;
+ 	}
++	_header.msg_control = nullptr;
++	_header.msg_controllen = 0;
+ };
+ 
+ struct cmsghdr* DarlingServer::Message::_credentialsHeader() {
+@@ -140,6 +221,10 @@ const struct cmsghdr* DarlingServer::Message::_credentialsHeader() const {
+ 	const struct cmsghdr* hdr = CMSG_FIRSTHDR(&_header);
+ 
+ 	while (hdr) {
++		if (hdr->cmsg_len < sizeof(struct cmsghdr)) {
++			break;
++		}
++
+ 		if (hdr->cmsg_level == SOL_SOCKET && hdr->cmsg_type == SCM_CREDENTIALS) {
+ 			return hdr;
+ 		}
+@@ -158,6 +243,10 @@ const struct cmsghdr* DarlingServer::Message::_descriptorHeader() const {
+ 	const struct cmsghdr* hdr = CMSG_FIRSTHDR(&_header);
+ 
+ 	while (hdr) {
++		if (hdr->cmsg_len < sizeof(struct cmsghdr)) {
++			break;
++		}
++
+ 		if (hdr->cmsg_level == SOL_SOCKET && hdr->cmsg_type == SCM_RIGHTS) {
+ 			return hdr;
+ 		}
+@@ -175,7 +264,12 @@ size_t DarlingServer::Message::_descriptorSpace() const {
+ 		return 0;
+ 	}
+ 
+-	return (hdr->cmsg_len - (reinterpret_cast<uintptr_t>(CMSG_DATA(hdr)) - reinterpret_cast<uintptr_t>(hdr))) / sizeof(int);
++	size_t headerLen = reinterpret_cast<uintptr_t>(CMSG_DATA(hdr)) - reinterpret_cast<uintptr_t>(hdr);
++	if (hdr->cmsg_len < headerLen) {
++		return 0;
++	}
++
++	return (hdr->cmsg_len - headerLen) / sizeof(int);
+ };
+ 
+ DarlingServer::Message::~Message() {
+@@ -187,12 +281,17 @@ DarlingServer::Message::Message(Message&& other) {
+ };
+ 
+ DarlingServer::Message& DarlingServer::Message::operator=(Message&& other) {
++	if (this == &other) {
++		return *this;
++	}
+ 	_cleanupSelf();
+ 	_initWithOther(std::move(other));
+ 	return *this;
+ };
+ 
+ struct msghdr& DarlingServer::Message::rawHeader() {
++	_dataDescriptor.iov_base = _buffer.data();
++	_dataDescriptor.iov_len = _buffer.size();
+ 	return _header;
+ };
+ 
+@@ -200,19 +299,19 @@ const struct msghdr& DarlingServer::Message::rawHeader() const {
+ 	return _header;
+ };
+ 
+-std::vector<uint8_t>& DarlingServer::Message::data() {
++DarlingServer::MessageDataBuffer& DarlingServer::Message::data() {
+ 	return _buffer;
+ };
+ 
+-const std::vector<uint8_t>& DarlingServer::Message::data() const {
++const DarlingServer::MessageDataBuffer& DarlingServer::Message::data() const {
+ 	return _buffer;
+ };
+ 
+-DarlingServer::Address DarlingServer::Message::address() const {
++const DarlingServer::Address& DarlingServer::Message::address() const {
+ 	return _socketAddress;
+ };
+ 
+-void DarlingServer::Message::setAddress(Address address) {
++void DarlingServer::Message::setAddress(const Address& address) {
+ 	_socketAddress = address;
+ 	_header.msg_namelen = _socketAddress.rawSize();
+ };
+@@ -295,13 +394,15 @@ int DarlingServer::Message::extractDescriptorAtIndex(size_t index) {
+ 
+ void DarlingServer::Message::replaceDescriptors(const std::vector<int>& newDescriptors) {
+ 	_ensureDescriptorHeader(newDescriptors.size());
+-	memcpy(CMSG_DATA(_descriptorHeader()), newDescriptors.data(), sizeof(int) * newDescriptors.size());
++	if (!newDescriptors.empty()) {
++		memcpy(CMSG_DATA(_descriptorHeader()), newDescriptors.data(), sizeof(int) * newDescriptors.size());
++	}
+ };
+ 
+ bool DarlingServer::Message::copyCredentialsOut(struct ucred& outputCredentials) const {
+ 	auto credHeader = _credentialsHeader();
+ 
+-	if (credHeader) {
++	if (credHeader && credHeader->cmsg_len >= CMSG_LEN(sizeof(outputCredentials))) {
+ 		memcpy(&outputCredentials, CMSG_DATA(credHeader), sizeof(outputCredentials));
+ 		return true;
+ 	} else {
+@@ -322,37 +423,45 @@ void DarlingServer::Message::_ensureCredentialsHeader() {
+ 	auto fdHeader = _descriptorHeader();
+ 	auto descSpace = _descriptorSpace();
+ 	size_t controlLen = CMSG_SPACE(sizeof(struct ucred)) + (descSpace > 0 ? CMSG_SPACE(sizeof(int) * descSpace) : 0);
+-	auto tmp = static_cast<decltype(_controlHeader)>(malloc(controlLen));
++	bool oldInline = _usingInlineControl();
+ 	auto old = _controlHeader;
+-	struct cmsghdr* credHeader = nullptr;
++	struct cmsghdr* target = nullptr;
+ 
+-	if (!tmp) {
+-		throw std::bad_alloc();
++	if (controlLen <= inlineControlCapacity) {
++		target = reinterpret_cast<struct cmsghdr*>(_inlineControl);
++	} else {
++		target = static_cast<struct cmsghdr*>(malloc(controlLen));
++		if (!target) {
++			throw std::bad_alloc();
++		}
+ 	}
+ 
+-	_controlHeader = tmp;
+-	_header.msg_control = _controlHeader;
+-
+-	credHeader = _controlHeader;
+-
+ 	if (descSpace > 0) {
+-		auto newFdHeader = reinterpret_cast<decltype(_controlHeader)>(reinterpret_cast<char*>(_controlHeader) + CMSG_SPACE(sizeof(struct ucred)));
+-		memcpy(newFdHeader, fdHeader, CMSG_SPACE(sizeof(int) * descSpace));
++		auto newFdHeader = reinterpret_cast<struct cmsghdr*>(reinterpret_cast<char*>(target) + CMSG_SPACE(sizeof(struct ucred)));
++		size_t fdBytes = std::min<size_t>(fdHeader->cmsg_len, CMSG_SPACE(sizeof(int) * descSpace));
++		size_t fdTotal = CMSG_SPACE(sizeof(int) * descSpace);
++		memmove(newFdHeader, fdHeader, fdBytes);
++		if (fdTotal > fdBytes) {
++			memset(reinterpret_cast<char*>(newFdHeader) + fdBytes, 0, fdTotal - fdBytes);
++		}
+ 	}
+ 
+-	free(old);
++	memset(target, 0, CMSG_SPACE(sizeof(struct ucred)));
++
++	if (!oldInline) {
++		free(old);
++	}
+ 
++	_controlHeader = target;
++	_header.msg_control = _controlHeader;
+ 	_header.msg_controllen = controlLen;
+ 
+-	credHeader->cmsg_len = CMSG_LEN(sizeof(struct ucred));
+-	credHeader->cmsg_level = SOL_SOCKET;
+-	credHeader->cmsg_type = SCM_CREDENTIALS;
++	_controlHeader->cmsg_len = CMSG_LEN(sizeof(struct ucred));
++	_controlHeader->cmsg_level = SOL_SOCKET;
++	_controlHeader->cmsg_type = SCM_CREDENTIALS;
  
 -	struct ucred creds;
 -	creds.pid = getpid();
 -	creds.uid = getuid();
 -	creds.gid = getgid();
+-	memcpy(CMSG_DATA(credHeader), &creds, sizeof(struct ucred));
 +	struct ucred creds = outgoingCredentials();
- 	memcpy(CMSG_DATA(credHeader), &creds, sizeof(struct ucred));
++	memcpy(CMSG_DATA(_controlHeader), &creds, sizeof(struct ucred));
  };
  
-@@ -485,6 +498,14 @@ void DarlingServer::MessageQueue::push(Message&& message) {
+ void DarlingServer::Message::_ensureDescriptorHeader(size_t newSpace) {
+@@ -361,49 +470,107 @@ void DarlingServer::Message::_ensureDescriptorHeader(size_t newSpace) {
+ 	}
+ 
+ 	auto credHeader = _credentialsHeader();
++	auto oldFdHeader = _descriptorHeader();
+ 	size_t oldSpace = _descriptorSpace();
+ 	size_t controlLen = (credHeader ? CMSG_SPACE(sizeof(struct ucred)) : 0) + (newSpace == 0 ? 0 : CMSG_SPACE(sizeof(int) * newSpace));
+ 
+ 	if (controlLen == 0) {
+-		free(_controlHeader);
++		if (!_usingInlineControl()) {
++			free(_controlHeader);
++		}
+ 		_controlHeader = nullptr;
+ 		_header.msg_control = nullptr;
+ 		_header.msg_controllen = 0;
+ 		return;
+ 	}
+ 
+-	auto tmp = static_cast<decltype(_controlHeader)>(malloc(controlLen));
++	bool oldInline = _usingInlineControl();
+ 	auto old = _controlHeader;
+-	struct cmsghdr* fdHeader = nullptr;
++	size_t copyCount = (newSpace > 0 && oldFdHeader) ? std::min(oldSpace, newSpace) : 0;
++	static constexpr size_t maxInlineDescriptors = inlineControlCapacity / sizeof(int);
++
++	if (controlLen <= inlineControlCapacity && copyCount <= maxInlineDescriptors) {
++		uint8_t savedCred[CMSG_SPACE(sizeof(struct ucred))]{};
++		size_t savedCredBytes = 0;
++		int savedFDs[maxInlineDescriptors];
+ 
++		if (credHeader) {
++			savedCredBytes = std::min<size_t>(credHeader->cmsg_len, sizeof(savedCred));
++			memcpy(savedCred, credHeader, savedCredBytes);
++		}
++		if (copyCount > 0) {
++			memcpy(savedFDs, CMSG_DATA(oldFdHeader), sizeof(int) * copyCount);
++		}
++		if (!oldInline) {
++			free(old);
++		}
++
++		auto target = reinterpret_cast<struct cmsghdr*>(_inlineControl);
++		memset(target, 0, controlLen);
++		struct cmsghdr* fdHeader = nullptr;
++
++		if (credHeader) {
++			memcpy(target, savedCred, savedCredBytes);
++			fdHeader = reinterpret_cast<struct cmsghdr*>(reinterpret_cast<char*>(target) + CMSG_SPACE(sizeof(struct ucred)));
++		} else {
++			fdHeader = target;
++		}
++
++		if (newSpace > 0) {
++			fdHeader->cmsg_len = CMSG_LEN(sizeof(int) * newSpace);
++			fdHeader->cmsg_level = SOL_SOCKET;
++			fdHeader->cmsg_type = SCM_RIGHTS;
++			if (copyCount > 0) {
++				memcpy(CMSG_DATA(fdHeader), savedFDs, sizeof(int) * copyCount);
++			}
++			for (size_t i = copyCount; i < newSpace; ++i) {
++				int fd = -1;
++				memcpy(CMSG_DATA(fdHeader) + (sizeof(int) * i), &fd, sizeof(int));
++			}
++		}
++
++		_controlHeader = target;
++		_header.msg_control = _controlHeader;
++		_header.msg_controllen = controlLen;
++		return;
++	}
++
++	auto tmp = static_cast<decltype(_controlHeader)>(malloc(controlLen));
+ 	if (!tmp) {
+ 		throw std::bad_alloc();
+ 	}
++	memset(tmp, 0, controlLen);
+ 
+-	_controlHeader = tmp;
+-	_header.msg_control = _controlHeader;
+-
++	struct cmsghdr* fdHeader = nullptr;
+ 	if (credHeader) {
+-		memcpy(_controlHeader, credHeader, CMSG_SPACE(sizeof(struct ucred)));
+-		fdHeader = reinterpret_cast<decltype(_controlHeader)>(reinterpret_cast<char*>(_controlHeader) + CMSG_SPACE(sizeof(struct ucred)));
++		size_t credBytes = std::min<size_t>(credHeader->cmsg_len, CMSG_SPACE(sizeof(struct ucred)));
++		memcpy(tmp, credHeader, credBytes);
++		fdHeader = reinterpret_cast<decltype(_controlHeader)>(reinterpret_cast<char*>(tmp) + CMSG_SPACE(sizeof(struct ucred)));
+ 	} else {
+-		fdHeader = _controlHeader;
++		fdHeader = tmp;
+ 	}
+ 
+-	free(old);
+-
+-	_header.msg_controllen = controlLen;
+-
+ 	if (newSpace > 0) {
+ 		fdHeader->cmsg_len = CMSG_LEN(sizeof(int) * newSpace);
+ 		fdHeader->cmsg_level = SOL_SOCKET;
+ 		fdHeader->cmsg_type = SCM_RIGHTS;
+ 
+-		for (size_t i = oldSpace; i < newSpace; ++i) {
++		if (copyCount > 0) {
++			memcpy(CMSG_DATA(fdHeader), CMSG_DATA(oldFdHeader), sizeof(int) * copyCount);
++		}
++		for (size_t i = copyCount; i < newSpace; ++i) {
+ 			int fd = -1;
+ 			memcpy(CMSG_DATA(fdHeader) + (sizeof(int) * i), &fd, sizeof(int));
+ 		}
+ 	}
++
++	if (!oldInline) {
++		free(old);
++	}
++
++	_controlHeader = tmp;
++	_header.msg_control = _controlHeader;
++	_header.msg_controllen = controlLen;
+ };
+ 
+ pid_t DarlingServer::Message::pid() const {
+@@ -485,6 +652,14 @@ void DarlingServer::MessageQueue::push(Message&& message) {
  	}
  };
  
@@ -3265,7 +3843,7 @@ index 414c1d6..224d49e 100644
  std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
  	std::scoped_lock lock(_lock);
  	if (_messages.size() > 0) {
-@@ -496,13 +517,52 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
+@@ -496,13 +671,52 @@ std::optional<DarlingServer::Message> DarlingServer::MessageQueue::pop() {
  	}
  };
  
@@ -3319,7 +3897,7 @@ index 414c1d6..224d49e 100644
  	while (ret >= 0) {
  		len = 0;
  		for (size_t i = 0; i < _messages.size() && i < sizeof(mmsgs) / sizeof(*mmsgs); ++i) {
-@@ -538,7 +598,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+@@ -538,7 +752,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  				break;
  			} else if (errno == EINTR) {
  				ret = 0;
@@ -3328,7 +3906,7 @@ index 414c1d6..224d49e 100644
  				// this means that peer of the first message we tried to send has died.
  				// we'll just drop that message and try the others.
  				_messages.pop_front();
-@@ -549,6 +609,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+@@ -549,6 +763,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  		}
  
  		for (size_t i = 0; i < ret; ++i) {
@@ -3336,7 +3914,7 @@ index 414c1d6..224d49e 100644
  			auto cb = _messages.front().sendNotificationCallback();
  			_messages.pop_front();
  			if (cb) {
-@@ -567,10 +628,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+@@ -567,10 +782,11 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
  	int ret = 0;
  
  	while (ret >= 0) {
@@ -3346,13 +3924,13 @@ index 414c1d6..224d49e 100644
 -			mmsgs[i].msg_hdr = messages[i].rawHeader();
 +		for (size_t i = 0; i < _receiveMessages.size(); ++i) {
 +			if (!_receiveMessages[i]) {
-+				_receiveMessages[i].emplace();
++				_receiveMessages[i].emplace(Message::forReceive());
 +			}
 +			mmsgs[i].msg_hdr = _receiveMessages[i]->rawHeader();
  			mmsgs[i].msg_len = 0;
  		}
  
-@@ -587,11 +649,25 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
+@@ -587,11 +803,25 @@ bool DarlingServer::MessageQueue::receiveMany(int socket) {
  			}
  		}
  
@@ -3383,7 +3961,7 @@ index 414c1d6..224d49e 100644
  		}
  	}
  
-@@ -615,3 +691,43 @@ bool DarlingServer::MessageQueue::empty() const {
+@@ -615,3 +845,43 @@ bool DarlingServer::MessageQueue::empty() const {
  	std::unique_lock lock(_lock);
  	return _messages.empty();
  };
@@ -3986,7 +4564,7 @@ index 9cd7b81..f6b87cf 100644
  			continue;
  		}
 diff --git a/src/server.cpp b/src/server.cpp
-index e502e28..2ca502c 100644
+index e502e28..68368e1 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
 @@ -28,10 +28,14 @@
@@ -4562,7 +5140,7 @@ index e502e28..2ca502c 100644
 +
 +void DarlingServer::Server::_ringArmReceive(size_t index) {
 +	auto& slot = _ringReceives[index];
-+	slot.emplace();
++	slot.emplace(Message::forReceive());
 +	struct io_uring_sqe* sqe = ringSubmission(*_ring);
 +	sqe->opcode = IORING_OP_RECVMSG;
 +	sqe->fd = _listenerSocket;
@@ -4639,8 +5217,8 @@ index e502e28..2ca502c 100644
 +		sqe->user_data = ringTagSend | i;
 +	}
 +	_ringSendsPending = _ringSends.size();
-+};
-+
+ };
+ 
 +void DarlingServer::Server::_ringFinishSends() {
 +	std::deque<Message> retry;
 +	std::vector<std::function<void()>> callbacks;
@@ -4683,8 +5261,8 @@ index e502e28..2ca502c 100644
 +	for (auto& callback: callbacks) {
 +		callback();
 +	}
- };
- 
++};
++
 +void DarlingServer::Server::_ringComplete(const Ring::Completion& completion) {
 +	uint64_t tag = completion.userData & ringTagMask;
 +	uint64_t index = completion.userData & ~ringTagMask;
@@ -4700,9 +5278,9 @@ index e502e28..2ca502c 100644
 +			throw std::system_error(error, std::generic_category(), "Failed to receive messages through socket");
 +		}
 +
++		slot->data().resize(completion.result);
 +		Message message = std::move(*slot);
 +		slot.reset();
-+		message.data().resize(completion.result);
 +		message.setAddress(Address(*(const struct sockaddr_un*)message.rawHeader().msg_name, message.rawHeader().msg_namelen));
 +
 +		// keep the socket draining while this call is handled
@@ -4803,10 +5381,18 @@ index e502e28..2ca502c 100644
 +	}
  };
 diff --git a/src/thread.cpp b/src/thread.cpp
-index 5563ad9..dfa32a3 100644
+index 5563ad9..0078b9a 100644
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
-@@ -53,6 +53,120 @@
+@@ -43,6 +43,7 @@
+ #include <assert.h>
+ 
+ #include <limits>
++#include <cstring>
+ #include <sys/ptrace.h>
+ #include <sys/user.h>
+ #include <sys/wait.h>
+@@ -53,6 +54,120 @@
  #define USE_THREAD_GUARD_PAGES 1
  #define IDLE_THREAD_STACK_COUNT 8
  
@@ -4927,7 +5513,23 @@ index 5563ad9..dfa32a3 100644
  static thread_local std::shared_ptr<DarlingServer::Thread> currentThreadVar = nullptr;
  static thread_local bool returningToThreadTop = false;
  static thread_local ucontext_t backToThreadTopContext;
-@@ -350,14 +464,14 @@ void DarlingServer::Thread::microthreadWorker() {
+@@ -308,7 +423,14 @@ DarlingServer::Address DarlingServer::Thread::address() const {
+ 	return _address;
+ };
+ 
+-void DarlingServer::Thread::setAddress(Address address) {
++void DarlingServer::Thread::setAddress(const Address& address) {
++	{
++		std::shared_lock lock(_rwlock);
++		if (_address.rawSize() == address.rawSize() && address.rawSize() <= sizeof(struct sockaddr_un) && std::memcmp(&_address.raw(), &address.raw(), _address.rawSize()) == 0) {
++			return;
++		}
++	}
++
+ 	std::unique_lock lock(_rwlock);
+ 	_address = address;
+ };
+@@ -350,14 +472,14 @@ void DarlingServer::Thread::microthreadWorker() {
  #if DSERVER_ASAN
  		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  #endif
@@ -4944,7 +5546,7 @@ index 5563ad9..dfa32a3 100644
  	}
  	__builtin_unreachable();
  };
-@@ -381,13 +495,13 @@ void DarlingServer::Thread::microthreadContinuation() {
+@@ -381,13 +503,13 @@ void DarlingServer::Thread::microthreadContinuation() {
  #if DSERVER_ASAN
  		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  #endif
@@ -4960,7 +5562,7 @@ index 5563ad9..dfa32a3 100644
  	}
  	__builtin_unreachable();
  };
-@@ -432,7 +546,7 @@ void DarlingServer::Thread::doWork() {
+@@ -432,7 +554,7 @@ void DarlingServer::Thread::doWork() {
  
  	_runningCondvar.notify_all();
  
@@ -4969,7 +5571,7 @@ index 5563ad9..dfa32a3 100644
  
  	if (returningToThreadTop) {
  		// someone jumped back to the top of the microthread
-@@ -503,7 +617,7 @@ void DarlingServer::Thread::doWork() {
+@@ -503,7 +625,7 @@ void DarlingServer::Thread::doWork() {
  			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
  #endif
  
@@ -4978,7 +5580,7 @@ index 5563ad9..dfa32a3 100644
  		} else {
  			if (!_pendingCall) {
  				// if we don't actually have a pending call, we have nothing to do
-@@ -520,7 +634,7 @@ void DarlingServer::Thread::doWork() {
+@@ -520,7 +642,7 @@ void DarlingServer::Thread::doWork() {
  			stackPool.allocate(_stack);
  
  			ucontext_t newContext;
@@ -4987,7 +5589,7 @@ index 5563ad9..dfa32a3 100644
  			newContext.uc_stack.ss_sp = _stack.base;
  			newContext.uc_stack.ss_size = _stack.size;
  			newContext.uc_stack.ss_flags = 0;
-@@ -531,7 +645,7 @@ void DarlingServer::Thread::doWork() {
+@@ -531,7 +653,7 @@ void DarlingServer::Thread::doWork() {
  			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
  #endif
  
@@ -4996,7 +5598,7 @@ index 5563ad9..dfa32a3 100644
  		}
  
  		// inform the compiler that it shouldn't do anything that would live past the setcontext calls
-@@ -602,7 +716,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+@@ -602,7 +724,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  
  	unlockMeWhenSuspending = unlockMe;
  
@@ -5005,7 +5607,7 @@ index 5563ad9..dfa32a3 100644
  
  	_rwlock.lock();
  	if (_suspended) {
-@@ -620,7 +734,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+@@ -620,7 +742,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  		__sanitizer_start_switch_fiber((continuationCallback) ? nullptr : &asanOldFakeStack, asanOldStackBottom, asanOldStackSize);
  #endif
  
@@ -5014,7 +5616,7 @@ index 5563ad9..dfa32a3 100644
  		__builtin_unreachable();
  	} else {
  		// we've been resumed
-@@ -690,7 +804,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
+@@ -690,7 +812,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
  	std::unique_lock lock(_rwlock);
  	_continuationCallback = startupCallback;
  	_suspended = true;
@@ -5023,7 +5625,7 @@ index 5563ad9..dfa32a3 100644
  };
  
  void DarlingServer::Thread::startKernelThread(std::function<void()> startupCallback) {
-@@ -717,6 +831,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -717,6 +839,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  		std::unique_lock lock(_rwlock);
  		oldThread = _impersonating;
  		_impersonating = thread;
@@ -5031,7 +5633,7 @@ index 5563ad9..dfa32a3 100644
  	}
  
  	if (oldThread) {
-@@ -730,6 +845,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -730,6 +853,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  };
  
  std::shared_ptr<DarlingServer::Thread> DarlingServer::Thread::impersonatingThread() const {
@@ -5045,7 +5647,7 @@ index 5563ad9..dfa32a3 100644
  	std::shared_lock lock(_rwlock);
  	return _impersonating;
  };
-@@ -768,7 +890,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+@@ -768,7 +898,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
  			__sanitizer_start_switch_fiber(nullptr, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  		}
  #endif
@@ -5054,7 +5656,7 @@ index 5563ad9..dfa32a3 100644
  		__builtin_unreachable();
  	}
  
-@@ -776,7 +898,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+@@ -776,7 +906,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
  #if DSERVER_ASAN
  	__sanitizer_start_switch_fiber(nullptr, asanOldStackBottom, asanOldStackSize);
  #endif
@@ -5063,7 +5665,7 @@ index 5563ad9..dfa32a3 100644
  	__builtin_unreachable();
  };
  
-@@ -872,6 +994,24 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
+@@ -872,6 +1002,24 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
  };
  
  void DarlingServer::Thread::kernelSync(std::function<void()> fn) {
@@ -5088,7 +5690,7 @@ index 5563ad9..dfa32a3 100644
  	std::mutex mutex;
  	std::condition_variable condvar;
  	bool done = false;
-@@ -1443,7 +1583,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
+@@ -1443,7 +1591,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
  #if DSERVER_ASAN
  	__sanitizer_start_switch_fiber(&asanOldFakeStack, stack, stackSize);
  #endif
@@ -5097,7 +5699,7 @@ index 5563ad9..dfa32a3 100644
  	__builtin_unreachable();
  };
  
-@@ -1543,7 +1683,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
+@@ -1543,7 +1691,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
  	dtape_thread_sigexc_enter(currentThreadVar->_dtapeThread);
  
  	currentThreadVar->_didSyscallReturnDuringInterrupt = false;
@@ -7131,3 +7733,78 @@ index 0000000..3df2f23
 +}
 +
 +#endif // DSERVER_IO_URING
+diff --git a/internal-include/darlingserver/registry.hpp b/internal-include/darlingserver/registry.hpp
+index 26bbb8f..6da6249 100644
+--- a/internal-include/darlingserver/registry.hpp
++++ b/internal-include/darlingserver/registry.hpp
+@@ -35,48 +35,65 @@
+ 
+ namespace DarlingServer {
+ 	// for our purposes, a simple uint64_t is good enough
+ 	using EternalID = uint64_t;
+ 	static constexpr EternalID EternalIDInvalid = std::numeric_limits<EternalID>::max();
+ 
+ 	template<class Entry>
+ 	class Registry {
+ 	private:
+ 		std::unordered_map<typename Entry::ID, std::shared_ptr<Entry>> _map;
+ 		std::unordered_map<typename Entry::NSID, std::shared_ptr<Entry>> _nsmap;
+ 		std::unordered_map<EternalID, std::shared_ptr<Entry>> _emap;
+ 		// this is only accessed with the lock held, so no need for atomics
+-		uint64_t _eternalCounter;
++		uint64_t _eternalCounter = 0;
+ 		mutable std::shared_mutex _rwlock;
+ 
+ 		// sometimes, the factory used with registerIfAbsent needs to be able to look up other entries
+ 		// (and the factory is called with the lock held, so trying to acquire the lock again would be a deadlock)
+ 		static thread_local bool _registeringWithLockHeld;
+ 
+ 	public:
+ 		using ID = typename Entry::ID;
+ 		using NSID = typename Entry::NSID;
+ 
+-		std::shared_ptr<Entry> registerIfAbsent(NSID nsid, std::function<std::shared_ptr<Entry>()> entryFactory) {
++		template<class Factory>
++		std::shared_ptr<Entry> registerIfAbsent(NSID nsid, Factory&& entryFactory) {
++			{
++				std::shared_lock lock(_rwlock);
++				auto it2 = _nsmap.find(nsid);
++				if (it2 != _nsmap.end()) {
++					return (*it2).second;
++				}
++			}
++
+ 			std::unique_lock lock(_rwlock);
+ 
+ 			auto it2 = _nsmap.find(nsid);
+ 			if (it2 != _nsmap.end()) {
+ 				return (*it2).second;
+ 			}
+ 
+-			_registeringWithLockHeld = true;
+-			auto entry = entryFactory();
+-			_registeringWithLockHeld = false;
++			struct RegisteringGuard {
++				bool& flag;
++				explicit RegisteringGuard(bool& f) : flag(f) {
++					flag = true;
++				}
++				~RegisteringGuard() {
++					flag = false;
++				}
++			} registeringGuard(_registeringWithLockHeld);
++
++			auto entry = std::forward<Factory>(entryFactory)();
+ 
+ 			if (!entry) {
+ 				return nullptr;
+ 			}
+ 
+ 			entry->_setEternalID(_eternalCounter++);
+ 
+ 			_map[entry->id()] = entry;
+ 			_nsmap[entry->nsid()] = entry;
+ 			_emap[entry->eternalID()] = entry;
+ 
+ 			return entry;
+ 		};

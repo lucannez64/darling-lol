@@ -57,6 +57,18 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(exec_guest.filter_host_environment(environ), [])
         self.assertEqual(environ, {'PATH': '/custom/bin', 'TERM': 'xterm', 'SHELL': '/bin/zsh'})
 
+    def test_experimental_wayland_names_reach_the_guest_under_the_filter(self):
+        # The launcher sets these itself (run-riot-client.sh), so the host filter must not drop them.
+        environ = {**REQUIRED, **SESSION, 'WAYLAND_DISPLAY': 'wayland-1', 'RCLOL_WAYLAND': '1',
+                   'RCLOL_WAYLAND_SOCKET': '/run/user/1000/wayland-1',
+                   'DARLING_WAYLAND_LIBRARY': '/Users/u/libDarlingWayland.dylib',
+                   'RCLOL_WAYLAND_ACTIVATION_TOKEN': 'token'}
+        exec_guest.filter_host_environment(environ)
+        self.assertEqual(environ['RCLOL_WAYLAND_SOCKET'], '/run/user/1000/wayland-1')
+        self.assertEqual(environ['DARLING_WAYLAND_LIBRARY'], '/Users/u/libDarlingWayland.dylib')
+        self.assertEqual(environ['RCLOL_WAYLAND_ACTIVATION_TOKEN'], 'token')
+        self.assertNotIn('WAYLAND_DISPLAY', environ)
+
     def test_keep_list(self):
         environ = {'WAYLAND_DISPLAY': 'wayland-0', 'SSH_AUTH_SOCK': '/s', 'SHELL': '/bin/fish',
                    'RCLOL_KEEP_HOST_ENV': 'WAYLAND_DISPLAY, SHELL'}

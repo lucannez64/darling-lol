@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render local paths into ignored runtime tools; never alter the source snapshot."""
-import argparse,json,os,re,shutil,sys
+import argparse,contextlib,json,os,re,shutil,sys,tempfile
 from pathlib import Path
 from common import LOCALES,REGIONS,ROOT,configuration,render
 
@@ -25,6 +25,27 @@ def rehome_prefix(c,requested):
         if relative:
             warn(f'prefix {saved} is inside the previous home {old_home}; pass --prefix to move it')
     return saved
+
+def publish(target,data,mode):
+    """Atomically publish data with mode at target; return False when it already matches.
+    A launcher may read a runtime tool while configure.py runs, so the entry is never absent or
+    partially written: the content goes to a temporary file in the same directory and replaces
+    the entry with one rename. The rename replaces a symlink or dangling symlink itself, never
+    its target, and a directory in the way makes the rename fail instead of being followed."""
+    try:
+        if not target.is_symlink() and target.is_file() and \
+           (target.stat().st_mode & 0o777)==mode and target.read_bytes()==data:
+            return False
+    except OSError:pass
+    fd,temporary=tempfile.mkstemp(dir=target.parent,prefix='.'+target.name+'.',suffix='.tmp')
+    try:
+        with os.fdopen(fd,'wb') as handle:handle.write(data)
+        os.chmod(temporary,mode)
+        os.replace(temporary,target)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):os.unlink(temporary)
+        raise
+    return True
 
 def link_build(runtime):
     """build/runtime/build must resolve to this checkout's build directory. A relative link keeps
@@ -80,16 +101,16 @@ c['prefix']=rehome_prefix(c,a.prefix.expanduser().resolve() if a.prefix else Non
 if a.sdk:c['sdk']=str(a.sdk.expanduser().resolve())
 c['project_root']=str(ROOT);c['host_home']=str(Path.home())
 build=ROOT/'build';build.mkdir(exist_ok=True)
-(build/'config.json').write_text(json.dumps(c,indent=2)+'\n')
+config_file=build/'config.json'
+# Keep an existing configuration's mode; a new one follows the umask, as write_text did.
+try:config_mode=config_file.stat().st_mode & 0o777
+except FileNotFoundError:
+    umask=os.umask(0);os.umask(umask);config_mode=0o666 & ~umask
+publish(config_file,(json.dumps(c,indent=2)+'\n').encode(),config_mode)
 folder=build/'runtime/tools';folder.mkdir(parents=True,exist_ok=True)
 for source in (ROOT/'tools').iterdir():
     if not source.is_file():continue
-    target=folder/source.name
-    # Unlink the directory entry, including dangling symlinks. Any other error
-    # must abort rather than following a leftover link or writing through it.
-    target.unlink(missing_ok=True)
-    target.write_text(render(source.read_text(),c))
-    os.chmod(target,source.stat().st_mode & 0o777)
+    publish(folder/source.name,render(source.read_text(encoding='utf-8'),c).encode('utf-8'),source.stat().st_mode & 0o777)
 link_build(folder.parent)
 stale=stale_cache(build)
 if stale:

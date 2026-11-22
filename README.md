@@ -51,7 +51,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 
 ## Requirements
 
-- **OS:** x86-64 Linux **5.14+**, X11 session or Xwayland.
+- **OS:** x86-64 Linux **5.14+**, X11 session or Xwayland (optional opt-in experimental native Wayland via `RCLOL_WAYLAND=game` or `1`, see [setup](docs/SETUP.md#experimental-native-wayland-windows-rclol_wayland)).
 - **GPU:** Working hardware Vulkan/OpenGL driver. AMD RADV and NVIDIA (proprietary and open modules) have been exercised; others are not validated. See [NVIDIA](docs/TROUBLESHOOTING.md#nvidia). Hybrid laptops usually render on the iGPU unless started with PRIME offload: see [hybrid graphics](docs/TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
 - **Tools:** Git + Git LFS (2.13+), Bash, curl, unzip, CMake 3.20+, Make, Clang/LLD, LLVM dev files (16+; 22/23 is what the Metal overlays are tested with), C/C++ compiler, Python 3.10+. Node.js only for offline JavaScript checks.
 - **Libs:** X11/XCB/SHM development files.
@@ -147,7 +147,7 @@ First installs and future Riot updates can still hit compatibility gaps (e.g. an
 - **Region/locale:** `RCLOL_REGION=NA RCLOL_LOCALE=en_US ./scripts/run.sh` (display follows `$DISPLAY`; legacy fallback is `:1`).
 - **Recover stale client** (client closed but `darlingserver` still running): `RCLOL_RECOVER_STALE_CLIENT=1 ./scripts/run.sh`. Stops only a windowless Riot/League/CEF tree at least 60 s old; preserves `darlingserver`, launchd/mldr, sockets and `.init.pid`. [Details](docs/TROUBLESHOOTING.md#client-remains-running-without-a-window).
 - **Clean orphaned helpers** (several `close-league-client-in-game.py` watchers): `RCLOL_CLEAN_STALE_HELPERS=1 ./scripts/run.sh`. Only removes orphaned helpers of this prefix. [Details](docs/TROUBLESHOOTING.md#multiple-client-in-game-helpers).
-- **Client handling in-game:** `RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh`. Reads `lol-user-experience` from `LCULocalPreferences.yaml`; when `potatoModeEnabled` is true, closes or hides the client UI depending on `closeLeagueClientDuringGame`. Missing or invalid values select no action. Low-level switches `RCLOL_CLOSE_CLIENT_IN_GAME` and `RCLOL_HIDE_CLIENT_IN_GAME` remain available. [Details](docs/TROUBLESHOOTING.md#automatic-client-handling-during-a-match).
+- **Client handling in-game:** `RCLOL_CLIENT_IN_GAME_TRICKS=1 ./scripts/run.sh`. Reads `lol-user-experience` from `LCULocalPreferences.yaml`; closes the client UI when `closeLeagueClientDuringGame` is true, and hides it when that value is false and `potatoModeEnabled` is true. Missing or invalid values select no action. Low-level switches `RCLOL_CLOSE_CLIENT_IN_GAME` and `RCLOL_HIDE_CLIENT_IN_GAME` remain available. [Details](docs/TROUBLESHOOTING.md#automatic-client-handling-during-a-match).
 - **League splash overlay:** `RCLOL_HIDE_LEAGUE_SPLASH=1 ./scripts/run.sh`. Polls every five seconds and unmaps only the borderless `512x216` override-redirect `LeagueClient/LeagueClient` window that can appear at random. Off by default; local window management only, never hides the game or managed client windows, and does not patch client binaries, CEF, anti-cheat or DRM. Standalone: `./scripts/hide-league-splash-window.sh` (`--once` inspects without changes). [Details](docs/TROUBLESHOOTING.md#league-splash-window-appears-over-the-client).
 
 These window-management helpers are opt-in, off by default, and do not patch client binaries.

@@ -6,7 +6,7 @@
 #
 #   --sdk             add /usr/local/libexec/darling (needs root)
 #   --prefix          add the per-user prefix overlays (RuntimeLibraries,
-#                     RuntimeFrameworks) under ~/.darling
+#                     RuntimeFrameworks, usr/lib/system) under ~/.darling
 #   --dry-run         list what would be signed
 #   --force           re-sign files that already have a signature
 #   --verify          verify after signing (default)
@@ -78,8 +78,16 @@ while [ $# -gt 0 ]; do
 	--sdk) roots="$roots /usr/local/libexec/darling"; explicit=1; sdk_selected=1 ;;
 	--prefix)
 		prefix_root=${DPREFIX:-${HOME}/.darling}
-		for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
-			[ -d "$d" ] && roots="$roots $d"
+		for d in \
+		    "$prefix_root"/Users/*/RuntimeLibraries \
+		    "$prefix_root"/Users/*/RuntimeFrameworks \
+		    "$prefix_root"/usr/lib/system \
+		    "$prefix_root"/System/Library/Frameworks/CoreServices.framework \
+		    "$prefix_root"/System/Library/Frameworks/Accelerate.framework \
+		    "$prefix_root"/Users/*/Library/Audio/Plug-Ins/Components \
+		    "$prefix_root"/Users/*/libDarlingXShm.dylib \
+		    "$prefix_root"/Users/*/libDarlingWayland.dylib; do
+			{ [ -d "$d" ] || [ -f "$d" ]; } && roots="$roots $d"
 		done
 		explicit=1 ;;
 	--dry-run) dry=1 ;;
@@ -104,8 +112,16 @@ if [ "$explicit" -eq 0 ]; then
 	sdk_selected=1
 	roots="/usr/local/libexec/darling"
 	prefix_root=${DPREFIX:-${HOME}/.darling}
-	for d in "$prefix_root"/Users/*/RuntimeLibraries "$prefix_root"/Users/*/RuntimeFrameworks; do
-		[ -d "$d" ] && roots="$roots $d"
+	for d in \
+	    "$prefix_root"/Users/*/RuntimeLibraries \
+	    "$prefix_root"/Users/*/RuntimeFrameworks \
+	    "$prefix_root"/usr/lib/system \
+	    "$prefix_root"/System/Library/Frameworks/CoreServices.framework \
+	    "$prefix_root"/System/Library/Frameworks/Accelerate.framework \
+	    "$prefix_root"/Users/*/Library/Audio/Plug-Ins/Components \
+	    "$prefix_root"/Users/*/libDarlingXShm.dylib \
+	    "$prefix_root"/Users/*/libDarlingWayland.dylib; do
+		{ [ -d "$d" ] || [ -f "$d" ]; } && roots="$roots $d"
 	done
 fi
 
@@ -157,29 +173,36 @@ import os
 import stat
 import sys
 
-for top, dirs, files in os.walk(sys.argv[1]):
-    dirs.sort()
-    for name in sorted(files):
-        path = os.path.join(top, name)
-        if '\n' in path or '\t' in path:
+target = sys.argv[1]
+if os.path.isfile(target) and not os.path.islink(target):
+    entries = [target]
+else:
+    entries = []
+    for top, dirs, files in os.walk(target):
+        dirs.sort()
+        for name in sorted(files):
+            entries.append(os.path.join(top, name))
+
+for path in entries:
+    if '\n' in path or '\t' in path:
+        continue
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
             continue
-        try:
-            if not stat.S_ISREG(os.lstat(path).st_mode):
-                continue
-            with open(path, 'rb') as handle:
-                head = handle.read(16)
-        except OSError:
-            continue
-        magic = head[:4]
-        if magic in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
-            kind = 'object' if head[12:16] == b'\x01\x00\x00\x00' else 'thin'
-        elif magic in (b'\xfe\xed\xfa\xcf', b'\xfe\xed\xfa\xce'):
-            kind = 'object' if head[12:16] == b'\x00\x00\x00\x01' else 'thin'
-        elif magic in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
-            kind = 'fat'
-        else:
-            continue
-        sys.stdout.write(kind + '\t' + path + '\n')
+        with open(path, 'rb') as handle:
+            head = handle.read(16)
+    except OSError:
+        continue
+    magic = head[:4]
+    if magic in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
+        kind = 'object' if head[12:16] == b'\x01\x00\x00\x00' else 'thin'
+    elif magic in (b'\xfe\xed\xfa\xcf', b'\xfe\xed\xfa\xce'):
+        kind = 'object' if head[12:16] == b'\x00\x00\x00\x01' else 'thin'
+    elif magic in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
+        kind = 'fat'
+    else:
+        continue
+    sys.stdout.write(kind + '\t' + path + '\n')
 PY
 }
 
@@ -256,8 +279,8 @@ prune_cache() { # cache dir
 signed=0; restored=0; skipped=0; failed=0; fat=0; thinned=0; object=0; total=0
 
 for root in $roots; do
-	if [ ! -d "$root" ]; then
-		echo "sign-darling-runtime.sh: not a directory: $root" >&2
+	if [ ! -d "$root" ] && [ ! -f "$root" ]; then
+		echo "sign-darling-runtime.sh: not a file or directory: $root" >&2
 		failed=$((failed + 1))
 		continue
 	fi

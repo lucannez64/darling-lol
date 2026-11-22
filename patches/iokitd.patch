@@ -4179,11 +4179,12 @@ index 0000000..41aeae3
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -41,6 +41,7 @@
+@@ -41,6 +41,8 @@
  	src/PowerSources.mm
  	src/PowerAssertionsX11.mm
  	src/IOPlatformExpertDevice.mm
 +	src/IOGraphicsAccelerator.mm
++	src/IOEthernetInterface.mm
  	src/IOPMrootDomain.mm
  	src/IOInterestNotification.mm
  	src/LogindSleep.c
@@ -4265,19 +4266,209 @@ diff --git a/src/IOService.mm b/src/IOService.mm
 diff --git a/src/main.mm b/src/main.mm
 --- a/src/main.mm
 +++ b/src/main.mm
-@@ -32,6 +32,7 @@
+@@ -32,6 +32,8 @@
  #include "IODisplayConnectX11.h"
  #include "PowerAssertions.h"
  #include "IOSurfaceRoot.h"
 +#include "IOGraphicsAccelerator.h"
++#include "IOEthernetInterface.h"
  #include "IOPlatformExpertDevice.h"
  #include "IOPMrootDomain.h"
  
-@@ -151,6 +152,7 @@
+@@ -151,6 +153,8 @@
  	IORegistryEntry::root();
  	IODisplayConnectX11::discoverDevices(registry);
  	IOPlatformExpertDevice::registerSelf(registry);
 +	IOGraphicsAccelerator::registerSelf(registry);
++	IOEthernetInterface::registerSelf(registry);
  	IOSurfaceRoot::registerSelf(registry);
  	IOPMrootDomain::registerSelf(registry);
  }
+diff --git a/src/IOEthernetInterface.h b/src/IOEthernetInterface.h
+new file mode 100644
+index 0000000..0000001
+--- /dev/null
++++ b/src/IOEthernetInterface.h
+@@ -0,0 +1,45 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef IOKITD_IOETHERNETINTERFACE_H
++#define IOKITD_IOETHERNETINTERFACE_H
++
++#include "IOService.h"
++#include "ServiceRegistry.h"
++
++// Synthetic primary Ethernet controller/interface pair (en0) so IOKit queries
++// for IOEthernetInterface / IOMACAddress succeed and agree with the prefix ROM.
++class IOEthernetController : public IOService
++{
++public:
++	const char* className() const override;
++	bool conformsTo(const char* className) override;
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++};
++
++class IOEthernetInterface : public IOService
++{
++public:
++	const char* className() const override;
++	bool conformsTo(const char* className) override;
++	NSDictionary* matchingDictionary() override;
++	NSDictionary* getProperties() override;
++
++	static void registerSelf(ServiceRegistry* targetServiceRegistry);
++};
++
++#endif
+diff --git a/src/IOEthernetInterface.mm b/src/IOEthernetInterface.mm
+new file mode 100644
+index 0000000..0000002
+--- /dev/null
++++ b/src/IOEthernetInterface.mm
+@@ -0,0 +1,115 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include "IOEthernetInterface.h"
++#include "PlatformIdentity.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSNumber.h>
++#import <Foundation/NSString.h>
++#include <IOKit/IOKitKeys.h>
++#include <cstring>
++
++static NSData* primaryMacAddress()
++{
++	static NSData* cached = nil;
++	if (cached)
++		return cached;
++
++	NSDictionary* overrides = DarlingPlatformIdentity::load("/private/etc/darling-platform.plist");
++	NSData* rom = overrides ? overrides[@"ROM"] : nil;
++	if ([rom isKindOfClass:[NSData class]] && [rom length] == 6)
++	{
++		cached = [rom copy];
++		return cached;
++	}
++
++	static const unsigned char fallback[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
++	cached = [[NSData dataWithBytes:fallback length:sizeof(fallback)] copy];
++	return cached;
++}
++
++const char* IOEthernetController::className() const
++{
++	return "IOEthernetController";
++}
++
++bool IOEthernetController::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IONetworkController") == 0
++	    || std::strcmp(className, "IOEthernetController") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++NSDictionary* IOEthernetController::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @[ @"IONetworkController", @"IOEthernetController" ],
++		@"IOClass": @"IOEthernetController",
++	};
++}
++
++NSDictionary* IOEthernetController::getProperties()
++{
++	return @{
++		@"IOMACAddress": primaryMacAddress(),
++		@"IOBuiltin": @YES,
++		@"IOModel": @"Ethernet",
++	};
++}
++
++const char* IOEthernetInterface::className() const
++{
++	return "IOEthernetInterface";
++}
++
++bool IOEthernetInterface::conformsTo(const char* className)
++{
++	if (std::strcmp(className, "IONetworkInterface") == 0
++	    || std::strcmp(className, "IOEthernetInterface") == 0)
++		return true;
++	return IOService::conformsTo(className);
++}
++
++NSDictionary* IOEthernetInterface::matchingDictionary()
++{
++	return @{
++		@"IOProviderClass": @[ @"IONetworkInterface", @"IOEthernetInterface" ],
++		@"IOClass": @"IOEthernetInterface",
++		@"BSD Name": @"en0",
++		@"IOPrimaryInterface": @YES,
++		@"IOInterfaceType": @6,
++	};
++}
++
++NSDictionary* IOEthernetInterface::getProperties()
++{
++	return @{
++		@"BSD Name": @"en0",
++		@"IOPrimaryInterface": @YES,
++		@"IOInterfaceType": @6,
++		@"IOBuiltin": @YES,
++		@"IOMACAddress": primaryMacAddress(),
++	};
++}
++
++void IOEthernetInterface::registerSelf(ServiceRegistry* targetServiceRegistry)
++{
++	IORegistryEntry* parent = IORegistryEntry::fromPath("IOService:/Platform");
++	if (!parent)
++		parent = IORegistryEntry::root();
++
++	static IOEthernetController* controller = new IOEthernetController;
++	static IOEthernetInterface* iface = new IOEthernetInterface;
++
++	targetServiceRegistry->registerService(controller);
++	controller->registerInPlane(kIOServicePlane, "IOEthernetController", parent);
++
++	targetServiceRegistry->registerService(iface);
++	iface->registerInPlane(kIOServicePlane, "en0", controller);
++}
