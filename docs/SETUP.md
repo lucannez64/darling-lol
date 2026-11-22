@@ -258,6 +258,10 @@ list Darling's `mldr` processes, so the client's host PID is not used either.
 Discord's game list may name the relay as the running game. The relay logs
 nothing and exits with the session.
 `RCLOL_DISCORD_PID_RELAY=0` links straight to the Discord sockets instead.
+When no status shows, `RCLOL_DISCORD_RPC_DEBUG=1` makes the relay print one
+`discord-rpc:` line per frame to the launch log: direction, command and event
+names, Discord's error code and message, and the activity pid. It never
+prints the activity, the client ID or other payload content.
 
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,

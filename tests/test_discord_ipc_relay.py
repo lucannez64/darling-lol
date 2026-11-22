@@ -50,6 +50,24 @@ class RewriteTests(unittest.TestCase):
         for opcode, payload in cases:
             self.assertIs(relay.rewrite_frame(opcode, payload, 9000), payload)
 
+    def test_debug_line_names_the_frame_but_never_its_content(self):
+        payload = json.dumps({'cmd': 'SET_ACTIVITY', 'nonce': 'n', 'args': {
+            'pid': 31, 'activity': {'state': 'secret-state', 'party': {'id': 'secret-party'}}}}).encode()
+        line = relay.describe('client', 1, payload)
+        self.assertIn('cmd=SET_ACTIVITY', line)
+        self.assertIn('pid=31', line)
+        self.assertIn('activity=set', line)
+        self.assertNotIn('secret', line)
+        handshake = relay.describe('client', 0, json.dumps({'v': 1, 'client_id': '987654'}).encode())
+        self.assertIn('handshake v=1', handshake)
+        self.assertNotIn('987654', handshake)
+        error = relay.describe('discord', 1, json.dumps({
+            'cmd': 'SET_ACTIVITY', 'evt': 'ERROR', 'data': {'code': 4000, 'message': 'bad pid'}}).encode())
+        self.assertIn("evt=ERROR code=4000 message='bad pid'", error)
+        close = relay.describe('discord', 2, json.dumps({'code': 4000, 'message': 'Invalid Client ID'}).encode())
+        self.assertIn("code=4000 message='Invalid Client ID'", close)
+        self.assertIn('not-json', relay.describe('client', 1, b'\x00\xff'))
+
     def test_unknown_peer_keeps_the_pid(self):
         payload = json.dumps({'cmd': 'SET_ACTIVITY', 'args': {'pid': 42}}).encode()
         self.assertIs(relay.rewrite_frame(1, payload, 0), payload)
@@ -139,6 +157,41 @@ class RelayProcessTests(unittest.TestCase):
         server, _ = self.discord.accept()
         server.close()
 
+    def test_debug_relay_prints_discord_errors_to_stderr(self):
+        proc = subprocess.Popen(
+            [sys.executable, str(RELAY), '--host-dir', str(self.host_dir),
+             '--relay-dir', str(self.relay_dir), '--foreground', '--debug'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertEqual(proc.stdout.readline().strip(), '0')
+        guest = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(guest.close)
+        guest.connect(str(self.relay_dir / 'discord-ipc-0'))
+        self.discord.settimeout(10)
+        server, _ = self.discord.accept()
+        self.addCleanup(server.close)
+        server.settimeout(10)
+        guest.sendall(frame(1, {'cmd': 'SET_ACTIVITY', 'nonce': 'a',
+                                'args': {'pid': 31, 'activity': {'details': 'private'}}}))
+        read_frame(server)
+        reply = {'cmd': 'SET_ACTIVITY', 'evt': 'ERROR', 'nonce': 'a',
+                 'data': {'code': 4000, 'message': 'nope'}}
+        server.sendall(frame(1, reply))
+        guest.settimeout(10)
+        # Replies still reach the client unchanged in debug mode.
+        self.assertEqual(read_frame(guest), (1, reply))
+        server.close()
+        guest.close()
+        proc.kill()
+        _out, err = proc.communicate(timeout=10)
+        self.assertIn('discord-rpc: relay pid', err)
+        self.assertIn('client op=1', err)
+        self.assertIn('cmd=SET_ACTIVITY pid=31 activity=set', err)
+        self.assertIn("discord op=1", err)
+        self.assertIn("evt=ERROR code=4000 message='nope'", err)
+        self.assertNotIn('private', err)
+
     def test_no_discord_socket_means_no_relay(self):
         self.discord.close()
         (self.host_dir / 'discord-ipc-0').unlink()
@@ -157,6 +210,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('target=$relay_dir', text)
         self.assertIn('darling-lol-discord-$(id -u)/$$"', text)
         self.assertIn('"$discord_found" = 1', text)
+        self.assertIn('[ "${RCLOL_DISCORD_RPC_DEBUG:-0}" = 1 ] && relay_debug=--debug', text)
+        self.assertIn('--watch-pid "$$" $relay_debug)', text)
 
 
 if __name__ == '__main__':

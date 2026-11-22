@@ -110,6 +110,7 @@ FLAGS = (
     ("RCLOL_WAYLAND", "`0`", "`1`: experimental native Wayland for the game, League client and Riot Client windows; `game`: game window only"),
     ("RCLOL_DISCORD_RPC", "`1`", "`0` removes the Discord IPC links"),
     ("RCLOL_DISCORD_PID_RELAY", "`1`", "`0` links straight to Discord instead of the host-PID relay"),
+    ("RCLOL_DISCORD_RPC_DEBUG", "`0`", "`1`: the relay logs Discord command/event names and errors, never activity content"),
     ("RCLOL_FILTER_HOST_ENV", "`0`", "drop host desktop-session variables before the guest"),
     ("RCLOL_KEEP_HOST_ENV", "empty", "names kept by `RCLOL_FILTER_HOST_ENV`"),
     ("RCLOL_FINISH_LEAGUE_EXIT", "`1`", "`0` disables the League exit finish workaround"),

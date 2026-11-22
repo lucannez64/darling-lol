@@ -13,8 +13,12 @@ the relay's own PID. That is the process Discord sees on the other end of its
 socket: a host process it can find, which lives exactly as long as the
 session. The guest process's host PID is not used: Discord does not list
 Darling's mldr processes (#286), so an activity tied to one never shows.
-Nothing else is parsed, stored or logged. The relay exits when the process
-given with --watch-pid (the session supervisor) exits.
+Nothing else is parsed or stored, and nothing is logged unless --debug is
+given. With --debug the relay prints one line per frame to stderr: the
+direction, opcode, command and event names, Discord's error code and message,
+and SET_ACTIVITY's pid. It never prints the activity itself, the handshake's
+client ID or any other payload. The relay exits when the process given with
+--watch-pid (the session supervisor) exits.
 """
 
 import argparse
@@ -28,9 +32,47 @@ import sys
 import threading
 
 HEADER = struct.Struct('<II')
+OP_HANDSHAKE = 0
 OP_FRAME = 1
+OP_CLOSE = 2
 MAX_FRAME = 1 << 20
 SLOTS = range(10)
+DEBUG = False
+
+
+def debug(line):
+    if DEBUG:
+        try:
+            print(f'discord-rpc: {line}', file=sys.stderr, flush=True)
+        except OSError:
+            pass
+
+
+def describe(source, opcode, payload):
+    """One debug line for a frame: names, error code/message and pid only."""
+    parts = [source, f'op={opcode}', f'len={len(payload)}']
+    try:
+        message = json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return ' '.join(parts + ['not-json'])
+    if not isinstance(message, dict):
+        return ' '.join(parts + ['not-object'])
+    if opcode == OP_HANDSHAKE:
+        parts.append(f'handshake v={message.get("v")!r}')
+    for key in ('cmd', 'evt'):
+        if isinstance(message.get(key), str):
+            parts.append(f'{key}={message[key]}')
+    args = message.get('args')
+    if message.get('cmd') == 'SET_ACTIVITY' and isinstance(args, dict):
+        parts.append(f'pid={args.get("pid")!r}')
+        parts.append('activity=' + ('null' if args.get('activity') is None else 'set'))
+    error = message.get('data') if message.get('evt') == 'ERROR' else None
+    if opcode == OP_CLOSE:
+        error = message
+    if isinstance(error, dict):
+        parts.append(f'code={error.get("code")!r}')
+        parts.append(f'message={str(error.get("message"))[:200]!r}')
+    return ' '.join(parts)
 
 
 def rewrite_frame(opcode, payload, pid):
@@ -60,19 +102,29 @@ def recv_exact(conn, size):
     return bytes(data)
 
 
-def pump_guest_to_discord(guest, discord, pid):
+def pump_frames(source, target, label, pid=0):
+    """Forward whole frames; rewrite SET_ACTIVITY's pid when pid is set."""
     while True:
-        header = recv_exact(guest, HEADER.size)
+        header = recv_exact(source, HEADER.size)
         if header is None:
+            debug(f'{label} closed the connection')
             return
         opcode, length = HEADER.unpack(header)
         if length > MAX_FRAME:
+            debug(f'{label} sent an oversized frame ({length} bytes); closing')
             return
-        payload = recv_exact(guest, length)
+        payload = recv_exact(source, length)
         if payload is None:
+            debug(f'{label} closed the connection mid-frame')
             return
-        payload = rewrite_frame(opcode, payload, pid)
-        discord.sendall(HEADER.pack(opcode, len(payload)) + payload)
+        debug(describe(label, opcode, payload))
+        if pid:
+            payload = rewrite_frame(opcode, payload, pid)
+        target.sendall(HEADER.pack(opcode, len(payload)) + payload)
+
+
+def pump_guest_to_discord(guest, discord, pid):
+    pump_frames(guest, discord, 'client', pid)
 
 
 def pump_raw(source, target):
@@ -99,9 +151,11 @@ def serve_connection(guest, host_path):
     discord = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         discord.connect(host_path)
-    except OSError:
+    except OSError as error:
+        debug(f'cannot connect to {os.path.basename(host_path)}: {error}')
         close_both(guest, discord)
         return
+    debug(f'client connected; forwarding to {os.path.basename(host_path)} as pid {pid}')
 
     def run(target, *args):
         try:
@@ -111,7 +165,11 @@ def serve_connection(guest, host_path):
         finally:
             close_both(guest, discord)
 
-    threading.Thread(target=run, args=(pump_raw, discord, guest), daemon=True).start()
+    if DEBUG:
+        replies = (pump_frames, discord, guest, 'discord')
+    else:
+        replies = (pump_raw, discord, guest)
+    threading.Thread(target=run, args=replies, daemon=True).start()
     run(pump_guest_to_discord, guest, discord, pid)
 
 
@@ -192,7 +250,11 @@ def main(argv=None):
     parser.add_argument('--relay-dir', required=True, help='directory for the relay sockets')
     parser.add_argument('--watch-pid', type=int, default=0, help='exit when this process exits')
     parser.add_argument('--foreground', action='store_true', help='do not detach after binding')
+    parser.add_argument('--debug', action='store_true',
+                        help='print frame names and Discord errors to stderr (no activity content)')
     args = parser.parse_args(argv)
+    global DEBUG
+    DEBUG = args.debug
 
     host_paths = host_sockets(args.host_dir)
     if not host_paths:
@@ -211,12 +273,15 @@ def main(argv=None):
             os._exit(0)
         os.setsid()
         devnull = os.open(os.devnull, os.O_RDWR)
-        # Release the launcher's pipes: nothing is logged after binding.
-        for fd in (0, 1, 2):
+        # Release the launcher's pipes. Stdout must close so the launcher's
+        # command substitution returns; with --debug, stderr stays on the
+        # launch log.
+        for fd in (0, 1) if args.debug else (0, 1, 2):
             os.dup2(devnull, fd)
         os.close(devnull)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    debug(f'relay pid {os.getpid()} serving slots {" ".join(str(n) for n in sorted(listeners))}')
     serve(listeners, host_paths, args.watch_pid, args.relay_dir)
     return 0
 

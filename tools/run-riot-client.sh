@@ -472,11 +472,16 @@ if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  # One directory per session: a relay leaves with its own session, so it is never shared.
  relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)/$$"
  relayed=''
+ # RCLOL_DISCORD_RPC_DEBUG=1: the relay prints one line per frame (command/event names,
+ # Discord's error code and message, the activity pid; never the activity) to this log.
+ relay_debug=''
+ [ "${RCLOL_DISCORD_RPC_DEBUG:-0}" = 1 ] && relay_debug=--debug
  # Without a running Discord there is nothing to relay: keep the direct links for a later start.
  if [ "$discord_found" = 1 ] && [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then
   relayed=$(python3 "$runner_dir/discord-ipc-relay.py" --host-dir "$host_ipc" \
-   --relay-dir "$relay_dir" --watch-pid "$$") || relayed=''
+   --relay-dir "$relay_dir" --watch-pid "$$" $relay_debug) || relayed=''
  fi
+ [ -n "$relay_debug" ] && echo "discord-rpc: Discord socket dir $host_ipc (found=$discord_found), relayed slots: ${relayed:-none}" >&2
  (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
   target=$host_ipc
   case " $relayed " in *" $n "*) target=$relay_dir ;; esac
