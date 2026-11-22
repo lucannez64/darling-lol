@@ -66,12 +66,11 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 138,
+      "modified_files": 137,
       "new_files": [
-        "QuartzCore/include/QuartzCore/CATransformLayer.h",
-        "AppKit/NSGeometryTrace.h",
         "AppKit/NSAccessibilityCustomAction.m",
         "AppKit/NSColorSampler.m",
+        "AppKit/NSGeometryTrace.h",
         "AppKit/NSImageSymbolConfiguration.m",
         "AppKit/NSMenuItemBadge.m",
         "AppKit/NSNextStepFrame.m",
@@ -84,6 +83,7 @@
         "AppKit/include/AppKit/NSPreviewRepresentingActivityItem.h",
         "QuartzCore/CAEDRMetadata.m",
         "QuartzCore/include/QuartzCore/CAEDRMetadata.h",
+        "QuartzCore/include/QuartzCore/CATransformLayer.h",
         "AppKit/X11.backend/DarlingWaylandAPI.h",
         "AppKit/X11.backend/WaylandBackend.h",
         "AppKit/X11.backend/WaylandSubWindow.h",
@@ -162,7 +162,7 @@
       "revision": "63f667cf06d7ed59553adebb0c8d70a117135ac9",
       "repository": "https://github.com/darlinghq/darling-dyld.git",
       "patch": "patches/dyld.patch",
-      "modified_files": 3,
+      "modified_files": 2,
       "new_files": [
         "src/dc_image_snapshot.h"
       ]
@@ -327,7 +327,7 @@
       "revision": "1a12df76d12bfc9fdfffadb290f7742763568765",
       "repository": "https://github.com/darlinghq/darling-objc4.git",
       "patch": "patches/objc4.patch",
-      "modified_files": 2,
+      "modified_files": 3,
       "new_files": []
     },
     {
@@ -349,7 +349,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 97,
+      "modified_files": 100,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",

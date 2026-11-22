@@ -195,6 +195,18 @@ guest probes; do not run the guest probes on your own.
 - Add or update a test for every behavior change; run the closest test file
   first, then the full suite when practical.
 
+## Skills
+
+Project skills carry procedures too long for this index. They live in
+`docs/skills/` as a single opt-in copy: harnesses do not load that directory
+automatically, so a contributor points their agent at the file or symlinks it
+into the harness's skill directory. `tests/test_agent_skills.py` checks the
+layout and frontmatter.
+
+- `docs/skills/open-pr/SKILL.md`: branch, commit and open a pull request.
+- `docs/skills/codereview/SKILL.md`: plan and resolve pull request review
+  comments.
+
 ## Definition of done
 
 - [ ] Focused diff with tests.

@@ -351,6 +351,20 @@ def trust_store(env):
     return next((str(path) for path in candidates if path.exists()), '')
 
 
+def rootless_namespace(proc_root=Path('/proc')):
+    """True in a rootless user namespace (Toolbox, the Nix runtime).
+
+    darlingserver reads the same first uid_map line and ignores every trust
+    store there, because the host user could rewrite it.
+    """
+    fields = read_text(Path(proc_root) / 'self/uid_map').split()
+    try:
+        inside, outside, count = (int(field) for field in fields[:3])
+    except ValueError:
+        return False
+    return inside == 0 and outside != 0 and count != 0
+
+
 def configured_prefix(env, roots=None):
     """The prefix the launcher uses: $DPREFIX, then build/config.json, then ~/.darling.
 
@@ -429,6 +443,7 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'perf_event_open': perf_probe(),
         'platform_identity': platform_identity_state(prefix) if prefix.is_dir() else 'missing',
         'trust_store': trust_store(env),
+        'rootless_namespace': rootless_namespace(proc_root),
         'core_limit': _core_limit(),
         'environment': {key: env[key] for key in ENV_ALLOWLIST if key in env},
         'trace_env': sorted(key for key, value in env.items() if value and TRACE_ENV.match(key)),
@@ -641,6 +656,9 @@ def check_runtime_signing(facts):
         return 'ok', 'Runtime not installed yet'
     if facts.get('trust_store'):
         return 'ok', 'Runtime trust store present'
+    if facts.get('rootless_namespace'):
+        return 'ok', ('Rootless namespace (Toolbox or Nix): darlingserver does not use a trust store here, '
+                      'so none is expected; the SDK signatures from scripts/update.sh still apply')
     return 'warn', (
         'No runtime signing trust store found, so the base Darling SDK is probably unsigned; '
         'run `sudo env RCODESIGN="$(sh tools/install-rcodesign.sh)" sh tools/sign-darling-runtime.sh --sdk` '

@@ -140,6 +140,19 @@ class PatchParsingTests(unittest.TestCase):
         self.assertEqual(mod, 1)
         self.assertEqual(new_f, ["sub/brand_new.h"])
 
+    def test_inventory_counts_a_file_split_across_sections_once(self) -> None:
+        edit = "--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-a\n+b\n"
+        patch = (
+            "diff --git a/old.c b/old.c\n" + edit.format("old.c")
+            + "diff --git a/new.h b/new.h\nnew file mode 100644\n"
+            "--- /dev/null\n+++ b/new.h\n@@ -0,0 +1 @@\n+x\n"
+            "diff --git a/old.c b/old.c\n" + edit.format("old.c")
+            + "diff --git a/new.h b/new.h\n" + edit.format("new.h")
+        )
+        mod, new_f = patchkit.patch_file_inventory(patch)
+        self.assertEqual(mod, 1)
+        self.assertEqual(new_f, ["new.h"])
+
     def test_parses_mnemonic_diff_prefix(self) -> None:
         patch = (
             "diff --git i/src/sandbox.h w/src/sandbox.h\n"
