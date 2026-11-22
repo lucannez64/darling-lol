@@ -352,10 +352,13 @@ restart_toolbox_container() {
 # which would end a session still running inside an unreachable container.
 # Exit status: 0 when a client runs, 1 when the scan completed without one, and
 # 2 when the probe itself failed, so a failed probe is never read as "no
-# clients".
+# clients". The scan prints its result, and only that token with a zero exit
+# yields status 1; an interpreter that fails before the probe body cannot.
 riot_or_league_running() {
 	command -v python3 >/dev/null 2>&1 || return 2
-	python3 - <<'PY'
+	# -I keeps an inherited PYTHONHOME/PYTHONPATH from breaking interpreter
+	# startup before the scan runs.
+	probe_output=$(python3 -I - <<'PY'
 import sys
 from pathlib import Path
 
@@ -368,11 +371,18 @@ try:
         except OSError:
             continue
         if b'/Riot Client.app/' in command_line or b'/League of Legends.app/' in command_line:
+            print('running')
             sys.exit(0)
 except Exception:
     sys.exit(2)
-sys.exit(1)
+print('none')
 PY
+) || return 2
+	case "$probe_output" in
+	running) return 0 ;;
+	none) return 1 ;;
+	*) return 2 ;;
+	esac
 }
 
 reject_running_clients() {
