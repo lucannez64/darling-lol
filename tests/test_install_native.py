@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts/install-native.sh'
-REGION_CODES = ('EUW', 'EUNE', 'NA', 'BR', 'KR', 'JP', 'OCE', 'LAN', 'LAS', 'TR', 'RU')
+REGION_CODES = ('EUW', 'EUNE', 'NA', 'BR', 'KR', 'JP', 'OCE', 'LAN', 'LAS', 'TR', 'RU', 'SG2')
 
 
 def installer_env(**extra):
@@ -251,6 +251,7 @@ class LocaleDetectionTests(unittest.TestCase):
             '[[ $(region_for_country BR) == BR ]] || exit 9\n'
             '[[ $(region_for_country CA) == NA ]] || exit 9\n'
             '[[ $(region_for_country PL) == EUNE ]] || exit 9\n'
+            '[[ $(region_for_country SG) == SG2 ]] || exit 9\n'
         )
         result = run_sourced(snippet)
         self.assertEqual(result.returncode, 0, result.stderr)
