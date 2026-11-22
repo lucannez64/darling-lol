@@ -2,6 +2,7 @@
 import os
 import pty
 import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -339,6 +340,8 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"signaling PID {victim.pid}", result.stderr)
         self.assertIn('start stuck', self.podman_lines())
+        # The warning alone would pass if the production SIGTERM were removed.
+        self.assertEqual(victim.wait(timeout=5), -signal.SIGTERM)
         self.assert_reexec_into('stuck')
 
     def test_running_container_is_left_alone_when_the_client_probe_fails(self):
