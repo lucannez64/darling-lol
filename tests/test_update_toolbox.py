@@ -90,6 +90,7 @@ class UpdateToolboxTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix='update-toolbox ')
         self.addCleanup(tmp.cleanup)
         folder = Path(tmp.name)
+        self.folder = folder
         self.repo = folder / 'repo'
         self.home = folder / 'home'
         self.bindir = folder / 'bin'
@@ -173,6 +174,30 @@ class UpdateToolboxTests(unittest.TestCase):
         build = self.repo / 'build'
         build.mkdir(exist_ok=True)
         (build / 'native-install').write_text('')
+
+    def use_real_python(self):
+        """Replace the probe stub with the host interpreter for scan tests."""
+        real = shutil.which('python3')
+        if real is None:
+            self.skipTest('python3 is unavailable')
+        (self.bindir / 'python3').unlink()
+        os.symlink(real, self.bindir / 'python3')
+
+    def proc_entry(self, pid, cmdline=None):
+        """Create an UPDATE_PROC_ROOT entry; no cmdline means a vanished process."""
+        entry = self.folder / 'proc' / str(pid)
+        entry.mkdir(parents=True)
+        if cmdline is not None:
+            (entry / 'cmdline').write_bytes(
+                b'\0'.join(part.encode() for part in cmdline) + b'\0')
+        return entry
+
+    def unreadable_proc_entry(self, pid):
+        if os.geteuid() == 0:
+            self.skipTest('root can read a mode-000 cmdline')
+        entry = self.proc_entry(pid, ['/usr/bin/python3', 'player'])
+        (entry / 'cmdline').chmod(0)
+        return entry
 
     def write_desktop_entry(self, container, script_repo=None):
         """Write the launcher entry as tools/desktop-entry.py would for script_repo."""
@@ -384,6 +409,59 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('was left untouched', result.stderr)
         self.assertNotIn('stop --time 10 stuck', self.podman_lines())
         self.assert_no_reexec()
+
+    def test_real_scan_finds_a_running_client_and_refuses_the_restart(self):
+        self.write_marker('stuck')
+        self.use_real_python()
+        self.proc_entry(4242, ['/Applications/Riot Client.app/Contents/MacOS/RiotClientServices'])
+        result = self.run_update_in_terminal(
+            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('A Riot Client or League process is running', result.stderr)
+        self.assertIn('was left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_scan_skips_a_process_that_exited_during_the_scan(self):
+        self.write_marker('stuck')
+        self.use_real_python()
+        # A process gone before its cmdline could be read leaves the empty
+        # directory behind; that is not an unreadable live process.
+        self.proc_entry(4242)
+        result = self.run_update_in_terminal(
+            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Restarting Toolbox container 'stuck'", result.stdout)
+        self.assert_reexec_into('stuck')
+
+    def test_unreadable_owned_process_refuses_the_restart(self):
+        self.write_marker('stuck')
+        self.use_real_python()
+        # An unreadable entry of this user could be the client, so it must not
+        # be read as "no client".
+        self.unreadable_proc_entry(4242)
+        result = self.run_update_in_terminal(
+            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_unreadable_owned_process_stops_a_native_update(self):
+        (self.repo / 'build/darling-src/build').mkdir(parents=True)
+        self.write_native_marker()
+        self.use_real_python()
+        self.unreadable_proc_entry(4242)
+        result = self.run_update(UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('refusing to update', result.stderr)
 
     def test_toolbox_missing_gives_distinct_message(self):
         self.write_marker('mycont')

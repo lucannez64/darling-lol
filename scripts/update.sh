@@ -356,26 +356,51 @@ restart_toolbox_container() {
 # yields status 1; an interpreter that fails before the probe body cannot.
 riot_or_league_running() {
 	command -v python3 >/dev/null 2>&1 || return 2
+	# UPDATE_PROC_ROOT exists for the tests, like CLEAN_PREFIX_PROC_ROOT.
 	# -I keeps an inherited PYTHONHOME/PYTHONPATH from breaking interpreter
 	# startup before the scan runs.
 	probe_output=$(python3 -I - <<'PY'
+import os
 import sys
 from pathlib import Path
 
-try:
-    for entry in Path('/proc').iterdir():
+
+def main():
+    uid = os.getuid()
+    for entry in Path(os.environ.get('UPDATE_PROC_ROOT') or '/proc').iterdir():
         if not entry.name.isdigit():
             continue
         try:
             command_line = (entry / 'cmdline').read_bytes()
-        except OSError:
+        except FileNotFoundError:
+            # The process exited while the scan ran; nothing left to check.
             continue
-        if b'/Riot Client.app/' in command_line or b'/League of Legends.app/' in command_line:
+        except OSError:
+            # On a host with a restricted /proc the entries of other users
+            # cannot be read, and the clients run as this user. An entry of
+            # ours that cannot be read fails the scan instead of counting as
+            # "no client".
+            try:
+                owner = entry.stat().st_uid
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return 2
+            if owner == uid:
+                return 2
+            continue
+        if (b'/Riot Client.app/' in command_line or
+                b'/League of Legends.app/' in command_line):
             print('running')
-            sys.exit(0)
+            return 0
+    print('none')
+    return 0
+
+
+try:
+    sys.exit(main())
 except Exception:
     sys.exit(2)
-print('none')
 PY
 ) || return 2
 	case "$probe_output" in
