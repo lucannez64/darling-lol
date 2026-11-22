@@ -64,6 +64,27 @@ class IokitGpuRegistryTests(unittest.TestCase):
         self.assertIn('#include "IOGraphicsAccelerator.h"', main)
         self.assertIn('IOGraphicsAccelerator::registerSelf(registry);', main)
 
+    def test_ethernet_interface_is_built_registered_and_matches_platform_rom(self):
+        manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
+        component = next(c for c in manifest['components'] if c['patch'] == PATCH)
+        for path in ('src/IOEthernetInterface.h', 'src/IOEthernetInterface.mm'):
+            self.assertIn(path, component['new_files'])
+            self.assertIn('new file mode', patch_section(path))
+        self.assertIn('src/IOEthernetInterface.mm', added_lines('CMakeLists.txt'))
+        main = added_lines('src/main.mm')
+        self.assertIn('#include "IOEthernetInterface.h"', main)
+        self.assertIn('IOEthernetInterface::registerSelf(registry);', main)
+        source = added_lines('src/IOEthernetInterface.mm')
+        for token in (
+            'DarlingPlatformIdentity::load("/private/etc/darling-platform.plist")',
+            '@"IOMACAddress"',
+            '@"BSD Name": @"en0"',
+            '@"IOPrimaryInterface": @YES',
+            '"IOEthernetInterface"',
+            '"IOEthernetController"',
+        ):
+            self.assertIn(token, source)
+
     def test_registry_ids_are_derived_identically_in_metal(self):
         mine = registry_function(added_lines(IDS))
         theirs = registry_function(added_lines(METAL_INFO, 'patches/metal.patch'))

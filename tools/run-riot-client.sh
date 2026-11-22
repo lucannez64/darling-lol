@@ -75,6 +75,14 @@ case "$profile" in
   ;;
 esac
 export RCLOL_PLATFORM_PROFILE="$profile"
+# Under profile=compat, enable Darling's SIP enforcement (M7/M8) unless the caller
+# already chose DARLING_SIP_ENFORCE or opted out with RCLOL_SIP_ENFORCE=0, so
+# csr_get_active_config() truthfully reports SIP enabled instead of all-disabled.
+if [ "$profile" = compat ] && [ -z "${DARLING_SIP_ENFORCE+x}" ]; then
+ if [ "${RCLOL_SIP_ENFORCE:-1}" != 0 ]; then
+  export DARLING_SIP_ENFORCE=1
+ fi
+fi
 [ -z "$cpu_brand" ] || export RCLOL_CPU_BRAND="$cpu_brand"
 case "$memory_bytes" in ''|*[!0-9]*) ;; *) export RCLOL_MEMORY_BYTES="$memory_bytes";; esac
 export RCLOL_GPU_NAME="$gpu_name"
