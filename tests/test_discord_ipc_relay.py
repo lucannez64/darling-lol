@@ -213,6 +213,18 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('[ "${RCLOL_DISCORD_RPC_DEBUG:-0}" = 1 ] && relay_debug=--debug', text)
         self.assertIn('--watch-pid "$$" $relay_debug)', text)
 
+    def test_launcher_creates_the_discord_games_directory(self):
+        # The Discord SDK's macOS launch-command registration writes into this
+        # directory and fails when it is missing (#286).
+        text = LAUNCHER.read_text()
+        block = text[text.index('if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then'):]
+        block = block[:block.index('\nelse\n')]
+        self.assertIn('mkdir -p "$guest_home/Library/Application Support/discord/games"', block)
+        # guest_home comes from runtime-paths.sh, sourced near the top.
+        self.assertLess(text.index('. "$runner_dir/runtime-paths.sh"'),
+                        text.index('Application Support/discord/games'))
+        self.assertIn('guest_home=', (LAUNCHER.parent / 'runtime-paths.sh').read_text())
+
 
 if __name__ == '__main__':
     unittest.main()
