@@ -11195,7 +11195,7 @@ index e03fbf8..a0206b0 100644
 +    return levels[key];
  }
 diff --git a/CoreGraphics/CMakeLists.txt b/CoreGraphics/CMakeLists.txt
-index e702dfb..d832aa4 100644
+index e702dfb3..3a6b2f17 100644
 --- a/CoreGraphics/CMakeLists.txt
 +++ b/CoreGraphics/CMakeLists.txt
 @@ -66,6 +66,8 @@ include_directories(
@@ -11207,6 +11207,14 @@ index e702dfb..d832aa4 100644
  set(CoreGraphics_sources
  	CGAffineTransform.m
  	CGBitmapContext.m
+@@ -106,6 +108,7 @@ set(CoreGraphics_sources
+ 	CGEvent.m
+ 	CGEventSource.m
+ 	CGEventTap.m
++	CGEventTapX11.c
+ 	CGEventObjC.m
+ 	# KTFont+PDF.m 'KGPDFArray.h' file not found
+ )
 diff --git a/CoreGraphics/X11.backend/CGSConnectionX11.h b/CoreGraphics/X11.backend/CGSConnectionX11.h
 index 5437acb..07f7eb4 100644
 --- a/CoreGraphics/X11.backend/CGSConnectionX11.h
@@ -16215,10 +16223,27 @@ index ebda402..745772d 100644
  #import <QuartzCore/CAReplicatorLayer.h>
  #import <QuartzCore/CAScrollLayer.h>
 diff --git a/CoreGraphics/CGEvent.m b/CoreGraphics/CGEvent.m
-index a09c912..65bf8c4 100644
+index a09c912c..990d88bf 100644
 --- a/CoreGraphics/CGEvent.m
 +++ b/CoreGraphics/CGEvent.m
-@@ -172,17 +172,19 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
+@@ -152,6 +152,8 @@ CGEventRef CGEventCreateKeyboardEvent(CGEventSourceRef source, CGKeyCode virtual
+ 	CGEventType type = keyDown ? kCGEventKeyDown : kCGEventKeyUp;
+ 	CGEvent* event = [[CGEvent alloc] initWithSource: (CGEventSource*) source type: type];
+ 	event.virtualKey = virtualKey;
++	// Like macOS: CGEventGetIntegerValueField(kCGKeyboardEventKeycode) reports the key.
++	CGEventSetIntegerValueField((CGEventRef) event, kCGKeyboardEventKeycode, virtualKey);
+ 
+ 	return (CGEventRef) event;
+ }
+@@ -161,6 +163,7 @@ CGEventRef CGEventCreateMouseEvent(CGEventSourceRef source, CGEventType mouseTyp
+ 	CGEvent* event = [[CGEvent alloc] initWithSource: (CGEventSource*) source type: mouseType];
+ 	event.location = mouseCursorPosition;
+ 	event.mouseButton = mouseButton;
++	CGEventSetIntegerValueField((CGEventRef) event, kCGMouseEventButtonNumber, mouseButton);
+ 	return (CGEventRef) event;
+ }
+ 
+@@ -172,17 +175,19 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
  	CGEvent* event = [[CGEvent alloc] initWithSource: (CGEventSource*) source type: kCGEventScrollWheel];
  
  	double pixelsPerLine = CGEventSourceGetPixelsPerLine(source);
@@ -16241,7 +16266,7 @@ index a09c912..65bf8c4 100644
  		event.fields[@(kCGScrollWheelEventPointDeltaAxis1)] = [NSNumber numberWithInt: (int)(wheel1 * pixelsPerLine)];
  	}
  
-@@ -194,14 +196,15 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
+@@ -194,14 +199,15 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
  		int32_t wheelN = va_arg(vl, int32_t);
  		if (units == kCGScrollEventUnitPixel)
  		{
@@ -16260,7 +16285,7 @@ index a09c912..65bf8c4 100644
  			event.fields[@(kCGScrollWheelEventPointDeltaAxis2)] = [NSNumber numberWithInt: (int)(wheelN * pixelsPerLine)];
  		}
  
-@@ -210,14 +213,15 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
+@@ -210,14 +216,15 @@ CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source, CGScrollEventU
  			wheelN = va_arg(vl, int32_t);
  			if (units == kCGScrollEventUnitPixel)
  			{
@@ -19308,3 +19333,484 @@ index 757dd8c9..ad98c3dc 100644
  	CGLContextObj _glContext = nullptr;
  
  public:
+diff --git a/CoreGraphics/CGEventTap.m b/CoreGraphics/CGEventTap.m
+index eeb3bda6..9145fc60 100644
+--- a/CoreGraphics/CGEventTap.m
++++ b/CoreGraphics/CGEventTap.m
+@@ -20,6 +20,102 @@
+ #include <CoreGraphics/CGEvent.h>
+ #import "CGEventObjC.h"
+ #include <CoreGraphics/CGEventTapInternal.h>
++#import <Foundation/NSAutoreleasePool.h>
++#include <pthread.h>
++#include <stdlib.h>
++#include "../AppKit/X11.backend/CarbonKeys.h"
++#include "CGEventTapMap.h"
++
++extern void _CGEventTapX11Start(void);
++
++// darling-lol: live taps by receive port. Global input (CGEventTapX11.c) is
++// posted to every enabled tap whose mask wants the event; the tap's CFMachPort
++// callout (cgEventTapCallout) then runs the callback on the client's run loop.
++typedef struct {
++	mach_port_t port;
++	CGEventTap* tap; // not retained; _CGEventTapDestroyed removes it before dealloc
++} TapEntry;
++
++static pthread_mutex_t g_tapsLock = PTHREAD_MUTEX_INITIALIZER;
++static TapEntry* g_taps;
++static size_t g_tapCount, g_tapCapacity;
++static CGTapMapState g_mapState; // only touched by the X11 listener thread
++
++static void registerTap(CGEventTap* tap)
++{
++	pthread_mutex_lock(&g_tapsLock);
++	if (g_tapCount == g_tapCapacity)
++	{
++		size_t capacity = g_tapCapacity ? g_tapCapacity * 2 : 4;
++		TapEntry* grown = realloc(g_taps, capacity * sizeof(TapEntry));
++		if (!grown)
++		{
++			pthread_mutex_unlock(&g_tapsLock);
++			return;
++		}
++		g_taps = grown;
++		g_tapCapacity = capacity;
++	}
++	g_taps[g_tapCount++] = (TapEntry) { tap.machPort, tap };
++	pthread_mutex_unlock(&g_tapsLock);
++}
++
++static void postToTaps(CGEventRef event)
++{
++	const CGEventMask bit = CGEventMaskBit(CGEventGetType(event));
++	pthread_mutex_lock(&g_tapsLock);
++	for (size_t i = 0; i < g_tapCount; i++)
++	{
++		CGEventTap* tap = g_taps[i].tap;
++		if (!tap.enabled || !(tap.mask & bit))
++			continue;
++		struct TapMachMessage message = {
++			.header = {
++				.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
++				.msgh_size = sizeof(struct TapMachMessage),
++				.msgh_remote_port = g_taps[i].port,
++				.msgh_local_port = MACH_PORT_NULL,
++			},
++			.proxy = NULL,
++			.event = (CGEventRef) CFRetain(event),
++		};
++		// Never block input on a client that stopped servicing its run loop.
++		if (mach_msg(&message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, message.header.msgh_size, 0,
++				MACH_PORT_NULL, 0, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
++			CFRelease(event);
++	}
++	pthread_mutex_unlock(&g_tapsLock);
++}
++
++void _CGEventTapX11Deliver(bool isButton, unsigned detail, bool down)
++{
++	CGTapMapEvent mapped;
++	if (isButton)
++	{
++		if (!CGTapMapButton(&g_mapState, detail, down, &mapped))
++			return;
++	}
++	else
++	{
++		const uint8_t code = detail < 256 ? x11ToCarbon[detail] : 0;
++		if (!CGTapMapKnownKeycode(detail, code) || !CGTapMapKey(&g_mapState, code, down, &mapped))
++			return;
++	}
++
++	NSAutoreleasePool* pool = [NSAutoreleasePool new];
++	CGEventRef event;
++	if (isButton)
++		event = CGEventCreateMouseEvent(NULL, mapped.type, CGPointZero, (CGMouseButton) mapped.button);
++	else
++	{
++		event = CGEventCreateKeyboardEvent(NULL, (CGKeyCode) mapped.keycode, down);
++		CGEventSetType(event, mapped.type); // kCGEventFlagsChanged for modifier keys
++	}
++	((CGEvent*) event).flags = mapped.flags;
++	postToTaps(event);
++	CFRelease(event);
++	[pool release];
++}
+ 
+ void CGEventPost(CGEventTapLocation tap, CGEventRef _Nullable event)
+ {
+@@ -35,12 +131,15 @@ CFMachPortRef CGEventTapCreate(CGEventTapLocation tap, CGEventTapPlacement place
+ 													mask: eventsOfInterest
+ 													callback: callback
+ 													userInfo: userInfo];
+-
+-	mach_port_t port = newTap.machPort;
+-
+-	// TODO: Save this port to tapping structures
++	if (!newTap)
++		return NULL;
+ 
+ 	CFMachPortRef mp = [newTap createCFMachPort];
++	if (mp)
++	{
++		registerTap(newTap);
++		_CGEventTapX11Start();
++	}
+ 	[newTap release]; // CFMachPortRef now holds a ref
+ 
+ 	return mp;
+@@ -48,16 +147,54 @@ CFMachPortRef CGEventTapCreate(CGEventTapLocation tap, CGEventTapPlacement place
+ 
+ void _CGEventTapDestroyed(CGEventTapLocation location, mach_port_t mp)
+ {
+-	// TODO: Deregister the tap
++	pthread_mutex_lock(&g_tapsLock);
++	for (size_t i = 0; i < g_tapCount; i++)
++	{
++		if (g_taps[i].port == mp)
++		{
++			g_taps[i] = g_taps[--g_tapCount];
++			break;
++		}
++	}
++	pthread_mutex_unlock(&g_tapsLock);
+ }
+ 
+ void CGEventTapEnable(CFMachPortRef tap, bool enable)
+ {
++	if (!tap)
++		return;
+ 	mach_port_t mp = CFMachPortGetPort(tap);
+ 
+-	// TODO: Lookup CGEventTap instance by mp
+-	CGEventTap* tapObj = nil;
+-	tapObj.enabled = enable;
++	pthread_mutex_lock(&g_tapsLock);
++	for (size_t i = 0; i < g_tapCount; i++)
++	{
++		if (g_taps[i].port == mp)
++		{
++			g_taps[i].tap.enabled = enable;
++			break;
++		}
++	}
++	pthread_mutex_unlock(&g_tapsLock);
++}
++
++bool CGEventTapIsEnabled(CFMachPortRef tap)
++{
++	if (!tap)
++		return false;
++	mach_port_t mp = CFMachPortGetPort(tap);
++	bool enabled = false;
++
++	pthread_mutex_lock(&g_tapsLock);
++	for (size_t i = 0; i < g_tapCount; i++)
++	{
++		if (g_taps[i].port == mp)
++		{
++			enabled = g_taps[i].tap.enabled;
++			break;
++		}
++	}
++	pthread_mutex_unlock(&g_tapsLock);
++	return enabled;
+ }
+ 
+ void CGEventTapPostEvent(CGEventTapProxy proxy, CGEventRef event)
+@@ -67,5 +204,8 @@ void CGEventTapPostEvent(CGEventTapProxy proxy, CGEventRef event)
+ 
+ CGError CGGetEventTapList(uint32_t maxNumberOfTaps, CGEventTapInformation *tapList, uint32_t *eventTapCount)
+ {
+-
++	// Taps of other processes are not visible; report none rather than garbage.
++	if (eventTapCount)
++		*eventTapCount = 0;
++	return kCGErrorSuccess;
+ }
+diff --git a/CoreGraphics/CGEventTapMap.h b/CoreGraphics/CGEventTapMap.h
+new file mode 100644
+index 00000000..0d33f0f7
+--- /dev/null
++++ b/CoreGraphics/CGEventTapMap.h
+@@ -0,0 +1,143 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++/* darling-lol: translate global X input (XInput2 raw events) into the events a
++ * macOS session event tap receives. Plain C with no X11 or Objective-C types so
++ * host tests can compile it.
++ *
++ * Keys arrive as Carbon virtual key codes (the X keycode already mapped through
++ * the AppKit backend's x11ToCarbon table, so a key bound in the client matches).
++ * Modifier keys produce kCGEventFlagsChanged, other keys kCGEventKeyDown/Up.
++ * X buttons 1/3/2 are the left/right/center buttons, 4-7 are scroll steps (not
++ * button events on macOS), and 8, 9, 10... are macOS other buttons 3, 4, 5...
++ */
++#ifndef CGEVENTTAP_MAP_H
++#define CGEVENTTAP_MAP_H
++#include <stdbool.h>
++#include <stdint.h>
++
++enum {
++    CGTapMapLeftMouseDown = 1, CGTapMapLeftMouseUp = 2,
++    CGTapMapRightMouseDown = 3, CGTapMapRightMouseUp = 4,
++    CGTapMapKeyDown = 10, CGTapMapKeyUp = 11, CGTapMapFlagsChanged = 12,
++    CGTapMapOtherMouseDown = 25, CGTapMapOtherMouseUp = 26,
++};
++
++enum {
++    CGTapMapFlagAlphaShift = 0x00010000,
++    CGTapMapFlagShift = 0x00020000,
++    CGTapMapFlagControl = 0x00040000,
++    CGTapMapFlagAlternate = 0x00080000,
++    CGTapMapFlagCommand = 0x00100000,
++    CGTapMapFlagSecondaryFn = 0x00800000,
++};
++
++typedef struct {
++    uint32_t heldModifiers; /* bit (code - 0x36) for each held modifier key 0x36...0x3F */
++    bool capsLock;
++} CGTapMapState;
++
++typedef struct {
++    uint32_t type;
++    int64_t keycode; /* kCGKeyboardEventKeycode, key events */
++    int64_t button;  /* kCGMouseEventButtonNumber, mouse events */
++    uint64_t flags;
++} CGTapMapEvent;
++
++/* Carbon code -> modifier flag, 0 for an ordinary key. */
++static inline uint64_t CGTapMapModifierFlag(uint8_t code) {
++    switch (code) {
++    case 0x38: case 0x3C: return CGTapMapFlagShift;     /* Shift, RightShift */
++    case 0x3B: case 0x3E: return CGTapMapFlagControl;   /* Control, RightControl */
++    case 0x3A: case 0x3D: return CGTapMapFlagAlternate; /* Option, RightOption */
++    case 0x37: case 0x36: return CGTapMapFlagCommand;   /* Command, RightCommand */
++    case 0x39: return CGTapMapFlagAlphaShift;            /* CapsLock */
++    case 0x3F: return CGTapMapFlagSecondaryFn;           /* Function */
++    default: return 0;
++    }
++}
++
++static inline uint64_t CGTapMapFlags(const CGTapMapState *state) {
++    uint64_t flags = state->capsLock ? CGTapMapFlagAlphaShift : 0;
++    for (uint8_t code = 0x36; code <= 0x3F; code++)
++        if (code != 0x39 && (state->heldModifiers & (1u << (code - 0x36))))
++            flags |= CGTapMapModifierFlag(code);
++    return flags;
++}
++
++/* A key changed state. Returns false when nothing should be delivered. */
++static inline bool CGTapMapKey(CGTapMapState *state, uint8_t code, bool down, CGTapMapEvent *out) {
++    const uint64_t modifier = CGTapMapModifierFlag(code);
++    if (modifier) {
++        const uint32_t bit = 1u << (code - 0x36);
++        if (code == 0x39) {
++            /* Caps Lock toggles on press; its release changes nothing. */
++            if (!down)
++                return false;
++            state->capsLock = !state->capsLock;
++        } else if (down) {
++            if (state->heldModifiers & bit)
++                return false; /* already held */
++            state->heldModifiers |= bit;
++        } else {
++            if (!(state->heldModifiers & bit))
++                return false;
++            state->heldModifiers &= ~bit;
++        }
++        out->type = CGTapMapFlagsChanged;
++    } else {
++        out->type = down ? CGTapMapKeyDown : CGTapMapKeyUp;
++    }
++    out->keycode = code;
++    out->button = 0;
++    out->flags = CGTapMapFlags(state);
++    return true;
++}
++
++/* An X pointer button changed state. Returns false for scroll steps and button 0. */
++static inline bool CGTapMapButton(const CGTapMapState *state, unsigned xButton, bool down, CGTapMapEvent *out) {
++    switch (xButton) {
++    case 1:
++        out->type = down ? CGTapMapLeftMouseDown : CGTapMapLeftMouseUp;
++        out->button = 0;
++        break;
++    case 3:
++        out->type = down ? CGTapMapRightMouseDown : CGTapMapRightMouseUp;
++        out->button = 1;
++        break;
++    case 2:
++        out->type = down ? CGTapMapOtherMouseDown : CGTapMapOtherMouseUp;
++        out->button = 2;
++        break;
++    default:
++        if (xButton < 8)
++            return false;
++        out->type = down ? CGTapMapOtherMouseDown : CGTapMapOtherMouseUp;
++        out->button = (int64_t) xButton - 5;
++        break;
++    }
++    out->keycode = 0;
++    out->flags = CGTapMapFlags(state);
++    return true;
++}
++
++/* x11ToCarbon maps unknown keycodes to 0, which is also kVK_ANSI_A (X keycode 38). */
++static inline bool CGTapMapKnownKeycode(unsigned xKeycode, uint8_t carbon) {
++    return xKeycode < 256 && (carbon != 0 || xKeycode == 38);
++}
++
++#endif
+diff --git a/CoreGraphics/CGEventTapX11.c b/CoreGraphics/CGEventTapX11.c
+new file mode 100644
+index 00000000..c5cba2ce
+--- /dev/null
++++ b/CoreGraphics/CGEventTapX11.c
+@@ -0,0 +1,130 @@
++/*
++ This file is part of Darling.
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++/* darling-lol: global input source for CGEventTap.
++ *
++ * A macOS session event tap sees key and button events whatever window has
++ * focus; voice chat push-to-talk relies on it while the game window is in
++ * front. X11 offers the same through XInput2 raw events selected on the root
++ * window. One thread per process, started by the first tap, reads them on its
++ * own display connection and hands each key or button change to
++ * _CGEventTapX11Deliver.
++ *
++ * libX11 and libXi are opened at run time: without a display or XInput 2 the
++ * thread logs one line and exits, and taps simply receive nothing (as before).
++ * Under XWayland, X clients only receive input while an X11 window has focus.
++ */
++#include <X11/Xlib.h>
++#include <X11/extensions/XInput2.h>
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <string.h>
++
++extern void _CGEventTapX11Deliver(bool isButton, unsigned detail, bool down);
++
++#define LIB_X11 "/usr/lib/native/libX11.dylib"
++#define LIB_XI "/usr/lib/native/libXi.dylib"
++
++static void report(const char *why) {
++    fprintf(stderr, "CGEventTap: global input unavailable (%s); event taps receive no events\n", why);
++}
++
++static void *listen_thread(void *unused) {
++    (void) unused;
++    void *x11 = dlopen(LIB_X11, RTLD_NOW | RTLD_LOCAL);
++    void *xi = x11 ? dlopen(LIB_XI, RTLD_NOW | RTLD_LOCAL) : NULL;
++    if (!xi) {
++        report(x11 ? "libXi missing" : "libX11 missing");
++        return NULL;
++    }
++
++    Display *(*openDisplay)(const char *) = dlsym(x11, "XOpenDisplay");
++    Bool (*queryExtension)(Display *, const char *, int *, int *, int *) = dlsym(x11, "XQueryExtension");
++    Window (*defaultRoot)(Display *) = dlsym(x11, "XDefaultRootWindow");
++    int (*nextEvent)(Display *, XEvent *) = dlsym(x11, "XNextEvent");
++    Bool (*getEventData)(Display *, XGenericEventCookie *) = dlsym(x11, "XGetEventData");
++    void (*freeEventData)(Display *, XGenericEventCookie *) = dlsym(x11, "XFreeEventData");
++    int (*flush)(Display *) = dlsym(x11, "XFlush");
++    Status (*queryVersion)(Display *, int *, int *) = dlsym(xi, "XIQueryVersion");
++    Status (*selectEvents)(Display *, Window, XIEventMask *, int) = dlsym(xi, "XISelectEvents");
++    if (!openDisplay || !queryExtension || !defaultRoot || !nextEvent || !getEventData || !freeEventData || !flush ||
++        !queryVersion || !selectEvents) {
++        report("missing X11/XInput2 symbols");
++        return NULL;
++    }
++
++    Display *display = openDisplay(NULL);
++    if (!display) {
++        report("no X11 display");
++        return NULL;
++    }
++    int opcode = 0, firstEvent = 0, firstError = 0;
++    int major = 2, minor = 2;
++    if (!queryExtension(display, "XInputExtension", &opcode, &firstEvent, &firstError) ||
++        queryVersion(display, &major, &minor) != Success || major < 2) {
++        report("no XInput 2");
++        return NULL;
++    }
++
++    unsigned char bits[XIMaskLen(XI_LASTEVENT)];
++    memset(bits, 0, sizeof(bits));
++    XISetMask(bits, XI_RawKeyPress);
++    XISetMask(bits, XI_RawKeyRelease);
++    XISetMask(bits, XI_RawButtonPress);
++    XISetMask(bits, XI_RawButtonRelease);
++    XIEventMask mask = { .deviceid = XIAllMasterDevices, .mask_len = sizeof(bits), .mask = bits };
++    selectEvents(display, defaultRoot(display), &mask, 1);
++    flush(display);
++
++    for (;;) {
++        XEvent event;
++        nextEvent(display, &event);
++        XGenericEventCookie *cookie = &event.xcookie;
++        if (cookie->type != GenericEvent || cookie->extension != opcode || !getEventData(display, cookie))
++            continue;
++        const XIRawEvent *raw = cookie->data;
++        switch (cookie->evtype) {
++        case XI_RawKeyPress:
++        case XI_RawKeyRelease:
++            _CGEventTapX11Deliver(false, (unsigned) raw->detail, cookie->evtype == XI_RawKeyPress);
++            break;
++        case XI_RawButtonPress:
++        case XI_RawButtonRelease:
++            _CGEventTapX11Deliver(true, (unsigned) raw->detail, cookie->evtype == XI_RawButtonPress);
++            break;
++        }
++        freeEventData(display, cookie);
++    }
++    return NULL;
++}
++
++static void start_once(void) {
++    pthread_t thread;
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++    if (pthread_create(&thread, &attr, listen_thread, NULL) != 0)
++        report("thread creation failed");
++    pthread_attr_destroy(&attr);
++}
++
++void _CGEventTapX11Start(void) {
++    static pthread_once_t once = PTHREAD_ONCE_INIT;
++    pthread_once(&once, start_once);
++}

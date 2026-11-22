@@ -14743,3 +14743,44 @@ index cb7d010e8..24038fc53 100644
      kAudioDevicePropertyVolumeDecibelsToScalar = 'db2v',
      kAudioDevicePropertyVolumeScalarToDecibels = 'v2db',
      kAudioDevicePropertyMute = 'mute',
+diff --git a/src/frameworks/ApplicationServices/HIServices/src/HIServices.c b/src/frameworks/ApplicationServices/HIServices/src/HIServices.c
+index 598126fb4..3160ca425 100644
+--- a/src/frameworks/ApplicationServices/HIServices/src/HIServices.c
++++ b/src/frameworks/ApplicationServices/HIServices/src/HIServices.c
+@@ -64,16 +64,18 @@ void* AXAPIEnabled(void)
+     return NULL;
+ }
+ 
+-void* AXIsProcessTrusted(void)
++// darling-lol: answer like a Mac where the user granted Accessibility access.
++// Clients check this before creating a session event tap (voice chat
++// push-to-talk); CGEventTap delivers global key and button events from X11.
++Boolean AXIsProcessTrusted(void)
+ {
+-    if (verbose) puts("STUB: AXIsProcessTrusted called");
+-    return NULL;
++    return true;
+ }
+ 
+-void* AXIsProcessTrustedWithOptions(void)
++Boolean AXIsProcessTrustedWithOptions(CFDictionaryRef options)
+ {
+-    if (verbose) puts("STUB: AXIsProcessTrustedWithOptions called");
+-    return NULL;
++    (void) options; // no consent prompt to show
++    return true;
+ }
+ 
+ void* AXMakeProcessTrusted(void)
+diff --git a/src/native/CMakeLists.txt b/src/native/CMakeLists.txt
+index 79e1197dd..5817b03ec 100644
+--- a/src/native/CMakeLists.txt
++++ b/src/native/CMakeLists.txt
+@@ -14,6 +14,7 @@ if (COMPONENT_gui)
+ 	wrap_elf(fontconfig libfontconfig.so)
+ 	wrap_elf(X11 libX11.so)
+ 	wrap_elf(Xext libXext.so)
++	wrap_elf(Xi libXi.so)
+ 	wrap_elf(XRandR libXrandr.so)
+ 	wrap_elf(Xcursor libXcursor.so)
+ 	wrap_elf(xkbfile libxkbfile.so)

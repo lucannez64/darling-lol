@@ -9,8 +9,8 @@ need clang; need cmake; need git; need git-lfs; need curl; need unzip; need file
 [ "$(uname -m)" = x86_64 ] || { echo "WARN: Darling officially needs x86_64 host (got $(uname -m))"; }
 if [ -f /etc/arch-release ]; then
   echo "distro: arch"
-  for p in fuse libudev cairo mesa glu egl tiff freetype libxml2 fontconfig libbsd libxrandr libxcursor libgiflib pulseaudio ffmpeg dbus libxkbfile openssl llvm libcap vulkan-headers libcurl libedit; do :; done
-  echo "(install: sudo pacman -S cmake clang bison flex fuse libudev cairo mesa glu egl tiff freetype libxml2 fontconfig libbsd libxrandr libxcursor libgiflib pulseaudio ffmpeg dbus libxkbfile openssl llvm libcap vulkan-headers libcurl libedit git-lfs)"
+  for p in fuse libudev cairo mesa glu egl tiff freetype libxml2 fontconfig libbsd libxrandr libxi libxcursor libgiflib pulseaudio ffmpeg dbus libxkbfile openssl llvm libcap vulkan-headers libcurl libedit; do :; done
+  echo "(install: sudo pacman -S cmake clang bison flex fuse libudev cairo mesa glu egl tiff freetype libxml2 fontconfig libbsd libxrandr libxi libxcursor libgiflib pulseaudio ffmpeg dbus libxkbfile openssl llvm libcap vulkan-headers libcurl libedit git-lfs)"
 elif [ -f /etc/debian_version ]; then echo "distro: debian/ubuntu (see darling docs/build-instructions.html)";
 elif [ -f /etc/fedora-release ]; then echo "distro: fedora/rhel";
 else echo "distro: unknown"; fi

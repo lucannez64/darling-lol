@@ -466,7 +466,7 @@ detect_distribution() {
         cairo-devel freetype-devel libjpeg-turbo-devel fontconfig-devel
         libglvnd-devel mesa-libGL-devel mesa-libEGL-devel mesa-libGLU-devel
         libtiff-devel libxml2-devel libbsd-devel libXcursor-devel
-        libXrandr-devel giflib-devel pulseaudio-libs-devel libxkbfile-devel
+        libXrandr-devel libXi-devel giflib-devel pulseaudio-libs-devel libxkbfile-devel
         openssl-devel libcap-devel vulkan-headers vulkan-loader-devel
         libcurl-devel libedit-devel libX11-devel libXext-devel
         libXrender-devel libXfixes-devel libXcomposite-devel
@@ -483,7 +483,7 @@ detect_distribution() {
         base-devel cmake clang lld llvm flex bison icu fuse2 gcc-multilib
         lib32-gcc-libs pkgconf fontconfig cairo libtiff mesa glu libglvnd
         libbsd libxkbfile libxcursor libxext libx11 libxcb libxkbcommon
-        libxrandr libxfixes ffmpeg git git-lfs curl unzip file python
+        libxrandr libxfixes libxi ffmpeg git git-lfs curl unzip file python
         python-pip freetype2 libxml2 giflib libpulse dbus openssl libedit
         libcap vulkan-headers vulkan-icd-loader vulkan-tools
         xorg-xwayland xorg-xdpyinfo xorg-xprop xorg-xwininfo xorg-xrandr
@@ -498,7 +498,7 @@ detect_distribution() {
         libcap2-bin git git-lfs curl unzip ca-certificates python3 python3-dev
         python3-venv python3-pip libglu1-mesa-dev libcairo2-dev
         libgl1-mesa-dev libtiff-dev libfreetype6-dev libxml2-dev
-        libegl1-mesa-dev libfontconfig1-dev libbsd-dev libxrandr-dev
+        libegl1-mesa-dev libfontconfig1-dev libbsd-dev libxrandr-dev libxi-dev
         libxcursor-dev libgif-dev libpulse-dev libavformat-dev
         libavcodec-dev libavutil-dev libswresample-dev libdbus-1-dev libxkbfile-dev
         libssl-dev libvulkan-dev libcurl4-openssl-dev libedit-dev
