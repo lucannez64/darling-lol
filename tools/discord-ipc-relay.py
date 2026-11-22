@@ -9,9 +9,12 @@ host, finds no such process (or an unrelated one) and shows no activity.
 This relay listens on its own discord-ipc-N sockets, which the launcher links
 into the guest, and forwards every frame to the matching host socket
 unchanged, except that the ``pid`` argument of SET_ACTIVITY is replaced with
-the host PID of the connecting process (SO_PEERCRED). Nothing else is parsed,
-stored or logged. The relay exits when the process given with --watch-pid
-(the session supervisor) exits.
+the relay's own PID. That is the process Discord sees on the other end of its
+socket: a host process it can find, which lives exactly as long as the
+session. The guest process's host PID is not used: Discord does not list
+Darling's mldr processes (#286), so an activity tied to one never shows.
+Nothing else is parsed, stored or logged. The relay exits when the process
+given with --watch-pid (the session supervisor) exits.
 """
 
 import argparse
@@ -28,16 +31,6 @@ HEADER = struct.Struct('<II')
 OP_FRAME = 1
 MAX_FRAME = 1 << 20
 SLOTS = range(10)
-
-
-def peer_pid(conn):
-    """Host PID of the process on the other end of a Unix socket, or 0."""
-    try:
-        data = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
-    except OSError:
-        return 0
-    pid, _uid, _gid = struct.unpack('3i', data)
-    return pid if pid > 0 else 0
 
 
 def rewrite_frame(opcode, payload, pid):
@@ -100,7 +93,9 @@ def close_both(*socks):
 
 
 def serve_connection(guest, host_path):
-    pid = peer_pid(guest)
+    # Discord's own end of this connection is the relay, so its PID is the one
+    # that matches the socket and that Discord can look up on the host.
+    pid = os.getpid()
     discord = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         discord.connect(host_path)

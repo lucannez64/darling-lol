@@ -466,7 +466,8 @@ if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  done
  # The guest has its own PID namespace, so the PID the client sends with SET_ACTIVITY means
  # nothing to the host Discord, which then shows no activity (#286). The relay forwards the
- # slots it prints and swaps that PID for the client's host PID; it exits with this session
+ # slots it prints and swaps that PID for its own (Discord does not list mldr processes, so
+ # the client's host PID is not found either); it exits with this session
  # ($$ becomes the session supervisor below). RCLOL_DISCORD_PID_RELAY=0 links straight to Discord.
  # One directory per session: a relay leaves with its own session, so it is never shared.
  relay_dir="${XDG_RUNTIME_DIR:-/tmp}/darling-lol-discord-$(id -u)/$$"

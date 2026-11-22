@@ -1,4 +1,4 @@
-"""Discord IPC relay: guest SET_ACTIVITY PIDs become host PIDs (issue #286)."""
+"""Discord IPC relay: guest SET_ACTIVITY PIDs become the relay's PID (issue #286)."""
 import importlib.util
 import json
 import os
@@ -97,7 +97,12 @@ class RelayProcessTests(unittest.TestCase):
                                 'args': {'pid': 7, 'activity': {'details': 'x'}}}))
         opcode, message = read_frame(server)
         self.assertEqual(opcode, 1)
-        self.assertEqual(message['args']['pid'], os.getpid())
+        # The PID is the one Discord sees on its socket (the relay), never the
+        # connecting guest process: Discord cannot find mldr processes (#286).
+        peer = struct.unpack('3i', server.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i')))[0]
+        self.assertEqual(message['args']['pid'], peer)
+        self.assertNotEqual(peer, os.getpid())
         self.assertEqual(message['args']['activity'], {'details': 'x'})
 
         # Replies travel back unchanged.

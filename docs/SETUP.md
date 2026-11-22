@@ -253,7 +253,10 @@ Discord is running at launch, the slots it serves are linked to a small host
 relay (`tools/discord-ipc-relay.py`, sockets in
 `$XDG_RUNTIME_DIR/darling-lol-discord-<uid>/<session>`, one per session) that forwards every frame
 unchanged except the `pid` argument of `SET_ACTIVITY`, replaced with the
-client's host PID. It logs nothing and exits with the session.
+relay's own PID: the process on Discord's end of the socket. Discord does not
+list Darling's `mldr` processes, so the client's host PID is not used either.
+Discord's game list may name the relay as the running game. The relay logs
+nothing and exits with the session.
 `RCLOL_DISCORD_PID_RELAY=0` links straight to the Discord sockets instead.
 
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
