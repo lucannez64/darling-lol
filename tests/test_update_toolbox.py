@@ -102,6 +102,10 @@ class UpdateToolboxTests(unittest.TestCase):
         (self.bindir / 'toolbox').chmod(0o755)
         (self.bindir / 'podman').write_text(FAKE_PODMAN)
         (self.bindir / 'podman').chmod(0o755)
+        # The client probe scans the real /proc, so answer it from a stub: the
+        # tests must not depend on a Darling session running on the host.
+        self.stub(self.bindir / 'python3',
+                  'if [ "$1" = - ]; then exit 1; fi\nexit 0')
         self.env = dict(os.environ)
         self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
                         FAKE_PODMAN_LOG=str(self.podman_log))
@@ -337,6 +341,29 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('start stuck', self.podman_lines())
         self.assert_reexec_into('stuck')
 
+    def test_running_container_is_left_alone_when_the_client_probe_fails(self):
+        self.write_marker('stuck')
+        # A probe that cannot run must not be read as "no client running".
+        self.stub(self.bindir / 'python3', 'exit 2')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_failed_client_probe_stops_the_update(self):
+        (self.repo / 'build/darling-src/build').mkdir(parents=True)
+        self.write_native_marker()
+        self.stub(self.bindir / 'python3', 'exit 2')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('refusing to update', result.stderr)
+
     def test_running_container_is_left_alone_while_clients_are_open(self):
         self.write_marker('stuck')
         # Pretend the Riot Client probe found a live session.
@@ -402,8 +429,6 @@ class UpdateToolboxTests(unittest.TestCase):
         self.stub(self.repo / 'scripts/build.sh',
                   f'echo build-diagnostic >&2\nexit {build_exit}')
         self.stub(self.repo / 'scripts/install-runtime.sh', 'echo overlay-ran')
-        self.stub(self.bindir / 'python3',
-                  'if [ "$1" = - ]; then exit 1; fi\nexit 0')
         self.stub(self.bindir / 'sudo', 'echo sudo-foreground')
         # A privileged command must never go through the detachment wrapper.
         self.stub(self.bindir / 'setsid',

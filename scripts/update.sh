@@ -350,27 +350,45 @@ restart_toolbox_container() {
 # The install steps shut Darling down and stop leftover Riot processes, so
 # refuse rather than end a session. The same probe guards a container restart,
 # which would end a session still running inside an unreachable container.
+# Exit status: 0 when a client runs, 1 when the scan completed without one, and
+# 2 when the probe itself failed, so a failed probe is never read as "no
+# clients".
 riot_or_league_running() {
+	command -v python3 >/dev/null 2>&1 || return 2
 	python3 - <<'PY'
+import sys
 from pathlib import Path
-for entry in Path('/proc').iterdir():
-    if not entry.name.isdigit():
-        continue
-    try:
-        command_line = (entry / 'cmdline').read_bytes()
-    except OSError:
-        continue
-    if b'/Riot Client.app/' in command_line or b'/League of Legends.app/' in command_line:
-        raise SystemExit(0)
-raise SystemExit(1)
+
+try:
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            command_line = (entry / 'cmdline').read_bytes()
+        except OSError:
+            continue
+        if b'/Riot Client.app/' in command_line or b'/League of Legends.app/' in command_line:
+            sys.exit(0)
+except Exception:
+    sys.exit(2)
+sys.exit(1)
 PY
 }
 
 reject_running_clients() {
-	if riot_or_league_running; then
+	probe_status=0
+	riot_or_league_running || probe_status=$?
+	case "$probe_status" in
+	0)
 		error 'A Riot Client or League process is running; exit the game and both clients, then run this again.'
 		exit 1
-	fi
+		;;
+	1) ;;
+	*)
+		error 'Could not check for a running Riot Client or League process; refusing to update.'
+		exit 1
+		;;
+	esac
 }
 
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
@@ -472,10 +490,18 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 				exit 1
 				;;
 			esac
-			if [ "$action" = Restart ] && riot_or_league_running; then
-				error 'A Riot Client or League process is running; exit the game and both clients, then run this again.'
-				printf '  Toolbox container %s was left untouched.\n' "'$name'" >&2
-				exit 1
+			if [ "$action" = Restart ]; then
+				probe_status=0
+				riot_or_league_running || probe_status=$?
+				if [ "$probe_status" -eq 0 ]; then
+					error 'A Riot Client or League process is running; exit the game and both clients, then run this again.'
+					printf '  Toolbox container %s was left untouched.\n' "'$name'" >&2
+					exit 1
+				elif [ "$probe_status" -ne 1 ]; then
+					error 'Could not check for a running Riot Client or League process; refusing to restart.'
+					printf '  The container was left untouched. Restart it by hand: podman restart %s\n' "$name" >&2
+					exit 1
+				fi
 			fi
 			if [ "$action" = Restart ]; then
 				info "Restarting Toolbox container '$name'..."
