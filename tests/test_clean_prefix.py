@@ -99,6 +99,10 @@ class CleanPrefixTests(unittest.TestCase):
         (lol / 'Config/game.cfg').write_text('[General]\n')
         (lol / 'Config/input.ini').write_text('[GameEvents]\n')
         (lol / 'Config/LCULocalPreferences.yaml').write_text('potatoModeEnabled: true\n')
+        (lol / 'Config/PerksPreferences.yaml').write_text('currentPageId: 1234\n')
+        (lol / 'lockfile').write_text('LeagueClient:1:2:pass:https\n')
+        (prefix / 'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.update-status.json').write_text('{"productSessionId":"old"}\n')
+        (prefix / 'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.product_settings.yaml').write_text('keep\n')
         (lol / 'Saved/webcache/Cookies').write_text('cookie\n')
         (prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices').write_text('bin\n')
         (prefix / 'Users/Shared/Riot Games/machine.cfg').write_text('machine-shared\n')
@@ -186,6 +190,8 @@ class CleanPrefixTests(unittest.TestCase):
             'Applications/League of Legends.app/Contents/LoL/Config/PersistedSettings.json',
             'Applications/League of Legends.app/Contents/LoL/Config/game.cfg',
             'Applications/League of Legends.app/Contents/LoL/Config/input.ini',
+            'Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/PerksPreferences.yaml',
             'private/etc/darling-platform.plist',
             'private/etc/darling-smbios.conf',
             'private/etc/darling-platform.plist.before-platform-change',
@@ -206,6 +212,10 @@ class CleanPrefixTests(unittest.TestCase):
             'Applications/League of Legends.app/Contents/LoL/Config/PersistedSettings.json',
             'Applications/League of Legends.app/Contents/LoL/Config/game.cfg',
             'Applications/League of Legends.app/Contents/LoL/Config/input.ini',
+            'Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/PerksPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/lockfile',
+            'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.update-status.json',
             'Users/Shared/Riot Games/machine.cfg',
             'Users/tester/Library/Application Support/Riot Games',
             'Users/tester/Library/Application Support/Riot Client',
@@ -223,9 +233,8 @@ class CleanPrefixTests(unittest.TestCase):
         for kept in (
             'private/etc/darling-system.prop',
             'Applications/League of Legends.app/Contents/LoL/game.bin',
-            'Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml',
             'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices',
-            'Users/Shared/Riot Games/Metadata/league_of_legends.live',
+            'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.product_settings.yaml',
             'Users/tester/Library/Application Support/Other/keep.txt',
             'Users/tester/Library/Preferences/other.plist',
             'Users/tester/Library/Caches/mesa/shader',
@@ -237,12 +246,14 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertNotEqual(updated['IOPlatformSerialNumber'], self.old_serial)
         self.assertEqual(updated['model'], 'MacBookPro16,1')
 
-    def test_keep_game_settings_preserves_game_cfg_and_input_ini(self):
+    def test_keep_game_settings_preserves_game_cfg_input_ini_and_local_prefs(self):
         result = self.run_script('--keep-identity', '--keep-game-settings', '--yes')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lol_cfg = self.prefix / 'Applications/League of Legends.app/Contents/LoL/Config'
         self.assertTrue((lol_cfg / 'game.cfg').exists())
         self.assertTrue((lol_cfg / 'input.ini').exists())
+        self.assertTrue((lol_cfg / 'LCULocalPreferences.yaml').exists())
+        self.assertFalse((lol_cfg / 'PerksPreferences.yaml').exists())
         self.assertFalse((lol_cfg / 'LeagueClientSettings.yaml').exists())
         self.assertFalse((lol_cfg / 'LCUAccountPreferences.yaml').exists())
         self.assertFalse((lol_cfg / 'PersistedSettings.json').exists())
