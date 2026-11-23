@@ -175,6 +175,84 @@ int main(void)
 }
 ''')
 
+    def test_darling_process_name_rejects_unknown_pids_even_with_cmdline(self):
+        text = added(SYSCTL_PROC)
+        start = text.index('static const char* path_basename(')
+        end = text.index('\n}\n', text.index('bool darling_process_name(')) + 3
+        fn = text[start:end]
+        self.run_c(r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static int rpc_rc = 0;
+static const char* rpc_path = "";
+static const char* fake_cmdline = "";
+static int read_calls = 0;
+
+static int dserver_rpc_get_executable_path(int pid, char* buf, size_t size, uint64_t* full)
+{
+	(void) pid;
+	if (rpc_rc != 0)
+		return rpc_rc;
+	snprintf(buf, size, "%s", rpc_path);
+	*full = strlen(rpc_path);
+	return 0;
+}
+
+static int __simple_sprintf(char* buf, const char* fmt, int pid)
+{
+	return sprintf(buf, fmt, pid);
+}
+
+static bool read_string(const char* path, char* dst, int maxlen)
+{
+	(void) path;
+	read_calls++;
+	if (!fake_cmdline || !*fake_cmdline)
+		return false;
+	snprintf(dst, (size_t) maxlen, "%s", fake_cmdline);
+	return true;
+}
+
+''' + fn + r'''
+
+int main(void)
+{
+	char out[32];
+
+	/* Unknown pid (ESRCH from darlingserver): must return false even if /proc/<pid>/cmdline has a name. */
+	rpc_rc = ESRCH;
+	fake_cmdline = "/usr/bin/bash";
+	read_calls = 0;
+	assert(!darling_process_name(99, out, sizeof(out)));
+	assert(read_calls == 0);
+
+	/* Known guest pid with Mach-O path from darlingserver. */
+	rpc_rc = 0;
+	rpc_path = "/Applications/LeagueClient.app/Contents/MacOS/LeagueClient";
+	assert(darling_process_name(41, out, sizeof(out)));
+	assert(strcmp(out, "LeagueClient") == 0);
+
+	/* Known guest pid with empty path falls back to cmdline argv[0]. */
+	rpc_rc = 0;
+	rpc_path = "";
+	fake_cmdline = "/sbin/launchd";
+	assert(darling_process_name(1, out, sizeof(out)));
+	assert(strcmp(out, "launchd") == 0);
+
+	/* Un-exec'd mldr is rejected even when known. */
+	rpc_rc = 0;
+	rpc_path = "";
+	fake_cmdline = "/usr/libexec/darling/mldr";
+	assert(!darling_process_name(2, out, sizeof(out)));
+	return 0;
+}
+''')
+
 
 if __name__ == '__main__':
     unittest.main()

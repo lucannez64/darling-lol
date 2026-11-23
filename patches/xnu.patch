@@ -10790,11 +10790,11 @@ index 6600da7..a291362 100644
 +	if (size == 0)
 +		return false;
 +	// The Mach-O executable darlingserver recorded for the process...
-+	if (dserver_rpc_get_executable_path(pid, path, sizeof(path), &fullLength) == 0) {
-+		path[sizeof(path) - 1] = '\0';
-+		base = path_basename(path);
-+	}
-+	// ...or, when it has none (a process that has not exec'd a Mach-O through it), argv[0]:
++	if (dserver_rpc_get_executable_path(pid, path, sizeof(path), &fullLength) != 0)
++		return false; // darlingserver does not know it: host process or already gone
++	path[sizeof(path) - 1] = '\0';
++	base = path_basename(path);
++	// ...or, when a registered guest has none yet, argv[0]:
 +	// mldr rewrites the Linux command line to the guest's.
 +	if (*base == '\0') {
 +		char cmdpath[48];
@@ -10839,7 +10839,7 @@ index 407996e..4bcdfa8 100644
 +// The macOS process name: the basename of the process's executable, truncated to
 +// fit `size` (a NUL is always written). Linux's comm is "mldr" for every Darling
 +// process, which macOS never reports. Returns false for processes darlingserver
-+// does not know (host processes); callers then keep the Linux comm.
++// does not know (host processes) so KERN_PROC_* omits them.
 +bool darling_process_name(int pid, char* out, unsigned long size);
 +
  #endif // _SYSCTL_PROC_H
