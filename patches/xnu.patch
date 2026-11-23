@@ -3766,7 +3766,7 @@ index bd9cdc2..61fe056 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +357,32 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +357,35 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -3790,8 +3790,11 @@ index bd9cdc2..61fe056 100644
 +}
 +
 +static sysctl_handler(handle_osvariant_status) {
++	/* STATUS_INITIAL_BITS (0x70000000f0000000) | S_NO (2) at every macOS
++	 * status_flags_positions slot (0, 1, 3, 4, 7, 9, 11, 12) so libdarwin's
++	 * status2bool() never sees S_UNKNOWN and traps in launchd. */
 +	sysctl_handle_size(sizeof(unsigned long long));
-+	*((unsigned long long*) old) = 0x70010000f0000002ULL;
++	*((unsigned long long*) old) = 0x70000000f288828aULL;
 +	return 0;
 +}
 +
