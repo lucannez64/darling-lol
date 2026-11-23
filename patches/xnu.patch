@@ -9183,7 +9183,7 @@ new file mode 100644
 index 0000000..983fb6c
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/sip.c
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,306 @@
 +#include <darling/emulation/xnu_syscall/bsd/impl/misc/sip.h>
 +
 +#include <errno.h>
@@ -9380,8 +9380,6 @@ index 0000000..983fb6c
 +		return -EPERM;
 +	if (path_is(guest_path, "/System") || path_is(guest_path, "/bin") ||
 +	    path_is(guest_path, "/sbin") || path_is(guest_path, "/usr") ||
-+	    path_is(guest_path, "/private/etc") ||
-+	    path_is(guest_path, "/private/var/db") ||
 +	    path_is(guest_path, "/Library/Apple"))
 +		return -EPERM;
 +	return 0;
@@ -9452,8 +9450,6 @@ index 0000000..983fb6c
 +			return -EPERM;
 +		if (path_is(path, "/System") || path_is(path, "/bin") ||
 +		    path_is(path, "/sbin") || path_is(path, "/usr") ||
-+		    path_is(path, "/private/etc") ||
-+		    path_is(path, "/private/var/db") ||
 +		    path_is(path, "/Library/Apple")) {
 +			sip_remember_path(host_stat_path);
 +			return -EPERM;
@@ -9466,8 +9462,6 @@ index 0000000..983fb6c
 +		return -EPERM;
 +	if (has_path(path, "/System") || has_path(path, "/bin") ||
 +	    has_path(path, "/sbin") || has_path(path, "/usr") ||
-+	    has_path(path, "/private/etc") ||
-+	    has_path(path, "/private/var/db") ||
 +	    has_path(path, "/Library/Apple")) {
 +		if (has_path(path, "/usr/local"))
 +			return 0;
@@ -9480,8 +9474,7 @@ index 0000000..983fb6c
 +/* Renaming an ancestor would move protected paths outside their policy roots. */
 +int dc_sip_check_tree_move(const char* host_path) {
 +    static const char* const roots[] = {
-+        "/System", "/bin", "/sbin", "/usr", "/private/etc",
-+        "/private/var/db", "/Library/Apple", NULL
++        "/System", "/bin", "/sbin", "/usr", "/Library/Apple", NULL
 +    };
 +    char normalized[4096];
 +    struct vchroot_unexpand_args u;
