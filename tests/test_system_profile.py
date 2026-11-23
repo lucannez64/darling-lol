@@ -218,14 +218,14 @@ class SystemProfileTests(unittest.TestCase):
             # Whatever this host answers, the probe runs and never breaks the launch.
             self.assertNotIn('Traceback', result.stderr)
 
-    def test_compat_enables_sip_enforcement_by_default_with_opt_out(self):
+    def test_compat_enables_sip_enforcement_only_when_opted_in(self):
         compat = self.launcher_handoff('compat')
-        self.assertEqual(compat['sip'], '1')
-        opt_out = self.launcher_handoff('compat', RCLOL_SIP_ENFORCE='0')
-        self.assertEqual(opt_out['sip'], '')
-        explicit = self.launcher_handoff('compat', DARLING_SIP_ENFORCE='0')
-        self.assertEqual(explicit['sip'], '0')
-        host = self.launcher_handoff('host')
+        self.assertEqual(compat['sip'], '')
+        opt_in = self.launcher_handoff('compat', RCLOL_SIP_ENFORCE='1')
+        self.assertEqual(opt_in['sip'], '1')
+        explicit = self.launcher_handoff('compat', DARLING_SIP_ENFORCE='1')
+        self.assertEqual(explicit['sip'], '1')
+        host = self.launcher_handoff('host', RCLOL_SIP_ENFORCE='1')
         self.assertEqual(host['sip'], '')
 
 
