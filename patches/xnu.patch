@@ -1935,7 +1935,7 @@ new file mode 100644
 index 0000000..1b8d54e
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1150 @@
+@@ -0,0 +1,1153 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2426,7 +2426,7 @@ index 0000000..1b8d54e
 +		 * and long mode. */
 +		*eax = 0;
 +		*ebx = 0;
-+		*ecx &= ~0x00003fc4u; /* SVM, SSE4A, misaligned SSE, 3DNow prefetch, OSVW, IBS, XOP, SKINIT, WDT */
++		*ecx &= ~0x00c03fdeu; /* CMP_LEGACY, SVM, EXTAPIC, CR8_LEGACY, SSE4A, misaligned SSE, 3DNow prefetch, OSVW, IBS, XOP, SKINIT, WDT, TOPOEXT, PerfCtrExtCore */
 +		*edx &= ~0xc0400000u; /* MMX-ext, FXSR-opt, 3DNow, 3DNow-ext */
 +		break;
 +	case 0x80000002u:
@@ -2456,6 +2456,9 @@ index 0000000..1b8d54e
 +		*edx = 0;
 +		break;
 +	case 0x80000007u:
++		*eax = 0;
++		*ebx = 0;
++		*ecx = 0;
 +		*edx &= 0x00000100u; /* invariant TSC only */
 +		break;
 +	case 0x80000008u:
@@ -3212,7 +3215,7 @@ index f273989..7ecb675 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +30,14 @@ enum {
+@@ -24,10 +30,17 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -3221,6 +3224,9 @@ index f273989..7ecb675 100644
 +	_HW_CPUFREQUENCY = 1500,
 +	_HW_CACHECONFIG = 1200,
 +	_HW_CACHESIZE,
++	_HW_L2CACHESIZE,
++	_HW_L3CACHESIZE,
++	_HW_PACKAGES,
  };
  
  static sysctl_handler(handle_availcpu);
@@ -3228,7 +3234,7 @@ index f273989..7ecb675 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +49,94 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +52,97 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -3237,6 +3243,9 @@ index f273989..7ecb675 100644
 +static sysctl_handler(handle_cpufrequency_compat);
 +static sysctl_handler(handle_cacheconfig);
 +static sysctl_handler(handle_cachesize);
++static sysctl_handler(handle_l2cachesize);
++static sysctl_handler(handle_l3cachesize);
++static sysctl_handler(handle_packages);
 +
 +static int compat_optional_feature(unsigned int leaf, int reg, int bit, unsigned int host_word)
 +{
@@ -3324,7 +3333,7 @@ index f273989..7ecb675 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,27 +148,98 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +154,101 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -3335,6 +3344,9 @@ index f273989..7ecb675 100644
 +	{ .oid = _HW_CPUFREQUENCY_COMPAT, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufrequency_compat", .handler = handle_cpufrequency_compat },
 +	{ .oid = _HW_CACHECONFIG, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cacheconfig", .handler = handle_cacheconfig },
 +	{ .oid = _HW_CACHESIZE, .type = CTLTYPE_OPAQUE, .exttype = "Q", .name = "cachesize", .handler = handle_cachesize },
++	{ .oid = _HW_L2CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l2cachesize", .handler = handle_l2cachesize },
++	{ .oid = _HW_L3CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l3cachesize", .handler = handle_l3cachesize },
++	{ .oid = _HW_PACKAGES, .type = CTLTYPE_INT, .exttype = "I", .name = "packages", .handler = handle_packages },
  	{ .oid = -1 }
  };
  
@@ -3523,7 +3535,7 @@ index f273989..7ecb675 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +416,130 @@ sysctl_handler(handle_machine)
+@@ -193,3 +425,159 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -3654,31 +3666,73 @@ index f273989..7ecb675 100644
 +	}
 +	return 0;
 +}
++
++sysctl_handler(handle_l2cachesize)
++{
++	unsigned long long size = 0;
++	unsigned int sharing = 0;
++
++	sysctl_handle_size(sizeof(unsigned long long));
++	cache_level(2, &size, &sharing);
++	*((unsigned long long*) old) = size;
++	return 0;
++}
++
++sysctl_handler(handle_l3cachesize)
++{
++	unsigned long long size = 0;
++	unsigned int sharing = 0;
++
++	sysctl_handle_size(sizeof(unsigned long long));
++	cache_level(3, &size, &sharing);
++	*((unsigned long long*) old) = size;
++	return 0;
++}
++
++sysctl_handler(handle_packages)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 1;
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 index bd9cdc2..61fe056 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -23,6 +23,7 @@
+@@ -14,5 +14,6 @@
+ #include <darling/emulation/conversion/fcntl/open.h>
+ #include <darling/emulation/common/simple.h>
++#include <darling/emulation/common/cpu_identity.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
+@@ -23,6 +24,9 @@
  enum {
  	_KERN_MSGBUF = 1000,
  	_KERN_OSPRODUCTVERSION,
 +	_KERN_HV_VMM_PRESENT,
++	_KERN_OSVARIANT_STATUS,
++	_KERN_OSRELEASETYPE,
  
  	_KERN_SEMMNS = 1000,
  };
-@@ -46,6 +47,7 @@ static sysctl_handler(handle_usrstack64);
+@@ -46,6 +50,9 @@ static sysctl_handler(handle_usrstack64);
  static sysctl_handler(handle_sysv_semmns);
  static sysctl_handler(handle_osproductversion);
  static sysctl_handler(handle_osrevision);
 +static sysctl_handler(handle_hv_vmm_present);
++static sysctl_handler(handle_osvariant_status);
++static sysctl_handler(handle_osreleasetype);
  
  extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
  extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
-@@ -76,6 +78,7 @@ const struct known_sysctl sysctls_kern[] = {
+@@ -76,6 +82,9 @@ const struct known_sysctl sysctls_kern[] = {
  	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
  	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
  	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
 +	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
++	{ .oid = _KERN_OSVARIANT_STATUS, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "osvariant_status", .handler = handle_osvariant_status },
++	{ .oid = _KERN_OSRELEASETYPE, .type = CTLTYPE_STRING, .exttype = "S", .name = "osreleasetype", .handler = handle_osreleasetype },
  	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
  	{ .oid = -1 }
  };
@@ -3712,7 +3766,7 @@ index bd9cdc2..61fe056 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +350,19 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +357,34 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -3725,11 +3779,26 @@ index bd9cdc2..61fe056 100644
 +
 +	sysctl_handle_size(sizeof(int));
 +#if defined(__i386__) || defined(__x86_64__)
-+	unsigned int eax = 1, ebx, ecx = 0, edx;
-+	__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
-+	value = (ecx >> 31) & 1;
++	if (!darling_compat_profile_enabled()) {
++		unsigned int eax = 1, ebx, ecx = 0, edx;
++		__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
++		value = (ecx >> 31) & 1;
++	}
 +#endif
 +	*((int*) old) = value;
++	return 0;
++}
++
++static sysctl_handler(handle_osvariant_status) {
++	sysctl_handle_size(sizeof(unsigned long long));
++	*((unsigned long long*) old) = 0x70010000f0000002ULL;
++	return 0;
++}
++
++static sysctl_handler(handle_osreleasetype) {
++	static const char value[] = "RELEASE";
++	sysctl_handle_size(sizeof(value));
++	__simple_memcpy(old, value, sizeof(value));
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
