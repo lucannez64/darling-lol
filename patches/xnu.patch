@@ -5202,13 +5202,33 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..6ba89a3 100644
+index c2f70fb..136171b 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-@@ -83,6 +83,38 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+@@ -7,6 +7,7 @@
+ #include <mach/vm_prot.h>
+ #include <stdbool.h>
+ #include <sys/proc.h>
++#include <sys/sysctl.h>
+ #include <stddef.h>
+ 
+ #include <darling/emulation/common/base.h>
+@@ -35,6 +36,10 @@
+ #define LINUX_PR_SET_NAME 15
+ 
+ static long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize);
++static long _proc_listpids(uint32_t type, uint32_t typeinfo, void* buffer, int32_t bufsize);
++extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
++extern void* malloc(__SIZE_TYPE__ len);
++extern void free(void* ptr);
+ 
+ extern __SIZE_TYPE__ strlen(const char *s);
+ extern void *memset(void *s, int c, __SIZE_TYPE__ n);
+@@ -83,7 +88,40 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
  		case 2: // proc_pidinfo
  			return _proc_pidinfo(pid, flavor, arg, buffer, bufsize);
  		case 3: // proc_pidfdinfo
+-		case 1: // proc_listpids
 +		{
 +			if (flavor == PROC_PIDFDVNODEPATHINFO)
 +			{
@@ -5241,10 +5261,107 @@ index c2f70fb..6ba89a3 100644
 +					flavor);
 +			return -ENOTSUP;
 +		}
- 		case 1: // proc_listpids
++		case 1: // proc_listpids: pid carries the type, flavor the typeinfo
++			return _proc_listpids((uint32_t) pid, flavor, buffer, bufsize);
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
-@@ -328,6 +360,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 					callnum);
+@@ -91,6 +129,94 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+ 	}
+ }
+ 
++/*
++ * proc_listpids(): the same guest processes sysctl KERN_PROC_ALL reports, so
++ * every pid it returns resolves through proc_pidinfo/proc_name to the guest's
++ * Mach-O name (never mldr or a host process). Like xnu, a NULL buffer returns
++ * the size needed with room for 20 more pids, and pids come newest first.
++ */
++static long _proc_listpids(uint32_t type, uint32_t typeinfo, void* buffer, int32_t bufsize)
++{
++	struct kinfo_proc* procs = NULL;
++	unsigned long len = 0;
++	int ret, attempt, nprocs, i, count = 0, max;
++	int* out = (int*) buffer;
++
++	if (type < PROC_ALL_PIDS || type > PROC_KDBG_ONLY)
++		return -EINVAL;
++	if (bufsize < 0)
++		return -EINVAL;
++
++	for (attempt = 0; attempt < 4; attempt++)
++	{
++		len = 0;
++		ret = _sysctl_proc(KERN_PROC_ALL, 0, NULL, &len);
++		if (ret < 0)
++			return ret;
++		len += 8 * sizeof(struct kinfo_proc);
++		procs = (struct kinfo_proc*) malloc(len);
++		if (procs == NULL)
++			return -ENOMEM;
++		ret = _sysctl_proc(KERN_PROC_ALL, 0, procs, &len);
++		if (ret != -ENOSPC)
++			break;
++		free(procs);
++		procs = NULL;
++	}
++	if (procs == NULL)
++		return -ENOMEM;
++	if (ret < 0)
++	{
++		free(procs);
++		return ret;
++	}
++
++	nprocs = (int) (len / sizeof(struct kinfo_proc));
++	if (buffer == NULL)
++	{
++		free(procs);
++		return (nprocs + 20) * (long) sizeof(int);
++	}
++
++	max = bufsize / (int32_t) sizeof(int);
++	// /proc lists pids in ascending order; allproc is newest first.
++	for (i = nprocs - 1; i >= 0 && count < max; i--)
++	{
++		const struct kinfo_proc* kp = &procs[i];
++		bool match;
++
++		switch (type)
++		{
++			case PROC_ALL_PIDS:
++				match = true;
++				break;
++			case PROC_PGRP_ONLY:
++				match = kp->kp_eproc.e_pgid == (pid_t) typeinfo;
++				break;
++			case PROC_TTY_ONLY:
++				match = (kp->kp_proc.p_flag & P_CONTROLT) && kp->kp_eproc.e_tdev == (dev_t) typeinfo;
++				break;
++			case PROC_UID_ONLY:
++				match = kp->kp_eproc.e_ucred.cr_uid == (uid_t) typeinfo;
++				break;
++			case PROC_RUID_ONLY:
++				match = kp->kp_eproc.e_pcred.p_ruid == (uid_t) typeinfo;
++				break;
++			case PROC_PPID_ONLY:
++				match = kp->kp_eproc.e_ppid == (pid_t) typeinfo;
++				break;
++			default: // PROC_KDBG_ONLY: no process is kdebug-enabled here
++				match = false;
++				break;
++		}
++		if (match)
++			out[count++] = kp->kp_proc.p_pid;
++	}
++
++	free(procs);
++	return count * (long) sizeof(int);
++}
++
+ static bool parse_smaps_firstline(
+ 	const char* line,
+ 	uint64_t* pri_address,
+@@ -328,6 +454,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
  	info->pbi_start_tvusec = starttime_usecs;
  
  	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
@@ -5253,7 +5370,7 @@ index c2f70fb..6ba89a3 100644
  
  	return sizeof(struct proc_bsdinfo);
  reterr:
-@@ -390,7 +424,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -390,7 +518,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  
  	// comm
  	READELEM();
@@ -5264,7 +5381,7 @@ index c2f70fb..6ba89a3 100644
  
  	// process state
  	READELEM();
-@@ -437,7 +473,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -437,7 +567,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  	if (is_64_bit)
  		info->pbsi_flags |= P_LP64;
  
@@ -10647,7 +10764,7 @@ index a1b55f5..e6540d8 100644
  host_statistics64(
  #endif
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
-index 6600da7..ec2ecc0 100644
+index 6600da7..a291362 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
 @@ -124,6 +124,48 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
@@ -10673,11 +10790,11 @@ index 6600da7..ec2ecc0 100644
 +	if (size == 0)
 +		return false;
 +	// The Mach-O executable darlingserver recorded for the process...
-+	if (dserver_rpc_get_executable_path(pid, path, sizeof(path), &fullLength) == 0) {
-+		path[sizeof(path) - 1] = '\0';
-+		base = path_basename(path);
-+	}
-+	// ...or, when it has none (a process that has not exec'd a Mach-O through it), argv[0]:
++	if (dserver_rpc_get_executable_path(pid, path, sizeof(path), &fullLength) != 0)
++		return false; // darlingserver does not know it: host process or already gone
++	path[sizeof(path) - 1] = '\0';
++	base = path_basename(path);
++	// ...or, when a registered guest has none yet, argv[0]:
 +	// mldr rewrites the Linux command line to the guest's.
 +	if (*base == '\0') {
 +		char cmdpath[48];
@@ -10699,13 +10816,15 @@ index 6600da7..ec2ecc0 100644
  bool read_string(const char* path, char* dst, int maxlen)
  {
  	int fd, rd;
-@@ -215,7 +257,8 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
+@@ -215,7 +257,10 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
  
  	// comm
  	READELEM();
 -	strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm));
++	// Leave out what has no guest Mach-O name (a host process, or mldr before its
++	// exec): its Linux comm is not something a Mac process list ever contains.
 +	if (!darling_process_name(kinfo->kinfo.kp_proc.p_pid, kinfo->kinfo.kp_proc.p_comm, sizeof(kinfo->kinfo.kp_proc.p_comm)))
-+		strncpy(kinfo->kinfo.kp_proc.p_comm, elem, sizeof(kinfo->kinfo.kp_proc.p_comm));
++		goto retnull;
  
  	// process state
  	READELEM();
@@ -10720,7 +10839,7 @@ index 407996e..4bcdfa8 100644
 +// The macOS process name: the basename of the process's executable, truncated to
 +// fit `size` (a NUL is always written). Linux's comm is "mldr" for every Darling
 +// process, which macOS never reports. Returns false for processes darlingserver
-+// does not know (host processes); callers then keep the Linux comm.
++// does not know (host processes) so KERN_PROC_* omits them.
 +bool darling_process_name(int pid, char* out, unsigned long size);
 +
  #endif // _SYSCTL_PROC_H
