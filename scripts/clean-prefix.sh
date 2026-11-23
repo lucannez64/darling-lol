@@ -424,12 +424,18 @@ backed_up_targets = [
     guest / 'Library/Application Support/Riot Client',
     guest / 'Library/Application Support/riot-client-ux',
     guest / 'Library/Application Support/CEF',
+    guest / 'Library/Keychains/Darling/items-v1.plist',
+    guest / 'Library/Cookies',
+    guest / 'Library/HTTPStorages',
+    guest / 'Library/WebKit',
+    guest / 'Library/Saved Application State',
     *prefs_files,
     *lol_config_files,
 ]
 identity_backups = [
     prefix / 'private/etc/darling-platform.plist.before-platform-change',
     prefix / 'private/etc/darling-smbios.conf.before-platform-change',
+    prefix / 'System/Library/CoreServices/SystemVersion.plist.before-platform-change',
 ]
 
 archive_targets = list(backed_up_targets)

@@ -91,6 +91,8 @@ class CleanPrefixTests(unittest.TestCase):
             f'SMBIOS_SERIAL_NUMBER={self.old_serial}\nSMBIOS_PLATFORM_UUID={self.old_uuid}\n')
         (prefix / 'private/etc/darling-platform.plist.before-platform-change').write_text('first-plist\n')
         (prefix / 'private/etc/darling-smbios.conf.before-platform-change').write_text('first-conf\n')
+        (prefix / 'System/Library/CoreServices').mkdir(parents=True, exist_ok=True)
+        (prefix / 'System/Library/CoreServices/SystemVersion.plist.before-platform-change').write_text('old-sv\n')
         (lol / 'game.bin').write_text('game\n')
         (lol / 'Logs/GameLogs/r3dlog.txt').write_text('match\n')
         (lol / 'Config/LeagueClientSettings.yaml').write_text('install-identifier: old-id\n')
@@ -118,6 +120,16 @@ class CleanPrefixTests(unittest.TestCase):
         (guest / 'Library/Application Support/riot-client-ux/sentry/scope_v3.json').write_text('{"user":{"id":"old"}}\n')
         (guest / 'Library/Application Support/riot-client-ux/Crashpad/settings.dat').write_text('crashpad\n')
         (guest / 'Library/Application Support/CEF/cache.dat').write_text('cef\n')
+        (guest / 'Library/Keychains/Darling').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/Keychains/Darling/items-v1.plist').write_text('keychain\n')
+        (guest / 'Library/Cookies').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/Cookies/Cookies.binarycookies').write_text('cookies\n')
+        (guest / 'Library/HTTPStorages').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/HTTPStorages/com.riotgames.httpstorages').write_text('http\n')
+        (guest / 'Library/WebKit').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/WebKit/WebsiteData').write_text('webkit\n')
+        (guest / 'Library/Saved Application State').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/Saved Application State/com.riotgames.savedState').write_text('state\n')
         (guest / 'Library/Application Support/Other/keep.txt').write_text('keep\n')
         (guest / 'Library/Logs/Riot Games/Riot Client/rc.log').write_text('riot log\n')
         (guest / 'Library/Caches/com.riotgames.RiotClient/cache.bin').write_text('cache\n')
@@ -221,12 +233,18 @@ class CleanPrefixTests(unittest.TestCase):
             'Users/tester/Library/Application Support/Riot Client',
             'Users/tester/Library/Application Support/riot-client-ux',
             'Users/tester/Library/Application Support/CEF',
+            'Users/tester/Library/Keychains/Darling/items-v1.plist',
+            'Users/tester/Library/Cookies',
+            'Users/tester/Library/HTTPStorages',
+            'Users/tester/Library/WebKit',
+            'Users/tester/Library/Saved Application State',
             'Users/tester/Library/Preferences/com.riotgames.RiotClient.plist',
             'Users/tester/Library/Caches/com.riotgames.RiotClient',
             '.init.pid.stale-1-2',
             # No *.before-platform-change identity copies left readable inside the prefix.
             'private/etc/darling-platform.plist.before-platform-change',
             'private/etc/darling-smbios.conf.before-platform-change',
+            'System/Library/CoreServices/SystemVersion.plist.before-platform-change',
         ):
             self.assertFalse(os.path.lexists(self.prefix / gone), gone)
 
