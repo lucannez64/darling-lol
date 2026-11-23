@@ -61,6 +61,7 @@ int main() {
         source = self.source('AppKit/X11.backend/X11Display.m')
         fits = sources.function(source, 'X11ModeFitsScreen')
         frame = sources.function(source, 'X11FrameForModeOnScreen')
+        screen = sources.function(source, 'X11ScreenFrameForMode')
         self.run_cpp(r'''
 #include <cassert>
 using BOOL=bool;
@@ -73,7 +74,7 @@ static double NSWidth(NSRect r) {return r.size.width;}
 static double NSHeight(NSRect r) {return r.size.height;}
 static double NSMinX(NSRect r) {return r.origin.x;}
 static double NSMaxY(NSRect r) {return r.origin.y+r.size.height;}
-''' + fits + frame + r'''
+''' + fits + frame + screen + r'''
 static bool same(NSRect a,NSRect b) {
     return a.origin.x==b.origin.x && a.origin.y==b.origin.y &&
            a.size.width==b.size.width && a.size.height==b.size.height;
@@ -92,10 +93,17 @@ int main() {
                 NSMakeRect(0,312,1024,768)));
     assert(same(X11FrameForModeOnScreen(primary,NSMakeSize(1920,1080)),
                 NSMakeRect(0,0,1920,1080)));
+    /* An emulated mode changes the frame NSScreen reports; an impossible mode
+     * leaves the physical frame untouched. */
+    assert(same(X11ScreenFrameForMode(primary,NSMakeSize(1368,768)),
+                NSMakeRect(0,312,1368,768)));
+    assert(same(X11ScreenFrameForMode(primary,NSMakeSize(2560,1440)),primary));
     /* A monitor above the primary keeps its own top-left. */
     NSRect upper=NSMakeRect(1920,-68,1366,768);
     assert(!X11ModeFitsScreen(NSMakeSize(1368,768),upper));
     assert(same(X11FrameForModeOnScreen(upper,NSMakeSize(1024,768)),
+                NSMakeRect(1920,-68,1024,768)));
+    assert(same(X11ScreenFrameForMode(upper,NSMakeSize(1024,768)),
                 NSMakeRect(1920,-68,1024,768)));
 }
 ''')
@@ -104,11 +112,38 @@ int main() {
         source = self.source('AppKit/X11.backend/X11Window.m')
         method = body(source, '- (BOOL) wantsFullscreenWithStyleMask: (NSUInteger) mask rootFrame: (O2Rect) frame')
         self.assertIn('X11ShouldRequestFullscreen(', method)
+        # Coverage must be the physical XRandR monitor: an emulated mode makes
+        # the NSScreen frame smaller, and EWMH would pin the window back.
+        self.assertIn('X11RootRectCoversMonitor(_display, frame)', method)
+        self.assertNotIn('[display screens]', method)
         self.assertNotIn('if (mask & NSWindowStyleMaskFullScreen) return YES;', method)
 
-    def test_display_mode_request_resizes_the_game_window(self):
+    def test_display_mode_request_emulates_the_screen_frame(self):
         source = self.source('AppKit/X11.backend/X11Display.m')
         method = body(source, '- (BOOL) setMode: (NSDictionary *) mode forScreen: (int) screenIndex')
-        self.assertIn('X11ModeFitsScreen(requested, screenFrame)', method)
-        self.assertIn('[game setFrame: X11FrameForModeOnScreen(screenFrame, requested) display: YES]', method)
+        self.assertIn('X11ModeFitsScreen(requested, physicalFrame)', method)
+        self.assertIn('X11ScreenFrameForMode(physicalFrame, requested)', method)
+        self.assertIn('[_emulatedModes setObject: [NSValue valueWithSize: requested] forKey: displayKey]', method)
+        self.assertIn('[_emulatedModes removeObjectForKey: displayKey]', method)
+        self.assertIn('_lastScreens = nil', method)
+        self.assertIn('[game setFrame: frame display: YES]', method)
         self.assertNotIn('TODO: Use XRRSetCrtcConfig', method)
+        # The screen frame is what the game reads back to place its window, so
+        # the emulated mode is recorded on any thread; only the window resize is
+        # held back to the main thread.
+        self.assertIn('@synchronized (self)', method)
+        self.assertLess(method.index('[_emulatedModes setObject:'),
+                        method.index('pthread_main_np()'))
+        self.assertLess(method.index('pthread_main_np()'),
+                        method.index('[game setFrame: frame display: YES]'))
+
+    def test_screens_apply_the_emulated_mode(self):
+        source = self.source('AppKit/X11.backend/X11Display.m')
+        method = body(source, '- (NSArray *) _screensLocked')
+        self.assertIn('_physicalScreenFrames', method)
+        self.assertIn('X11ScreenFrameForMode(physicalFrame, [emulated sizeValue])', method)
+        self.assertIn('_physicalScreenFrames = physicalFrames', method)
+        # The cache is read and rebuilt under the same lock the mode change uses.
+        wrapper = body(source, '- (NSArray *) screens')
+        self.assertIn('@synchronized (self)', wrapper)
+        self.assertIn('[self _screensLocked]', wrapper)
