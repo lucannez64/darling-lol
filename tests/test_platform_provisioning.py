@@ -63,7 +63,7 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(out['ProductBuildVersion'], platform.EMULATED_BUILD_VERSION)
         self.assertNotIn('Darling', out['ProductBuildVersion'])
         # Unrelated keys survive; the Darling copyright is replaced.
-        self.assertEqual(out['iOSSupportVersion'], '14.7')
+        self.assertEqual(out['iOSSupportVersion'], '17.7')
         self.assertNotIn('Dolezel', out['ProductCopyright'])
         self.assertIn('Apple', out['ProductCopyright'])
 

@@ -245,6 +245,8 @@ def normalize_system_version(metadata):
     updated['ProductVersion'] = EMULATED_PRODUCT_VERSION
     updated['ProductUserVisibleVersion'] = EMULATED_PRODUCT_VERSION
     updated['ProductBuildVersion'] = EMULATED_BUILD_VERSION
+    if 'iOSSupportVersion' in updated:
+        updated['iOSSupportVersion'] = '17.7'
     # The stock template credits "Lubos Dolezel"; a real install never does.
     updated['ProductCopyright'] = '1983-2024 Apple Inc.'
     return plistlib.dumps(updated, fmt=plistlib.FMT_XML, sort_keys=True)
