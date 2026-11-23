@@ -76,8 +76,8 @@ case "$profile" in
 esac
 export RCLOL_PLATFORM_PROFILE="$profile"
 # Opt-in Darling SIP enforcement (M7/M8) via RCLOL_SIP_ENFORCE=1 when
-# DARLING_SIP_ENFORCE is unset. Kept off by default because sip.c currently
-# blocks writes to /private/var/db and /private/etc, aborting launchd daemons.
+# DARLING_SIP_ENFORCE is unset. Kept off by default while investigating an
+# Electron renderer spawn stall in Riot Client under DARLING_SIP_ENFORCE=1.
 if [ "$profile" = compat ] && [ -z "${DARLING_SIP_ENFORCE+x}" ]; then
  if [ "${RCLOL_SIP_ENFORCE:-0}" = 1 ]; then
   export DARLING_SIP_ENFORCE=1

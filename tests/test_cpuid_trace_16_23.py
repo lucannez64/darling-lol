@@ -402,10 +402,15 @@ int main(void) {{
     // 0x80000005 (AMD L1 caches) is reserved on Intel.
     a = 0x00a20f12u; b = 0x40000000u; c = 0xffffffffu; d = 0xffffffffu;
     rclol_cpuid_trace_spoof(0x80000001u, 0u, &a, &b, &c, &d);
-    assert(a == 0u && b == 0u && (c & 0x00003fc4u) == 0u && (d & 0xc0400000u) == 0u);
+    assert(a == 0u && b == 0u && (c & 0x00c03fdeu) == 0u && (d & 0xc0400000u) == 0u);
     a = b = c = d = 0xdeadbeefu;
     rclol_cpuid_trace_spoof(0x80000005u, 0u, &a, &b, &c, &d);
     assert(a == 0u && b == 0u && c == 0u && d == 0u);
+
+    // Leaf 0x80000007: Intel reserves EAX/EBX/ECX and keeps only invariant TSC in EDX.
+    a = b = c = d = 0xffffffffu;
+    rclol_cpuid_trace_spoof(0x80000007u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0u && d == 0x00000100u);
 
     // Leaf 0x80000006: Intel L2 256 KiB, 4-way (0x4), 64-byte line (0x40); EAX/EBX/EDX zero.
     a = 0xdeadbeefu; b = 0xdeadbeefu; c = 0xdeadbeefu; d = 0xdeadbeefu;
