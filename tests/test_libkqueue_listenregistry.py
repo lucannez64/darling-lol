@@ -50,8 +50,8 @@ class LibkqueueListenRegistryTests(unittest.TestCase):
         marker = 'diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c '
         self.assertIn(marker, xnu_patch)
         sec = xnu_patch.split(marker, 1)[1].split('\ndiff --git ', 1)[0]
-        self.assertIn('+			if (kqueue_atfork)', sec)
-        self.assertIn('+				kqueue_atfork();', sec)
+        self.assertIn('+#ifndef VARIANT_DYLD', sec)
+        self.assertIn('+			kqueue_atfork();', sec)
 
     def test_listenregistry_patch_fixes_alloc_and_unregister(self):
         added = added_lines('src/darling/listenregistry.c')
