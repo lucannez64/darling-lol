@@ -3766,7 +3766,7 @@ index bd9cdc2..61fe056 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +357,34 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +357,32 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -3796,9 +3796,7 @@ index bd9cdc2..61fe056 100644
 +}
 +
 +static sysctl_handler(handle_osreleasetype) {
-+	static const char value[] = "RELEASE";
-+	sysctl_handle_size(sizeof(value));
-+	__simple_memcpy(old, value, sizeof(value));
++	copyout_string("RELEASE", (char*)old, oldlen);
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
