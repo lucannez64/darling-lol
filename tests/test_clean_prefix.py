@@ -89,6 +89,7 @@ class CleanPrefixTests(unittest.TestCase):
         }))
         (prefix / 'private/etc/darling-smbios.conf').write_text(
             f'SMBIOS_SERIAL_NUMBER={self.old_serial}\nSMBIOS_PLATFORM_UUID={self.old_uuid}\n')
+        (prefix / 'private/etc/darling-identity-salt').write_bytes(b'0' * 32)
         (prefix / 'private/etc/darling-platform.plist.before-platform-change').write_text('first-plist\n')
         (prefix / 'private/etc/darling-smbios.conf.before-platform-change').write_text('first-conf\n')
         (prefix / 'System/Library/CoreServices').mkdir(parents=True, exist_ok=True)
@@ -206,6 +207,7 @@ class CleanPrefixTests(unittest.TestCase):
             'Applications/League of Legends.app/Contents/LoL/Config/PerksPreferences.yaml',
             'private/etc/darling-platform.plist',
             'private/etc/darling-smbios.conf',
+            'private/etc/darling-identity-salt',
             'private/etc/darling-platform.plist.before-platform-change',
             'private/etc/darling-smbios.conf.before-platform-change',
         ):
@@ -241,7 +243,8 @@ class CleanPrefixTests(unittest.TestCase):
             'Users/tester/Library/Preferences/com.riotgames.RiotClient.plist',
             'Users/tester/Library/Caches/com.riotgames.RiotClient',
             '.init.pid.stale-1-2',
-            # No *.before-platform-change identity copies left readable inside the prefix.
+            # No *.before-platform-change identity copies or old fallback salt left readable inside the prefix.
+            'private/etc/darling-identity-salt',
             'private/etc/darling-platform.plist.before-platform-change',
             'private/etc/darling-smbios.conf.before-platform-change',
             'System/Library/CoreServices/SystemVersion.plist.before-platform-change',
@@ -285,6 +288,7 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual((self.prefix / 'private/etc/darling-platform.plist').read_bytes(), before_plist)
         self.assertEqual((self.prefix / 'private/etc/darling-smbios.conf').read_bytes(), before_conf)
+        self.assertEqual((self.prefix / 'private/etc/darling-identity-salt').read_bytes(), b'0' * 32)
         self.assertTrue((self.prefix / 'private/etc/darling-platform.plist.before-platform-change').exists())
 
         # Recreate a file and run again in the same second; the first archive must survive.
