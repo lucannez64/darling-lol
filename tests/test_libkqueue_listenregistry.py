@@ -45,6 +45,14 @@ class LibkqueueListenRegistryTests(unittest.TestCase):
     def test_listenregistry_header_declares_atfork(self):
         self.assertIn('void __darling_kqueue_listen_atfork(void);', added_lines('src/darling/listenregistry.h'))
 
+    def test_posix_spawn_resets_libsystem_kernel_kqueue_copy(self):
+        xnu_patch = (ROOT / 'patches/xnu.patch').read_text()
+        marker = 'diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c '
+        self.assertIn(marker, xnu_patch)
+        sec = xnu_patch.split(marker, 1)[1].split('\ndiff --git ', 1)[0]
+        self.assertIn('+			if (kqueue_atfork)', sec)
+        self.assertIn('+				kqueue_atfork();', sec)
+
     def test_listenregistry_patch_fixes_alloc_and_unregister(self):
         added = added_lines('src/darling/listenregistry.c')
         self.assertIn('malloc(REGISTRY_VECTOR_INITIAL_CAPACITY * sizeof(int))', added)
