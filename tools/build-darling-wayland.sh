@@ -62,8 +62,15 @@ else
   echo "note: wayland-protocols has no pointer-warp-v1; pointer_warp is limited to locked pointers" >&2
 fi
 
+# Presentation timing is optional on older protocol packages and compositors.
+presentation_flag=""
+if generate stable/presentation-time/presentation-time.xml presentation-time; then
+  protocols="$protocols $proto_dir/presentation-time-protocol.c"
+  presentation_flag="-DDWL_HAVE_PRESENTATION"
+fi
+
 # shellcheck disable=SC2086
-cc -std=gnu11 -shared -fPIC -O2 -Wall -Wextra $warp_flag \
+cc -std=gnu11 -shared -fPIC -O2 -Wall -Wextra $warp_flag $presentation_flag \
   "-Wl,-soname,$out_dir/libdarling-wayland.so" \
   -I"$proto_dir" -I"$project_dir/tools" \
   "$project_dir/tools/darling-wayland.c" $protocols -o "$out_dir/libdarling-wayland.next.so" \

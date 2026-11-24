@@ -33,6 +33,10 @@
 #include "pointer-warp-v1-client-protocol.h"
 #endif
 
+#ifdef DWL_HAVE_PRESENTATION
+#include "presentation-time-client-protocol.h"
+#endif
+
 #include "darling-wayland-api.h"
 
 #define LOG(...) do { fprintf(stderr, "darling-wayland: " __VA_ARGS__); fputc('\n', stderr); } while (0)
@@ -51,6 +55,8 @@ struct shmbuf {
     int32_t width, height;
     bool busy;
 };
+
+struct presentation_pending;
 
 struct window {
     int32_t id;
@@ -85,10 +91,19 @@ struct window {
     bool act_pending;
     int64_t act_deadline;
     char act_token[MAX_TOKEN_LOG + 1];
+    uint64_t *entered;
+    size_t entered_count;
+    uint64_t timing_output, surface_generation, presentation_token;
+    bool deferred_commit;
+    struct dwl_timing observation;
+    struct presentation_pending *feedback;
+    unsigned feedback_count;
 };
 
 struct output {
     uint32_t name;
+    uint64_t identity;
+    int32_t timing_refresh;
     struct wl_output *output;
     struct zxdg_output_v1 *xdg;
     int32_t geo_x, geo_y, transform;
@@ -133,6 +148,12 @@ static struct {
     struct wp_viewporter *viewporter;
     struct zxdg_output_manager_v1 *xdg_output_manager;
     struct zwp_idle_inhibit_manager_v1 *idle_manager;
+#ifdef DWL_HAVE_PRESENTATION
+    struct wp_presentation *presentation;
+    uint32_t presentation_name, presentation_version;
+    clockid_t presentation_clock;
+    bool presentation_clock_known;
+#endif
     char **advertised;
     size_t advertised_count;
     bool dead;
@@ -318,6 +339,321 @@ static void maybe_mint_handoff_token(struct window *w, uint32_t serial) {
     xdg_activation_token_v1_set_surface(t, w->surface);
     xdg_activation_token_v1_commit(t);
     flush_best_effort();
+}
+
+/* ------------------------------------------------------------------ display timing
+ * SPDX-License-Identifier: GPL-3.0-only
+ * Optional feedback never owns drawable retirement or pacing. All state here
+ * belongs to the existing main-thread Wayland connection. */
+
+static uint64_t next_surface_generation, next_presentation_token, connection_identity;
+static void queue_outputs_changed(void);
+
+static uint64_t timing_now_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+
+static struct output *timing_output(uint64_t identity) {
+    for (size_t i = 0; i < g.output_count; ++i)
+        if (g.outputs[i]->identity == identity) return g.outputs[i];
+    return NULL;
+}
+
+static bool timing_entered(const struct window *w, uint64_t identity) {
+    for (size_t i = 0; i < w->entered_count; ++i)
+        if (w->entered[i] == identity) return true;
+    return false;
+}
+
+static struct output *timing_choose_output(struct window *w, uint64_t sync_output) {
+    if (!sync_output && (w->observation.flags & DWL_TIMING_PRESENTATION))
+        sync_output = w->observation.output_id;
+    struct output *out = timing_output(sync_output);
+    if (out && out->timing_refresh > 0) return out;
+    out = timing_output(w->timing_output);
+    if (out && out->timing_refresh > 0 && timing_entered(w, out->identity)) return out;
+    struct output *best = NULL;
+    for (size_t i = 0; i < g.output_count; ++i) {
+        out = g.outputs[i];
+        if (out->timing_refresh <= 0 || !timing_entered(w, out->identity)) continue;
+        if (!best || out->timing_refresh > best->timing_refresh ||
+            (out->timing_refresh == best->timing_refresh && out->identity < best->identity)) best = out;
+    }
+    if (best) return best;
+    /* Before enter, use the first usable Wayland output, never RandR. */
+    for (size_t i = 0; i < g.output_count; ++i)
+        if (g.outputs[i]->timing_refresh > 0) return g.outputs[i];
+    return NULL;
+}
+
+struct presentation_pending {
+    struct presentation_pending *next;
+    struct window *window;
+    uint64_t token, generation, output_id, submitted_ns, expires_ns;
+    int64_t clock_low, clock_high;
+    bool clock_valid, committed;
+#ifdef DWL_HAVE_PRESENTATION
+    struct wp_presentation_feedback *feedback;
+#endif
+};
+
+static void timing_drop_feedback(struct presentation_pending *pending) {
+    struct presentation_pending **link = &pending->window->feedback;
+    while (*link && *link != pending) link = &(*link)->next;
+    if (*link) { *link = pending->next; --pending->window->feedback_count; }
+#ifdef DWL_HAVE_PRESENTATION
+    if (pending->feedback) wp_presentation_feedback_destroy(pending->feedback);
+#endif
+    free(pending);
+}
+
+static void timing_invalidate(struct window *w) {
+    /* Invalidation precedes association/surface mutation. The guest publishes
+     * this generation into its own process-scoped timing snapshots. */
+    w->surface_generation = ++next_surface_generation;
+    memset(&w->observation, 0, sizeof w->observation);
+    while (w->feedback) timing_drop_feedback(w->feedback);
+}
+
+static void timing_reassociate(struct window *w, uint64_t sync_output) {
+    struct output *out = timing_choose_output(w, sync_output);
+    uint64_t identity = out ? out->identity : 0;
+    if (identity != w->timing_output) {
+        timing_invalidate(w);
+        w->timing_output = identity;
+    }
+}
+
+static void timing_expire(struct window *w, uint64_t now) {
+    struct presentation_pending *pending = w->feedback;
+    while (pending) {
+        struct presentation_pending *next = pending->next;
+        if (now >= pending->expires_ns) timing_drop_feedback(pending);
+        pending = next;
+    }
+}
+
+static void timing_surface_enter(void *data, struct wl_surface *surface UNUSED, struct wl_output *output) {
+    struct window *w = data;
+    for (size_t i = 0; i < g.output_count; ++i) {
+        struct output *out = g.outputs[i];
+        if (out->output != output || timing_entered(w, out->identity)) continue;
+        uint64_t *entered = realloc(w->entered, (w->entered_count + 1) * sizeof *entered);
+        if (!entered) return;
+        w->entered = entered;
+        w->entered[w->entered_count++] = out->identity;
+        timing_reassociate(w, 0);
+        queue_outputs_changed();
+        return;
+    }
+}
+
+static void timing_surface_leave(void *data, struct wl_surface *surface UNUSED, struct wl_output *output) {
+    struct window *w = data;
+    for (size_t i = 0; i < g.output_count; ++i) {
+        if (g.outputs[i]->output != output) continue;
+        uint64_t identity = g.outputs[i]->identity;
+        for (size_t j = 0; j < w->entered_count; ++j) {
+            if (w->entered[j] != identity) continue;
+            memmove(&w->entered[j], &w->entered[j + 1], (w->entered_count - j - 1) * sizeof *w->entered);
+            --w->entered_count;
+            if (w->timing_output == identity) timing_invalidate(w);
+            timing_reassociate(w, 0);
+            queue_outputs_changed();
+            return;
+        }
+    }
+}
+
+static const struct wl_surface_listener timing_surface_listener = {
+    .enter = timing_surface_enter, .leave = timing_surface_leave,
+};
+
+static void timing_attach_surface(struct window *w) {
+    timing_invalidate(w);
+    w->entered_count = 0;
+    w->timing_output = 0;
+    wl_surface_add_listener(w->surface, &timing_surface_listener, w);
+}
+
+/* Every shim commit to a content surface passes here. EGL alone commits
+ * between begin/end. Cursor surfaces are independent and need no reservation. */
+static void window_commit(struct window *w) {
+    if (w->presentation_token) { w->deferred_commit = true; return; }
+    wl_surface_commit(w->surface);
+}
+
+static void timing_fill_output(struct output *out, struct dwl_timing *timing) {
+    if (!out) return;
+    timing->output_id = out->identity;
+    if (out->timing_refresh > 0) {
+        timing->rate_num = (uint64_t)out->timing_refresh;
+        timing->rate_den = 1000;
+        timing->flags |= DWL_TIMING_NOMINAL;
+    }
+}
+
+static int dwl_output_get_timing(int index, struct dwl_timing *out) {
+    if (!out || index < 0 || (size_t)index >= g.output_count) return -1;
+    memset(out, 0, sizeof *out);
+    out->version = 1;
+    timing_fill_output(g.outputs[index], out);
+    return 0;
+}
+
+static int dwl_window_get_timing(int32_t window, struct dwl_timing *out) {
+    struct window *w = find_window(window);
+    if (!w || !out || g.dead) return -1;
+    timing_expire(w, timing_now_ns());
+    timing_reassociate(w, 0);
+    *out = w->observation;
+    out->version = 1;
+    out->surface_generation = w->surface_generation;
+    timing_fill_output(timing_output(w->timing_output), out);
+    return 0;
+}
+
+#ifdef DWL_HAVE_PRESENTATION
+/* A bracket gives a bounded conversion rather than treating receipt time as
+ * presentation time. Repeat it on completion and reject clock discontinuity. */
+static bool timing_clock_bracket(int64_t *low, int64_t *high) {
+    struct timespec before, source, after;
+    if (!g.presentation_clock_known ||
+        clock_gettime(CLOCK_MONOTONIC, &before) ||
+        clock_gettime(g.presentation_clock, &source) ||
+        clock_gettime(CLOCK_MONOTONIC, &after)) return false;
+    __int128 a = (__int128)before.tv_sec * 1000000000 + before.tv_nsec;
+    __int128 b = (__int128)after.tv_sec * 1000000000 + after.tv_nsec;
+    __int128 s = (__int128)source.tv_sec * 1000000000 + source.tv_nsec;
+    if (b < a || b - a > 1000000 || a - s < INT64_MIN || b - s > INT64_MAX) return false;
+    *low = (int64_t)(a - s); *high = (int64_t)(b - s);
+    return true;
+}
+
+static void timing_clock_id(void *data UNUSED, struct wp_presentation *presentation UNUSED, uint32_t clock) {
+    g.presentation_clock = (clockid_t)clock;
+    g.presentation_clock_known = true;
+}
+static const struct wp_presentation_listener presentation_listener = {.clock_id = timing_clock_id};
+
+static void timing_sync_output(void *data, struct wp_presentation_feedback *feedback UNUSED, struct wl_output *output) {
+    struct presentation_pending *pending = data;
+    for (size_t i = 0; i < g.output_count; ++i)
+        if (g.outputs[i]->output == output) pending->output_id = g.outputs[i]->identity;
+}
+
+static void timing_presented(void *data, struct wp_presentation_feedback *feedback UNUSED,
+                             uint32_t sec_hi, uint32_t sec_lo, uint32_t nsec,
+                             uint32_t refresh, uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
+    struct presentation_pending *pending = data;
+    struct window *w = pending->window;
+    uint64_t now = timing_now_ns();
+    uint64_t sequence = ((uint64_t)seq_hi << 32) | seq_lo;
+    __uint128_t raw = (__uint128_t)(((uint64_t)sec_hi << 32) | sec_lo) * 1000000000 + nsec;
+    if (!pending->committed || pending->generation != w->surface_generation ||
+        now >= pending->expires_ns || nsec >= 1000000000 || raw > UINT64_MAX) {
+        timing_drop_feedback(pending); return;
+    }
+    uint64_t timestamp = (uint64_t)raw;
+    int64_t low, high;
+    bool clock_valid = pending->clock_valid && timing_clock_bracket(&low, &high);
+    if (clock_valid) {
+        if (low < pending->clock_low) low = pending->clock_low;
+        if (high > pending->clock_high) high = pending->clock_high;
+        __int128 converted = (__int128)timestamp + low + (high - (__int128)low) / 2;
+        clock_valid = low <= high && converted >= 0 && converted <= UINT64_MAX;
+        if (clock_valid) timestamp = (uint64_t)converted;
+    }
+    /* Receipt delay does not alter phase. A future timestamp or clock reset
+     * is retained as an observation without granting scheduling eligibility. */
+    if (clock_valid && (timestamp > now || (__uint128_t)timestamp + 1000000000ull < pending->submitted_ns)) clock_valid = false;
+    uint64_t output_id = timing_output(pending->output_id) ? pending->output_id : w->timing_output;
+    uint32_t timing_flags = DWL_TIMING_PRESENTATION;
+    if (clock_valid) timing_flags |= DWL_TIMING_CLOCK_MONOTONIC;
+    if (sequence) timing_flags |= DWL_TIMING_COUNTER;
+    if (flags & WP_PRESENTATION_FEEDBACK_KIND_VSYNC) timing_flags |= DWL_TIMING_VSYNC;
+    /* v1 requires refresh=0 for variable rate; v2 allows a fastest interval
+     * with no way to distinguish it. Only v3's fixed_rate is authoritative. */
+    if (refresh && ((g.presentation_version == 1) ||
+        (g.presentation_version >= 3 && (flags & 0x10) && !(flags & 0x20))))
+        timing_flags |= DWL_TIMING_FIXED;
+    if (refresh && g.presentation_version >= 3 && (flags & 0x20) && !(flags & 0x10))
+        timing_flags |= DWL_TIMING_VARIABLE;
+    if (w->observation.flags & DWL_TIMING_PRESENTATION) {
+        if ((clock_valid && (w->observation.flags & DWL_TIMING_CLOCK_MONOTONIC) &&
+             timestamp <= w->observation.presentation_ns) ||
+            (sequence && w->observation.counter && output_id == w->observation.output_id &&
+             sequence <= w->observation.counter)) {
+            timing_drop_feedback(pending); return;
+        }
+    }
+    /* Detach before reassociation: changing output cancels all other feedback. */
+    timing_drop_feedback(pending);
+    timing_reassociate(w, output_id);
+    w->observation = (struct dwl_timing){.version = 1, .flags = timing_flags,
+        .output_id = w->timing_output, .surface_generation = w->surface_generation,
+        .presentation_ns = timestamp, .counter = sequence, .refresh_ns = refresh,
+        .presentation_version = g.presentation_version};
+}
+
+static void timing_discarded(void *data, struct wp_presentation_feedback *feedback UNUSED) {
+    timing_drop_feedback(data);
+}
+static const struct wp_presentation_feedback_listener timing_feedback_listener = {
+    .sync_output = timing_sync_output, .presented = timing_presented, .discarded = timing_discarded,
+};
+#endif
+
+static uint64_t dwl_presentation_begin(int32_t window, uint64_t generation) {
+    struct window *w = find_window(window);
+    if (!w || !w->surface || !w->egl || g.dead || w->presentation_token || generation != w->surface_generation) return 0;
+    uint64_t now = timing_now_ns();
+    timing_expire(w, now);
+    w->presentation_token = ++next_presentation_token;
+#ifdef DWL_HAVE_PRESENTATION
+    if (g.presentation && w->feedback_count < 8) {
+        struct presentation_pending *pending = calloc(1, sizeof *pending);
+        if (pending) {
+            struct output *out = timing_output(w->timing_output);
+            uint64_t period = out && out->timing_refresh > 0 ? 1000000000000ull / out->timing_refresh : 16666667;
+            uint64_t lifetime = period * 8 > 1000000000ull ? period * 8 : 1000000000ull;
+            pending->window = w; pending->token = w->presentation_token;
+            pending->generation = w->surface_generation;
+            pending->submitted_ns = now; pending->expires_ns = now + lifetime;
+            pending->clock_valid = timing_clock_bracket(&pending->clock_low, &pending->clock_high);
+            pending->feedback = wp_presentation_feedback(g.presentation, w->surface);
+            if (pending->feedback) {
+                pending->next = w->feedback; w->feedback = pending; ++w->feedback_count;
+                wp_presentation_feedback_add_listener(pending->feedback, &timing_feedback_listener, pending);
+            } else free(pending);
+        }
+    }
+#endif
+    return w->presentation_token;
+}
+
+static void dwl_presentation_end(int32_t window, uint64_t token, int success) {
+    struct window *w = find_window(window);
+    if (!w || !token || w->presentation_token != token) return;
+    struct presentation_pending *pending = w->feedback;
+    while (pending && pending->token != token) pending = pending->next;
+    if (pending) {
+        if (success) pending->committed = true;
+        else timing_drop_feedback(pending);
+    }
+    w->presentation_token = 0;
+    if (w->deferred_commit) {
+        w->deferred_commit = false;
+        /* Successful EGL swap already committed the pending surface state. */
+        if (!success) window_commit(w);
+    }
+}
+
+static void dwl_window_invalidate_timing(int32_t window) {
+    struct window *w = find_window(window);
+    if (w) timing_invalidate(w);
 }
 
 /* ------------------------------------------------------------------ cursor */
@@ -526,7 +862,7 @@ static int dwl_pointer_warp(int32_t window, double x, double y) {
     if (!w || !g.display) return -1;
     if (w->locked) {
         zwp_locked_pointer_v1_set_cursor_position_hint(w->locked, wl_fixed_from_double(x), wl_fixed_from_double(y));
-        wl_surface_commit(w->surface);
+        window_commit(w);
         return 0;
     }
 #ifdef DWL_HAVE_POINTER_WARP
@@ -870,14 +1206,26 @@ static void out_geometry(void *data, struct wl_output *o UNUSED, int32_t x, int3
     out->geo_y = y;
     out->transform = transform;
 }
+static void out_done(void *data, struct wl_output *o);
+
 static void out_mode(void *data, struct wl_output *o UNUSED, uint32_t flags, int32_t w, int32_t h, int32_t refresh) {
     struct output *out = data;
     if (!(flags & WL_OUTPUT_MODE_CURRENT)) return;
     out->pixel_width = w;
     out->pixel_height = h;
     out->refresh = refresh;
+    if (wl_output_get_version(o) < 2) out_done(out, o);
 }
-static void out_done(void *d UNUSED, struct wl_output *o UNUSED) { queue_outputs_changed(); }
+static void out_done(void *data, struct wl_output *o UNUSED) {
+    struct output *out = data;
+    out->timing_refresh = out->refresh;
+    for (size_t i = 0; i < g.window_count; ++i) {
+        struct window *w = g.windows[i];
+        if (w->timing_output == out->identity) timing_invalidate(w);
+        timing_reassociate(w, 0);
+    }
+    queue_outputs_changed();
+}
 static void out_scale(void *data, struct wl_output *o UNUSED, int32_t factor) {
     ((struct output *)data)->scale = factor;
 }
@@ -984,6 +1332,13 @@ static void registry_global(void *d UNUSED, struct wl_registry *reg, uint32_t na
         for (size_t i = 0; i < g.output_count; i++) output_attach_xdg(g.outputs[i]);
     } else if (!strcmp(iface, zwp_idle_inhibit_manager_v1_interface.name)) {
         g.idle_manager = bind_global(reg, name, &zwp_idle_inhibit_manager_v1_interface, version, 1);
+#ifdef DWL_HAVE_PRESENTATION
+    } else if (!strcmp(iface, wp_presentation_interface.name)) {
+        g.presentation = bind_global(reg, name, &wp_presentation_interface, version, 3);
+        g.presentation_name = name;
+        g.presentation_version = wp_presentation_get_version(g.presentation);
+        wp_presentation_add_listener(g.presentation, &presentation_listener, NULL);
+#endif
     } else if (!strcmp(iface, wl_output_interface.name)) {
         struct output *out = calloc(1, sizeof *out);
         struct output **list = realloc(g.outputs, (g.output_count + 1) * sizeof *list);
@@ -994,6 +1349,7 @@ static void registry_global(void *d UNUSED, struct wl_registry *reg, uint32_t na
         }
         g.outputs = list;
         out->name = name;
+        out->identity = (connection_identity << 32) | name;
         out->scale = 1;
         out->output = bind_global(reg, name, &wl_output_interface, version, 4);
         wl_output_add_listener(out->output, &output_listener, out);
@@ -1003,11 +1359,26 @@ static void registry_global(void *d UNUSED, struct wl_registry *reg, uint32_t na
 }
 
 static void registry_global_remove(void *d UNUSED, struct wl_registry *reg UNUSED, uint32_t name) {
+#ifdef DWL_HAVE_PRESENTATION
+    if (g.presentation && g.presentation_name == name) {
+        for (size_t i = 0; i < g.window_count; ++i) timing_invalidate(g.windows[i]);
+        wp_presentation_destroy(g.presentation); g.presentation = NULL;
+        g.presentation_clock_known = false;
+    }
+#endif
     for (size_t i = 0; i < g.output_count; i++) {
         if (g.outputs[i]->name != name) continue;
-        output_free(g.outputs[i]);
+        struct output *removed = g.outputs[i];
+        for (size_t j = 0; j < g.window_count; ++j) {
+            /* A pending sync_output may name this output even before the
+             * selected output changes. Cancel it before freeing the global. */
+            timing_invalidate(g.windows[j]);
+            timing_surface_leave(g.windows[j], g.windows[j]->surface, removed->output);
+        }
+        output_free(removed);
         memmove(&g.outputs[i], &g.outputs[i + 1], (g.output_count - i - 1) * sizeof *g.outputs);
         g.output_count--;
+        for (size_t j = 0; j < g.window_count; ++j) timing_reassociate(g.windows[j], 0);
         queue_outputs_changed();
         return;
     }
@@ -1125,6 +1496,7 @@ static int32_t dwl_window_create(int32_t width, int32_t height, const char *titl
     w->app_id = strdup(app_id ? app_id : "");
     w->surface = wl_compositor_create_surface(g.compositor);
     wl_surface_set_user_data(w->surface, w);
+    timing_attach_surface(w);
     w->xdg_surface = xdg_wm_base_get_xdg_surface(g.wm_base, w->surface);
     xdg_surface_add_listener(w->xdg_surface, &xdg_surface_listener, w);
     w->toplevel = xdg_surface_get_toplevel(w->xdg_surface);
@@ -1133,7 +1505,7 @@ static int32_t dwl_window_create(int32_t width, int32_t height, const char *titl
     if (app_id && *app_id) xdg_toplevel_set_app_id(w->toplevel, app_id);
     if (g.viewporter) w->viewport = wp_viewporter_get_viewport(g.viewporter, w->surface);
     /* The initial commit without a buffer asks the compositor for the first configure. */
-    wl_surface_commit(w->surface);
+    window_commit(w);
     g.windows[g.window_count++] = w;
     flush_best_effort();
     return w->id;
@@ -1173,6 +1545,8 @@ static void dwl_window_destroy(int32_t window) {
         wl_surface_set_user_data(w->surface, NULL);
         wl_surface_destroy(w->surface);
     }
+    timing_invalidate(w);
+    free(w->entered);
     free(w->app_id);
     free(w);
     flush_best_effort();
@@ -1286,7 +1660,7 @@ static void dwl_window_present_pixels(int32_t window, const void *pixels, int32_
     b->busy = true;
     wl_surface_attach(w->surface, b->buffer, 0, 0);
     wl_surface_damage_buffer(w->surface, 0, 0, width, height);
-    wl_surface_commit(w->surface);
+    window_commit(w);
     flush_best_effort();
 }
 
@@ -1380,6 +1754,7 @@ static bool popup_build(struct window *w) {
     w->configured = false;
     w->surface = wl_compositor_create_surface(g.compositor);
     wl_surface_set_user_data(w->surface, w);
+    timing_attach_surface(w);
     w->xdg_surface = xdg_wm_base_get_xdg_surface(g.wm_base, w->surface);
     xdg_surface_add_listener(w->xdg_surface, &xdg_surface_listener, w);
     w->popup = xdg_surface_get_popup(w->xdg_surface, w->parent->xdg_surface, pos);
@@ -1388,7 +1763,7 @@ static bool popup_build(struct window *w) {
     if (w->popup_grab && g.seat && g.have_grab_serial) xdg_popup_grab(w->popup, g.seat, g.grab_serial);
     if (g.viewporter) w->viewport = wp_viewporter_get_viewport(g.viewporter, w->surface);
     /* The initial commit without a buffer asks the compositor for the configure; the grab must precede it. */
-    wl_surface_commit(w->surface);
+    window_commit(w);
     return true;
 }
 
@@ -1425,6 +1800,7 @@ static int32_t dwl_popup_create(int32_t parent, int32_t x, int32_t y, int32_t wi
 
 /* Fallback without xdg_popup.reposition: tear the popup surface down and build it again under the same id. */
 static void popup_recreate(struct window *w) {
+    timing_invalidate(w);
     for (struct window *child; (child = find_child_popup(w)) != NULL;) {
         queue_event(&(struct dwl_event){.type = DWL_EVENT_POPUP_DONE, .window = child->id});
         dwl_window_destroy(child->id);
@@ -1520,6 +1896,7 @@ static void dwl_window_set_maximized(int32_t window, int maximized) {
 static void dwl_window_set_minimized(int32_t window) {
     struct window *w = find_window(window);
     if (w && w->toplevel) {
+        timing_invalidate(w);
         xdg_toplevel_set_minimized(w->toplevel);
         flush_best_effort();
     }
@@ -1576,6 +1953,9 @@ static void dwl_disconnect(void) {
     g.output_count = 0;
     for (int i = 0; i < CURSOR_CACHE; i++) cursor_entry_free(&g.cursors[i]);
     if (g.cursor_surface) wl_surface_destroy(g.cursor_surface);
+#ifdef DWL_HAVE_PRESENTATION
+    if (g.presentation) wp_presentation_destroy(g.presentation);
+#endif
     if (!g.dead) wl_display_flush(g.display);
     wl_display_disconnect(g.display);
     g.display = NULL;
@@ -1588,6 +1968,7 @@ static int dwl_connect(const char *socket_path) {
         LOG("connect needs an absolute socket path");
         return -1;
     }
+    ++connection_identity;
     g.display = wl_display_connect(socket_path);
     if (!g.display) {
         LOG("cannot connect to %s: %s", socket_path, strerror(errno));
@@ -1664,6 +2045,7 @@ static void run_timers(void) {
     }
     for (size_t i = 0; i < g.window_count; i++) {
         struct window *w = g.windows[i];
+        if(w->feedback)timing_expire(w, timing_now_ns());
         if (w->act_pending && now >= w->act_deadline) {
             w->act_pending = false;
             struct dwl_event done = make_event(DWL_EVENT_ACTIVATION_DONE, w);
@@ -1696,6 +2078,7 @@ static int dwl_dispatch(void) {
     return (int)g.queue_len;
 fatal:
     g.dead = true;
+    for (size_t i = 0; i < g.window_count; ++i) timing_invalidate(g.windows[i]);
     LOG("connection lost: %s", strerror(errno));
     return -1;
 }
@@ -1716,6 +2099,12 @@ static int dwl_repeat_timeout_ms(void) {
         have = true;
     }
     for (size_t i = 0; i < g.window_count; i++) {
+        uint64_t ns = g.windows[i]->feedback ? timing_now_ns() : 0;
+        for (struct presentation_pending *p = g.windows[i]->feedback; p; p = p->next) {
+            int64_t d = p->expires_ns > ns ? (int64_t)((p->expires_ns - ns + 999999) / 1000000) : 0;
+            if (!have || d < best) best = d;
+            have = true;
+        }
         if (!g.windows[i]->act_pending) continue;
         int64_t d = g.windows[i]->act_deadline - now;
         if (!have || d < best) best = d;
@@ -1764,6 +2153,11 @@ static const struct dwl_api api = {
     .window_set_parent = dwl_window_set_parent,
     .window_set_maximized = dwl_window_set_maximized,
     .window_set_minimized = dwl_window_set_minimized,
+    .window_get_timing = dwl_window_get_timing,
+    .output_get_timing = dwl_output_get_timing,
+    .presentation_begin = dwl_presentation_begin,
+    .presentation_end = dwl_presentation_end,
+    .window_invalidate_timing = dwl_window_invalidate_timing,
 };
 
 __attribute__((visibility("default"))) const struct dwl_api *DarlingWaylandAPI(void) { return &api; }

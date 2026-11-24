@@ -37,12 +37,19 @@ class MetalDrawablePoolChecks(unittest.TestCase):
 
     def test_queue_present_wakes_a_waiting_main_thread_before_unlocking(self):
         source, _ = self.wait_loop()
-        body = source.split('- (void)queuePresent: (NSUInteger)drawableID\n{', 1)[1].split('\n}\n', 1)[0]
+        wrapper = source.split('- (void)queuePresent: (NSUInteger)drawableID\n{', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('[self queuePresent: drawableID fromDrawable: nullptr];', wrapper)
+        body = source.split('- (BOOL)queuePresent: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable\n{', 1)[1].split('\n}\n', 1)[0]
         wake = body.index('if (mainThreadDrawableWaiter.load(std::memory_order_relaxed) == (void*) self) {')
         self.assertLess(body.index('++_queuedDrawableCount;'), wake)
         self.assertLess(wake, body.index('[_drawableCondition broadcast];'))
-        self.assertLess(body.index('[_drawableCondition broadcast];'), body.index('[_drawableCondition unlock];'))
-        self.assertLess(body.index('[_drawableCondition unlock];'), body.index('dispatch_async(dispatch_get_main_queue()'))
+        dispatch = body.index('dispatch_async(dispatch_get_main_queue()')
+        unlock = body.rindex('[_drawableCondition unlock];')
+        self.assertLess(body.index('[_drawableCondition broadcast];'), dispatch)
+        # Enqueue callbacks under the producer lock to preserve ticket FIFO order.
+        self.assertLess(dispatch, unlock)
+        self.assertNotIn('[_drawableCondition unlock];', body[wake:dispatch])
+        self.assertLess(body.index('const uint64_t ticket = ++_issuedPresentation;'), dispatch)
 
     def test_main_thread_presents_queued_drawables_instead_of_timing_out(self):
         _, loop = self.wait_loop()

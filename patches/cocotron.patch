@@ -4762,7 +4762,7 @@ index bdc97bd..1369fd1 100644
      if (display)
          XFreeCursor(display, _cursor);
 diff --git a/AppKit/X11.backend/X11Display.h b/AppKit/X11.backend/X11Display.h
-index 18189404..6549492b 100644
+index 1818940..8f4c50f 100644
 --- a/AppKit/X11.backend/X11Display.h
 +++ b/AppKit/X11.backend/X11Display.h
 @@ -10,13 +10,62 @@
@@ -4829,7 +4829,7 @@ index 18189404..6549492b 100644
  
  @interface X11Display : NSDisplay {
      Display *_display;
-@@ -36,19 +85,118 @@
+@@ -36,19 +85,130 @@
      NSTimeInterval lastClickTimeStamp;
      int clickCount;
      X11Cursor *_blankCursor, *_defaultCursor;
@@ -4852,6 +4852,12 @@ index 18189404..6549492b 100644
 +    unsigned char _modifierKeysDown[256];
      int _rrEventBase;
      NSArray* _lastScreens;
++    /* Display IDs survive RandR enumeration changes; timing targets include GL children. */
++    NSMutableDictionary *_displayIDsByOutput;
++    uint32_t _nextDisplayID;
++    NSData *_timingOutputData;
++    NSMutableDictionary *_timingWindows;
++    BOOL _timingGeometryDirty;
 +    // Root-window rectangle of the primary monitor (macOS's global origin).
 +    NSRect _primaryRootFrame;
 +    BOOL _primaryRootFrameValid;
@@ -4891,6 +4897,12 @@ index 18189404..6549492b 100644
 +- (void) _startOcclusionTracking;
 +- (void) _updateOcclusion;
  - (Display *) display;
++- (int) screenIndexForDisplayID: (uint32_t) displayID;
++- (void) updateDisplayTimingForWindow: (Window) window;
++- (void) forgetDisplayTimingForWindow: (Window) window;
++- (void) refreshDisplayTiming;
++- (void) noteDisplayTimingGeometryChange;
++- (void) notifyNominalDisplayTimingForWindow: (Window) window;
 +- (BOOL) activateProcessIdentifier: (pid_t) processIdentifier;
 +- (Time) lastUserTime;
  
@@ -4950,18 +4962,21 @@ index 18189404..6549492b 100644
 +- (BOOL) waylandHandleGrabMouse: (BOOL) doGrab;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..4f394712 100644
+index 5ae29bf..45f05e6 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
-@@ -23,6 +23,7 @@
+@@ -23,8 +23,10 @@
  #import "X11Cursor.h"
  #import "X11Pasteboard.h"
  #import "X11Window.h"
 +#import "WaylandWindow.h"
  #import <AppKit/NSApplication.h>
  #import <AppKit/NSScreen.h>
++#import <CoreGraphics/DarlingDisplayTiming.h>
  #import <Foundation/NSDebug.h>
-@@ -48,12 +49,273 @@
+ 
+ #ifndef DARLING
+@@ -48,12 +50,330 @@
  #import "X11KeySymToUCS.h"
  #import <X11/XKBlib.h>
  #import <X11/Xutil.h>
@@ -4988,6 +5003,63 @@ index 5ae29bf4..4f394712 100644
 +#include <stdio.h>
 +#include <string.h>
 +#include <unistd.h>
++
++/* RandR timing policy: shared by the event-thread publisher and host fixtures. */
++typedef struct {
++    uint64_t outputID;
++    uint32_t displayID;
++    int x, y, width, height;
++    uint64_t rateNumerator, rateDenominator;
++    BOOL primary;
++} X11TimingOutput;
++
++static void X11TimingRateForMode(const XRRModeInfo *mode, uint64_t *numerator,
++                                uint64_t *denominator) {
++    *numerator = *denominator = 0;
++    if (!mode || !mode->dotClock || !mode->hTotal || !mode->vTotal) return;
++    uint64_t n = mode->dotClock, d = (uint64_t) mode->hTotal * mode->vTotal;
++    if (mode->modeFlags & RR_Interlace) n *= 2;
++    if (mode->modeFlags & RR_DoubleScan) d *= 2;
++    uint64_t a = n, b = d;
++    while (b) { uint64_t remainder = a % b; a = b; b = remainder; }
++    *numerator = n / a;
++    *denominator = d / a;
++}
++
++static int X11TimingIndexForOutput(const RROutput *outputs, int count, uint64_t outputID) {
++    for (int i = 0; i < count; ++i)
++        if (outputs[i] == outputID) return i;
++    return -1;
++}
++
++static const X11TimingOutput *X11TimingChooseOutput(const X11TimingOutput *outputs,
++        size_t count, uint64_t previous, int x, int y, int width, int height) {
++    const X11TimingOutput *best = NULL;
++    int64_t bestArea = -1;
++    for (size_t i = 0; i < count; ++i) {
++        const X11TimingOutput *candidate = &outputs[i];
++        if (candidate->width <= 0 || candidate->height <= 0) continue;
++        int64_t left = x > candidate->x ? x : candidate->x;
++        int64_t top = y > candidate->y ? y : candidate->y;
++        int64_t right = (int64_t) x + width;
++        int64_t edge = (int64_t) candidate->x + candidate->width;
++        if (edge < right) right = edge;
++        int64_t bottom = (int64_t) y + height;
++        edge = (int64_t) candidate->y + candidate->height;
++        if (edge < bottom) bottom = edge;
++        int64_t area = right > left && bottom > top ? (right - left) * (bottom - top) : 0;
++        BOOL preferred = !best || (candidate->outputID == previous && best->outputID != previous) ||
++            ((candidate->outputID == previous) == (best->outputID == previous) &&
++             (candidate->primary > best->primary ||
++              (candidate->primary == best->primary && candidate->outputID < best->outputID)));
++        if (area > bestArea || (area == bestArea && preferred)) {
++            best = candidate;
++            bestArea = area;
++        }
++    }
++    return best;
++}
++/* End RandR timing policy. */
 +
 +static int rclolTraceState = -1;
 +static FILE *rclolTraceFile;
@@ -5235,7 +5307,7 @@ index 5ae29bf4..4f394712 100644
  
  void NSColorSetCatalogColor(NSColorListName catalogName, NSColorName colorName, NSColor *color);
  
-@@ -75,6 +337,15 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -75,6 +395,15 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  - init {
      if (self = [super init]) {
  
@@ -5251,15 +5323,18 @@ index 5ae29bf4..4f394712 100644
          _display = XOpenDisplay(NULL);
  
          if (_display == NULL) {
-@@ -120,6 +391,7 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -120,6 +449,10 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  #endif
  
          _windowsByID = [NSMutableDictionary new];
++        _displayIDsByOutput = [NSMutableDictionary new];
++        _timingWindows = [NSMutableDictionary new];
++        _nextDisplayID = 1;
 +        _portWaitQueue = -1;
          [self _enableDetectableAutoRepeat];
  
          XSetLocaleModifiers("");
-@@ -136,6 +408,13 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -136,6 +469,13 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
          if (XRRQueryExtension(_display, &_rrEventBase, &errorBase)) {
              XRRSelectInput(_display, DefaultRootWindow(_display), RRScreenChangeNotifyMask | RRCrtcChangeNotifyMask | RROutputChangeNotifyMask | RROutputPropertyNotifyMask);
          }
@@ -5273,7 +5348,7 @@ index 5ae29bf4..4f394712 100644
  
          lastFocusedWindow = nil;
          lastClickTimeStamp = 0.0;
-@@ -145,26 +424,45 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -145,26 +485,48 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  }
  
  - (void) dealloc {
@@ -5281,11 +5356,11 @@ index 5ae29bf4..4f394712 100644
      [_blankCursor release];
      [_defaultCursor release];
 +    [_definedCursor release];
- 
--    XCloseIM(_xim);
++
 +    if (_xim)
 +        XCloseIM(_xim);
-+
+ 
+-    XCloseIM(_xim);
 +    if (_portWaitQueue >= 0)
 +        close(_portWaitQueue);
  
@@ -5303,6 +5378,9 @@ index 5ae29bf4..4f394712 100644
  #endif
  
      [_windowsByID release];
++    [_displayIDsByOutput release];
++    [_timingOutputData release];
++    [_timingWindows release];
 +    [_waylandWindowsByID release];
 +    [_waylandPopups release];
      [super dealloc];
@@ -5322,7 +5400,7 @@ index 5ae29bf4..4f394712 100644
      return [[X11Window alloc] initWithDelegate: delegate];
  }
  
-@@ -172,6 +470,165 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -172,6 +534,165 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
      return _display;
  }
  
@@ -5488,7 +5566,124 @@ index 5ae29bf4..4f394712 100644
  - (void) _enableDetectableAutoRepeat {
      int major = XkbMajorVersion, minor = XkbMinorVersion;
      XkbStateRec state;
-@@ -190,6 +647,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -185,11 +706,152 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+     XkbSetDetectableAutoRepeat(_display, TRUE, &supported);
+ }
+ 
++- (uint32_t) displayIDForOutput: (RROutput) output {
++    if (!_displayIDsByOutput) _displayIDsByOutput = [NSMutableDictionary new];
++    NSNumber *key = [NSNumber numberWithUnsignedLongLong: output];
++    NSNumber *value = [_displayIDsByOutput objectForKey: key];
++    if (!value) {
++        if (!_nextDisplayID) _nextDisplayID = 1;
++        value = [NSNumber numberWithUnsignedInt: _nextDisplayID++];
++        [_displayIDsByOutput setObject: value forKey: key];
++    }
++    return [value unsignedIntValue];
++}
++
++- (int) screenIndexForDisplayID: (uint32_t) displayID {
++    [self screens];
++    int eventBase, errorBase;
++    if (!XRRQueryExtension(_display, &eventBase, &errorBase))
++        return displayID == 1 ? 0 : -1;
++    XRRScreenResources *resources = XRRGetScreenResourcesCurrent(_display, DefaultRootWindow(_display));
++    if (!resources) return -1;
++    uint64_t outputID = 0;
++    for (NSNumber *key in _displayIDsByOutput)
++        if ([[_displayIDsByOutput objectForKey: key] unsignedIntValue] == displayID) {
++            outputID = [key unsignedLongLongValue];
++            break;
++        }
++    int index = X11TimingIndexForOutput(resources->outputs, resources->noutput, outputID);
++    XRRFreeScreenResources(resources);
++    return index;
++}
++
++- (void) forgetDisplayTimingForWindow: (Window) window {
++    if (!window) return;
++    DGTimingForget(window);
++    [_timingWindows removeObjectForKey: [NSNumber numberWithUnsignedLongLong: window]];
++}
++
++- (void) updateDisplayTimingForWindow: (Window) window {
++    if (!window) return;
++    [self screens];
++    if (!_timingWindows) _timingWindows = [NSMutableDictionary new];
++    NSNumber *key = [NSNumber numberWithUnsignedLongLong: window];
++    NSData *previousData = [_timingWindows objectForKey: key];
++    DGTimingSnapshot previous = {0};
++    if ([previousData length] == sizeof(previous)) [previousData getBytes: &previous length: sizeof(previous)];
++    // Backend events own geometry changes; ordinary swaps only read the cached association.
++    if (previous.generation && !_timingGeometryDirty) return;
++    XWindowAttributes attributes;
++    Window child;
++    int x, y;
++    if (!XGetWindowAttributes(_display, window, &attributes) ||
++        !XTranslateCoordinates(_display, window, DefaultRootWindow(_display), 0, 0, &x, &y, &child)) {
++        [self forgetDisplayTimingForWindow: window];
++        return;
++    }
++    const X11TimingOutput *selected = X11TimingChooseOutput([_timingOutputData bytes],
++        [_timingOutputData length] / sizeof(X11TimingOutput), previous.outputID,
++        x, y, attributes.width, attributes.height);
++    DGTimingSnapshot snapshot = {0};
++    snapshot.target = window;
++    snapshot.flags = DG_TIMING_X11_SERVER;
++    if (selected) {
++        snapshot.outputID = selected->outputID;
++        snapshot.displayID = selected->displayID;
++        snapshot.rateNumerator = selected->rateNumerator;
++        snapshot.rateDenominator = selected->rateDenominator;
++        if (snapshot.rateNumerator && snapshot.rateDenominator) snapshot.flags |= DG_TIMING_NOMINAL;
++    }
++    if (previous.generation && previous.outputID == snapshot.outputID &&
++        previous.displayID == snapshot.displayID && previous.rateNumerator == snapshot.rateNumerator &&
++        previous.rateDenominator == snapshot.rateDenominator && previous.flags == snapshot.flags)
++        return; // Preserve newer EGL presentation observations for an unchanged association.
++    snapshot.generation = DGTimingInvalidate(window);
++    if (snapshot.generation && DGTimingPublish(&snapshot)) {
++        [_timingWindows setObject: [NSData dataWithBytes: &snapshot length: sizeof(snapshot)] forKey: key];
++        [self notifyNominalDisplayTimingForWindow: window];
++    }
++}
++
++- (void) notifyNominalDisplayTimingForWindow: (Window) window {
++    NSData *data = [_timingWindows objectForKey: [NSNumber numberWithUnsignedLongLong: window]];
++    DGTimingSnapshot snapshot = {0};
++    if ([data length] == sizeof(snapshot)) [data getBytes: &snapshot length: sizeof(snapshot)];
++    id owner = [self windowForID: window];
++    if ([owner respondsToSelector: @selector(setNominalDisplayRateNumerator:denominator:)])
++        [owner setNominalDisplayRateNumerator: snapshot.rateNumerator denominator: snapshot.rateDenominator];
++}
++
++- (void) refreshDisplayTiming {
++    _timingGeometryDirty = YES;
++    for (NSNumber *key in [[[_timingWindows allKeys] copy] autorelease])
++        [self updateDisplayTimingForWindow: [key unsignedLongLongValue]];
++    _timingGeometryDirty = NO;
++}
++
++- (void) noteDisplayTimingGeometryChange {
++    _timingGeometryDirty = YES;
++    for (NSNumber *key in [[[_timingWindows allKeys] copy] autorelease]) {
++        DGTimingSnapshot previous = {0};
++        NSData *data = [_timingWindows objectForKey: key];
++        if ([data length] == sizeof(previous)) [data getBytes: &previous length: sizeof(previous)];
++        DGTimingInvalidate([key unsignedLongLongValue]);
++        previous.generation = 0;
++        [_timingWindows setObject: [NSData dataWithBytes: &previous length: sizeof(previous)] forKey: key];
++    }
++}
++
+ - (void) _invalidateRRCache {
++    // Invalidate before rebuilding: callback readers must not retain old output phase.
++    if (!X11WaylandModeActive()) DGTimingInvalidate(0);
++    [self noteDisplayTimingGeometryChange];
++    [_timingOutputData release];
++    _timingOutputData = nil;
++    _timingGeometryDirty = YES;
+     if (_lastScreens) {
          [_lastScreens release];
          _lastScreens = nil;
      }
@@ -5524,7 +5719,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (NSArray *) screens {
-@@ -201,25 +687,60 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -201,25 +863,73 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  
      int eventBase, errorBase;
  
@@ -5540,13 +5735,18 @@ index 5ae29bf4..4f394712 100644
 +                XRRGetOutputPrimary(_display, DefaultRootWindow(_display));
 +        NSRect *rootFrames = calloc(screen->noutput ? screen->noutput : 1,
 +                                    sizeof(NSRect));
-+        if (!rootFrames) {
++        X11TimingOutput *timings = calloc(screen->noutput ? screen->noutput : 1, sizeof(X11TimingOutput));
++        if (!rootFrames || !timings) {
++            free(rootFrames);
++            free(timings);
 +            XRRFreeScreenResources(screen);
 +            return [self _rootScreenFallback];
 +        }
 +        int primary = -1;
 +
 +        for (int i = 0; i < screen->noutput; i++) {
++            timings[i].outputID = screen->outputs[i];
++            timings[i].displayID = [self displayIDForOutput: screen->outputs[i]];
 +            XRROutputInfo *oinfo =
 +                    XRRGetOutputInfo(_display, screen, screen->outputs[i]);
 +            if (oinfo && oinfo->crtc) {
@@ -5555,6 +5755,14 @@ index 5ae29bf4..4f394712 100644
 +                if (crtc) {
 +                    rootFrames[i] =
 +                            NSMakeRect(crtc->x, crtc->y, crtc->width, crtc->height);
++                    timings[i].x = crtc->x; timings[i].y = crtc->y;
++                    timings[i].width = crtc->width; timings[i].height = crtc->height;
++                    for (int j = 0; j < screen->nmode; ++j)
++                        if (screen->modes[j].id == crtc->mode) {
++                            X11TimingRateForMode(&screen->modes[j], &timings[i].rateNumerator,
++                                                &timings[i].rateDenominator);
++                            break;
++                        }
 +                    XRRFreeCrtcInfo(crtc);
 +                }
 +            }
@@ -5573,7 +5781,7 @@ index 5ae29bf4..4f394712 100644
 +        _primaryRootFrameValid = YES;
 +
 +        // [NSScreen screens] starts with the primary screen, as on macOS.
-+        // Display IDs stay tied to the XRandR output index.
++        // Display IDs stay tied to the XRandR output identity, independent of ordering.
          NSMutableArray<NSScreen *> *retval =
                  [NSMutableArray arrayWithCapacity: screen->noutput];
 +        NSMutableArray<NSScreen *> *inactive = [NSMutableArray array];
@@ -5595,7 +5803,7 @@ index 5ae29bf4..4f394712 100644
  
                  nsscreen =
                          [[[NSScreen alloc] initWithFrame: frame
-@@ -228,18 +749,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -228,52 +938,81 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
                  Atom actualType;
                  unsigned long nitems, bytesAfter;
                  int actualFormat;
@@ -5617,12 +5825,13 @@ index 5ae29bf4..4f394712 100644
              } else {
                  nsscreen = [[[NSScreen alloc] initWithFrame: NSZeroRect
                                                 visibleFrame: NSZeroRect]
-@@ -247,25 +767,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+                         autorelease];
              }
-             [nsscreen setCgDirectDisplayID: (i + 1)];
- 
--            [retval addObject: nsscreen];
+-            [nsscreen setCgDirectDisplayID: (i + 1)];
 -
+-            [retval addObject: nsscreen];
++            [nsscreen setCgDirectDisplayID: timings[i].displayID];
+ 
 -            XRRFreeOutputInfo(oinfo);
 +            if (i == primary)
 +                [retval insertObject: nsscreen atIndex: 0];
@@ -5630,10 +5839,32 @@ index 5ae29bf4..4f394712 100644
 +                [retval addObject: nsscreen];
 +            else
 +                [inactive addObject: nsscreen];
-         }
++        }
 +        [retval addObjectsFromArray: inactive];
++
++        if (primary >= 0) timings[primary].primary = YES;
++        [_timingOutputData release];
++        _timingOutputData = [[NSData alloc] initWithBytes: timings length: screen->noutput * sizeof(*timings)];
++        if (!X11WaylandModeActive()) {
++            uint64_t generation = DGTimingInvalidate(0);
++            for (int i = 0; i < screen->noutput; ++i) {
++                DGTimingSnapshot snapshot = {0};
++                snapshot.generation = generation;
++                snapshot.displayID = timings[i].displayID;
++                snapshot.outputID = timings[i].outputID;
++                snapshot.rateNumerator = timings[i].rateNumerator;
++                snapshot.rateDenominator = timings[i].rateDenominator;
++                snapshot.flags = DG_TIMING_X11_SERVER;
++                if (timings[i].width > 0 && timings[i].height > 0 &&
++                    snapshot.rateNumerator && snapshot.rateDenominator)
++                    snapshot.flags |= DG_TIMING_NOMINAL;
++                DGTimingPublish(&snapshot);
++                if (i == primary) { snapshot.displayID = 0; DGTimingPublish(&snapshot); }
++            }
+         }
  
 +        free(rootFrames);
++        free(timings);
          XRRFreeScreenResources(screen);
  
          NSArray* array = [NSArray arrayWithArray: retval];
@@ -5649,8 +5880,10 @@ index 5ae29bf4..4f394712 100644
 -                                         autorelease]];
      }
 +    return [self _rootScreenFallback];
-+}
-+
+ }
+ 
+-static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+-    double rate = 0;
 +- (NSArray *) _rootScreenFallback {
 +    NSRect frame = NSMakeRect(
 +            0, 0, DisplayWidth(_display, DefaultScreen(_display)),
@@ -5661,10 +5894,53 @@ index 5ae29bf4..4f394712 100644
 +                                             visibleFrame: frame] autorelease];
 +    [nsscreen setCgDirectDisplayID: 1];
 +    return [NSArray arrayWithObject: nsscreen];
- }
++}
  
- static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
-@@ -536,12 +1066,116 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+-    if (mi->hTotal && mi->vTotal)
+-        rate = (double) mi->dotClock /
+-               ((double) mi->hTotal * (double) mi->vTotal);
++static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
++    uint64_t numerator, denominator;
++    X11TimingRateForMode(mi, &numerator, &denominator);
++    double rate = denominator ? (double) numerator / denominator : 0;
+ 
+     return @{
+         @"Width" : @(mi->width),
+@@ -299,6 +1038,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         XRRScreenResources *screen =
+                 XRRGetScreenResources(_display, DefaultRootWindow(_display));
+ 
++        if (!screen) return nil;
++
+         if (screenIndex < 0 || screenIndex >= screen->noutput) {
+             XRRFreeScreenResources(screen);
+             return nil;
+@@ -306,6 +1047,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+ 
+         XRROutputInfo *oinfo = XRRGetOutputInfo(_display, screen,
+                                                 screen->outputs[screenIndex]);
++        if (!oinfo) { XRRFreeScreenResources(screen); return nil; }
+ 
+         NSMutableArray<NSDictionary *> *retval =
+                 [NSMutableArray arrayWithCapacity: oinfo->nmode];
+@@ -350,6 +1092,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+         XRRScreenResources *screen =
+                 XRRGetScreenResources(_display, DefaultRootWindow(_display));
+ 
++        if (!screen) return dict;
++
+         if (screenIndex < 0 || screenIndex >= screen->noutput) {
+             XRRFreeScreenResources(screen);
+             return dict;
+@@ -357,6 +1101,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+ 
+         XRROutputInfo *oinfo = XRRGetOutputInfo(_display, screen,
+                                                 screen->outputs[screenIndex]);
++        if (!oinfo) { XRRFreeScreenResources(screen); return dict; }
+ 
+         if (oinfo->crtc) {
+             XRRCrtcInfo *crtc = XRRGetCrtcInfo(_display, screen, oinfo->crtc);
+@@ -536,12 +1281,116 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return &layout->layout;
  }
  
@@ -5783,7 +6059,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (NSPasteboard *) pasteboardWithName: (NSString *) name {
-@@ -675,6 +1309,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -675,6 +1524,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                      blue: 0.60f
                                      alpha: 1.0f];
  
@@ -5799,7 +6075,7 @@ index 5ae29bf4..4f394712 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -688,6 +1331,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -688,6 +1546,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) hideCursor {
@@ -5810,7 +6086,7 @@ index 5ae29bf4..4f394712 100644
      if (!_blankCursor)
          _blankCursor = [[X11Cursor alloc] initBlank];
      [self setCursor: _blankCursor];
-@@ -695,6 +1342,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -695,6 +1557,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) unhideCursor {
      NSCursor *current = [NSCursor currentCursor];
@@ -5821,7 +6097,7 @@ index 5ae29bf4..4f394712 100644
      if (current != nil) {
          [current push];
          [current pop];
-@@ -746,13 +1397,31 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -746,13 +1612,31 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) setCursor: (id) cursor {
@@ -5858,7 +6134,7 @@ index 5ae29bf4..4f394712 100644
      }
  }
  
-@@ -921,15 +1590,25 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -921,15 +1805,25 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -5893,7 +6169,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -948,6 +1627,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -948,6 +1842,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          // retaining the window causes it to keep popping back up endlessly even after dismissing it
          if (lastFocusedWindow && [[lastFocusedWindow platformWindow] windowHandle] == i)
              lastFocusedWindow = nil;
@@ -5913,7 +6189,7 @@ index 5ae29bf4..4f394712 100644
      }
  }
  
-@@ -955,6 +1647,130 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -955,6 +1862,130 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return [_windowsByID objectForKey: [NSNumber numberWithUnsignedLong: i]];
  }
  
@@ -6044,7 +6320,7 @@ index 5ae29bf4..4f394712 100644
  - (NSEvent *) nextEventMatchingMask: (NSEventMask) mask
                            untilDate: (NSDate *) untilDate
                               inMode: (NSRunLoopMode) mode
-@@ -962,20 +1778,104 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1993,104 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -6154,7 +6430,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1005,22 +1905,441 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1005,22 +2120,441 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          [result addObject: @([win windowNumber])];
      }
  
@@ -6598,7 +6874,7 @@ index 5ae29bf4..4f394712 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1030,7 +2349,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +2564,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              break;
  
          if (ev->type == KeyPress) {
@@ -6611,7 +6887,7 @@ index 5ae29bf4..4f394712 100644
              buf[strLen] = 0;
          } else {
              // Xutf8LookupString() may not be used with KeyRelease
-@@ -1038,18 +2361,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,18 +2576,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -6630,7 +6906,7 @@ index 5ae29bf4..4f394712 100644
          BOOL isARepeat = NO;
  
          if (ev->type == KeyPress) {
-@@ -1059,24 +2373,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1059,24 +2588,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              _lastKeySym = 0;
          }
  
@@ -6678,7 +6954,7 @@ index 5ae29bf4..4f394712 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +2408,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +2623,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -6689,7 +6965,7 @@ index 5ae29bf4..4f394712 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +2418,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +2633,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -6700,7 +6976,7 @@ index 5ae29bf4..4f394712 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +2431,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +2646,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -6727,7 +7003,7 @@ index 5ae29bf4..4f394712 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +2456,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +2671,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -6742,7 +7018,7 @@ index 5ae29bf4..4f394712 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +2469,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +2684,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -6753,7 +7029,7 @@ index 5ae29bf4..4f394712 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +2480,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +2695,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -6875,7 +7151,7 @@ index 5ae29bf4..4f394712 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +2577,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +2792,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -6936,7 +7212,7 @@ index 5ae29bf4..4f394712 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2639,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2854,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -7001,7 +7277,7 @@ index 5ae29bf4..4f394712 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2731,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2946,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -7029,10 +7305,11 @@ index 5ae29bf4..4f394712 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2759,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2974,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
++        _timingGeometryDirty = YES;
 +        if (_relativeMouse.active && ev->xconfigure.window == _relativeWindow) {
 +            /* Reconfiguration can make Xorg move a confined pointer by itself. Take a new snapshot
 +             * and discard the previous geometry's pending motion/echoes before resuming. */
@@ -7051,7 +7328,7 @@ index 5ae29bf4..4f394712 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2797,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +3013,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -7060,7 +7337,7 @@ index 5ae29bf4..4f394712 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1392,6 +2847,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1392,6 +3063,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
      case MappingNotify:
          NSLog(@"MappingNotify");
@@ -7070,7 +7347,7 @@ index 5ae29bf4..4f394712 100644
          break;
  
      case GenericEvent:
-@@ -1399,7 +2857,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +3073,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -7081,19 +7358,23 @@ index 5ae29bf4..4f394712 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1426,6 +2886,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1426,6 +3102,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          else
              [self postXEvent: &e];
      }
 +    if (_occlusionDirty)
 +        [self _updateOcclusion];
++    if (_timingGeometryDirty) {
++        [self screens];
++        [self refreshDisplayTiming];
++    }
 +    /* darling-lol: native Wayland events are drained on every pass that drains X events. */
 +    if (_wayland)
 +        [self waylandDispatchEvents];
  }
  
  - (int) handleError: (XErrorEvent *) errorEvent {
-@@ -1433,6 +2898,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +3118,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -7104,7 +7385,7 @@ index 5ae29bf4..4f394712 100644
      return 0;
  }
  
-@@ -1476,54 +2945,289 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +3165,289 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -7259,8 +7540,8 @@ index 5ae29bf4..4f394712 100644
 +        _confinedWidth = attrs.width;
 +        _confinedHeight = attrs.height;
 +    }
- }
- 
++}
++
 +/* Cache the actual confine_to rectangle, including its root offset. XWarpPointer clips to this
 + * rectangle, not to the primary monitor; refresh on resize/move rather than on every motion. */
 +- (BOOL) updateRelativeMouseBounds {
@@ -7353,8 +7634,8 @@ index 5ae29bf4..4f394712 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
-+}
-+
+ }
+ 
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    if (_wayland && [self waylandHandleGrabMouse: doGrab])
@@ -7843,10 +8124,10 @@ index 0000000..31fa646
 +
 +#endif
 diff --git a/AppKit/X11.backend/X11SubWindow.h b/AppKit/X11.backend/X11SubWindow.h
-index 65b63a3..e5b913b 100644
+index 65b63a3..ca14d94 100644
 --- a/AppKit/X11.backend/X11SubWindow.h
 +++ b/AppKit/X11.backend/X11SubWindow.h
-@@ -7,6 +7,10 @@
+@@ -7,8 +7,15 @@
      X11Window *_parent;
      Display *_display;
      Window _window;
@@ -7857,8 +8138,13 @@ index 65b63a3..e5b913b 100644
  }
  
  - initWithParentWindow: (X11Window *) parent frame: (CGRect) frame;
++- (uint64_t) displayTimingTarget;
++- (void) updateDisplayTiming;
++- (void) invalidateDisplayTiming;
+ 
+ @end
 diff --git a/AppKit/X11.backend/X11SubWindow.m b/AppKit/X11.backend/X11SubWindow.m
-index 738ab45..6596dab 100644
+index 738ab45..8e341ef 100644
 --- a/AppKit/X11.backend/X11SubWindow.m
 +++ b/AppKit/X11.backend/X11SubWindow.m
 @@ -1,6 +1,7 @@
@@ -7880,20 +8166,33 @@ index 738ab45..6596dab 100644
  
      _display = [(X11Display *) [NSDisplay currentDisplay] display];
  
-@@ -31,7 +33,9 @@
+@@ -31,7 +33,10 @@
  }
  
  - (void) dealloc {
++    [(X11Display *) [NSDisplay currentDisplay] forgetDisplayTimingForWindow: _window];
 +    if (_usingParentDrawable) [_parent releaseLayerDrawable: self];
      XDestroyWindow(_display, _window);
 +    [_parent release];
      [super dealloc];
  }
  
-@@ -39,16 +43,41 @@
+@@ -39,16 +44,54 @@
      return (void *) _window;
  }
  
++- (uint64_t) displayTimingTarget {
++    return _usingParentDrawable ? [_parent windowHandle] : _window;
++}
++
++- (void) updateDisplayTiming {
++    [(X11Display *) [NSDisplay currentDisplay] updateDisplayTimingForWindow: [self displayTimingTarget]];
++}
++
++- (void) invalidateDisplayTiming {
++    [(X11Display *) [NSDisplay currentDisplay] forgetDisplayTimingForWindow: [self displayTimingTarget]];
++}
++
 +- (void) setAllowsParentDrawable: (BOOL) allowed {
 +    _allowsParentDrawable = allowed;
 +}
@@ -7929,13 +8228,14 @@ index 738ab45..6596dab 100644
  }
  
  - (void) setFrame: (CGRect) frame {
++    [(X11Display *) [NSDisplay currentDisplay] noteDisplayTimingGeometryChange];
      frame = [self convertFrame: frame];
 +    _drawableFrame = frame;
  
      XMoveResizeWindow(_display, _window, frame.origin.x, frame.origin.y,
                        frame.size.width, frame.size.height);
 diff --git a/AppKit/X11.backend/X11Window.h b/AppKit/X11.backend/X11Window.h
-index bfe3839..8d7d1cb 100644
+index bfe3839..8c5e438 100644
 --- a/AppKit/X11.backend/X11Window.h
 +++ b/AppKit/X11.backend/X11Window.h
 @@ -26,7 +26,9 @@
@@ -7949,7 +8249,7 @@ index bfe3839..8d7d1cb 100644
  
  @interface X11Window : CGWindow {
      int _level; // TODO: care about this value
-@@ -47,8 +49,32 @@
+@@ -47,8 +49,33 @@
      BOOL _mapped;
      CGPoint _lastMotionPos;
      BOOL _isModal;
@@ -7974,6 +8274,7 @@ index bfe3839..8d7d1cb 100644
 +    void (*_remoteFrameShmDestroy)(void *);
 +    int (*_remoteFrameShmPut)(void *, Drawable, GC, const void *, size_t);
 +    int (*_remoteFrameShmStart)(void *, Drawable, GC, const char *);
++    void (*_remoteFrameShmSetTiming)(void *, uint32_t, uint32_t);
 +    BOOL _remoteFrameShmPumping;
 +    BOOL _remoteFrameSoftwarePublisher;
 +    BOOL _remoteFrameTimerSlow;
@@ -7982,13 +8283,16 @@ index bfe3839..8d7d1cb 100644
  
  @public
      XIC _xic;
-@@ -60,9 +86,14 @@
+@@ -60,9 +87,17 @@
  - (Visual *) visual;
  - (Drawable) drawable;
  - (NSPoint) transformPoint: (NSPoint) pos;
 -- (O2Rect) transformFrame: (O2Rect) frame;
  
  - (Window) windowHandle;
++- (uint64_t) displayTimingTarget;
++- (void) updateDisplayTiming;
++- (void) setNominalDisplayRateNumerator: (uint64_t) numerator denominator: (uint64_t) denominator;
 +- (BOOL) isOccluded;
 +- (void) setOccluded: (BOOL) occluded;
 +- (void *) layerDrawableFor: (id) owner;
@@ -7999,7 +8303,7 @@ index bfe3839..8d7d1cb 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b6..909a9d5 100644
+index f4925b6..7678981 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -18,11 +18,14 @@
@@ -8265,7 +8569,7 @@ index f4925b6..909a9d5 100644
      }
  
      _xic = XCreateIC(x11disp->_xim,
-@@ -254,19 +384,96 @@ static NSData *makeWindowIcon() {
+@@ -254,19 +384,98 @@ static NSData *makeWindowIcon() {
          XNFocusWindow, _window,
          NULL);
  
@@ -8303,7 +8607,9 @@ index f4925b6..909a9d5 100644
 +// The visual is fixed at creation, which often comes before the app sets its opacity and
 +// background: swap the window while it is unmapped, keeping its children.
 +- (void) recreateXWindowWithAlpha: (BOOL) alpha {
++    [(X11Display *) [NSDisplay currentDisplay] noteDisplayTimingGeometryChange];
 +    Window oldWindow = _window;
++    [(X11Display *) [NSDisplay currentDisplay] forgetDisplayTimingForWindow: oldWindow];
 +
 +    [_caContext release];
 +    _caContext = nil;
@@ -8368,7 +8674,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) dealloc {
-@@ -279,24 +486,59 @@ static NSData *makeWindowIcon() {
+@@ -279,24 +488,59 @@ static NSData *makeWindowIcon() {
      return _styleMask;
  }
  
@@ -8444,7 +8750,7 @@ index f4925b6..909a9d5 100644
      if (!_mapped) {
          long states[2];
          int states_cnt = 0;
-@@ -304,7 +546,7 @@ static NSData *makeWindowIcon() {
+@@ -304,7 +548,7 @@ static NSData *makeWindowIcon() {
              states[states_cnt++] =
                      (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
          }
@@ -8453,7 +8759,7 @@ index f4925b6..909a9d5 100644
              states[states_cnt++] = (long) XInternAtom(
                      _display, "_NET_WM_STATE_FULLSCREEN", False);
          }
-@@ -312,14 +554,13 @@ static NSData *makeWindowIcon() {
+@@ -312,14 +556,13 @@ static NSData *makeWindowIcon() {
                          XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
                          32, PropModeReplace, (const unsigned char *) states,
                          states_cnt);
@@ -8470,7 +8776,7 @@ index f4925b6..909a9d5 100644
          event.data.l[1] =
                  (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
          event.data.l[3] = 1;
-@@ -327,6 +568,48 @@ static NSData *makeWindowIcon() {
+@@ -327,6 +570,48 @@ static NSData *makeWindowIcon() {
                     SubstructureNotifyMask | SubstructureRedirectMask,
                     (XEvent *) &event);
      }
@@ -8519,7 +8825,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) setStyleMask: (NSUInteger) mask {
-@@ -338,7 +621,6 @@ static NSData *makeWindowIcon() {
+@@ -338,7 +623,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -8527,7 +8833,7 @@ index f4925b6..909a9d5 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -356,11 +638,25 @@ static NSData *makeWindowIcon() {
+@@ -356,11 +640,25 @@ static NSData *makeWindowIcon() {
  
  - (void) ensureMapped {
      if (!_mapped) {
@@ -8553,7 +8859,7 @@ index f4925b6..909a9d5 100644
  - (void) showWindowWithoutActivation {
      [self ensureMapped];
  }
-@@ -377,15 +673,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +675,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -8586,10 +8892,11 @@ index f4925b6..909a9d5 100644
      // TODO: background color
  }
  
-@@ -393,6 +701,24 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +703,25 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
++    [(X11Display *) [NSDisplay currentDisplay] forgetDisplayTimingForWindow: _window];
 +    [_remoteFrameTimer invalidate];
 +    [_remoteFrameTimer release];
 +    _remoteFrameTimer = nil;
@@ -8611,7 +8918,7 @@ index f4925b6..909a9d5 100644
      [_context release];
      _context = nil;
  
-@@ -421,10 +747,254 @@ static NSData *makeWindowIcon() {
+@@ -421,10 +750,275 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -8790,6 +9097,7 @@ index f4925b6..909a9d5 100644
 +    static PutShm putShm;
 +    static void (*destroyShm)(void *);
 +    static int (*startShm)(void *, Drawable, GC, const char *);
++    static void (*setShmTiming)(void *, uint32_t, uint32_t);
 +    static BOOL checkedShm;
 +    if (!checkedShm) {
 +        checkedShm = YES;
@@ -8802,11 +9110,13 @@ index f4925b6..909a9d5 100644
 +        void *(*getPut)(void) = transport ? dlsym(transport, "DarlingXShmGetPut") : NULL;
 +        void *(*getDestroy)(void) = transport ? dlsym(transport, "DarlingXShmGetDestroy") : NULL;
 +        void *(*getStart)(void) = transport ? dlsym(transport, "DarlingXShmGetStart") : NULL;
++        void *(*getSetTiming)(void) = transport ? dlsym(transport, "DarlingXShmGetSetTiming") : NULL;
 +        if (getCreate && getPut && getDestroy) {
 +            createShm = (CreateShm)getCreate();
 +            putShm = (PutShm)getPut();
 +            destroyShm = (void (*)(void *))getDestroy();
 +            if (getStart) startShm = (int (*)(void *, Drawable, GC, const char *))getStart();
++            if (getSetTiming) setShmTiming = (void (*)(void *, uint32_t, uint32_t))getSetTiming();
 +        }
 +    }
 +    if (!_remoteFrameShm && createShm && putShm && destroyShm) {
@@ -8818,6 +9128,7 @@ index f4925b6..909a9d5 100644
 +        _remoteFrameShmDestroy = destroyShm;
 +        _remoteFrameShmPut = putShm;
 +        _remoteFrameShmStart = startShm;
++        _remoteFrameShmSetTiming = setShmTiming;
 +        if (getenv("RCLOL_XSHM_TRACE")) {
 +            extern int __simple_printf(const char *, ...);
 +            __simple_printf("REMOTE_XSHM width=%u height=%u active=%d\n",
@@ -8832,6 +9143,9 @@ index f4925b6..909a9d5 100644
 +    }
 +    if (_remoteFrameShm && startShm && !_remoteFrameShmPumping) {
 +        _remoteFrameShmPumping = startShm(_remoteFrameShm, _remoteFrameWindow, _remoteFrameGC, path);
++        // A newly created target needs current nominal timing even if this window was already tracked.
++        [self updateDisplayTiming];
++        [(X11Display *) [NSDisplay currentDisplay] notifyNominalDisplayTimingForWindow: _window];
 +        if (_remoteFrameShmPumping) [self setRemoteFrameTimerSlow: YES];
 +    }
 +    _remoteFrameSequence = before.sequence;
@@ -8855,6 +9169,20 @@ index f4925b6..909a9d5 100644
      return _window;
  }
  
++- (uint64_t) displayTimingTarget {
++    return _window;
++}
++
++- (void) updateDisplayTiming {
++    [(X11Display *) [NSDisplay currentDisplay] updateDisplayTimingForWindow: _window];
++}
++
++- (void) setNominalDisplayRateNumerator: (uint64_t) numerator denominator: (uint64_t) denominator {
++    if (!_remoteFrameShm || !_remoteFrameShmSetTiming) return;
++    if (numerator > UINT32_MAX || denominator > UINT32_MAX) numerator = denominator = 0;
++    _remoteFrameShmSetTiming(_remoteFrameShm, (uint32_t) numerator, (uint32_t) denominator);
++}
++
 +- (BOOL) isOccluded {
 +    return _occluded;
 +}
@@ -8866,7 +9194,7 @@ index f4925b6..909a9d5 100644
  - (O2Context *) createCGContextIfNeeded {
      if (_context == nil) {
          O2ColorSpaceRef colorSpace = O2ColorSpaceCreateDeviceRGB();
-@@ -470,14 +1040,32 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +1064,33 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -8877,6 +9205,7 @@ index f4925b6..909a9d5 100644
  
  - (void) setFrame: (O2Rect) frame {
 -    frame = [self transformFrame: frame];
++    [(X11Display *) [NSDisplay currentDisplay] noteDisplayTimingGeometryChange];
 +    frame = [(X11Display *) [NSDisplay currentDisplay] rootRectForFrame: frame];
 +    BOOL fullscreen = [self wantsFullscreenWithStyleMask:_styleMask rootFrame:frame];
 +    if (!fullscreen) [self requestFullscreen:NO force:NO];
@@ -8900,7 +9229,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1076,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1101,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -8926,7 +9255,7 @@ index f4925b6..909a9d5 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -516,9 +1123,15 @@ static NSData *makeWindowIcon() {
+@@ -516,9 +1148,15 @@ static NSData *makeWindowIcon() {
      _mapped = NO;
  }
  
@@ -8944,7 +9273,7 @@ index f4925b6..909a9d5 100644
  
      if (!other) {
          XRaiseWindow(_display, _window);
-@@ -529,8 +1142,8 @@ static NSData *makeWindowIcon() {
+@@ -529,8 +1167,8 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) placeBelowWindow: (NSInteger) otherNumber {
@@ -8955,7 +9284,7 @@ index f4925b6..909a9d5 100644
  
      if (!other) {
          XLowerWindow(_display, _window);
-@@ -541,8 +1154,23 @@ static NSData *makeWindowIcon() {
+@@ -541,8 +1179,23 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) makeKey {
@@ -8980,7 +9309,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1187,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1212,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -9010,7 +9339,7 @@ index f4925b6..909a9d5 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -593,8 +1243,10 @@ static NSData *makeWindowIcon() {
+@@ -593,8 +1268,10 @@ static NSData *makeWindowIcon() {
      if (_cglContext == NULL) {
          CGLError error;
  
@@ -9023,7 +9352,7 @@ index f4925b6..909a9d5 100644
              NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
                    __LINE__, error);
  
-@@ -615,6 +1267,14 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1292,14 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -9038,7 +9367,7 @@ index f4925b6..909a9d5 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1312,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1337,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -9047,7 +9376,7 @@ index f4925b6..909a9d5 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1326,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1351,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -9055,7 +9384,7 @@ index f4925b6..909a9d5 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,19 +1371,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,19 +1396,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
@@ -10415,10 +10744,10 @@ index db8869c..6fea510 100644
 +    CGContextSetTextPosition(c, savedPosition.x, savedPosition.y);
  }
 diff --git a/CoreGraphics/CGDirectDisplay.m b/CoreGraphics/CGDirectDisplay.m
-index e213b06..f2d492a 100644
+index e213b06..86afb65 100644
 --- a/CoreGraphics/CGDirectDisplay.m
 +++ b/CoreGraphics/CGDirectDisplay.m
-@@ -53,6 +53,29 @@ static NSDisplay *currentDisplay(void) {
+@@ -53,6 +53,42 @@ static NSDisplay *currentDisplay(void) {
      return [cls currentDisplay];
  }
  
@@ -10432,6 +10761,19 @@ index e213b06..f2d492a 100644
 +            return screen;
 +    }
 +    return nil;
++}
++
++@interface NSDisplay (DarlingDisplayModeMapping)
++- (int) screenIndexForDisplayID: (uint32_t) displayID;
++@end
++
++static int modeIndexForDisplayID(NSDisplay *display, CGDirectDisplayID displayID) {
++    if ([display respondsToSelector: @selector(screenIndexForDisplayID:)])
++        return [display screenIndexForDisplayID: displayID];
++    NSArray *screens = [display screens];
++    for (NSUInteger index = 0; index < [screens count]; ++index)
++        if ([[screens objectAtIndex: index] cgDirectDisplayID] == displayID) return (int) index;
++    return -1;
 +}
 +
 +/* NSScreen frames have y up from the primary's bottom edge; CoreGraphics
@@ -10448,7 +10790,7 @@ index e213b06..f2d492a 100644
  CGDirectDisplayID CGMainDisplayID(void) {
      NSDisplay *display = currentDisplay();
      if (!display)
-@@ -60,9 +83,9 @@ CGDirectDisplayID CGMainDisplayID(void) {
+@@ -60,9 +96,9 @@ CGDirectDisplayID CGMainDisplayID(void) {
  
      NSArray<NSScreen *> *screens = [display screens];
  
@@ -10461,7 +10803,7 @@ index e213b06..f2d492a 100644
          }
      }
  
-@@ -89,10 +112,11 @@ CGError CGGetOnlineDisplayList(uint32_t maxDisplays,
+@@ -89,10 +125,11 @@ CGError CGGetOnlineDisplayList(uint32_t maxDisplays,
              onlineDisplays[0] = mainDisplay;
      }
  
@@ -10476,7 +10818,7 @@ index e213b06..f2d492a 100644
              (*displayCount)++;
          }
      }
-@@ -105,11 +129,11 @@ size_t CGDisplayPixelsHigh(CGDirectDisplayID displayIndex) {
+@@ -105,11 +142,11 @@ size_t CGDisplayPixelsHigh(CGDirectDisplayID displayIndex) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10491,7 +10833,7 @@ index e213b06..f2d492a 100644
  }
  
  size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
-@@ -117,11 +141,11 @@ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
+@@ -117,11 +154,11 @@ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10506,7 +10848,7 @@ index e213b06..f2d492a 100644
  }
  
  CGError CGGetActiveDisplayList(uint32_t maxDisplays,
-@@ -135,10 +159,10 @@ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
+@@ -135,10 +172,10 @@ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
  
      *displayCount = 0;
@@ -10520,7 +10862,7 @@ index e213b06..f2d492a 100644
              (*displayCount)++;
          }
      }
-@@ -169,11 +193,11 @@ CGError CGGetDisplaysWithPoint(CGPoint point, uint32_t maxDisplays,
+@@ -169,11 +206,11 @@ CGError CGGetDisplaysWithPoint(CGPoint point, uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
      *matchingDisplayCount = 0;
  
@@ -10535,7 +10877,7 @@ index e213b06..f2d492a 100644
              (*matchingDisplayCount)++;
          }
      }
-@@ -192,11 +216,11 @@ CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays,
+@@ -192,11 +229,11 @@ CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
      *matchingDisplayCount = 0;
  
@@ -10550,7 +10892,7 @@ index e213b06..f2d492a 100644
              (*matchingDisplayCount)++;
          }
      }
-@@ -218,10 +242,11 @@ CGRect CGDisplayBounds(CGDirectDisplayID displayIndex) {
+@@ -218,10 +255,11 @@ CGRect CGDisplayBounds(CGDirectDisplayID displayIndex) {
          return NSZeroRect;
  
      NSArray<NSScreen *> *screens = [display screens];
@@ -10564,7 +10906,16 @@ index e213b06..f2d492a 100644
  }
  
  CGError CGDisplayHideCursor(CGDirectDisplayID displayIndex) {
-@@ -256,7 +281,7 @@ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
+@@ -246,7 +284,7 @@ CFArrayRef CGDisplayAvailableModes(CGDirectDisplayID displayIndex) {
+     NSDisplay *display = currentDisplay();
+     if (!display)
+         return NULL;
+-    return (CFArrayRef) [display modesForScreen: displayIndex - 1];
++    return (CFArrayRef) [display modesForScreen: modeIndexForDisplayID(display, displayIndex)];
+ }
+ 
+ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
+@@ -256,7 +294,7 @@ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
  }
  
  Boolean CGDisplayIsMain(CGDirectDisplayID display) {
@@ -10573,7 +10924,16 @@ index e213b06..f2d492a 100644
  }
  
  CGDirectDisplayID CGDisplayMirrorsDisplay(CGDirectDisplayID display) {
-@@ -319,10 +344,15 @@ CFStringRef CGDisplayModeCopyPixelEncoding(CGDisplayModeRef mode) {
+@@ -270,7 +308,7 @@ CGDisplayModeRef CGDisplayCopyDisplayMode(CGDirectDisplayID displayId) {
+     if (!display)
+         return NULL;
+ 
+-    NSDictionary *dict = [[display currentModeForScreen: displayId - 1] retain];
++    NSDictionary *dict = [[display currentModeForScreen: modeIndexForDisplayID(display, displayId)] retain];
+ 
+     return (CGDisplayModeRef) dict;
+ }
+@@ -319,10 +357,15 @@ CFStringRef CGDisplayModeCopyPixelEncoding(CGDisplayModeRef mode) {
  CFArrayRef CGDisplayCopyAllDisplayModes(CGDirectDisplayID displayIndex,
                                          CFDictionaryRef options)
  {
@@ -10585,14 +10945,23 @@ index e213b06..f2d492a 100644
 -    if (!display)
 -        return NULL;
 -    return (CFArrayRef)[[display modesForScreen: displayIndex - 1] retain];
-+    NSArray *modes = [display modesForScreen: displayIndex - 1];
++    NSArray *modes = [display modesForScreen: modeIndexForDisplayID(display, displayIndex)];
 +    if (modes == nil)
-+        modes = [display modesForScreen: CGMainDisplayID() - 1];
++        modes = [display modesForScreen: modeIndexForDisplayID(display, CGMainDisplayID())];
 +    return (CFArrayRef)[(modes ? modes : @[]) retain];
  }
  
  CGError CGDisplaySetDisplayMode(CGDirectDisplayID displayId,
-@@ -341,11 +371,10 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
+@@ -331,7 +374,7 @@ CGError CGDisplaySetDisplayMode(CGDirectDisplayID displayId,
+     NSDisplay *display = currentDisplay();
+     if (!display)
+         return kCGErrorInvalidConnection;
+-    BOOL result = [display setMode: mode forScreen: displayId - 1];
++    BOOL result = [display setMode: mode forScreen: modeIndexForDisplayID(display, displayId)];
+ 
+     return result ? kCGErrorSuccess : kCGErrorFailure;
+ }
+@@ -341,11 +384,10 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
      if (!display)
          return nil;
  
@@ -10606,7 +10975,7 @@ index e213b06..f2d492a 100644
      NSData *edid = [screen edid];
      if (edid && [edid length] >= 16)
          return edid;
-@@ -354,17 +383,33 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
+@@ -354,17 +396,33 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
  }
  
  CGSize CGDisplayScreenSize(CGDirectDisplayID display) {
@@ -10647,7 +11016,7 @@ index e213b06..f2d492a 100644
  }
  
  uint32_t CGDisplaySerialNumber(CGDirectDisplayID displayId) {
-@@ -474,7 +519,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
+@@ -474,7 +532,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10658,7 +11027,7 @@ index e213b06..f2d492a 100644
      return kCGErrorSuccess;
  }
  
-@@ -500,3 +547,54 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
+@@ -500,3 +560,54 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
  size_t CGDisplayModeGetPixelWidth(CGDisplayModeRef mode) {
      return 0;
  }
@@ -11195,18 +11564,20 @@ index e03fbf8..a0206b0 100644
 +    return levels[key];
  }
 diff --git a/CoreGraphics/CMakeLists.txt b/CoreGraphics/CMakeLists.txt
-index e702dfb..d832aa4 100644
+index e702dfb..064af9b 100644
 --- a/CoreGraphics/CMakeLists.txt
 +++ b/CoreGraphics/CMakeLists.txt
-@@ -66,6 +66,8 @@ include_directories(
+@@ -66,7 +66,10 @@ include_directories(
  	${PC_CAIRO_INCLUDE_DIRS}
  )
  
 +set_source_files_properties(CGDisplayStream.m PROPERTIES COMPILE_FLAGS "-fblocks")
 +
  set(CoreGraphics_sources
++	DarlingDisplayTiming.c
  	CGAffineTransform.m
  	CGBitmapContext.m
+ 	CGColor.m
 diff --git a/CoreGraphics/X11.backend/CGSConnectionX11.h b/CoreGraphics/X11.backend/CGSConnectionX11.h
 index 5437acb..07f7eb4 100644
 --- a/CoreGraphics/X11.backend/CGSConnectionX11.h
@@ -14130,10 +14501,10 @@ index 5dcac11..5de4f03 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c5..103331a 100644
+index 5dce8c5..3f625a2 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
-@@ -1,47 +1,89 @@
+@@ -1,47 +1,101 @@
  #import <Foundation/NSString.h>
 +#import <Foundation/NSMutableArray.h>
  #import <QuartzCore/CALayer.h>
@@ -14145,9 +14516,21 @@ index 5dce8c5..103331a 100644
 +#include <stdlib.h>
 +#include <stdio.h>
  #import <OpenGL/CGLInternal.h>
++#include <CoreGraphics/DarlingDisplayTiming.h>
++
++@interface CGSubWindow (DarlingTiming)
++- (void) updateDisplayTiming;
++- (void) invalidateDisplayTiming;
++- (uint64_t) displayTimingTarget;
++- (uint64_t) beginPresentation;
++- (void) endPresentation: (uint64_t) token success: (BOOL) success;
++@end
  
  @class CAMetalLayerInternal;
- 
++@interface CAMetalLayer (DarlingPresentation)
++- (void)prepareRenderForFrame: (uint64_t)frame inContext: (CALayerContext *)context;
++@end
++
 +/* A flattened IOSurface only replaces local rendering for trees without
 + * Metal content. Skipping a mixed tree also skips prepareRender, exhausting
 + * its drawable pool even though presentation callbacks continue to run. */
@@ -14169,7 +14552,7 @@ index 5dce8c5..103331a 100644
 +    }
 +    return interval;
 +}
-+
+ 
 +/* The X11 transport presents Chromium's flattened full-window surface.
 + * Avoid uploading and compositing that same window again into a covered GL
 + * child. Restrict this to the explicitly configured native presentation path. */
@@ -14243,13 +14626,14 @@ index 5dce8c5..103331a 100644
      [super dealloc];
  }
  
-@@ -51,12 +93,22 @@
+@@ -51,33 +105,80 @@
  }
  
  - (void) setLayer: (CALayer *) layer {
 +    if (_layer == layer)
 +        return;
 +
++    __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
      layer = [layer retain];
 +    /* CALayer keeps a non-owning context pointer. Clear it before the old
 +     * context or layer can be released. */
@@ -14266,7 +14650,8 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) setSubwindow: (CGSubWindow*) subwindow
-@@ -64,20 +116,55 @@
+ {
++    __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
      CGSubWindow* oldSubwindow = _subwindow;
  
      if (_cglWindow) {
@@ -14324,31 +14709,41 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,8 +180,43 @@
+@@ -93,8 +194,55 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
 -- (void) renderLayer: (CALayer *) layer {
 +extern void darlingQCTiming(const char* what, double seconds);
 +
-+- (void) prepareMetalLayers: (CALayer *) layer {
++- (void) prepareMetalLayers: (CALayer *) layer frame: (uint64_t)frame {
 +    // Metal layers may be nested beneath ordinary backing layers. Every queued
 +    // drawable must be consumed before CARenderer samples the layer tree.
 +    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
 +        CFTimeInterval prepStart = CACurrentMediaTime();
-+        [(CAMetalLayerInternal*)layer prepareRender];
++        [(CAMetalLayer *)layer prepareRenderForFrame: frame inContext: self];
 +        darlingQCTiming("prepareRenderTotal", CACurrentMediaTime() - prepStart);
 +    }
 +    for (CALayer *child in layer.sublayers)
-+        [self prepareMetalLayers: child];
++        [self prepareMetalLayers: child frame: frame];
 +}
 +
 +- (void) updateDrawable {
 +    if (!_subwindow || !_glContext) return;
 +    [_subwindow setAllowsParentDrawable: hasMetalLayer(_layer)];
 +    void *shared = [_subwindow sharedCGLWindow];
++    if ([_subwindow respondsToSelector: @selector(updateDisplayTiming)]) {
++        [_subwindow updateDisplayTiming];
++        DGTimingBind((uint64_t)(uintptr_t)_glContext, [_subwindow displayTimingTarget]);
++    }
 +    if (shared && shared == _cglWindow && !_ownsCglWindow) return;
 +    if (!shared && _cglWindow && _ownsCglWindow) return;
++    if ([_subwindow respondsToSelector: @selector(invalidateDisplayTiming)]) {
++        [_subwindow invalidateDisplayTiming];
++        [_subwindow updateDisplayTiming];
++        DGTimingBind((uint64_t)(uintptr_t)_glContext, [_subwindow displayTimingTarget]);
++    }
++    __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
 +    CGLContextObj previous = CGLGetCurrentContext();
 +    if (previous == _glContext) CGLSetCurrentContext(NULL);
 +    if (_ownsCglWindow) CGLDestroyWindow(_cglWindow);
@@ -14361,7 +14756,9 @@ index 5dce8c5..103331a 100644
 +
 +- (void) renderLayer: (CALayer *) layer {
 +    CFTimeInterval renderLayerStart = CACurrentMediaTime();
-+    CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
++    uint64_t frame = __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
++    if (CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow) != kCGLNoError)
++        return;
 +    // CAMetalLayer first makes this context current without a surface, which leaves GL_DRAW_BUFFER
 +    // at GL_NONE on NVIDIA even once the window is attached (Mesa resets it).
 +    glDrawBuffer(GL_BACK);
@@ -14369,7 +14766,7 @@ index 5dce8c5..103331a 100644
  
      glEnable(GL_DEPTH_TEST);
      glShadeModel(GL_SMOOTH);
-@@ -118,27 +240,63 @@
+@@ -118,27 +266,64 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -14383,10 +14780,11 @@ index 5dce8c5..103331a 100644
 -        CAMetalLayerInternal* mtl = (CAMetalLayerInternal*)layer;
 -        [mtl prepareRender];
 -    }
-+    [self prepareMetalLayers: layer];
++    [self prepareMetalLayers: layer frame: frame];
  
 +    CFTimeInterval rendererStart = CACurrentMediaTime();
      [_renderer render];
++    __atomic_store_n(&_readyFrame, frame, __ATOMIC_RELEASE);
 +    darlingQCTiming("rendererRender", CACurrentMediaTime() - rendererStart);
  }
  
@@ -14438,7 +14836,7 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +305,7 @@
+@@ -147,15 +332,61 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -14447,25 +14845,58 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +313,20 @@
+     [_deleteTextureIds addObject: textureId];
  }
  
- - (void) flush {
--    CGLFlushDrawable(_glContext);
-+    if(skipLocalRender(_layer, _frame.size))return;
++- (BOOL) didSwapRenderFrame: (uint64_t) frame {
++    return frame && frame == __atomic_load_n(&_swappedFrame, __ATOMIC_ACQUIRE);
++}
++
++- (BOOL) tryFlush {
++    if(skipLocalRender(_layer, _frame.size))return NO;
 +    if (_glContext != NULL && _cglWindow != NULL) {
 +        CGLContextObj previous = CGLGetCurrentContext();
 +        // EGL applies the interval to the current draw surface, so attach this
 +        // window before setting it (including after late window attachment).
 +        if (CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow) != kCGLNoError)
-+            return;
++            return NO;
 +        GLint interval = metalSwapInterval(_layer);
 +        if (interval >= 0)
 +            CGLSetParameter(_glContext, kCGLCPSwapInterval, &interval);
-+        CGLFlushDrawable(_glContext);
++        uint64_t ready = __atomic_load_n(&_readyFrame, __ATOMIC_ACQUIRE);
++        BOOL rendered = [self flushDrawableWithTiming] == kCGLNoError && ready &&
++            ready == __atomic_load_n(&_renderFrame, __ATOMIC_RELAXED);
++        if (rendered) __atomic_store_n(&_swappedFrame, ready, __ATOMIC_RELEASE);
 +        if (previous != _glContext)
 +            CGLSetCurrentContext(previous);
++        return rendered;
 +    }
++    return NO;
++}
++
++- (CGLError) flushDrawableWithTiming {
++    if ([_subwindow respondsToSelector: @selector(updateDisplayTiming)]) {
++        [_subwindow updateDisplayTiming];
++        DGTimingBind((uint64_t)(uintptr_t)_glContext, [_subwindow displayTimingTarget]);
++    }
++    BOOL ownsCommit = [_subwindow respondsToSelector: @selector(beginPresentation)];
++    uint64_t token = ownsCommit ? [_subwindow beginPresentation] : 0;
++    CGLError result = CGLFlushDrawable(_glContext);
++    if (token) [_subwindow endPresentation: token success: result == kCGLNoError];
++    return result;
++}
++
+ - (void) flush {
+-    CGLFlushDrawable(_glContext);
++    [self tryFlush];
++}
++
++- (void) flushForQueuedPresentation {
++    // Retry a transient attach or swap failure once via the ordinary compositor timer.
++    if (!_layer || !_cglWindow) return;
++    uint64_t ready = __atomic_load_n(&_readyFrame, __ATOMIC_ACQUIRE);
++    if (!ready || ready != __atomic_load_n(&_renderFrame, __ATOMIC_RELAXED) || ![self tryFlush])
++        [self startTimerIfNeeded];
  }
  
  @end
@@ -14480,7 +14911,7 @@ index 5ad375f..c8e8381 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..bfed6710 100644
+index d6f86b3..81602d8 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
 @@ -31,6 +31,14 @@
@@ -14935,7 +15366,7 @@ index d6f86b31..bfed6710 100644
  //
  // drawable
  //
-@@ -605,35 +912,16 @@ void CAMetalDrawableActual::present() {
+@@ -605,35 +912,17 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -14950,7 +15381,12 @@ index d6f86b31..bfed6710 100644
 -			info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
 -			info.semaphore = _semaphore->semaphore;
 -			info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
--
++        // present() may run on the deferred encoding worker. The window's
++        // EGL context remains current on the main thread, so attempting to
++        // import a semaphore here fails and leaks the exported syncobj FD.
++        // Import it in synchronizeRender(), with the compositor context
++        // current, immediately before the GPU-side wait.
+ 
 -			if (DynamicVK::vkGetSemaphoreFdKHR(_semaphore->device->device(), &info, &fd) != VK_SUCCESS) {
 -				// TODO
 -				abort();
@@ -14958,12 +15394,7 @@ index d6f86b31..bfed6710 100644
 -
 -			CGLContextObj prev = CGLGetCurrentContext();
 -			CGLSetCurrentContext(_glContext);
-+        // present() may run on the deferred encoding worker. The window's
-+        // EGL context remains current on the main thread, so attempting to
-+        // import a semaphore here fails and leaks the exported syncobj FD.
-+        // Import it in synchronizeRender(), with the compositor context
-+        // current, immediately before the GPU-side wait.
- 
+-
 -			reportGLErrors();
 -			glGenSemaphoresEXT(1, &_glSemaphore);
 -			reportGLErrors();
@@ -14973,11 +15404,12 @@ index d6f86b31..bfed6710 100644
 -
 -			CGLSetCurrentContext(prev);
 -		}
-+        [layer queuePresent: _drawableID];
++        if (![layer queuePresent: _drawableID fromDrawable: this])
++            didDrop();
  	}
  }
  
-@@ -662,6 +950,10 @@ void CAMetalDrawableActual::disown() {
+@@ -662,27 +951,33 @@ void CAMetalDrawableActual::disown() {
  };
  
  void CAMetalDrawableActual::didPresent() {
@@ -14987,8 +15419,13 @@ index d6f86b31..bfed6710 100644
 +	}
  	_presentedTime = CACurrentMediaTime();
  
- 	if (_didPresentCallback) {
-@@ -671,6 +963,10 @@ void CAMetalDrawableActual::didPresent() {
+-	if (_didPresentCallback) {
+-		_didPresentCallback();
+-		_didPresentCallback = nullptr;
+-	}
++    // The callback can release the final owner or allow the pool to reuse this drawable.
++    auto callback = std::move(_didPresentCallback);
++    if (callback) callback();
  };
  
  void CAMetalDrawableActual::didDrop() {
@@ -14998,8 +15435,24 @@ index d6f86b31..bfed6710 100644
 +	}
  	_presentedTime = 0;
  
- 	if (_didPresentCallback) {
-@@ -694,6 +990,7 @@ void CAMetalDrawableActual::reset() {
+-	if (_didPresentCallback) {
+-		_didPresentCallback();
+-		_didPresentCallback = nullptr;
+-	}
++    // The callback can release the final owner or allow the pool to reuse this drawable.
++    auto callback = std::move(_didPresentCallback);
++    if (callback) callback();
+ };
+ 
+ void CAMetalDrawableActual::release() {
+ 	@autoreleasepool {
+ 		CAMetalLayerInternal* layer = objc_loadWeak(&_layer);
+-		[layer releaseDrawable: _drawableID];
++		[layer releaseDrawable: _drawableID fromDrawable: this];
+ 	}
+ };
+ 
+@@ -694,6 +989,7 @@ void CAMetalDrawableActual::reset() {
  		reportGLErrors();
  	}
  
@@ -15007,7 +15460,7 @@ index d6f86b31..bfed6710 100644
  	_semaphore = nullptr;
  	_wantsToPresentCallback = nullptr;
  	_didPresentCallback = nullptr;
-@@ -702,9 +999,55 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +998,55 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {
@@ -15067,7 +15520,7 @@ index d6f86b31..bfed6710 100644
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
 diff --git a/QuartzCore/CAMetalLayer.mm b/QuartzCore/CAMetalLayer.mm
-index b81e2e14..3bf4cfd9 100644
+index b81e2e1..87a31df 100644
 --- a/QuartzCore/CAMetalLayer.mm
 +++ b/QuartzCore/CAMetalLayer.mm
 @@ -25,7 +25,79 @@
@@ -15297,20 +15750,41 @@ index b81e2e14..3bf4cfd9 100644
  
  	drawable = _drawables[drawableID];
  
-@@ -410,20 +588,40 @@ static void reportGLErrors(void) {
+@@ -408,25 +586,79 @@ static void reportGLErrors(void) {
+ 	return [[[CAMetalDrawableInternal alloc] initWithLayer: self drawable: drawable] autorelease];
+ }
  
++// Called under _drawableCondition before replacing or consulting the last prepared frame.
++- (void)retireSwappedPresentation
++{
++    if (_preparedPresentation > _retiredPresentation && [_context didSwapRenderFrame: _preparedFrame])
++        _retiredPresentation = _preparedPresentation;
++}
++
  - (void)queuePresent: (NSUInteger)drawableID
  {
++    [self queuePresent: drawableID fromDrawable: nullptr];
++}
++
++- (BOOL)queuePresent: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable
++{
 +    auto* intervalSample = beginPresentIntervalSample();
  	[_drawableCondition lock];
++    if (drawableID >= _drawables.size() || !_drawables[drawableID] ||
++        (drawable && _drawables[drawableID].get() != drawable) || _queuedDrawableCount == _queuedDrawables.size()) {
++        [_drawableCondition unlock];
++        return NO;
++    }
  	_queuedDrawables[_queuedDrawableCount] = drawableID;
  	++_queuedDrawableCount;
+-	[_drawableCondition unlock];
++    const uint64_t ticket = ++_issuedPresentation;
 +	darlingMetalTrace("queuePresent", (long) drawableID, (long) _queuedDrawableCount);
 +	if (mainThreadDrawableWaiter.load(std::memory_order_relaxed) == (void*) self) {
 +		// The main thread is waiting in nextDrawable and cannot run the block below: let it present this itself.
 +		[_drawableCondition broadcast];
 +	}
- 	[_drawableCondition unlock];
++    // Submit while holding the queue lock so concurrent producers schedule callbacks in FIFO order.
  
  	// we now need to schedule a render
  	//
@@ -15320,6 +15794,12 @@ index b81e2e14..3bf4cfd9 100644
 +    // Present only after the Vulkan/GL synchronization has been prepared, on
 +    // the window thread. display alone does not drive the layer compositor.
 +    dispatch_async(dispatch_get_main_queue(), ^{
++        [self->_drawableCondition lock];
++        [self retireSwappedPresentation];
++        BOOL served = ticket <= self->_retiredPresentation;
++        [self->_drawableCondition unlock];
++        if (served) return;
++
 +        if (intervalSample) intervalSample->renderStart.store(presentIntervalNow());
 +        darlingMetalTrace("present-block-runs", 0, 0);
 +        CFTimeInterval blockStart = CACurrentMediaTime();
@@ -15327,19 +15807,43 @@ index b81e2e14..3bf4cfd9 100644
 +        if (intervalSample) intervalSample->renderDone.store(presentIntervalNow());
 +        CFTimeInterval renderDone = CACurrentMediaTime();
 +        darlingMetalTiming("mainBlockRender", renderDone - blockStart);
-+        [self->_context flush];
++        [self->_context flushForQueuedPresentation];
 +        if (intervalSample) intervalSample->flushDone.store(presentIntervalNow(), std::memory_order_release);
 +        darlingMetalTiming("mainBlockFlush", CACurrentMediaTime() - renderDone);
 +    });
++    [_drawableCondition unlock];
++    return YES;
  }
  
  - (void)releaseDrawable: (NSUInteger)drawableID
  {
++    [self releaseDrawable: drawableID fromDrawable: nullptr];
++}
++
++- (void)releaseDrawable: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable
++{
 +	darlingMetalTrace("releaseDrawable", (long) drawableID, 0);
  	[_drawableCondition lock];
- 	_usableDrawablesBitmap |= 1u << drawableID;
- 	[_drawableCondition signal];
-@@ -455,9 +653,21 @@ static void reportGLErrors(void) {
+-	_usableDrawablesBitmap |= 1u << drawableID;
+-	[_drawableCondition signal];
++    if (drawableID < _drawables.size() && _drawables[drawableID] &&
++        (!drawable || _drawables[drawableID].get() == drawable)) {
++        _usableDrawablesBitmap |= 1u << drawableID;
++        [_drawableCondition signal];
++    }
+ 	[_drawableCondition unlock];
+ }
+ 
+@@ -445,6 +677,8 @@ static void reportGLErrors(void) {
+ 		drawable->didDrop();
+ 	}
+ 	_queuedDrawableCount = 0;
++    _retiredPresentation = _issuedPresentation;
++    _preparedFrame = 0;
+ 
+ 	// clear the drawable array (and disown them so they don't try to queue with us anymore)
+ 	for (auto& drawable: _drawables) {
+@@ -455,9 +689,21 @@ static void reportGLErrors(void) {
  	}
  	_usableDrawablesBitmap = 0;
  
@@ -15362,7 +15866,7 @@ index b81e2e14..3bf4cfd9 100644
  		return;
  	}
  
-@@ -493,6 +703,11 @@ static void reportGLErrors(void) {
+@@ -493,6 +739,11 @@ static void reportGLErrors(void) {
  	[_drawableCondition unlock];
  
  	@synchronized(self) {
@@ -15374,7 +15878,7 @@ index b81e2e14..3bf4cfd9 100644
  		// resize the render texture
  		if (_tex != 0) {
  			reportGLErrors();
-@@ -506,6 +721,10 @@ static void reportGLErrors(void) {
+@@ -506,6 +757,10 @@ static void reportGLErrors(void) {
  			glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -15385,8 +15889,15 @@ index b81e2e14..3bf4cfd9 100644
  			reportGLErrors();
  		}
  	}
-@@ -516,6 +735,10 @@ static void reportGLErrors(void) {
+@@ -514,13 +769,26 @@ static void reportGLErrors(void) {
+ }
+ 
  - (void)prepareRender
++{
++    [self prepareRenderForFrame: 0 inContext: nil];
++}
++
++- (void)prepareRenderForFrame: (uint64_t)frame inContext: (CALayerContext *)context
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
 +	static CFTimeInterval lastPrepare = 0;
@@ -15395,8 +15906,17 @@ index b81e2e14..3bf4cfd9 100644
 +	lastPrepare = prepareStart;
  
  	[_drawableCondition lock];
++    [self retireSwappedPresentation];
++    _preparedFrame = (context == _context) ? frame : 0;
  	if (_queuedDrawableCount > 0) {
-@@ -528,27 +751,81 @@ static void reportGLErrors(void) {
+ 		drawable = _drawables[_queuedDrawables[0]];
+ 		--_queuedDrawableCount;
++        // Queue entries are consecutive tickets, consumed oldest first.
++        if (drawable) _preparedPresentation = _issuedPresentation - _queuedDrawableCount;
+ 		std::copy(_queuedDrawables.begin() + 1, _queuedDrawables.end(), _queuedDrawables.begin());
+ 	}
+ 	[_drawableCondition unlock];
+@@ -528,27 +796,81 @@ static void reportGLErrors(void) {
  	if (drawable) {
  		// wait for the drawable to be fully rendered before copying it to the render texture
  		// (this is a GPU-side wait)
@@ -15408,6 +15928,13 @@ index b81e2e14..3bf4cfd9 100644
 -		glCopyImageSubData(drawable->texture()->glTexture(), GL_TEXTURE_2D, 0, 0, 0, 0, _tex, GL_TEXTURE_2D, 0, 0, 0, 0, _drawableSize.width, _drawableSize.height, 1);
 -		reportGLErrors();
 -	}
+-
+-	@synchronized(self) {
+-		// FIXME: this is wrong, but there's no good way to tell when the texture is actually fully rendered/presented.
+-		//        this is at least close enough. it should balance out in the long run since we're supposed to be invoked on vsync
+-		//        or at least a fixed interval.
+-		if (_lastPresentedDrawable) {
+-			_lastPresentedDrawable->didPresent();
 +		{
 +			// Diagnostic: statistics of the imported Vulkan image itself, before the copy
 +			static unsigned long sourceCounter = 0;
@@ -15423,7 +15950,8 @@ index b81e2e14..3bf4cfd9 100644
 +				}
 +				darlingMetalTrace("source-stats", (long) lit, (long) (total / (width * height)));
 +			}
-+		}
+ 		}
+-		_lastPresentedDrawable = drawable;
 +		// Diagnostic: every 150th presented frame, log pixel statistics of what is about to be shown
 +		// and save a few of them as /tmp/metal-frame-<n>.ppm.
 +		static unsigned long frameCounter = 0;
@@ -15455,21 +15983,14 @@ index b81e2e14..3bf4cfd9 100644
 +				}
 +			}
 +		}
- 
--	@synchronized(self) {
--		// FIXME: this is wrong, but there's no good way to tell when the texture is actually fully rendered/presented.
--		//        this is at least close enough. it should balance out in the long run since we're supposed to be invoked on vsync
--		//        or at least a fixed interval.
--		if (_lastPresentedDrawable) {
--			_lastPresentedDrawable->didPresent();
++
 +		// CARenderer samples drawable->texture()->glTexture() directly once rotated below.
-+		@synchronized(self) {
-+			if (_lastPresentedDrawable) {
-+				_lastPresentedDrawable->didPresent();
-+			}
-+			_lastPresentedDrawable = drawable;
- 		}
--		_lastPresentedDrawable = drawable;
++        // A presented handler may synchronously render this layer again. Select
++        // the new texture before invoking it, and keep the previous one alive.
++        @synchronized(self) {
++            _lastPresentedDrawable.swap(drawable);
++        }
++        if (drawable) drawable->didPresent();
  	}
  }
  
@@ -15489,7 +16010,7 @@ index b81e2e14..3bf4cfd9 100644
  }
  
  //
-@@ -575,6 +852,11 @@ static void reportGLErrors(void) {
+@@ -575,6 +897,11 @@ static void reportGLErrors(void) {
  {
  	[super _setContext: context];
  
@@ -15501,7 +16022,7 @@ index b81e2e14..3bf4cfd9 100644
  	if (_tex == 0) {
  		// create our textures now using the context's CGLContext
  		CGLContextObj prev = CGLGetCurrentContext();
-@@ -589,10 +871,15 @@ static void reportGLErrors(void) {
+@@ -589,10 +916,15 @@ static void reportGLErrors(void) {
  		glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -15517,6 +16038,26 @@ index b81e2e14..3bf4cfd9 100644
  }
  
  #else
+diff --git a/QuartzCore/CAMetalLayerInternal.h b/QuartzCore/CAMetalLayerInternal.h
+index 48693da..2e3c5a4 100644
+--- a/QuartzCore/CAMetalLayerInternal.h
++++ b/QuartzCore/CAMetalLayerInternal.h
+@@ -48,10 +48,15 @@ class CAMetalDrawableActual;
+ 	std::shared_ptr<CAMetalDrawableActual> _lastPresentedDrawable;
+ 
+ 	GLuint _tex;
++    // Protected by _drawableCondition. Tickets increase across pool recreations.
++    uint64_t _issuedPresentation, _retiredPresentation;
++    uint64_t _preparedPresentation, _preparedFrame;
+ }
+ 
+ - (void)queuePresent: (NSUInteger)drawableID;
++- (BOOL)queuePresent: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable;
+ - (void)releaseDrawable: (NSUInteger)drawableID;
++- (void)releaseDrawable: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable;
+ 
+ - (void)prepareRender;
+ 
 diff --git a/QuartzCore/CARenderer.m b/QuartzCore/CARenderer.m
 index dd0a127..b6916db 100644
 --- a/QuartzCore/CARenderer.m
@@ -16115,14 +16656,17 @@ index 49b0348..5ebbf53 100644
  - (void) display;
  - (void) displayIfNeeded;
 diff --git a/QuartzCore/include/QuartzCore/CALayerContext.h b/QuartzCore/include/QuartzCore/CALayerContext.h
-index e4b0c34..69b3925 100644
+index e4b0c34..5267b7c 100644
 --- a/QuartzCore/include/QuartzCore/CALayerContext.h
 +++ b/QuartzCore/include/QuartzCore/CALayerContext.h
-@@ -17,9 +17,11 @@
+@@ -17,9 +17,14 @@
      NSTimer *_timer;
      CGSubWindow* _subwindow;
      void* _cglWindow;
 +    BOOL _ownsCglWindow;
++    // A render publishes its generation when the renderer finishes. A swap
++    // confirms it only while the rendered window and generation still match.
++    uint64_t _renderFrame, _readyFrame, _swappedFrame;
  }
  
  @property(readonly) CGLContextObj glContext;
@@ -16130,6 +16674,14 @@ index e4b0c34..69b3925 100644
  
  - initWithFrame: (CGRect) rect;
  
+@@ -36,5 +41,7 @@
+ - (void) deleteTextureId: (NSNumber *) textureId;
+ 
+ - (void) flush;
++- (void) flushForQueuedPresentation;
++- (BOOL) didSwapRenderFrame: (uint64_t) frame;
+ 
+ @end
 diff --git a/QuartzCore/include/QuartzCore/CATransaction.h b/QuartzCore/include/QuartzCore/CATransaction.h
 index 985f77f..db64f55 100644
 --- a/QuartzCore/include/QuartzCore/CATransaction.h
@@ -16281,10 +16833,10 @@ index a09c912..65bf8c4 100644
  		}
 diff --git a/AppKit/X11.backend/DarlingWaylandAPI.h b/AppKit/X11.backend/DarlingWaylandAPI.h
 new file mode 100644
-index 0000000..8f43881
+index 0000000..4541229
 --- /dev/null
 +++ b/AppKit/X11.backend/DarlingWaylandAPI.h
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,223 @@
 +/* darling-lol: experimental native Wayland transport for the League game window (RCLOL_WAYLAND=1).
 + *
 + * Contract between the host-native shim (tools/darling-wayland.c, an ELF library linked against
@@ -16310,7 +16862,7 @@ index 0000000..8f43881
 +#include <stddef.h>
 +#include <stdint.h>
 +
-+#define DWL_API_VERSION 2 /* 2 adds popups, interactive move/resize, parents (client windows) */
++#define DWL_API_VERSION 3 /* 3 appends display timing and presentation transactions. */
 +
 +enum dwl_event_type {
 +    DWL_EVENT_NONE = 0,
@@ -16379,6 +16931,24 @@ index 0000000..8f43881
 +    int32_t refresh_mhz;
 +    int32_t scale;
 +    char name[64];
++};
++
++/* Version 3 timing is deliberately separate: neither dwl_output nor dwl_event
++ * changes size. Times are host CLOCK_MONOTONIC nanoseconds when CLOCK_MONOTONIC
++ * is valid, otherwise the raw presentation clock observation. Rates are Hz. */
++#define DWL_TIMING_NOMINAL          (1u << 0)
++#define DWL_TIMING_PRESENTATION     (1u << 1)
++#define DWL_TIMING_CLOCK_MONOTONIC  (1u << 2)
++#define DWL_TIMING_COUNTER          (1u << 3)
++#define DWL_TIMING_FIXED            (1u << 4)
++#define DWL_TIMING_VARIABLE         (1u << 5)
++#define DWL_TIMING_VSYNC            (1u << 6)
++struct dwl_timing {
++    uint32_t version, flags;
++    uint64_t output_id, surface_generation;
++    uint64_t rate_num, rate_den;
++    uint64_t presentation_ns, counter, refresh_ns;
++    uint32_t presentation_version, reserved;
 +};
 +
 +struct dwl_api {
@@ -16468,6 +17038,21 @@ index 0000000..8f43881
 +    void (*window_set_parent)(int32_t window, int32_t parent);
 +    void (*window_set_maximized)(int32_t window, int maximized);
 +    void (*window_set_minimized)(int32_t window);
++
++    /* ---- version 3: main-thread-only timing and commit ownership ---- */
++    int (*window_get_timing)(int32_t window, struct dwl_timing *out);
++    int (*output_get_timing)(int index, struct dwl_timing *out);
++    /* Call immediately before EGL swaps the returned window's surface, and
++     * end immediately afterwards, including on failure. A nonzero token
++     * reserves commits on that surface; unrelated shim commits are deferred.
++     * Zero means ownership unavailable: still render, without feedback.
++     * A reservation need not create feedback (optional protocol/queue full).
++     * The EGL surface must have one owner; a caller unable to guarantee this
++     * must skip begin rather than attributing another owner's submission. */
++    uint64_t (*presentation_begin)(int32_t window, uint64_t surface_generation);
++    void (*presentation_end)(int32_t window, uint64_t token, int swap_success);
++    /* Hide, rebind or surface replacement cancels all outstanding feedback. */
++    void (*window_invalidate_timing)(int32_t window);
 +};
 +
 +/* Exported by libDarlingWayland.dylib (guest) and as DarlingWaylandAPI by the host shim. Returns NULL
@@ -16477,10 +17062,10 @@ index 0000000..8f43881
 +#endif
 diff --git a/AppKit/X11.backend/WaylandBackend.h b/AppKit/X11.backend/WaylandBackend.h
 new file mode 100644
-index 0000000..57caa55
+index 0000000..c975bfd
 --- /dev/null
 +++ b/AppKit/X11.backend/WaylandBackend.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,33 @@
 +/* darling-lol: shared pieces of the experimental native Wayland path for League's game windows
 + * (RCLOL_WAYLAND_SOCKET; see X11DisplayWayland.m). Everything it prints starts with "darling-wayland:". */
 +#ifndef WAYLAND_BACKEND_H
@@ -16488,6 +17073,11 @@ index 0000000..57caa55
 +
 +#include <stdint.h>
 +#include <stdio.h>
++struct dwl_output;
++struct dwl_api;
++uint64_t WaylandOutputIdentity(const struct dwl_output *output);
++uint32_t WaylandOutputDisplayID(uint64_t identity);
++void WaylandPublishDefaultTiming(const struct dwl_api *api);
 +
 +#define WLLOG(...) \
 +    do { \
@@ -16534,10 +17124,10 @@ index 0000000..aa4118c
 +@end
 diff --git a/AppKit/X11.backend/WaylandSubWindow.m b/AppKit/X11.backend/WaylandSubWindow.m
 new file mode 100644
-index 0000000..79f4f0c
+index 0000000..ae7ce24
 --- /dev/null
 +++ b/AppKit/X11.backend/WaylandSubWindow.m
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,77 @@
 +#import "WaylandSubWindow.h"
 +#import "WaylandBackend.h"
 +#import "WaylandWindow.h"
@@ -16596,7 +17186,18 @@ index 0000000..79f4f0c
 +}
 +
 +- (void) hide {
++    [_parent invalidateDisplayTiming];
 +    _visible = NO;
++}
++
++- (void) updateDisplayTiming { [_parent updateDisplayTiming]; }
++- (void) invalidateDisplayTiming { [_parent invalidateDisplayTiming]; }
++- (uint64_t) displayTimingTarget { return [_parent displayTimingTarget]; }
++- (uint64_t) beginPresentation {
++    return _visible && _usingParentDrawable ? [_parent beginPresentationFor: self] : 0;
++}
++- (void) endPresentation: (uint64_t) token success: (BOOL) success {
++    [_parent endPresentation: token success: success];
 +}
 +
 +- (void) setFrame: (CGRect) frame {
@@ -16606,10 +17207,10 @@ index 0000000..79f4f0c
 +@end
 diff --git a/AppKit/X11.backend/WaylandWindow.h b/AppKit/X11.backend/WaylandWindow.h
 new file mode 100644
-index 0000000..5117518
+index 0000000..fe99458
 --- /dev/null
 +++ b/AppKit/X11.backend/WaylandWindow.h
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,149 @@
 +/* darling-lol: a League game or client window served by native Wayland (xdg_toplevel or xdg_popup through the host
 + * libDarlingWayland shim) instead of an X11 window. See X11DisplayWayland.m for the connection, the event pump and the
 + * gate. GNOME offers no server-side decorations, so a titled window is an undecorated toplevel there.
@@ -16626,6 +17227,7 @@ index 0000000..5117518
 +#import "DarlingWaylandAPI.h"
 +
 +#import "RemoteFrameSlot.h"
++#include <CoreGraphics/DarlingDisplayTiming.h>
 +
 +@class X11Cursor, NSWindow, NSTimer, O2Context;
 +
@@ -16659,7 +17261,11 @@ index 0000000..5117518
 +    O2Context *_context;
 +    CGLWindowRef _cglWindow;
 +    id _layerDrawableOwner;
++    NSUInteger _layerDrawableOwnerCount;
 +    BOOL _loggedKeptOnHide;
++    uint64_t _timingGeneration, _hostTimingGeneration, _timingOutput;
++    uint64_t _timingRateNum, _timingRateDen;
++    DGTimingClock _timingClock;
 +
 +    /* Client windows. */
 +    WaylandWindowKind _kind;
@@ -16720,6 +17326,11 @@ index 0000000..5117518
 +- (void *) layerDrawableFor: (id) owner;
 +- (void) acquireLayerDrawable: (id) owner;
 +- (void) releaseLayerDrawable: (id) owner;
++- (uint64_t) displayTimingTarget;
++- (void) updateDisplayTiming;
++- (void) invalidateDisplayTiming;
++- (uint64_t) beginPresentationFor: (id) owner;
++- (void) endPresentation: (uint64_t) token success: (BOOL) success;
 +
 +/* Events from the compositor, called by X11Display. */
 +- (void) handleConfigureWidth: (int) width height: (int) height flags: (uint32_t) flags;
@@ -16751,10 +17362,10 @@ index 0000000..5117518
 +@end
 diff --git a/AppKit/X11.backend/WaylandWindow.m b/AppKit/X11.backend/WaylandWindow.m
 new file mode 100644
-index 0000000..6055c17
+index 0000000..faf3471
 --- /dev/null
 +++ b/AppKit/X11.backend/WaylandWindow.m
-@@ -0,0 +1,1165 @@
+@@ -0,0 +1,1241 @@
 +/* darling-lol: a League game or client window served by native Wayland. See WaylandWindow.h. */
 +#import <AppKit/NSApplication.h>
 +#import <AppKit/NSMenuWindow.h>
@@ -17354,6 +17965,7 @@ index 0000000..6055c17
 + * it, because QuartzCore still holds that surface; a CPU-drawn one (the splash) is destroyed and recreated on the
 + * next show. */
 +- (void) hideWindow {
++    [self invalidateDisplayTiming];
 +    _popupDismissed = NO; /* AppKit took the window down: it may be shown again */
 +    _loggedNoParent = NO;
 +    if (_dwlID == 0)
@@ -17370,6 +17982,9 @@ index 0000000..6055c17
 +
 +/* Destroys the Wayland surface; popups on it go with it. */
 +- (void) teardownSurface {
++    [self invalidateDisplayTiming];
++    DGTimingForget([self displayTimingTarget]);
++    _timingGeneration=0;
 +    if (_dwlID == 0)
 +        return;
 +    const struct dwl_api *api = WaylandAPI();
@@ -17877,12 +18492,84 @@ index 0000000..6055c17
 +}
 +
 +- (void) acquireLayerDrawable: (id) owner {
-+    _layerDrawableOwner = owner;
++    if (_layerDrawableOwner != owner) [self invalidateDisplayTiming];
++    if (!_layerDrawableOwnerCount) _layerDrawableOwner = owner;
++    ++_layerDrawableOwnerCount;
 +}
 +
 +- (void) releaseLayerDrawable: (id) owner {
-+    if (_layerDrawableOwner == owner)
-+        _layerDrawableOwner = nil;
++    [self invalidateDisplayTiming];
++    if (_layerDrawableOwnerCount) --_layerDrawableOwnerCount;
++    if (!_layerDrawableOwnerCount) _layerDrawableOwner = nil;
++}
++
++- (uint64_t) displayTimingTarget {
++    return 0x8000000000000000ull | (uint64_t)_number;
++}
++
++- (void) invalidateDisplayTiming {
++    /* The provider epoch changes before host association or commit ownership. */
++    _timingGeneration = DGTimingInvalidate([self displayTimingTarget]);
++    _hostTimingGeneration = _timingOutput = 0;
++    memset(&_timingClock, 0, sizeof _timingClock);
++    const struct dwl_api *api = WaylandAPI();
++    if (api && api->version >= 3 && api->window_invalidate_timing && _dwlID)
++        api->window_invalidate_timing(_dwlID);
++}
++
++- (void) updateDisplayTiming {
++    if (!_dwlID || _kind != WaylandWindowKindGame) return;
++    const struct dwl_api *api = WaylandAPI();
++    if (!api) return;
++    struct dwl_timing t = {0};
++    if (api->version >= 3 && api->window_get_timing) {
++        if (api->window_get_timing(_dwlID, &t) != 0) return;
++    } else {
++        /* v1/v2 expose only output nominal modes. Never consult RandR here. */
++        for (int i=0;i<api->output_count();++i) {
++            struct dwl_output out;
++            if (api->output_get(i,&out)==0 && out.refresh_mhz>0) {
++                t.output_id=WaylandOutputIdentity(&out);t.rate_num=out.refresh_mhz;t.rate_den=1000;
++                t.flags=DWL_TIMING_NOMINAL;break;
++            }
++        }
++    }
++    if (!(t.flags&DWL_TIMING_NOMINAL) || !t.rate_num || !t.rate_den) return;
++    if (!_timingGeneration || _hostTimingGeneration!=t.surface_generation ||
++        _timingOutput!=t.output_id || _timingRateNum!=t.rate_num || _timingRateDen!=t.rate_den) {
++        _timingGeneration=DGTimingInvalidate([self displayTimingTarget]);
++        _hostTimingGeneration=t.surface_generation;_timingOutput=t.output_id;
++        _timingRateNum=t.rate_num;_timingRateDen=t.rate_den;
++        memset(&_timingClock,0,sizeof _timingClock);
++    }
++    if (!_timingGeneration)return;
++    DGTimingSnapshot s={0};s.target=[self displayTimingTarget];s.generation=_timingGeneration;
++    s.displayID=WaylandOutputDisplayID(t.output_id);s.outputID=t.output_id;
++    s.rateNumerator=t.rate_num;s.rateDenominator=t.rate_den;
++    s.flags=DG_TIMING_NOMINAL|DG_TIMING_WAYLAND;
++    if ((t.flags&(DWL_TIMING_PRESENTATION|DWL_TIMING_CLOCK_MONOTONIC))==
++                 (DWL_TIMING_PRESENTATION|DWL_TIMING_CLOCK_MONOTONIC) &&
++        DGTimingMonotonicToMach(t.presentation_ns,&_timingClock,&s.presentationNS)) {
++        s.flags|=DG_TIMING_FEEDBACK;
++        if(t.flags&DWL_TIMING_FIXED)s.flags|=DG_TIMING_FIXED;
++        if(t.flags&DWL_TIMING_COUNTER)s.flags|=DG_TIMING_COUNTER;
++        s.presentationCounter=t.counter;
++    }
++    DGTimingPublish(&s);
++}
++
++- (uint64_t) beginPresentationFor: (id) owner {
++    const struct dwl_api *api=WaylandAPI();
++    if (!api || api->version<3 || !api->presentation_begin ||
++        !_dwlID || _layerDrawableOwnerCount!=1 || _layerDrawableOwner!=owner) return 0;
++    [self updateDisplayTiming];
++    return api->presentation_begin(_dwlID,_hostTimingGeneration);
++}
++
++- (void) endPresentation: (uint64_t) token success: (BOOL) success {
++    const struct dwl_api *api=WaylandAPI();
++    if(api && api->version>=3 && api->presentation_end && _dwlID)
++        api->presentation_end(_dwlID,token,success);
 +}
 +
 +- (CGSubWindow *) createSubWindowWithFrame: (CGRect) frame {
@@ -17954,10 +18641,10 @@ index a87d172..e03c944 100644
  @end
 diff --git a/AppKit/X11.backend/X11DisplayWayland.m b/AppKit/X11.backend/X11DisplayWayland.m
 new file mode 100644
-index 0000000..98fd051
+index 0000000..c0d6498
 --- /dev/null
 +++ b/AppKit/X11.backend/X11DisplayWayland.m
-@@ -0,0 +1,1021 @@
+@@ -0,0 +1,1067 @@
 +/* darling-lol: the display side of the experimental native Wayland path for League's game window and, with
 + * RCLOL_WAYLAND_SCOPE=all, the League client and Riot Client windows.
 + *
@@ -17987,6 +18674,42 @@ index 0000000..98fd051
 +#import <mach/mach_time.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <CoreGraphics/DarlingDisplayTiming.h>
++
++uint64_t WaylandOutputIdentity(const struct dwl_output *output) {
++    /* Legacy bridges have no registry identity; their output name is stable
++     * across compacted array indices. v3 always uses the host identity. */
++    uint64_t hash=1469598103934665603ull;
++    for (const unsigned char *p=(const unsigned char *)output->name;*p;++p)
++        hash=(hash^*p)*1099511628211ull;
++    return hash;
++}
++uint32_t WaylandOutputDisplayID(uint64_t identity) {
++    return 0x40000000u | (uint32_t)(identity&0x3fffffffu);
++}
++void WaylandPublishDefaultTiming(const struct dwl_api *api) {
++    if(!api)return;
++    uint64_t generation=DGTimingInvalidate(0);
++    if(!generation)return;
++    BOOL haveDefault=NO;
++    for(int i=0;i<api->output_count();++i) {
++        struct dwl_timing t={0};
++        if(api->version>=3 && api->output_get_timing) {
++            if(api->output_get_timing(i,&t)!=0)continue;
++        } else {
++            struct dwl_output out;
++            if(api->output_get(i,&out)!=0 || out.refresh_mhz<=0)continue;
++            t.output_id=WaylandOutputIdentity(&out);t.rate_num=out.refresh_mhz;t.rate_den=1000;
++            t.flags=DWL_TIMING_NOMINAL;
++        }
++        if(!(t.flags&DWL_TIMING_NOMINAL) || !t.rate_num || !t.rate_den)continue;
++        DGTimingSnapshot s={0};s.generation=generation;s.outputID=t.output_id;
++        s.displayID=WaylandOutputDisplayID(t.output_id);s.flags=DG_TIMING_NOMINAL|DG_TIMING_WAYLAND;
++        s.rateNumerator=t.rate_num;s.rateDenominator=t.rate_den;
++        DGTimingPublish(&s);
++        if(!haveDefault) {s.displayID=0;DGTimingPublish(&s);haveDefault=YES;}
++    }
++}
 +
 +/* The OpenGL framework may predate the Wayland entry points: look them up weakly. */
 +extern CGLError CGLRegisterNativeWaylandDisplay(void *wl_display) __attribute__((weak_import));
@@ -18198,6 +18921,7 @@ index 0000000..98fd051
 +    _waylandWindowsByID = [NSMutableDictionary new];
 +    waylandModeActive = YES;
 +    waylandActiveKind = kind;
++    WaylandPublishDefaultTiming(api);
 +#ifdef DARLING
 +    int descriptor = api->fd();
 +    if (descriptor >= 0) {
@@ -18471,6 +19195,9 @@ index 0000000..98fd051
 +    if (_wlInput.dead)
 +        return;
 +    _wlInput.dead = YES;
++    DGTimingInvalidate(0);
++    for (WaylandWindow *window in [_waylandWindowsByID allValues])
++        [window invalidateDisplayTiming];
 +    WLLOG("connection to the compositor was lost; closing the game windows");
 +    for (WaylandWindow *window in [_waylandWindowsByID allValues])
 +        [self waylandRequestCloseForWindow: window];
@@ -18503,8 +19230,10 @@ index 0000000..98fd051
 +            [self waylandHandleEvent: &event];
 +    }
 +    if ([_waylandWindowsByID count] > 0)
-+        for (WaylandWindow *window in [_waylandWindowsByID allValues])
++        for (WaylandWindow *window in [_waylandWindowsByID allValues]) {
 +            [window tickActivation];
++            [window updateDisplayTiming];
++        }
 +    /* Client windows: popups waiting for a parent, deferred focus loss. Popups not yet created are not in the table. */
 +    if (waylandActiveKind == X11WaylandProcessClient)
 +        for (id window in [_windowsByID allValues])
@@ -18524,7 +19253,11 @@ index 0000000..98fd051
 +}
 +
 +- (void) waylandHandleEvent: (const struct dwl_event *) event {
-+    if (event->type == DWL_EVENT_OUTPUTS_CHANGED || event->type == DWL_EVENT_NONE)
++    if (event->type == DWL_EVENT_OUTPUTS_CHANGED) {
++        WaylandPublishDefaultTiming([self waylandAPI]);
++        return;
++    }
++    if (event->type == DWL_EVENT_NONE)
 +        return;
 +    WaylandWindow *window = [_waylandWindowsByID objectForKey: [NSNumber numberWithInt: event->window]];
 +    if (window == nil)
@@ -19349,3 +20082,307 @@ index 757dd8c9..ad98c3dc 100644
  	CGLContextObj _glContext = nullptr;
  
  public:
+diff --git a/CoreGraphics/DarlingDisplayTiming.c b/CoreGraphics/DarlingDisplayTiming.c
+new file mode 100644
+index 0000000..a1d187f
+--- /dev/null
++++ b/CoreGraphics/DarlingDisplayTiming.c
+@@ -0,0 +1,243 @@
++/* SPDX-License-Identifier: GPL-3.0-only */
++#ifdef DG_TIMING_HOSTED
++#include "DarlingDisplayTiming.h"
++#include <sys/syscall.h>
++#include <unistd.h>
++#define dgSys(a,b,c,d,e,f,n) syscall(n,a,b,c,d,e,f)
++#else
++#include <CoreGraphics/DarlingDisplayTiming.h>
++#include <mach/mach_time.h>
++extern long __lolsys_syscall(long,long,long,long,long,long,int);
++#define dgSys(a,b,c,d,e,f,n) __lolsys_syscall((long)(a),(long)(b),(long)(c),(long)(d),(long)(e),(long)(f),n)
++#endif
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <limits.h>
++
++#define DG_SLOTS 256u
++#define DG_MAGIC 0x444754494d453031ull
++enum DGRecordKind { DG_DRAWABLE=1, DG_OUTPUT=2, DG_CONTEXT=3 };
++typedef struct {
++    uint64_t magic, version, pid, birth, epoch;
++    uint64_t outputGeneration;
++} DGHeader;
++typedef struct {
++    uint64_t kind, key, target;
++    DGTimingSnapshot snapshot;
++} DGRecord;
++/* All instances use the host pid and start ticks, including across guest-memory
++ * views. A reused pid must not inherit an earlier process's observations. */
++uint64_t DGTimingHostProcessBirth(void) {
++    char stat[2048];
++    long fd=dgSys("/proc/self/stat",0x80000,0,0,0,0,2);
++    if (fd<0) return 0;
++    long n=dgSys(fd,stat,sizeof(stat)-1,0,0,0,0);
++    dgSys(fd,0,0,0,0,0,3);
++    if (n<=0) return 0;
++    stat[n]=0;
++    char *p=strrchr(stat,')');
++    if (!p) return 0;
++    /* The next token is field 3; starttime is field 22. */
++    for (int field=3;field<=22;++field) {
++        while (*++p==' ') {}
++        if (field==22) {
++            uint64_t value=0;
++            while (*p>='0' && *p<='9') value=value*10+(*p++-'0');
++            return value;
++        }
++        while (*p && *p!=' ') ++p;
++        if (!*p) return 0;
++    }
++    return 0;
++}
++static long dgRead(int fd,void *p,size_t n,uint64_t at) { return dgSys(fd,p,n,at,0,0,17); }
++static int dgWrite(int fd,const void *p,size_t n,uint64_t at) { return dgSys(fd,p,n,at,0,0,18)==(long)n; }
++static uint64_t dgOffset(unsigned i) { return sizeof(DGHeader)+(uint64_t)i*sizeof(DGRecord); }
++static int dgHeader(int fd,DGHeader *h,uint64_t pid,uint64_t birth) {
++    return dgRead(fd,h,sizeof(*h),0)==sizeof(*h) && h->magic==DG_MAGIC &&
++        h->version==DG_TIMING_VERSION && h->pid==pid && h->birth==birth;
++}
++static int dgOpen(DGHeader *h,int writer) {
++    uint64_t pid=dgSys(0,0,0,0,0,0,39),birth=DGTimingHostProcessBirth();
++    if (!birth) return -1;
++    char path[160];
++    snprintf(path,sizeof path,"/dev/shm/darling-display-timing-v1-%u-%u.state",
++        (unsigned)dgSys(0,0,0,0,0,0,102),(unsigned)pid);
++    /* Linux O_NOFOLLOW | O_CLOEXEC; never follow a stale path to another file. */
++    long fd=dgSys(path,0xA0000|2|(writer?64:0),0600,0,0,0,2);
++    if (fd<0) return -1;
++    if (writer) {
++        /* Publishers serialize before changing backend association. Readers
++         * never wait for this lock; no backend call or callback holds it. */
++        if (dgSys(fd,2,0,0,0,0,73)<0) { dgSys(fd,0,0,0,0,0,3); return -1; }
++        int valid=dgHeader(fd,h,pid,birth);
++        if (!valid || (h->epoch&1)) {
++            uint64_t epoch=valid?h->epoch+1:0;
++            *h=(DGHeader){DG_MAGIC,DG_TIMING_VERSION,pid,birth,epoch};
++            if (dgSys(fd,0,0,0,0,0,77)<0 || !dgWrite(fd,h,sizeof(*h),0)) {
++                dgSys(fd,0,0,0,0,0,3);return -1;
++            }
++        }
++    } else if (!dgHeader(fd,h,pid,birth)) {
++        dgSys(fd,0,0,0,0,0,3); return -1;
++    }
++    return (int)fd;
++}
++static void dgClose(int fd) { dgSys(fd,0,0,0,0,0,3); }
++static int dgFind(int fd,uint64_t kind,uint64_t key,DGRecord *rec,unsigned *slot) {
++    unsigned firstFree=DG_SLOTS;
++    for (unsigned i=0;i<DG_SLOTS;++i) {
++        DGRecord r={0};
++        long n=dgRead(fd,&r,sizeof r,dgOffset(i));
++        if (n<0 || (n>0 && n!=sizeof r)) return 0;
++        if (r.kind==kind && r.key==key) { *rec=r;*slot=i;return 1; }
++        if (!r.kind && firstFree==DG_SLOTS) firstFree=i;
++        if (!n) break;
++    }
++    *slot=firstFree;memset(rec,0,sizeof(*rec));return firstFree<DG_SLOTS;
++}
++static int dgBegin(int fd,DGHeader *h) {
++    /* Publish the invalidation epoch before changing any record. An odd epoch
++     * left by an interrupted writer is never accepted by a cached reader. */
++    h->epoch=(h->epoch|1)+2;
++    return dgWrite(fd,&h->epoch,sizeof h->epoch,offsetof(DGHeader,epoch));
++}
++static int dgEnd(int fd,DGHeader *h) {
++    ++h->epoch;
++    return dgWrite(fd,&h->epoch,sizeof h->epoch,offsetof(DGHeader,epoch));
++}
++uint64_t DGTimingInvalidate(uint64_t target) {
++    DGHeader h;int fd=dgOpen(&h,1);if(fd<0)return 0;
++    DGRecord r;unsigned slot;uint64_t generation=0;
++    if (!target) {
++        if (dgBegin(fd,&h)) {
++            generation=h.epoch;
++            for(unsigned i=0;i<DG_SLOTS;++i) {
++                if(dgRead(fd,&r,sizeof r,dgOffset(i))!=sizeof r)break;
++                if(r.kind==DG_OUTPUT) {memset(&r,0,sizeof r);if(!dgWrite(fd,&r,sizeof r,dgOffset(i))){generation=0;break;}}
++            }
++            h.outputGeneration=generation;
++            if(!generation || !dgWrite(fd,&h.outputGeneration,sizeof h.outputGeneration,offsetof(DGHeader,outputGeneration)) || !dgEnd(fd,&h))generation=0;
++        }
++        dgClose(fd);return generation;
++    }
++    if (dgFind(fd,DG_DRAWABLE,target,&r,&slot) && dgBegin(fd,&h)) {
++        r.kind=DG_DRAWABLE;r.key=target;
++        generation=h.epoch;
++        memset(&r.snapshot,0,sizeof r.snapshot);
++        r.snapshot.target=target;r.snapshot.generation=generation;
++        if (!dgWrite(fd,&r,sizeof r,dgOffset(slot)) || !dgEnd(fd,&h)) generation=0;
++    }
++    dgClose(fd);return generation;
++}
++void DGTimingForget(uint64_t target) {
++    if(!target)return;
++    DGHeader h;int fd=dgOpen(&h,1);if(fd<0)return;
++    DGRecord r;unsigned slot;
++    if(dgFind(fd,DG_DRAWABLE,target,&r,&slot) && r.kind && dgBegin(fd,&h)) {
++        memset(&r,0,sizeof r);
++        if(dgWrite(fd,&r,sizeof r,dgOffset(slot)))dgEnd(fd,&h);
++    }
++    dgClose(fd);
++}
++int DGTimingPublish(const DGTimingSnapshot *snapshot) {
++    if (!snapshot || !(snapshot->flags&DG_TIMING_NOMINAL) ||
++        !snapshot->rateNumerator || !snapshot->rateDenominator ||
++        snapshot->rateNumerator>1000000000000ull || snapshot->rateDenominator>1000000000ull) return 0;
++    DGHeader h;int fd=dgOpen(&h,1);if(fd<0)return 0;
++    DGRecord r;unsigned slot;int ok=0;
++    uint64_t kind=snapshot->target?DG_DRAWABLE:DG_OUTPUT,key=snapshot->target?snapshot->target:snapshot->displayID;
++    if (dgFind(fd,kind,key,&r,&slot) &&
++        ((kind==DG_OUTPUT && snapshot->generation==h.outputGeneration) ||
++         (kind==DG_DRAWABLE && r.kind && r.snapshot.generation==snapshot->generation)) &&
++        (!(snapshot->flags&DG_TIMING_FEEDBACK) || !(r.snapshot.flags&DG_TIMING_FEEDBACK) ||
++         (snapshot->presentationNS>r.snapshot.presentationNS &&
++          (!(snapshot->flags&DG_TIMING_COUNTER) || snapshot->presentationCounter>r.snapshot.presentationCounter))) &&
++        dgBegin(fd,&h)) {
++        r.kind=kind;r.key=key;r.snapshot=*snapshot;
++        r.snapshot.version=DG_TIMING_VERSION;r.snapshot.processID=h.pid;
++        ok=dgWrite(fd,&r,sizeof r,dgOffset(slot)) && dgEnd(fd,&h);
++    }
++    dgClose(fd);return ok;
++}
++void DGTimingBind(uint64_t context,uint64_t target) {
++    if (!context)return;
++    DGHeader h;int fd=dgOpen(&h,1);if(fd<0)return;
++    DGRecord r;unsigned slot;
++    if (dgFind(fd,DG_CONTEXT,context,&r,&slot) && ((!r.kind && target) || (r.kind && r.target!=target)) && dgBegin(fd,&h)) {
++        if(target){r.kind=DG_CONTEXT;r.key=context;r.target=target;}
++        else memset(&r,0,sizeof r);
++        if (dgWrite(fd,&r,sizeof r,dgOffset(slot))) dgEnd(fd,&h);
++    }
++    dgClose(fd);
++}
++static DGTimingSnapshot dgSoftware(void) {
++    DGTimingSnapshot s={0};s.version=DG_TIMING_VERSION;
++    s.flags=DG_TIMING_NOMINAL|DG_TIMING_SOFTWARE;s.rateNumerator=60;s.rateDenominator=1;return s;
++}
++DGTimingSnapshot DGTimingRead(uint64_t context,uint32_t display,DGTimingCache *cache) {
++    /* Keep the launcher's existing explicit or detected refresh rate authoritative.
++     * Configured timing has no backend presentation phase or counter. */
++    const char *hz=getenv("RCLOL_REFRESH_HZ");
++    if(hz) {
++        DGTimingSnapshot s=dgSoftware();
++        long rate=strtol(hz,NULL,10);
++        if(rate>0 && rate<=1000)s.rateNumerator=(uint64_t)rate;
++        return s;
++    }
++    DGHeader h;int fd=dgOpen(&h,0);
++    if (fd<0)return dgSoftware();
++    if (h.epoch&1) { dgClose(fd);return dgSoftware(); }
++    if(cache && cache->epoch==h.epoch && cache->context==context && cache->display==display &&
++        cache->snapshot.version==DG_TIMING_VERSION) {dgClose(fd);return cache->snapshot;}
++    if (dgSys(fd,1|4,0,0,0,0,73)<0) {
++        dgClose(fd);
++        return cache && cache->epoch==h.epoch && cache->context==context && cache->display==display ? cache->snapshot:dgSoftware();
++    }
++    DGHeader current;
++    DGTimingSnapshot s=dgSoftware();DGRecord r;unsigned slot;
++    if (!dgHeader(fd,&current,h.pid,h.birth) || current.epoch!=h.epoch) {
++        dgClose(fd);return s;
++    }
++    uint64_t target=0;
++    if(context && dgFind(fd,DG_CONTEXT,context,&r,&slot) && r.kind) target=r.target;
++    if(target && dgFind(fd,DG_DRAWABLE,target,&r,&slot) && (r.snapshot.flags&DG_TIMING_NOMINAL)) s=r.snapshot;
++    if(s.flags&DG_TIMING_SOFTWARE) {
++        if(dgFind(fd,DG_OUTPUT,display,&r,&slot) && r.kind && (r.snapshot.flags&DG_TIMING_NOMINAL)) s=r.snapshot;
++        else if(display && dgFind(fd,DG_OUTPUT,0,&r,&slot) && r.kind && (r.snapshot.flags&DG_TIMING_NOMINAL)) s=r.snapshot;
++    }
++    if(cache) {cache->epoch=h.epoch;cache->snapshot=s;cache->context=context;cache->display=display;}
++    dgClose(fd);return s;
++}
++int DGTimingMapClock(uint64_t stamp,uint64_t before,uint64_t target,uint64_t after,
++                    DGTimingClock *clock,uint64_t *mapped) {
++    if(!clock || !mapped || after<before || after>INT64_MAX || after-before>250000 ||
++        before>INT64_MAX || target>INT64_MAX || stamp>INT64_MAX) return 0;
++    uint64_t middle=before+(after-before)/2;
++    int64_t offset=(int64_t)target-(int64_t)middle;
++    if(clock->valid && (before<clock->source || target<clock->target ||
++        (__int128)offset-clock->offset>1000000 || (__int128)clock->offset-offset>1000000)) {
++        clock->valid=0;return 0;
++    }
++    clock->source=before;clock->target=target;clock->offset=offset;clock->valid=1;
++    if((offset<0 && stamp<(uint64_t)-offset) ||
++        (offset>0 && stamp>UINT64_MAX-(uint64_t)offset))return 0;
++    *mapped=stamp+offset;return 1;
++}
++int DGTimingMonotonicToMach(uint64_t stamp,DGTimingClock *clock,uint64_t *mapped) {
++#ifdef DG_TIMING_HOSTED
++    (void)stamp;(void)clock;(void)mapped;return 0;
++#else
++    struct {int64_t sec,nsec;} before,after;
++    struct mach_timebase_info tb;
++    mach_timebase_info(&tb);
++    if(!tb.denom || dgSys(1,&before,0,0,0,0,228)<0)return 0;
++    uint64_t ticks=mach_absolute_time();
++    uint64_t ns=(uint64_t)((__uint128_t)ticks*tb.numer/tb.denom);
++    if(dgSys(1,&after,0,0,0,0,228)<0)return 0;
++    return DGTimingMapClock(stamp,(uint64_t)before.sec*1000000000ull+before.nsec,ns,
++        (uint64_t)after.sec*1000000000ull+after.nsec,clock,mapped);
++#endif
++}
+diff --git a/CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h b/CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h
+new file mode 100644
+index 0000000..1eb3d5d
+--- /dev/null
++++ b/CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h
+@@ -0,0 +1,49 @@
++/* SPDX-License-Identifier: GPL-3.0-only
++ * Private Darling display timing. No backend or Objective-C objects cross this API. */
++#ifndef DARLING_DISPLAY_TIMING_H
++#define DARLING_DISPLAY_TIMING_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++#define DG_TIMING_VERSION 1
++#define DG_TIMING_NOMINAL 1u
++#define DG_TIMING_FEEDBACK 2u
++#define DG_TIMING_FIXED 4u
++#define DG_TIMING_COUNTER 8u
++#define DG_TIMING_SOFTWARE 16u
++#define DG_TIMING_X11_SERVER 32u
++#define DG_TIMING_WAYLAND 64u
++typedef struct DGTimingSnapshot {
++    uint32_t version, flags, displayID, reserved;
++    uint64_t processID, target, outputID, generation;
++    uint64_t rateNumerator, rateDenominator, presentationNS, presentationCounter;
++} DGTimingSnapshot;
++typedef struct DGTimingCache {
++    uint64_t epoch;
++    DGTimingSnapshot snapshot;
++    uint64_t context;
++    uint32_t display, reserved;
++} DGTimingCache;
++typedef struct DGTimingClock {
++    uint64_t source, target;
++    int64_t offset;
++    uint32_t valid, reserved;
++} DGTimingClock;
++/* target 0 publishes an output (displayID 0 is the backend default).
++ * Nonzero target identifies the actual native drawable, not its owner window.
++ * Invalidate before replacing an association; late generations are rejected. */
++uint64_t DGTimingInvalidate(uint64_t target);
++void DGTimingForget(uint64_t target);
++uint64_t DGTimingHostProcessBirth(void);
++int DGTimingPublish(const DGTimingSnapshot *snapshot);
++void DGTimingBind(uint64_t context, uint64_t target);
++DGTimingSnapshot DGTimingRead(uint64_t context, uint32_t display, DGTimingCache *cache);
++/* Bracket target-clock sampling with two source-clock samples, all in ns. */
++int DGTimingMapClock(uint64_t stamp, uint64_t before, uint64_t target, uint64_t after,
++                     DGTimingClock *clock, uint64_t *mapped);
++int DGTimingMonotonicToMach(uint64_t stamp, DGTimingClock *clock, uint64_t *mapped);
++#ifdef __cplusplus
++}
++#endif
++#endif

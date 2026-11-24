@@ -57,6 +57,48 @@ class HostEnvFixture(unittest.TestCase):
         return result.stdout.strip()
 
 
+class RefreshRate(HostEnvFixture):
+    BLOCK = launcher_text('# --- darling-lol perf:', '# Vulkan WSI & Mesa optimizations')
+
+    def refresh(self, **extra):
+        return self.run_block(self.BLOCK, SH + ' -c \'printf "%s" "${RCLOL_REFRESH_HZ-unset}"\'', **extra)
+
+    def test_explicit_value_is_exported_without_querying_xrandr(self):
+        calls = self.bin / 'xrandr-calls'
+        self.stub('xrandr', f': > "{calls}"\nexit 99')
+        for value in ('144', '59.94', 'invalid', '0'):
+            with self.subTest(value=value):
+                self.assertEqual(self.refresh(RCLOL_REFRESH_HZ=value), value)
+        self.assertFalse(calls.exists())
+
+    def test_primary_current_mode_is_rounded_and_exported(self):
+        self.stub('xrandr', '''[ "$*" = --current ] || exit 99
+cat <<'MODES'
+DP-1 connected 1920x1080+0+0
+   1920x1080 59.94*+ 120.00
+DP-2 connected primary 2560x1440+1920+0
+   2560x1440 143.98*+ 60.00
+MODES''')
+        self.assertEqual(self.refresh(), '144')
+        self.assertEqual(self.refresh(RCLOL_REFRESH_HZ=''), '144')
+
+    def test_without_primary_the_first_active_mode_wins(self):
+        self.stub('xrandr', '''cat <<'MODES'
+DP-1 connected 1920x1080+0+0
+   1920x1080 59.94*+ 120.00
+DP-2 connected 2560x1440+1920+0
+   2560x1440 143.98*+ 60.00
+MODES''')
+        self.assertEqual(self.refresh(), '60')
+
+    def test_missing_failed_or_empty_xrandr_leaves_the_rate_unset(self):
+        self.assertEqual(self.refresh(), 'unset')
+        self.stub('xrandr', 'exit 1')
+        self.assertEqual(self.refresh(), 'unset')
+        self.stub('xrandr', 'echo "DP-1 disconnected"')
+        self.assertEqual(self.refresh(), 'unset')
+
+
 class WaylandGameWindow(HostEnvFixture):
     """RCLOL_WAYLAND plumbing: the launcher's own block, then its guest `env` assignments."""
     BLOCK = launcher_text('wayland_socket_path() {', '# The client saves its locale')

@@ -130,8 +130,14 @@ int main() {
         method = body(source, '- (void) updateDrawable')
         method=method.replace('[_subwindow setAllowsParentDrawable: hasMetalLayer(_layer)]', '_subwindow->allow(hasMetalLayer(_layer))')
         method=method.replace('[_subwindow sharedCGLWindow]', '_subwindow->shared').replace('[_subwindow nativeWindow]', '_subwindow->native')
+        method=method.replace('[_subwindow respondsToSelector: @selector(updateDisplayTiming)]', 'true')
+        method=method.replace('[_subwindow respondsToSelector: @selector(invalidateDisplayTiming)]', 'true')
+        method=method.replace('[_subwindow updateDisplayTiming]', '_subwindow->updateTiming()')
+        method=method.replace('[_subwindow invalidateDisplayTiming]', '_subwindow->invalidateTiming()')
+        method=method.replace('[_subwindow displayTimingTarget]', 'uint64_t(42)')
         self.run_cpp(r'''
 #include <cassert>
+#include <cstdint>
 using BOOL=bool;
 using CGLContextObj=int;
 static int current=0,destroyed=0,created=0;
@@ -142,19 +148,24 @@ static void CGLDestroyWindow(void* surface) {assert(surface==(void*)10); destroy
 static void* CGLGetWindow(void*) {++created; return (void*)10;}
 static void CGLContextMakeCurrentAndAttachToWindow(int c,void*) {current=c;}
 static bool hasMetalLayer(int layer) {return layer!=0;}
-struct Subwindow {void* shared=nullptr; void* native=(void*)2; void allow(bool enabled) {assert(enabled);} };
+static void DGTimingBind(uint64_t,uint64_t) {}
+struct Subwindow {void* shared=nullptr; void* native=(void*)2; int invalidations=0;
+ void allow(bool enabled) {assert(enabled);} void updateTiming(){} void invalidateTiming(){++invalidations;} };
 struct Context {
  Subwindow* _subwindow; int _layer=1; int _glContext=1; void* _cglWindow=nullptr; bool _ownsCglWindow=false;
+ uint64_t _renderFrame=0;
  void update() {
 ''' + method.replace('CGLSetCurrentContext(NULL)', 'CGLSetCurrentContext(0)') + r'''
  }
 };
 int main() {
  Subwindow sub; Context c{&sub};
- c.update(); assert(created==1 && c._ownsCglWindow); // Ordinary clients still get a child.
- c.update(); assert(created==1 && destroyed==0);
+ c.update(); assert(created==1 && c._ownsCglWindow && c._renderFrame==1); // Ordinary clients still get a child.
+ c.update(); assert(created==1 && destroyed==0 && c._renderFrame==1);
+ assert(sub.invalidations==1);
  current=1; sub.shared=(void*)20;
- c.update(); assert(destroyed==1 && destroyedSurface==(void*)10 && !c._ownsCglWindow && current==1);
+ c.update(); assert(destroyed==1 && destroyedSurface==(void*)10 && !c._ownsCglWindow && current==1 && c._renderFrame==2);
+ assert(sub.invalidations==2);
  c.update(); assert(destroyed==1);
  sub.shared=(void*)30; c.update(); assert(destroyed==1 && c._cglWindow==(void*)30);
  sub.shared=nullptr; c.update(); assert(created==2 && destroyed==1 && c._ownsCglWindow);

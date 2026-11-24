@@ -275,6 +275,19 @@ static void *pumpFrames(void *arg) {
   free(snapshot);
   return NULL;
 }
+__attribute__((visibility("default"))) void
+DarlingXShmSetTiming(void *handle, uint32_t numerator, uint32_t denominator) {
+  Frame *f=handle;
+  if(!f || !f->gpuTarget)return;
+  DarlingNativePresentTarget *t=f->gpuTarget;
+  uint32_t seq=__atomic_load_n(&t->reserved[0],__ATOMIC_RELAXED);
+  seq=(seq+2)|DARLING_NATIVE_TIMING_V2;
+  __atomic_store_n(&t->reserved[0],seq|1,__ATOMIC_RELEASE);
+  __atomic_store_n(&t->reserved[4],numerator,__ATOMIC_RELAXED);
+  __atomic_store_n(&t->reserved[5],denominator,__ATOMIC_RELAXED);
+  __atomic_store_n(&t->reserved[0],seq&~1u,__ATOMIC_RELEASE);
+}
+
 __attribute__((visibility("default"))) int
 DarlingXShmStart(void *handle, Drawable target, GC gc, const char *path) {
   Frame *f = handle;
@@ -327,6 +340,7 @@ DarlingXShmStart(void *handle, Drawable target, GC gc, const char *path) {
           f->gpuTarget->visual = f->visualID;
           f->gpuTarget->flags = getenv("DARLING_GPU_SYNTHETIC_TARGET") ? 0x54455354 : 0;
           memset(f->gpuTarget->reserved, 0, sizeof(f->gpuTarget->reserved));
+          DarlingXShmSetTiming(f,60,1);
         }
       }
       close(fd);

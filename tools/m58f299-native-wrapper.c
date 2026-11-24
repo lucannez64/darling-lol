@@ -21,3 +21,7 @@ void *DarlingXShmGetDestroy(void) {
 void *DarlingXShmGetStart(void) {
   return _elfcalls->dlsym_fatal(handle, "DarlingXShmStart");
 }
+
+void *DarlingXShmGetSetTiming(void) {
+  return _elfcalls->dlsym_fatal(handle, "DarlingXShmSetTiming");
+}

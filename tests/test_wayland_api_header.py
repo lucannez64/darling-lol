@@ -9,7 +9,7 @@ GUEST_COPY = ROOT / 'build/darling-src/src/external/cocotron/AppKit/X11.backend/
 class WaylandApiHeader(unittest.TestCase):
     def test_header_defines_contract(self):
         text = SOURCE.read_text()
-        self.assertIn('#define DWL_API_VERSION 2', text)
+        self.assertIn('#define DWL_API_VERSION 3', text)
         self.assertIn('DarlingWaylandGetAPI', text)
 
     @unittest.skipUnless(GUEST_COPY.is_file(), 'cocotron DarlingWaylandAPI.h copy not present')

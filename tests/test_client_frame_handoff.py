@@ -358,7 +358,7 @@ static CGLContextObj CGLGetCurrentContext(void) { return mock_current_ctx; }
 static CGLContextObj CGLRetainContext(CGLContextObj c) { if (c) ++c->retain_count; return c; }
 static void CGLReleaseContext(CGLContextObj c) { if (c) --c->retain_count; }
 static uint64_t nativeMonotonicNS(void) { return mock_now_ns; }
-static uint64_t nativeRefreshIntervalNS(void) { return 16666667ull; }
+static uint64_t nativeRefreshIntervalNS(const DarlingNativePresentTarget *target) { return DarlingNativeNominalInterval(target); }
 static long __lolsys_syscall(long a, long b, long c, long d, long e, long f, int nr) {
     (void)a; (void)c; (void)d; (void)e; (void)f;
     if (nr == 228 && b) memset((void *)(uintptr_t)b, 0, sizeof(struct timespec));

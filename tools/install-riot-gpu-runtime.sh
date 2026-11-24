@@ -25,12 +25,9 @@ make -C build/darling-src/build/src/native GL -j4
 make -C build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices LaunchServices -j4
 # WebAudio gain, mixing, filters and FFTs need real vDSP kernels, not stubs.
 make -C build/darling-src/build/src/frameworks/Accelerate/vecLib/vDSP vDSP -j4
-python3 tools/build-m58f327-opengl.py
-python3 tools/build-m58f336-quartzcore.py
-python3 tools/build-m58f341-corevideo.py
-python3 tools/build-riot-x11-runtime.py
+# Timing's private ABI must be linked and installed as one candidate set.
+python3 tools/build-display-timing-runtime.py
 python3 tools/build-riot-appkit-runtime.py
-python3 tools/build-riot-coregraphics-runtime.py
 python3 tools/build-riot-coretext-runtime.py
 python3 tools/build-riot-carboncore-runtime.py
 python3 tools/build-riot-corefoundation-runtime.py
@@ -62,13 +59,13 @@ for name in IOSurface OpenGL QuartzCore CoreVideo CoreAudio AudioToolbox CoreGra
  if [ ! -f "$binary.before-gpu-direct" ]; then cp -p "$binary" "$binary.before-gpu-direct"; fi
  case "$name" in
  IOSurface) source=build/m333-IOSurface;;
- OpenGL) source=build/m327-OpenGL;;
+  OpenGL) source=build/display-timing-runtime/OpenGL;;
  # Use the artifact rebuilt by this invocation, not an older optional probe build.
- QuartzCore) source=build/m336-QuartzCore;;
- CoreVideo) source=build/m341-CoreVideo;;
+  QuartzCore) source=build/display-timing-runtime/QuartzCore;;
+  CoreVideo) source=build/display-timing-runtime/CoreVideo;;
  CoreAudio) source=build/riot-CoreAudio;;
  AudioToolbox) source=build/riot-AudioToolbox;;
- CoreGraphics) source=build/riot-CoreGraphics;;
+  CoreGraphics) source=build/display-timing-runtime/CoreGraphics;;
  CoreText) source=build/riot-CoreText;;
  CoreFoundation) source=build/riot-CoreFoundation;;
  Metal) source=build/riot-Metal;;
@@ -145,7 +142,7 @@ if [ ! -f "$appkit.before-gpu-direct" ]; then cp -p "$appkit" "$appkit.before-gp
 install -m755 build/riot-AppKit "$appkit.next"
 mv -f "$appkit.next" "$appkit"
 if [ ! -f "$x11.before-gpu-direct" ]; then cp -p "$x11" "$x11.before-gpu-direct"; fi
-install -m755 build/riot-X11 "$x11.next"
+install -m755 build/display-timing-runtime/X11 "$x11.next"
 mv -f "$x11.next" "$x11"
 kernel="$guest_home/RuntimeLibraries/libsystem_kernel.dylib"
 if [ ! -f "$kernel.before-gpu-direct" ]; then cp -p "$kernel" "$kernel.before-gpu-direct"; fi

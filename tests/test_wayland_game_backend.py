@@ -120,9 +120,8 @@ class WaylandGameBackend(unittest.TestCase):
 
     def test_pump_waits_on_the_wayland_fd_and_survives_a_lost_connection(self):
         display = added('X11Display.m')
-        self.assertIn('if (_occlusionDirty)\n        [self _updateOcclusion];\n'
-                      '    /* darling-lol: native Wayland events are drained on every pass that drains X events. */\n'
-                      '    if (_wayland)\n        [self waylandDispatchEvents];', display)
+        self.assertIn('if (_occlusionDirty)\n        [self _updateOcclusion];', display)
+        self.assertIn('if (_wayland)\n        [self waylandDispatchEvents];', display)
         self.assertIn('pfds[1].fd = [self waylandPollDescriptor];', display)
         self.assertIn('[self waylandPollTimeoutMillis]', display)
         wayland = added('X11DisplayWayland.m')

@@ -46,7 +46,7 @@ class WaylandShimBuild(unittest.TestCase):
     def check_api_table(self, library):
         header = (ROOT / 'tools/darling-wayland-api.h').read_text()
         declared = int(re.search(r'#define DWL_API_VERSION (\d+)', header).group(1))
-        self.assertEqual(declared, 2)
+        self.assertEqual(declared, 3)
         # struct dwl_api is a version word followed by function pointers, all 8 bytes on x86-64.
         body = header.split('struct dwl_api {', 1)[1].split('};', 1)[0]
         names = re.findall(r'\(\*(\w+)\)\(', body)

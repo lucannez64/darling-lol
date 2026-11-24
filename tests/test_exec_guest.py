@@ -26,7 +26,7 @@ REQUIRED = {
     # libgamemodeauto would load there, open its own sockets and contact the host daemon.
     'LD_PRELOAD': '/nonexistent/libgamemodeauto.so.0', 'LD_LIBRARY_PATH': '/nonexistent/opengl-driver/lib',
     'HOME': '/home/u', 'USER': 'u', 'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8',
-    'DPREFIX': '/home/u/.darling', 'RCLOL_REFRESH_HZ': '144', 'DYLD_LIBRARY_PATH': '/Users/u/RuntimeLibraries',
+    'DPREFIX': '/home/u/.darling', 'DYLD_LIBRARY_PATH': '/Users/u/RuntimeLibraries',
 }
 SESSION = {
     'TERM': 'xterm', 'STARSHIP_SESSION_KEY': 'host-prompt', 'AWS_PROFILE': 'host-profile',
@@ -110,6 +110,14 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(child['env']['SHELL'], '/bin/zsh')
         self.assertNotIn('RCLOL_FILTER_HOST_ENV', child['env'])
         self.assertNotIn('RCLOL_KEEP_HOST_ENV', child['env'])
+
+    def test_refresh_setting_reaches_the_guest_with_or_without_filtering(self):
+        for filtered in ('0', '1'):
+            for value in ('144', '59.94', 'invalid'):
+                with self.subTest(filter=filtered, value=value):
+                    child = self.run_helper({**REQUIRED, 'RCLOL_REFRESH_HZ': value,
+                                             'RCLOL_FILTER_HOST_ENV': filtered})
+                    self.assertEqual(child['env'].get('RCLOL_REFRESH_HZ'), value)
 
 
 if __name__ == '__main__':

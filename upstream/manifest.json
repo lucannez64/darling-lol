@@ -66,7 +66,7 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 137,
+      "modified_files": 138,
       "new_files": [
         "AppKit/NSAccessibilityCustomAction.m",
         "AppKit/NSColorSampler.m",
@@ -92,7 +92,9 @@
         "AppKit/X11.backend/WaylandWindow.m",
         "AppKit/X11.backend/X11DisplayWayland.m",
         "AppKit/X11.backend/RemoteFrameSlot.h",
-        "AppKit/X11.backend/RemoteFrameSlot.m"
+        "AppKit/X11.backend/RemoteFrameSlot.m",
+        "CoreGraphics/DarlingDisplayTiming.c",
+        "CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h"
       ]
     },
     {

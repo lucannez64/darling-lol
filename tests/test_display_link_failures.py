@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 import test_runtime_compatibility as runtime
+from test_display_link_timing import PROVIDER
 
 
 class DisplayLinkFailureChecks(unittest.TestCase):
@@ -46,6 +47,7 @@ static void releaseObject(CVDisplayLinkRef) { ++releases; }
 
 static int lock_calls, unlock_calls, closes, lock_mode, creates;
 static int clockOpen() { if(open_fds>=fd_limit)return -1; ++open_fds; return 42; }
+static uint64_t clockThreadID() { return 1; }
 static void clockClose(int) { ++closes; --open_fds; }
 static long clockRead(int, void *out, size_t size, off_t offset) {
     if (read_failure) return -5;
@@ -77,7 +79,7 @@ static void installFrameSinkBridge() {}
 '''
         main = r'''
 int main() {
-    records[0].magic=kStateMagic; records[0].version=2; records[0].refs=1;
+    records[0].magic=kStateMagic; records[0].version=3; records[0].refs=1;
     state.link=(void *)1; state.alive=1; state.refs=1;
     lock_mode=1;
     { CVStateGuard guard; assert(guard.fd == 42 && guard.locked); }
@@ -96,6 +98,7 @@ int main() {
         int calls=lock_calls;
         {
             CVCallbackScope scope(outer.fd);
+            assert(scope.ready && records[0].callbackThread == 1);
             CVStateGuard inner;
             assert(inner.fd == outer.fd && inner.borrowed && !inner.locked);
             assert(open_fds == 1 && lock_calls == calls);
@@ -103,8 +106,13 @@ int main() {
             assert(open_fds == 1 && lock_calls == calls);
         }
         assert(callbackClockFD == -1 && open_fds == 1 && unlock_calls == 0);
+        assert(records[0].callbackThread == 0);
     }
     assert(open_fds == 0 && closes == 1 && unlock_calls == 1);
+    write_failure=true;
+    { CVStateGuard guard; CVCallbackScope scope(guard.fd);
+      assert(!scope.ready && callbackClockFD == -1); }
+    write_failure=false;
     assert(CVDisplayLinkStart((void *)1) == kCVReturnError);
     assert(state.running == 0 && creates == 1);
     assert(CVDisplayLinkStart((void *)1) == kCVReturnSuccess);
@@ -129,7 +137,8 @@ int main() {
 '''
         record_start = source.index('struct CVLinkStateRec {')
         record_end = source.index('\n};', record_start) + 3
-        harness = harness.replace('// RECORD_DEFINITION', source[record_start:record_end])
+        harness = harness.replace('// RECORD_DEFINITION',
+                                  PROVIDER + source[record_start:record_end])
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
             (path / 'probe.cc').write_text(harness + bodies + main)

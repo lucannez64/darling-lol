@@ -13,6 +13,7 @@ make -C "$build_dir/src/external/cfnetwork/src" CFNetwork -j8
 make -C "$build_dir/src/external/configd/SystemConfiguration.fproj" SystemConfiguration -j8
 make -C "$build_dir/src/external/cocotron/QuartzCore" QuartzCore -j8
 make -C "$build_dir/src/external/cocotron/AppKit" AppKit X11_backend -j8
+python3 "$project_dir/tools/build-display-timing-runtime.py"
 cc -shared -fPIC -O3 -march=native -mtune=generic -Wall -Wextra \
   "-Wl,-soname,$project_dir/build/libdarling-xshm.so" \
   "$project_dir/tools/m58f299-xshm.c" -o "$project_dir/build/libdarling-xshm.next.so" \
@@ -42,7 +43,7 @@ if [ -f "$project_dir/build/libdarling-wayland.next.so" ] && [ -f "$project_dir/
   rm -f "$project_dir/build/libDarlingWayland.next.dylib"
 fi
 mkdir -p "$guest_home/RuntimeFrameworks"
-for framework in AppKit QuartzCore CoreFoundation SystemConfiguration CFNetwork; do
+for framework in AppKit QuartzCore CoreGraphics OpenGL CoreVideo CoreFoundation SystemConfiguration CFNetwork; do
   if [ ! -d "$guest_home/RuntimeFrameworks/$framework.framework" ]; then
     cp -a "@DARLING_SDK@/System/Library/Frameworks/$framework.framework" "$guest_home/RuntimeFrameworks/"
   fi
@@ -52,8 +53,10 @@ atomic_install() {
   mv -f "$2.next" "$2"
 }
 atomic_install "$build_dir/src/external/cocotron/AppKit/AppKit" "$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C/AppKit"
-atomic_install "$build_dir/src/external/cocotron/AppKit/X11" "$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C/Resources/Backends/X11.backend/Contents/MacOS/X11"
-atomic_install "$build_dir/src/external/cocotron/QuartzCore/QuartzCore" "$guest_home/RuntimeFrameworks/QuartzCore.framework/Versions/A/QuartzCore"
+atomic_install "$project_dir/build/display-timing-runtime/X11" "$guest_home/RuntimeFrameworks/AppKit.framework/Versions/C/Resources/Backends/X11.backend/Contents/MacOS/X11"
+for framework in CoreGraphics OpenGL CoreVideo QuartzCore; do
+  atomic_install "$project_dir/build/display-timing-runtime/$framework" "$guest_home/RuntimeFrameworks/$framework.framework/Versions/A/$framework"
+done
 
 atomic_install "$build_dir/src/external/corefoundation/CoreFoundation" "$guest_home/RuntimeFrameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
 

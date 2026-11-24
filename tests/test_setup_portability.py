@@ -336,6 +336,10 @@ finally:
 
 
     def presentation_inputs(self):
+        for name in ('CoreGraphics', 'OpenGL', 'CoreVideo', 'QuartzCore', 'X11'):
+            path = self.root / 'build/display-timing-runtime' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('paired timing library')
         for name in ('external/cocotron/AppKit/AppKit', 'external/cocotron/AppKit/X11',
                      'external/cocotron/QuartzCore/QuartzCore',
                      'external/corefoundation/CoreFoundation',
@@ -347,6 +351,7 @@ finally:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('library')
         for framework, version in (('AppKit', 'C'), ('QuartzCore', 'A'),
+                                   ('CoreGraphics', 'A'), ('OpenGL', 'A'), ('CoreVideo', 'A'),
                                    ('CoreFoundation', 'A'), ('SystemConfiguration', 'A'),
                                    ('CFNetwork', 'A')):
             path = self.root / 'sdk/System/Library/Frameworks' / (framework + '.framework')

@@ -12,6 +12,25 @@ archive into another prefix or into a staging directory for a distribution
 package. It never includes Riot's game files, the Darling base runtime under
 `/usr/local`, or the prefix identity (serial, MLB, UUID, ROM).
 
+## Display timing runtime
+
+CoreGraphics, OpenGL, CoreVideo, QuartzCore, AppKit's X11 backend and the native
+Wayland bridge share private timing contracts. Build and install them together,
+with the runtime stopped. `python3 tools/build-display-timing-runtime.py` builds
+the complete candidate set without installing it or launching a probe. Both
+runtime installers consume those candidates after their existing stop step.
+Do not copy just CoreVideo or one new backend into an older active runtime.
+
+The overlay archive below carries the frameworks under `RuntimeFrameworks`.
+The native ELF transports and guest wrappers are installed by the paired runtime
+installer outside those archive roots and must be rebuilt/installed together on
+the destination; the archive alone does not update the Wayland bridge.
+
+`RCLOL_REFRESH_HZ` keeps its upstream override, launcher detection and guest
+forwarding behavior. Explicit or launcher-detected values take precedence;
+when it is absent, timing follows the associated output at runtime. Details
+and verification limits are in the [display timing note](notes/display-timing-and-presentation.md).
+
 ## Export on a machine that built the runtime
 
 ```sh

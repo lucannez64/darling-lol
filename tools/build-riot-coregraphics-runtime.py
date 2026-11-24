@@ -11,12 +11,17 @@ for line in (folder / 'CMakeFiles/CoreGraphics.dir/flags.make').read_text().spli
         key, value = line.split(' = ', 1)
         flags[key] = shlex.split(value)
 link = shlex.split((folder / 'CMakeFiles/CoreGraphics.dir/link.txt').read_text())
-for name in ('CGDirectDisplay', 'CGSubWindow'):
+for name in ('CGDirectDisplay', 'CGSubWindow', 'DarlingDisplayTiming'):
+    suffix = 'c' if name == 'DarlingDisplayTiming' else 'm'
     obj = root / f'build/riot-{name}.o'
     subprocess.run(['clang', *flags['C_DEFINES'], *flags['C_INCLUDES'], *flags['C_FLAGS'],
                     '-O2', '-Wno-macro-redefined', '-c',
-                    str(root / f'build/darling-src/src/external/cocotron/CoreGraphics/{name}.m'),
+                    str(root / f'build/darling-src/src/external/cocotron/CoreGraphics/{name}.{suffix}'),
                     '-o', str(obj)], check=True)
-    link[link.index(f'CMakeFiles/CoreGraphics.dir/{name}.m.o')] = str(obj)
+    old = f'CMakeFiles/CoreGraphics.dir/{name}.{suffix}.o'
+    if old in link:
+        link[link.index(old)] = str(obj)
+    else:
+        link.append(str(obj))
 link[link.index('-o') + 1] = str(root / 'build/riot-CoreGraphics')
 subprocess.run(link, cwd=folder, check=True)

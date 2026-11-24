@@ -4316,10 +4316,10 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba226..a50629bad 100644
+index 3e9cba22..a20d3660 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,941 @@
+@@ -1,38 +1,1087 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -4340,7 +4340,9 @@ index 3e9cba226..a50629bad 100644
 +#import <dispatch/dispatch.h>
  #include <CoreGraphics/CGWindow.h>
  #include <CoreGraphics/CGDirectDisplay.h>
- 
++#include <CoreGraphics/DarlingDisplayTiming.h>
++#include <limits.h>
++
 +/*
 + * M58b FrameSink bridge.
 + *
@@ -4934,7 +4936,7 @@ index 3e9cba226..a50629bad 100644
 +__attribute__((constructor)) static void installFrameSinkBridgeAtLoad(void) {
 +	installFrameSinkBridge();
 +}
-+
+ 
  static const NSString* kDirectDisplayArray = @"CGDirectDisplay";
  
 +/*
@@ -4949,11 +4951,10 @@ index 3e9cba226..a50629bad 100644
 + * loaded instances is the HOST filesystem (/dev/shm via shm_open, used by
 + * the M58b IOSurface work, and fileports via the M58 kobject machinery).
 + *
-+ * So the shim keeps NO guest-side state. The display link's state lives in
-+ * a per-pid host file; Create/Start/SetOutputCallback/Stop are trivial side
-+ * effects on that file; the runloop timer fires every 1/60 s and reads the
-+ * file fresh each tick, invoking Chromium's callback with a plausible
-+ * CVTimeStamp. The timer itself fires (verified: continuous ~60 Hz records).
++ * Lifecycle, display/context bindings and per-link deadlines live in a host
++ * file identified by the process and its birth ticks. The pump reads private
++ * CoreGraphics timing snapshots; backend queries stay on backend threads.
++ * Each link has its own rational display period and presentation prediction.
 + */
 +
 +#include <CoreVideo/CVDisplayLink.h>
@@ -4990,6 +4991,14 @@ index 3e9cba226..a50629bad 100644
 +	uint32_t refs;
 +	uint64_t reserved;
 +    CVDisplayLinkRef link;
++    uint32_t displayID, timingReserved;
++    uint64_t context, bindingSerial;
++    DGTimingCache timing;
++    uint64_t deadlineNS, remainder, periodNumerator, periodDenominator;
++    uint64_t scheduledGeneration, scheduledTarget, scheduledOutputID;
++    uint64_t feedbackCounter, lastCurrentNS, lastOutputNS;
++    uint64_t callbackThread;
++    int64_t callbackDescriptor;
 +};
 +static const uint32_t kStateMagic = 0xC81DFA10u;
 +static const uint32_t kStateVersion = 1;
@@ -5013,42 +5022,69 @@ index 3e9cba226..a50629bad 100644
 +	if (fd >= 0) { write(fd, msg, strlen(msg)); close(fd); }
 +}
 +
++extern "C" long __lolsys_syscall(long,long,long,long,long,long,int);
 +static const char* statePathFor(void) {
-+	static char path[128];
-+	static bool init = false;
-+	if (!init) {
-+		snprintf(path, sizeof(path), "/dev/shm/darling-cvlink-%d.state",
-+		    (int) getpid());
-+		init = true;
-+	}
-+	return path;
++    // Include host process birth, so pid reuse cannot resurrect callback pointers.
++    static __thread char path[192];
++    uint64_t birth = DGTimingHostProcessBirth();
++    if (!birth) return NULL;
++    unsigned pid = (unsigned)__lolsys_syscall(0,0,0,0,0,0,39);
++    unsigned uid = (unsigned)__lolsys_syscall(0,0,0,0,0,0,102);
++    snprintf(path, sizeof(path), "/dev/shm/darling-cvlink-v3-%u-%u-%llu.state", uid, pid,
++             (unsigned long long)birth);
++    return path;
 +}
 +
 +/* These private records live in the host /dev/shm. Bypass recursive guest
 + * path expansion on Chromium's small callback stacks, and avoid frame-time RPC. */
 +extern "C" long __lolsys_syscall(long,long,long,long,long,long,int);
-+static int clockOpen(void) { return (int)__lolsys_syscall((long)statePathFor(),66,0600,0,0,0,2); }
++static int clockOpen(void) {
++    const char* path = statePathFor();
++    return path ? (int)__lolsys_syscall((long)path,0xA0000|66,0600,0,0,0,2) : -1;
++}
 +static void clockClose(int fd) { __lolsys_syscall(fd,0,0,0,0,0,3); }
 +static long clockRead(int fd,void *p,size_t n,off_t offset) { return __lolsys_syscall(fd,(long)p,n,offset,0,0,17); }
 +static long clockWrite(int fd,const void *p,size_t n,off_t offset) { return __lolsys_syscall(fd,(long)p,n,offset,0,0,18); }
 +static int clockFlock(int fd,int op) { return (int)__lolsys_syscall(fd,op,0,0,0,0,73); }
++static uint64_t clockThreadID(void) { return (uint64_t)__lolsys_syscall(0,0,0,0,0,0,186); }
 +/* The first record owns the process-wide lock and slot count. Every link has
 + * its own record after it: Chromium uses separate links for its Viz and GPU
 + * threads even on one display. A process-wide callback silently drops one. */
 +static bool readHeader(int fd, CVLinkStateRec *out) {
 +    return clockRead(fd, out, sizeof(*out), 0) == sizeof(*out) &&
-+        out->magic == kStateMagic && out->version == 2;
++        out->magic == kStateMagic && out->version == 3;
 +}
 +static off_t slotOffset(uint32_t slot) {
 +    return ((off_t)slot + 1) * sizeof(CVLinkStateRec);
 +}
-+// Callback reentrancy belongs to the calling thread, not a fallible file
-+// record. Borrow the pump's locked descriptor; other threads still lock it.
++// TLS handles same-instance reentry. The host record also identifies the
++// callback thread for another loaded framework view; other threads still lock.
 +static __thread int callbackClockFD = -1;
++static bool readHeader(int fd, CVLinkStateRec *out);
 +struct CVCallbackScope {
-+    int previous;
-+    explicit CVCallbackScope(int fd) : previous(callbackClockFD) { callbackClockFD = fd; }
-+    ~CVCallbackScope() { callbackClockFD = previous; }
++    int previous, descriptor;
++    uint64_t previousThread;
++    int64_t previousDescriptor;
++    bool ready;
++    explicit CVCallbackScope(int fd) : previous(callbackClockFD), descriptor(fd),
++        previousThread(0), previousDescriptor(0), ready(false) {
++        CVLinkStateRec header;
++        if(!readHeader(fd,&header))return;
++        previousThread=header.callbackThread;previousDescriptor=header.callbackDescriptor;
++        header.callbackThread=clockThreadID();header.callbackDescriptor=fd;
++        if(!header.callbackThread || clockWrite(fd,&header,sizeof header,0)!=sizeof header)return;
++        callbackClockFD=fd;ready=true;
++    }
++    ~CVCallbackScope() {
++        if(ready) {
++            CVLinkStateRec header;
++            if(readHeader(descriptor,&header)) {
++                header.callbackThread=previousThread;header.callbackDescriptor=previousDescriptor;
++                clockWrite(descriptor,&header,sizeof header,0);
++            }
++        }
++        callbackClockFD=previous;
++    }
 +};
 +struct CVStateGuard {
 +    int fd; bool locked; bool borrowed;
@@ -5056,6 +5092,13 @@ index 3e9cba226..a50629bad 100644
 +        if (borrowed) return;
 +        fd = clockOpen();
 +        if (fd < 0) return;
++        CVLinkStateRec header, owner;
++        if(readHeader(fd,&header) && header.callbackThread==clockThreadID() &&
++            header.callbackDescriptor>=0 && header.callbackDescriptor!=fd &&
++            readHeader((int)header.callbackDescriptor,&owner) &&
++            owner.callbackThread==header.callbackThread && owner.callbackDescriptor==header.callbackDescriptor) {
++            clockClose(fd);fd=(int)header.callbackDescriptor;borrowed=true;return;
++        }
 +        int result;
 +        do { result = clockFlock(fd, LOCK_EX); } while (result == -4); // Linux EINTR.
 +        locked = result == 0;
@@ -5096,14 +5139,15 @@ index 3e9cba226..a50629bad 100644
 +    return written;
 +}
 +__attribute__((constructor)) static void initializeDisplayClockRecord(void) {
-+    int fd = clockOpen();
-+    if (fd < 0) return;
++    CVStateGuard guard;
++    if (guard.fd < 0) return;
 +    CVLinkStateRec header = {};
-+    header.magic = kStateMagic; header.version = 2; header.alive = 1;
-+    clockWrite(fd, &header, sizeof(header), 0);
-+    clockClose(fd);
++    // A second loaded framework instance must preserve live registrations.
++    if (readHeader(guard.fd, &header)) return;
++    header.magic = kStateMagic; header.version = 3; header.alive = 1;
++    clockWrite(guard.fd, &header, sizeof(header), 0);
 +}
-+static bool registerDisplayLink(CVDisplayLinkRef link) {
++static bool registerDisplayLink(CVDisplayLinkRef link, CGDirectDisplayID displayID = 0) {
 +    CVStateGuard guard;
 +    CVLinkStateRec header, current;
 +    if (guard.fd < 0 || !readHeader(guard.fd, &header)) return false;
@@ -5114,7 +5158,7 @@ index 3e9cba226..a50629bad 100644
 +    }
 +    CVLinkStateRec rec = {};
 +    rec.magic = kStateMagic; rec.version = kStateVersion;
-+    rec.alive = 1; rec.refs = 1; rec.link = link;
++    rec.alive = 1; rec.refs = 1; rec.link = link; rec.displayID = displayID;
 +    if (clockWrite(guard.fd, &rec, sizeof(rec), slotOffset(slot)) != sizeof(rec)) return false;
 +    if (slot == header.refs) {
 +        ++header.refs;
@@ -5126,57 +5170,156 @@ index 3e9cba226..a50629bad 100644
 +static const char* displayLinkTick =
 +    "displayLinkTick"; /* marker so grep can find the tick body */
 +
-+static void displayLinkTickFromRec(CVLinkStateRec* rec) {
-+	CVDisplayLinkOutputCallback callback = (CVDisplayLinkOutputCallback) rec->callback;
-+	if (traceLog != NULL) {
-+		/* darling-lol M58d: full continuity logging while the begin-frame
-+		 * stall is under diagnosis (previously capped at 32 records). */
-+		traceLog("PUMP cb=%p ticks=%llu\n", (uint64_t) callback, rec->ticks);
-+	}
-+	if (callback != NULL && rec->running && rec->refs) {
-+		rec->ticks++;
-+		struct mach_timebase_info timebase;
-+		mach_timebase_info(&timebase);
-+		uint64_t periodNs = 1000000000ull / 60ull;
-+		uint64_t periodMach = periodNs * timebase.denom / timebase.numer;
++struct DisplayLinkClock {
++    struct mach_timebase_info timebase;
++    DisplayLinkClock() { mach_timebase_info(&timebase); }
++    uint64_t toNS(uint64_t ticks) const {
++        return (uint64_t)((__uint128_t)ticks * timebase.numer / timebase.denom);
++    }
++    uint64_t toMach(uint64_t ns) const {
++        return (uint64_t)(((__uint128_t)ns * timebase.denom + timebase.numer - 1) /
++                          timebase.numer);
++    }
++    uint64_t nowNS() const { return toNS(mach_absolute_time()); }
++    CVTimeStamp stamp(uint64_t ns, uint64_t periodNS) const {
++        CVTimeStamp value = {};
++        value.hostTime = toMach(ns);
++        value.videoTime = ns;
++        value.videoTimeScale = 1000000000;
++        value.videoRefreshPeriod = periodNS;
++        value.rateScalar = 1.0;
++        value.flags = kCVTimeStampHostTimeValid | kCVTimeStampVideoTimeValid |
++                      kCVTimeStampVideoRefreshPeriodValid | kCVTimeStampRateScalarValid;
++        return value;
++    }
++};
 +
-+		uint64_t hostTime = mach_absolute_time();
-+		CVTimeStamp now = {};
-+		now.version = 0;
-+		now.hostTime = hostTime;
-+		now.videoTime = hostTime / periodMach;
-+		now.videoTimeScale = 60;
-+		now.videoRefreshPeriod = 1;
-+		now.flags = kCVTimeStampHostTimeValid | kCVTimeStampVideoTimeValid |
-+		    kCVTimeStampVideoRefreshPeriodValid;
-+		CVTimeStamp outputTime = now;
-+		outputTime.hostTime = hostTime + periodMach;
-+        outputTime.videoTime = now.videoTime + 1;
-+		CVOptionFlags flagsOut = 0;
-+		callback(rec->link, &now, &outputTime, 0, &flagsOut, rec->userInfo);
-+	} else {
-+		rec->nullTicks++;
-+	}
++static const DisplayLinkClock& displayLinkClock() {
++    static const DisplayLinkClock clock;
++    return clock;
 +}
 +
-+/* Invoke every running link under the shared, callback-reentrant lock.
-+ * External Stop/Release wait for callbacks; a callback may stop itself or a
-+ * different link. Re-read each slot before invoking it and preserve mutations
-+ * made by callbacks instead of writing an old snapshot over them. */
++static DGTimingSnapshot displayLinkTiming(CVLinkStateRec* rec) {
++    DGTimingSnapshot timing = DGTimingRead(rec->context, rec->displayID, &rec->timing);
++    // The provider labels the software fallback. Do not infer a rate from frames.
++    if (!(timing.flags & DG_TIMING_NOMINAL) || !timing.rateNumerator ||
++        !timing.rateDenominator) {
++        timing = {};
++        timing.flags = DG_TIMING_NOMINAL | DG_TIMING_SOFTWARE;
++        timing.rateNumerator = 60; timing.rateDenominator = 1;
++    }
++    return timing;
++}
++
++static uint64_t displayLinkPeriod(const DGTimingSnapshot& timing) {
++    __uint128_t period = (__uint128_t)1000000000 * timing.rateDenominator /
++                         timing.rateNumerator;
++    return period > INT64_MAX ? INT64_MAX : period ? (uint64_t)period : 1;
++}
++
++static void advanceDisplayDeadline(CVLinkStateRec* rec, uint64_t now) {
++    // Accumulate the fractional nanosecond instead of rounding Hz or each cycle.
++    __uint128_t numerator = rec->periodNumerator;
++    __uint128_t denominator = rec->periodDenominator;
++    __uint128_t steps = (__uint128_t)(now - rec->deadlineNS) * denominator /
++                        numerator + 1;
++    __uint128_t increment = steps * numerator + rec->remainder;
++    rec->deadlineNS += (uint64_t)(increment / denominator);
++    rec->remainder = (uint64_t)(increment % denominator);
++    if (rec->deadlineNS <= now) {
++        increment = numerator + rec->remainder;
++        rec->deadlineNS += (uint64_t)(increment / denominator);
++        rec->remainder = (uint64_t)(increment % denominator);
++    }
++}
++
++static bool prepareDisplayDeadline(CVLinkStateRec* rec, const DGTimingSnapshot& timing,
++                                   uint64_t now) {
++    __uint128_t product = (__uint128_t)1000000000 * timing.rateDenominator;
++    // Defensive bounds only protect record arithmetic; ordinary rational rates stay exact.
++    uint64_t numerator = product <= UINT64_MAX ? (uint64_t)product : displayLinkPeriod(timing);
++    uint64_t denominator = product <= UINT64_MAX ? timing.rateNumerator : 1;
++    if (numerator < denominator) { numerator = denominator; }
++    bool changed = rec->periodNumerator != numerator || rec->periodDenominator != denominator ||
++        rec->scheduledGeneration != timing.generation || rec->scheduledTarget != timing.target ||
++        rec->scheduledOutputID != timing.outputID;
++    bool alreadyDue = !changed && rec->deadlineNS <= now;
++    if (changed) {
++        rec->periodNumerator = numerator; rec->periodDenominator = denominator;
++        rec->scheduledGeneration = timing.generation; rec->scheduledTarget = timing.target;
++        rec->scheduledOutputID = timing.outputID;
++        rec->deadlineNS = now; rec->remainder = 0; rec->feedbackCounter = 0;
++    }
++    uint32_t feedbackFlags = DG_TIMING_FEEDBACK | DG_TIMING_FIXED | DG_TIMING_COUNTER;
++    uint64_t period = displayLinkPeriod(timing);
++    uint64_t maxAge = period > UINT64_MAX / 8 ? UINT64_MAX : period * 8;
++    if (maxAge < 1000000000) maxAge = 1000000000;
++    bool eligible = (timing.flags & feedbackFlags) == feedbackFlags &&
++        timing.presentationCounter && timing.presentationNS <= now &&
++        now - timing.presentationNS <= maxAge;
++    if (eligible && timing.presentationCounter > rec->feedbackCounter) {
++        rec->feedbackCounter = timing.presentationCounter;
++        __uint128_t cycle = (__uint128_t)(now - timing.presentationNS) * denominator /
++                            numerator + 1;
++        __uint128_t delta = cycle * numerator;
++        rec->deadlineNS = timing.presentationNS + (uint64_t)(delta / denominator);
++        rec->remainder = (uint64_t)(delta % denominator);
++        if (rec->deadlineNS <= now) advanceDisplayDeadline(rec, now);
++    }
++    // A new observation at an already due cycle must not perpetually postpone it.
++    return alreadyDue || rec->deadlineNS <= now;
++}
++
++static void displayLinkTickFromRec(CVLinkStateRec* rec) {
++    if (!rec->running || !rec->refs) return;
++    const auto& clock = displayLinkClock();
++    uint64_t nowNS = clock.nowNS();
++    if (nowNS < rec->lastCurrentNS) nowNS = rec->lastCurrentNS;
++    DGTimingSnapshot timing = displayLinkTiming(rec);
++    if (!prepareDisplayDeadline(rec, timing, nowNS)) return;
++    if (rec->deadlineNS <= nowNS) advanceDisplayDeadline(rec, nowNS);
++    CVDisplayLinkOutputCallback callback = (CVDisplayLinkOutputCallback) rec->callback;
++    if (!callback) { ++rec->nullTicks; return; }
++    ++rec->ticks;
++    rec->lastCurrentNS = nowNS;
++    uint64_t outputNS = rec->deadlineNS;
++    if (outputNS <= rec->lastOutputNS) outputNS = rec->lastOutputNS + 1;
++    rec->lastOutputNS = outputNS;
++    uint64_t periodNS = displayLinkPeriod(timing);
++    CVTimeStamp now = clock.stamp(nowNS, periodNS);
++    CVTimeStamp outputTime = clock.stamp(outputNS, periodNS);
++    CVOptionFlags flagsOut = 0;
++    callback(rec->link, &now, &outputTime, 0, &flagsOut, rec->userInfo);
++}
++
++/* Invoke under the lifecycle lock; the timing provider's independent try-lock
++ * is released before callbacks. Callback setters/stop/release remain reentrant. */
 +static void dispatchTimerFire(void *) {
 +    CVStateGuard guard;
 +    CVLinkStateRec header;
 +    if (guard.fd < 0 || !readHeader(guard.fd, &header)) return;
 +    CVCallbackScope callbacks(guard.fd);
++    if(!callbacks.ready)return;
 +    for (uint32_t i = 0; i < header.refs; ++i) {
 +        CVLinkStateRec rec;
 +        if (clockRead(guard.fd, &rec, sizeof(rec), slotOffset(i)) != sizeof(rec)) break;
-+        if (!rec.alive) continue;
++        if (!rec.alive || !rec.running) continue;
 +        displayLinkTickFromRec(&rec);
 +        CVLinkStateRec current;
 +        if (readState(guard.fd, &current, rec.link)) {
-+            current.ticks = rec.ticks;
-+            current.nullTicks = rec.nullTicks;
++            if (current.bindingSerial == rec.bindingSerial) {
++                current.timing = rec.timing;
++                current.deadlineNS = rec.deadlineNS; current.remainder = rec.remainder;
++                current.periodNumerator = rec.periodNumerator;
++                current.periodDenominator = rec.periodDenominator;
++                current.scheduledGeneration = rec.scheduledGeneration;
++                current.scheduledTarget = rec.scheduledTarget;
++                current.scheduledOutputID = rec.scheduledOutputID;
++                current.feedbackCounter = rec.feedbackCounter;
++            }
++            if (current.lastCurrentNS < rec.lastCurrentNS) current.lastCurrentNS = rec.lastCurrentNS;
++            if (current.lastOutputNS < rec.lastOutputNS) current.lastOutputNS = rec.lastOutputNS;
++            current.ticks = rec.ticks; current.nullTicks = rec.nullTicks;
 +            writeState(guard.fd, &current);
 +        }
 +    }
@@ -5184,30 +5327,33 @@ index 3e9cba226..a50629bad 100644
 +
 +/* Keep callbacks off Darling's dispatch trampoline: Chromium can leave its
 + * emulated workqueue with less than a page of usable stack. */
-+static void *displayClockThread(void *) {
-+    struct { long sec, nsec; } deadline;
-+    if (__lolsys_syscall(1,(long)&deadline,0,0,0,0,228)<0) return NULL;
-+    static uint64_t cvIntervalNS = 0;
-+    if (!cvIntervalNS) {
-+        const char *hz = getenv("RCLOL_REFRESH_HZ");
-+        int rate = hz ? atoi(hz) : 0;
-+        cvIntervalNS = (rate > 0 && rate <= 1000) ? 1000000000ull / (uint64_t)rate : (1000000000ull / 60ull);
++static uint64_t displayClockSleepNS(void) {
++    uint64_t now = displayLinkClock().nowNS();
++    uint64_t wait = 16000000; // Observe association changes at least every 16 ms.
++    CVStateGuard guard;
++    CVLinkStateRec header;
++    if (guard.fd < 0 || !readHeader(guard.fd, &header)) return wait;
++    for (uint32_t i = 0; i < header.refs; ++i) {
++        CVLinkStateRec rec;
++        if (clockRead(guard.fd, &rec, sizeof(rec), slotOffset(i)) != sizeof(rec)) break;
++        if (!rec.alive || !rec.running) continue;
++        uint64_t remaining = rec.deadlineNS > now ? rec.deadlineNS - now : 1;
++        if (remaining < wait) wait = remaining;
 +    }
++    return wait;
++}
++
++static void *displayClockThread(void *) {
 +    for (;;) {
-+        deadline.nsec += cvIntervalNS;
-+        if(deadline.nsec>=NSEC_PER_SEC){deadline.nsec-=NSEC_PER_SEC;++deadline.sec;}
++        dispatchTimerFire(NULL);
++        uint64_t interval = displayClockSleepNS();
++        struct { long sec, nsec; } deadline;
++        if (__lolsys_syscall(1,(long)&deadline,0,0,0,0,228)<0) return NULL;
++        deadline.nsec += interval;
++        if (deadline.nsec >= 1000000000) { deadline.nsec -= 1000000000; ++deadline.sec; }
 +        long result;
 +        do { result=__lolsys_syscall(1,1,(long)&deadline,0,0,0,230); } while(result==-4);
-+        if(result<0) return NULL;
-+        dispatchTimerFire(NULL);
-+        struct { long sec, nsec; } now;
-+        if(__lolsys_syscall(1,(long)&now,0,0,0,0,228)==0) {
-+            long long diffNS = ((long long)now.sec - (long long)deadline.sec) * 1000000000LL + (now.nsec - deadline.nsec);
-+            if (diffNS > (long long)cvIntervalNS) {
-+                deadline.sec = now.sec;
-+                deadline.nsec = now.nsec;
-+            }
-+        }
++        if (result<0) return NULL;
 +    }
 +}
 +static bool InstallDispatchPump(void) {
@@ -5269,7 +5415,7 @@ index 3e9cba226..a50629bad 100644
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,35 +944,102 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,112 +1090,212 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
@@ -5287,16 +5433,25 @@ index 3e9cba226..a50629bad 100644
 +    rec.running = 1;
 +    if (!writeState(guard.fd, &rec)) return kCVReturnError;
 +
-+    // The clock thread is shared, but callback and running state are per link.
-+    static bool started = false;
-+    if (!started) {
-+        if (!InstallDispatchPump()) {
++    // Header ownership is host-backed too: loaded instances share one pump.
++    CVLinkStateRec header;
++    if (!readHeader(guard.fd, &header)) return kCVReturnError;
++    if (!header.reserved) {
++        header.reserved = 1;
++        if (clockWrite(guard.fd, &header, sizeof(header), 0) != sizeof(header)) {
 +            rec.running = 0;
 +            writeState(guard.fd, &rec);
 +            return kCVReturnError;
 +        }
-+        started = true;
++        if (!InstallDispatchPump()) {
++            header.reserved = 0;
++            clockWrite(guard.fd, &header, sizeof(header), 0);
++            rec.running = 0;
++            writeState(guard.fd, &rec);
++            return kCVReturnError;
++        }
 +    }
++
  	return kCVReturnSuccess;
  }
  
@@ -5327,10 +5482,13 @@ index 3e9cba226..a50629bad 100644
 -	// TODO
 -	return true;
 +	return rec.running != 0;
-+}
-+
+ }
+ 
+-void CVDisplayLinkRelease(CVDisplayLinkRef displayLink)
 +CVDisplayLinkRef CVDisplayLinkRetain(CVDisplayLinkRef displayLink)
-+{
+ {
+-	NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
+-	[self release];
 +    if (!displayLink) return NULL;
 +    CVStateGuard guard;
 +    CVLinkStateRec rec;
@@ -5341,10 +5499,11 @@ index 3e9cba226..a50629bad 100644
 +    return displayLink;
  }
  
- void CVDisplayLinkRelease(CVDisplayLinkRef displayLink)
+-CVReturn CVDisplayLinkSetOutputCallback(CVDisplayLinkRef displayLink, CVDisplayLinkOutputCallback callback, void *userInfo)
++void CVDisplayLinkRelease(CVDisplayLinkRef displayLink)
  {
--	NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
--	[self release];
+-	// TODO
+-	return kCVReturnSuccess;
 +    if (!displayLink) return;
 +    CVStateGuard guard;
 +    CVLinkStateRec rec;
@@ -5360,16 +5519,36 @@ index 3e9cba226..a50629bad 100644
 +    [(NSMutableDictionary*) displayLink release];
  }
  
+-CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef displayLink, CGLContextObj cglContext, CGLPixelFormatObj cglPixelFormat)
 +/* Creation, retain and release maintain the live link count. Stop cancels
 + * callbacks; callback-side Stop is reentrant, while outside Stop/Release wait
 + * for the active callback before clearing or destroying its registration. */
 +
- CVReturn CVDisplayLinkSetOutputCallback(CVDisplayLinkRef displayLink, CVDisplayLinkOutputCallback callback, void *userInfo)
++CVReturn CVDisplayLinkSetOutputCallback(CVDisplayLinkRef displayLink, CVDisplayLinkOutputCallback callback, void *userInfo)
  {
--	// TODO
-+	if (!displayLink)
-+		return kCVReturnInvalidArgument;
-+
+ 	if (!displayLink)
+ 		return kCVReturnInvalidArgument;
+ 
+-	NSArray *windowArray = [[NSClassFromString(@"NSApplication") sharedApplication] windows];
+-	if (!windowArray)
+-		return kCVReturnError;
+-
+-	for (NSWindow* window in windowArray)
+-	{
+-		CGWindow* cgw = [window platformWindow];
+-		CGLContextObj ctxt = [cgw cglContext];
+-		if (ctxt == cglContext)
+-		{
+-			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
+-			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
+-
+-			[self setObject: @[[NSNumber numberWithInt: displayID]]
+-					forKey: kDirectDisplayArray];
+-			return kCVReturnSuccess;
+-		}
+-	}
+-	
+-	return kCVReturnError;
 +    CVStateGuard guard;
 +    if (guard.fd < 0) return kCVReturnError;
 +	CVLinkStateRec rec;
@@ -5380,19 +5559,57 @@ index 3e9cba226..a50629bad 100644
 +	rec.userInfo = userInfo;
 +    if (!writeState(guard.fd, &rec)) return kCVReturnError;
 +	traceLog("SETOUT cb=%p pid_ok\n", (uint64_t) callback, 0);
- 	return kCVReturnSuccess;
++	return kCVReturnSuccess;
  }
  
-@@ -91,7 +1061,7 @@ CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef disp
- 			CGDirectDisplayID displayID = [window.screen cgDirectDisplayID];
- 			NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
+-CGDirectDisplayID CVDisplayLinkGetCurrentCGDisplay( CVDisplayLinkRef CV_NONNULL displayLink )
++CVReturn CVDisplayLinkSetCurrentCGDisplay(CVDisplayLinkRef displayLink, CGDirectDisplayID displayID)
+ {
+-	if (!displayLink)
+-		return kCVReturnInvalidArgument;
++    if (!displayLink) return kCVReturnInvalidArgument;
++    CVStateGuard guard;
++    CVLinkStateRec rec;
++    if (guard.fd < 0 || !readState(guard.fd, &rec, displayLink)) return kCVReturnError;
++    rec.displayID = displayID;
++    rec.context = 0;
++    ++rec.bindingSerial;
++    rec.timing = {}; rec.periodNumerator = 0;
++    return writeState(guard.fd, &rec) ? kCVReturnSuccess : kCVReturnError;
++}
  
--			[self setObject: @[[NSNumber numberWithInt: displayID]]
-+			[self setObject: @[[NSNumber numberWithInt: (int)(displayID != 0 ? displayID : 1)]]
- 					forKey: kDirectDisplayArray];
- 			return kCVReturnSuccess;
- 		}
-@@ -117,14 +1087,34 @@ CVReturn CVDisplayLinkCreateWithCGDisplay(
+-	NSMutableDictionary* self = (NSMutableDictionary*) displayLink;
+-	NSArray* ids = self[kDirectDisplayArray];
++CVReturn CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(CVDisplayLinkRef displayLink,
++                                                         CGLContextObj cglContext,
++                                                         CGLPixelFormatObj cglPixelFormat)
++{
++    if (!displayLink || !cglContext) return kCVReturnInvalidArgument;
++    CVStateGuard guard;
++    CVLinkStateRec rec;
++    if (guard.fd < 0 || !readState(guard.fd, &rec, displayLink)) return kCVReturnError;
++    rec.context = (uint64_t)(uintptr_t)cglContext;
++    rec.displayID = 0;
++    ++rec.bindingSerial;
++    rec.timing = {}; rec.periodNumerator = 0;
++    return writeState(guard.fd, &rec) ? kCVReturnSuccess : kCVReturnError;
++}
+ 
+-	if ([ids count] > 0)
+-		return (CGDirectDisplayID) [[ids firstObject] intValue];
+-	return kCGNullDirectDisplay;
++CGDirectDisplayID CVDisplayLinkGetCurrentCGDisplay(CVDisplayLinkRef displayLink)
++{
++    if (!displayLink) return kCGNullDirectDisplay;
++    CVStateGuard guard;
++    CVLinkStateRec rec;
++    if (guard.fd < 0 || !readState(guard.fd, &rec, displayLink)) return kCGNullDirectDisplay;
++    DGTimingSnapshot timing = displayLinkTiming(&rec);
++    writeState(guard.fd, &rec);
++    return timing.displayID ? timing.displayID : rec.displayID ? rec.displayID : 1;
+ }
+ 
+ CVReturn CVDisplayLinkCreateWithCGDisplay(
      CGDirectDisplayID displayID,
      CV_RETURNS_RETAINED_PARAMETER CVDisplayLinkRef CV_NULLABLE * CV_NONNULL displayLinkOut )
  {
@@ -5421,7 +5638,7 @@ index 3e9cba226..a50629bad 100644
 +			close(fd);
 +		}
 +	}
-+	if (!registerDisplayLink((CVDisplayLinkRef)self)) {
++	if (!registerDisplayLink((CVDisplayLinkRef)self, displayID)) {
 +        [self release];
 +        return kCVReturnAllocationFailed;
 +    }
@@ -5430,31 +5647,52 @@ index 3e9cba226..a50629bad 100644
  	return kCVReturnSuccess;
  }
  
-@@ -150,3 +1140,24 @@ CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONN
- 	CGDisplayModeRelease(mode);
- 	return time;
- }
-+
-+// darling-lol: linked by the current Riot Client. Report the current host time
-+// on the same 60 Hz video timeline the output callback uses.
+-CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod( CVDisplayLinkRef CV_NONNULL displayLink )
++CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod(CVDisplayLinkRef displayLink)
+ {
+-	CVTime time = { 0, 0, kCVTimeIsIndefinite };
+-	CGDirectDisplayID displayId = CVDisplayLinkGetCurrentCGDisplay(displayLink);
+-	if (displayId == kCGNullDirectDisplay)
+-		return time;
+-
+-	CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayId);
+-	if (!mode)
+-		return time;
+-
+-	double rate = CGDisplayModeGetRefreshRate(mode);
+-	if (rate < 1.0)
+-		rate = 60.0;
+-
+-	time.flags = 0;
+-	time.timeValue = 1.0;
+-	time.timeScale = rate;
++    CVTime value = { 0, 1000000000, kCVTimeIsIndefinite };
++    if (!displayLink) return value;
++    CVStateGuard guard;
++    CVLinkStateRec rec;
++    if (guard.fd < 0 || !readState(guard.fd, &rec, displayLink)) return value;
++    DGTimingSnapshot timing = displayLinkTiming(&rec);
++    writeState(guard.fd, &rec);
++    value.timeValue = displayLinkPeriod(timing); value.flags = 0;
++    return value;
++}
+ 
+-	CGDisplayModeRelease(mode);
+-	return time;
 +CVReturn CVDisplayLinkGetCurrentTime(CVDisplayLinkRef displayLink, CVTimeStamp* outTime)
 +{
-+	if (displayLink == NULL || outTime == NULL)
-+		return kCVReturnInvalidArgument;
-+	struct mach_timebase_info timebase;
-+	mach_timebase_info(&timebase);
-+	uint64_t periodMach = (1000000000ull / 60ull) * timebase.denom / timebase.numer;
-+	uint64_t hostTime = mach_absolute_time();
-+	memset(outTime, 0, sizeof(*outTime));
-+	outTime->hostTime = hostTime;
-+	outTime->videoTime = hostTime / periodMach;
-+	outTime->videoTimeScale = 60;
-+	outTime->videoRefreshPeriod = 1;
-+	outTime->rateScalar = 1.0;
-+	outTime->flags = kCVTimeStampHostTimeValid | kCVTimeStampVideoTimeValid |
-+	    kCVTimeStampVideoRefreshPeriodValid | kCVTimeStampRateScalarValid;
-+	return kCVReturnSuccess;
-+}
++    if (!displayLink || !outTime) return kCVReturnInvalidArgument;
++    CVStateGuard guard;
++    CVLinkStateRec rec;
++    if (guard.fd < 0 || !readState(guard.fd, &rec, displayLink)) return kCVReturnError;
++    DGTimingSnapshot timing = displayLinkTiming(&rec);
++    uint64_t now = displayLinkClock().nowNS();
++    if (now < rec.lastCurrentNS) now = rec.lastCurrentNS;
++    rec.lastCurrentNS = now;
++    if (!writeState(guard.fd, &rec)) return kCVReturnError;
++    *outTime = displayLinkClock().stamp(now, displayLinkPeriod(timing));
++    return kCVReturnSuccess;
+ }
 diff --git a/src/frameworks/CoreVideo/src/constants.c b/src/frameworks/CoreVideo/src/constants.c
 index 02f06704e..1bb9021e9 100644
 --- a/src/frameworks/CoreVideo/src/constants.c
@@ -7084,10 +7322,10 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe05..7dd45b17 100644
+index ffd7fe05..ec73204b 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
-@@ -2,11 +2,22 @@
+@@ -2,11 +2,23 @@
  #include <stdio.h>  // for fprintf(stderr, "unimplemented")
  
  #include <pthread.h>
@@ -7098,6 +7336,7 @@ index ffd7fe05..7dd45b17 100644
 +#include <sys/mman.h>
 +#include <sys/stat.h>
 +#include <OpenGL/DarlingNativePresent.h>
++#include <CoreGraphics/DarlingDisplayTiming.h>
 +extern long __lolsys_syscall(long,long,long,long,long,long,int);
 +
 +#define GL_GLEXT_PROTOTYPES 1
@@ -7111,7 +7350,7 @@ index ffd7fe05..7dd45b17 100644
  
  // Try to get the right (generic) type definitions.
  // In particular, we really want EGLNativeDisplayType to be void *,
-@@ -22,8 +33,79 @@
+@@ -22,8 +34,84 @@
  #define APPLE
  #define __APPLE__
  
@@ -7143,6 +7382,8 @@ index ffd7fe05..7dd45b17 100644
 +static EGLBoolean (*p_eglGetConfigs)(EGLDisplay, EGLConfig *, EGLint, EGLint *);
 +static const char *(*p_eglQueryString)(EGLDisplay, EGLint);
 +static EGLint (*p_eglGetError)(void);
++static void *(*p_eglGetProcAddress)(const char *);
++static EGLBoolean (*p_eglGetSyncValuesCHROMIUM)(EGLDisplay,EGLSurface,uint64_t*,uint64_t*,uint64_t*);
 +
 +static int native_egl_loaded;
 +static pthread_mutex_t native_egl_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -7171,6 +7412,9 @@ index ffd7fe05..7dd45b17 100644
 +            p_eglGetConfigs = (EGLBoolean (*)(EGLDisplay, EGLConfig *, EGLint, EGLint *)) dlsym(h, "eglGetConfigs");
 +            p_eglQueryString = (const char *(*)(EGLDisplay, EGLint)) dlsym(h, "eglQueryString");
 +            p_eglGetError = (EGLint (*)(void)) dlsym(h, "eglGetError");
++            p_eglGetProcAddress = (void *(*)(const char *)) dlsym(h, "eglGetProcAddress");
++            if(p_eglGetProcAddress)
++                p_eglGetSyncValuesCHROMIUM=(void*)p_eglGetProcAddress("eglGetSyncValuesCHROMIUM");
 +            native_egl_loaded = 1;
 +        }
 +    }
@@ -7191,7 +7435,7 @@ index ffd7fe05..7dd45b17 100644
  static EGLConfig config;
  static int num_config;
  
-@@ -34,6 +116,94 @@ static EGLint const attribute_list[] = {
+@@ -34,6 +122,94 @@ static EGLint const attribute_list[] = {
      EGL_NONE
  };
  
@@ -7286,7 +7530,7 @@ index ffd7fe05..7dd45b17 100644
  struct _CGLDisplay
  {
      EGLDisplay display;
-@@ -48,10 +218,21 @@ struct _CGLContextObj {
+@@ -48,10 +224,21 @@ struct _CGLContextObj {
      GLuint retain_count;
      pthread_mutex_t lock;
      EGLContext egl_context;
@@ -7308,7 +7552,7 @@ index ffd7fe05..7dd45b17 100644
  };
  
  struct _CGLPixelFormatObj {
-@@ -59,6 +240,24 @@ struct _CGLPixelFormatObj {
+@@ -59,6 +246,24 @@ struct _CGLPixelFormatObj {
      CGLPixelFormatAttribute *attributes;
  };
  
@@ -7333,7 +7577,7 @@ index ffd7fe05..7dd45b17 100644
  static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
      switch (attr) {
      case kCGLPFAAuxBuffers:
-@@ -69,6 +268,9 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
+@@ -69,6 +274,9 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
      case kCGLPFAAccumSize:
      case kCGLPFARendererID:
      case kCGLPFADisplayMask:
@@ -7343,7 +7587,7 @@ index ffd7fe05..7dd45b17 100644
          return 1;
      default:
          return 0;
-@@ -78,6 +280,7 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
+@@ -78,6 +286,7 @@ static inline int attribute_has_argument(CGLPixelFormatAttribute attr) {
  __attribute__((constructor))
  static void _CGLInitialize(void)
  {
@@ -7351,7 +7595,7 @@ index ffd7fe05..7dd45b17 100644
      g_displays = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
  }
  
-@@ -91,43 +294,151 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
+@@ -91,43 +300,151 @@ static int attributes_count(const CGLPixelFormatAttribute *attrs) {
      return result;
  }
  
@@ -7377,13 +7621,12 @@ index ffd7fe05..7dd45b17 100644
 -    eglChooseConfig(display, attribute_list, &config, 1, &num_config);
 +    p_eglInitialize(display, NULL, NULL);
 +    chooseDefaultConfig(display, &config, &num_config, "CGLRegisterNativeDisplay");
- 
--    eglBindAPI(EGL_OPENGL_API);
++
 +    p_eglBindAPI(EGL_OPENGL_API);
- 
-     return kCGLNoError;
- }
- 
++
++    return kCGLNoError;
++}
++
 +/* A config can back an OpenGL window surface: EGL_WINDOW_BIT and EGL_OPENGL_BIT. */
 +static int configIsWindowGL(EGLDisplay disp, EGLConfig cfg) {
 +    EGLint surface_type = 0, renderable = 0;
@@ -7392,12 +7635,13 @@ index ffd7fe05..7dd45b17 100644
 +        p_eglGetConfigAttrib(disp, cfg, EGL_RENDERABLE_TYPE, &renderable) &&
 +        (surface_type & EGL_WINDOW_BIT) && (renderable & EGL_OPENGL_BIT);
 +}
-+
+ 
+-    eglBindAPI(EGL_OPENGL_API);
 +static CGLError waylandDisplayFailed(EGLint error) {
 +    fprintf(stderr, "darling-wayland: EGL Wayland display failed (0x%x)\n", (unsigned) error);
 +    return kCGLBadConnection;
 +}
-+
+ 
 +/* Only assigns the globals after every step succeeds; a failure leaves the
 + * previously registered display in place. */
 +CGLError CGLRegisterNativeWaylandDisplay(void *wl_display) {
@@ -7442,9 +7686,9 @@ index ffd7fe05..7dd45b17 100644
 +
 +    const char *vendor = p_eglQueryString ? p_eglQueryString(disp, EGL_VENDOR) : NULL;
 +    fprintf(stderr, "darling-wayland: EGL on the Wayland display (vendor %s)\n", vendor ? vendor : "?");
-+    return kCGLNoError;
-+}
-+
+     return kCGLNoError;
+ }
+ 
 +int CGLUsesWaylandDisplay(void) {
 +    return wayland_mode;
 +}
@@ -7511,7 +7755,7 @@ index ffd7fe05..7dd45b17 100644
  
          pthread_mutex_lock(&g_displaysMutex);
          CFDictionaryAddValue(g_displays, (const void*)(unsigned long) cid, rv);
-@@ -139,6 +450,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
+@@ -139,6 +456,8 @@ static struct _CGLDisplay* getCGLDisplay(CGSConnectionID cid)
  
  CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, CGSSurfaceID sid)
  {
@@ -7520,7 +7764,7 @@ index ffd7fe05..7dd45b17 100644
      struct _CGLDisplay* disp = getCGLDisplay(cid);
      if (!disp)
          return kCGLBadConnection;
-@@ -152,16 +465,17 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
+@@ -152,16 +471,17 @@ CGLError CGLSetSurface(CGLContextObj gl, CGSConnectionID cid, CGSWindowID wid, C
      if (!window)
          return kCGLBadWindow;
  
@@ -7540,7 +7784,7 @@ index ffd7fe05..7dd45b17 100644
  
      if (surface == EGL_NO_SURFACE) {
          return NULL;
-@@ -170,15 +484,78 @@ CGLWindowRef CGLGetWindow(void *native_window) {
+@@ -170,15 +490,78 @@ CGLWindowRef CGLGetWindow(void *native_window) {
      return (CGLWindowRef) surface;
  }
  
@@ -7621,7 +7865,7 @@ index ffd7fe05..7dd45b17 100644
  }
  
  static pthread_key_t current_context_key;
-@@ -198,18 +575,42 @@ CGLContextObj CGLGetCurrentContext(void) {
+@@ -198,18 +581,42 @@ CGLContextObj CGLGetCurrentContext(void) {
      return pthread_getspecific(key);
  }
  
@@ -7669,7 +7913,7 @@ index ffd7fe05..7dd45b17 100644
  }
  
  CGLError CGLSetFullScreen(CGLContextObj ctx) {
-@@ -223,11 +624,13 @@ CGLError CGLChoosePixelFormat(
+@@ -223,11 +630,13 @@ CGLError CGLChoosePixelFormat(
      CGLPixelFormatObj *result,
      GLint *number_of_screens
  ) {
@@ -7684,7 +7928,7 @@ index ffd7fe05..7dd45b17 100644
      for (int i = 0; i < count; i++) {
          format->attributes[i] = attrs[i];
      }
-@@ -251,6 +654,10 @@ CGLError CGLDescribePixelFormat(
+@@ -251,6 +660,10 @@ CGLError CGLDescribePixelFormat(
      CGLPixelFormatAttribute attr,
      GLint *value
  ) {
@@ -7695,7 +7939,7 @@ index ffd7fe05..7dd45b17 100644
      for (int i = 0; format->attributes[i] != 0; i++) {
          int has_arg = attribute_has_argument(format->attributes[i]);
  
-@@ -303,37 +710,101 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
+@@ -303,37 +716,101 @@ GLuint CGLGetPixelFormatRetainCount(CGLPixelFormatObj pixelFormat) {
      return pixelFormat->retain_count;
  }
  
@@ -7800,7 +8044,7 @@ index ffd7fe05..7dd45b17 100644
      return context;
  }
  
-@@ -342,11 +813,17 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -342,11 +819,19 @@ void CGLReleaseContext(CGLContextObj context) {
          return;
      }
  
@@ -7818,10 +8062,12 @@ index ffd7fe05..7dd45b17 100644
 +        else ++i;
 +    }
 +    pthread_mutex_unlock(&ioSurfaceBindingMutex);
++
++    DGTimingBind((uint64_t)(uintptr_t)context,0);
  
      if (CGLGetCurrentContext() == context) {
          CGLSetCurrentContext(NULL);
-@@ -354,7 +831,11 @@ void CGLReleaseContext(CGLContextObj context) {
+@@ -354,7 +839,11 @@ void CGLReleaseContext(CGLContextObj context) {
  
      pthread_mutex_destroy(&(context->lock));
  
@@ -7834,9 +8080,33 @@ index ffd7fe05..7dd45b17 100644
  
      free(context);
  }
-@@ -384,8 +865,351 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+@@ -383,9 +872,377 @@ CGLError CGLUnlockContext(CGLContextObj context) {
+     return kCGLNoError;
  }
  
++/* EGL_CHROMIUM_sync_control defines UST in monotonic microseconds. This is
++ * server presentation timing on Xwayland; no physical scanout is inferred. */
++static void recordEGLPresentation(CGLContextObj context) {
++    if(wayland_mode || !p_eglGetSyncValuesCHROMIUM || !p_eglQueryString)return;
++    const char *extensions=p_eglQueryString(context->egl_display,EGL_EXTENSIONS);
++    if(!extensions || !strstr(extensions,"EGL_CHROMIUM_sync_control"))return;
++    DGTimingCache cache={0};
++    DGTimingSnapshot s=DGTimingRead((uint64_t)(uintptr_t)context,0,&cache);
++    if(!s.target || !(s.flags&DG_TIMING_NOMINAL) || (s.flags&DG_TIMING_SOFTWARE))return;
++    uint64_t ust=0,msc=0,sbc=0;
++    if(!p_eglGetSyncValuesCHROMIUM(context->egl_display,context->egl_surface,&ust,&msc,&sbc) ||
++        !ust || !msc || !sbc || ust>UINT64_MAX/1000)return;
++    static __thread DGTimingClock mapping;
++    uint64_t ns;
++    if(!DGTimingMonotonicToMach(ust*1000,&mapping,&ns)) {
++        s.flags&=~(DG_TIMING_FEEDBACK|DG_TIMING_FIXED|DG_TIMING_COUNTER);
++        s.presentationNS=s.presentationCounter=0;DGTimingPublish(&s);return;
++    }
++    s.flags|=DG_TIMING_FEEDBACK|DG_TIMING_FIXED|DG_TIMING_COUNTER|DG_TIMING_X11_SERVER;
++    s.presentationNS=ns;s.presentationCounter=msc;
++    DGTimingPublish(&s);
++}
++
  CGLError CGLFlushDrawable(CGLContextObj context) {
 -    eglSwapBuffers(display,context->egl_surface);
 -    return kCGLNoError;
@@ -7849,7 +8119,9 @@ index ffd7fe05..7dd45b17 100644
 +    if (!context->swap_interval_requested && p_eglSwapInterval && CGLGetCurrentContext() == context) {
 +        p_eglSwapInterval(context->egl_display, 0);
 +    }
-+    return p_eglSwapBuffers(context->egl_display, context->egl_surface) ? kCGLNoError : kCGLBadState;
++    EGLBoolean swapped=p_eglSwapBuffers(context->egl_display,context->egl_surface);
++    if(swapped)recordEGLPresentation(context);
++    return swapped?kCGLNoError:kCGLBadState;
 +}
 +
 +static GLenum textureBindingEnum(GLenum target) {
@@ -8078,7 +8350,7 @@ index ffd7fe05..7dd45b17 100644
 +        if(__lolsys_syscall(1,(long)&now,0,0,0,0,228)==0){
 +            uint64_t current=(uint64_t)now.tv_sec*1000000000ull+now.tv_nsec;
 +            uint64_t deadline=ctx->native_next_present_ns;
-+            uint64_t paceNS=nativeRefreshIntervalNS();
++            uint64_t paceNS=nativeRefreshIntervalNS(target);
 +            if(!deadline || (current>deadline && current-deadline>paceNS))deadline=current;
 +            if(deadline>current){
 +                struct timespec wake={deadline/1000000000ull,deadline%1000000000ull};
@@ -8188,7 +8460,7 @@ index ffd7fe05..7dd45b17 100644
  }
  
  CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, const GLint *value) {
-@@ -395,9 +1219,16 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
+@@ -395,9 +1252,16 @@ CGLError CGLSetParameter(CGLContextObj context, CGLContextParameter parameter, c
      if (parameter == kCGLCPSwapInterval)
      {
          GLint v = *value;
@@ -8207,7 +8479,7 @@ index ffd7fe05..7dd45b17 100644
          return success ? kCGLNoError : kCGLBadValue;
      }
      fprintf(stderr, "CGLSetParameter unimplemented for parameter %d\n", parameter);
-@@ -417,14 +1248,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
+@@ -417,14 +1281,19 @@ CGLError CGLGetParameter(CGLContextObj context, CGLContextParameter parameter, G
      return kCGLNoError;
  }
  
@@ -10561,24 +10833,22 @@ new file mode 100644
 +}
 diff --git a/src/frameworks/OpenGL/CGLAsyncPresent.inc b/src/frameworks/OpenGL/CGLAsyncPresent.inc
 new file mode 100644
-index 000000000..e5363c06a
+index 00000000..3bbcc581
 --- /dev/null
 +++ b/src/frameworks/OpenGL/CGLAsyncPresent.inc
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,197 @@
 +/* Bounded GPU-only staging: the producer never waits for display cadence.
 + * Three textures cover the currently displayed, pending, and writing frames.
 + * GPU fences order both the completed producer copy and subsequent reuse. */
 +
-+/* darling-lol: software refresh period for the paced paths, from RCLOL_REFRESH_HZ
-+ * (1-1000 Hz). Unset or out of range keeps the previous 60 Hz period. */
-+static uint64_t nativeRefreshIntervalNS(void){
-+    static uint64_t interval;
-+    if(!interval){
-+        const char *hz=getenv("RCLOL_REFRESH_HZ");
-+        long rate=hz?strtol(hz,NULL,10):0;
-+        interval=(rate>0&&rate<=1000)?1000000000ull/(uint64_t)rate:16666667ull;
++/* The separate IOSurface presenter consumes only target nominal timing. */
++static uint64_t nativeRefreshIntervalNS(const DarlingNativePresentTarget *target){
++    const char *hz=getenv("RCLOL_REFRESH_HZ");
++    if(hz){
++        long rate=strtol(hz,NULL,10);
++        return (rate>0&&rate<=1000)?1000000000ull/(uint64_t)rate:16666667ull;
 +    }
-+    return interval;
++    return DarlingNativeNominalInterval(target);
 +}
 +
 +struct DarlingAsyncPresent {
@@ -10683,7 +10953,7 @@ index 000000000..e5363c06a
 +        /* Native VSync owns the refresh cadence; avoid a second clock that
 +         * can miss the compositor's next refresh after a variable swap wait. */
 +        if(nativeVSync)continue;
-+        uint64_t refreshNS=nativeRefreshIntervalNS();
++        uint64_t refreshNS=nativeRefreshIntervalNS(target);
 +        deadline += refreshNS;
 +        uint64_t now=nativeMonotonicNS();
 +        /* Preserve the refresh phase across small scheduling delays. Reset only
@@ -10761,19 +11031,15 @@ index 000000000..e5363c06a
 +    if(!complete || !produced || copyError!=GL_NO_ERROR){if(getenv("RCLOL_GPU_DIRECT_TRACE"))fprintf(stderr,"GPU_ASYNC copy_error=%u fence=%d\n",copyError,produced!=NULL);if(produced)glDeleteSync(produced);pthread_mutex_lock(&a->mutex);a->state[index]=0;pthread_mutex_unlock(&a->mutex);return 0;}
 +    pthread_mutex_lock(&a->mutex);
 +    a->produced[index]=produced;a->state[index]=1;a->serial[index]=++a->submissions;
-+    if(ctx->native_present_target)__atomic_fetch_add(&ctx->native_present_target->reserved[0],1,__ATOMIC_RELAXED);
-+    if(ctx->native_present_target){
-+        __atomic_store_n(&ctx->native_present_target->reserved[4],__atomic_load_n(&nativeUploadCount,__ATOMIC_RELAXED),__ATOMIC_RELAXED);
-+        __atomic_store_n(&ctx->native_present_target->reserved[5],__atomic_load_n(&nativeUploadMicroseconds,__ATOMIC_RELAXED),__ATOMIC_RELAXED);
-+    }
 +    pthread_mutex_unlock(&a->mutex);
 +    return 1;
 +}
 diff --git a/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h b/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h
 new file mode 100644
+index 00000000..df17a548
 --- /dev/null
 +++ b/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,25 @@
 +#ifndef DARLING_NATIVE_PRESENT_H
 +#define DARLING_NATIVE_PRESENT_H
 +#include <stdint.h>
@@ -10784,6 +11050,20 @@ new file mode 100644
 + uint32_t ready,presenter,sequence,visual;
 + uint32_t flags,reserved[7];
 +} DarlingNativePresentTarget;
++/* v2 reuses reserved words without changing the shared mapping's size.
++ * reserved[0] is the versioned sequence, [4]/[5] the target nominal rational.
++ * Readers make one attempt; a writer in progress falls back without spinning. */
++#define DARLING_NATIVE_TIMING_V2 0x80000000u
++static inline uint64_t DarlingNativeNominalInterval(const DarlingNativePresentTarget *target) {
++ if(!target)return 16666667ull;
++ uint32_t before=__atomic_load_n(&target->reserved[0],__ATOMIC_ACQUIRE);
++ if(!(before&DARLING_NATIVE_TIMING_V2) || (before&1))return 16666667ull;
++ uint32_t numerator=__atomic_load_n(&target->reserved[4],__ATOMIC_RELAXED);
++ uint32_t denominator=__atomic_load_n(&target->reserved[5],__ATOMIC_RELAXED);
++ uint32_t after=__atomic_load_n(&target->reserved[0],__ATOMIC_ACQUIRE);
++ if(before!=after || !numerator || !denominator)return 16666667ull;
++ return (1000000000ull*denominator+numerator/2)/numerator;
++}
 +#endif
 diff --git a/src/startup/mldr/commpage-cpu-caps.h b/src/startup/mldr/commpage-cpu-caps.h
 new file mode 100644

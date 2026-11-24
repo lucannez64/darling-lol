@@ -23,7 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DWL_API_VERSION 2 /* 2 adds popups, interactive move/resize, parents (client windows) */
+#define DWL_API_VERSION 3 /* 3 appends display timing and presentation transactions. */
 
 enum dwl_event_type {
     DWL_EVENT_NONE = 0,
@@ -92,6 +92,24 @@ struct dwl_output {
     int32_t refresh_mhz;
     int32_t scale;
     char name[64];
+};
+
+/* Version 3 timing is deliberately separate: neither dwl_output nor dwl_event
+ * changes size. Times are host CLOCK_MONOTONIC nanoseconds when CLOCK_MONOTONIC
+ * is valid, otherwise the raw presentation clock observation. Rates are Hz. */
+#define DWL_TIMING_NOMINAL          (1u << 0)
+#define DWL_TIMING_PRESENTATION     (1u << 1)
+#define DWL_TIMING_CLOCK_MONOTONIC  (1u << 2)
+#define DWL_TIMING_COUNTER          (1u << 3)
+#define DWL_TIMING_FIXED            (1u << 4)
+#define DWL_TIMING_VARIABLE         (1u << 5)
+#define DWL_TIMING_VSYNC            (1u << 6)
+struct dwl_timing {
+    uint32_t version, flags;
+    uint64_t output_id, surface_generation;
+    uint64_t rate_num, rate_den;
+    uint64_t presentation_ns, counter, refresh_ns;
+    uint32_t presentation_version, reserved;
 };
 
 struct dwl_api {
@@ -181,6 +199,21 @@ struct dwl_api {
     void (*window_set_parent)(int32_t window, int32_t parent);
     void (*window_set_maximized)(int32_t window, int maximized);
     void (*window_set_minimized)(int32_t window);
+
+    /* ---- version 3: main-thread-only timing and commit ownership ---- */
+    int (*window_get_timing)(int32_t window, struct dwl_timing *out);
+    int (*output_get_timing)(int index, struct dwl_timing *out);
+    /* Call immediately before EGL swaps the returned window's surface, and
+     * end immediately afterwards, including on failure. A nonzero token
+     * reserves commits on that surface; unrelated shim commits are deferred.
+     * Zero means ownership unavailable: still render, without feedback.
+     * A reservation need not create feedback (optional protocol/queue full).
+     * The EGL surface must have one owner; a caller unable to guarantee this
+     * must skip begin rather than attributing another owner's submission. */
+    uint64_t (*presentation_begin)(int32_t window, uint64_t surface_generation);
+    void (*presentation_end)(int32_t window, uint64_t token, int swap_success);
+    /* Hide, rebind or surface replacement cancels all outstanding feedback. */
+    void (*window_invalidate_timing)(int32_t window);
 };
 
 /* Exported by libDarlingWayland.dylib (guest) and as DarlingWaylandAPI by the host shim. Returns NULL
