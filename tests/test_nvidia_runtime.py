@@ -1,4 +1,4 @@
-"""Compile the patched native-thread signal bridge and completion budget policy."""
+"""Compile the patched native-thread signal bridge, completion budget policy and texture timeline policy."""
 import shutil
 import subprocess
 from pathlib import Path
@@ -200,3 +200,241 @@ int main() {
             subprocess.run(['c++', '-std=c++17', '-pthread', str(path/'poll.cpp'), '-o', str(path/'poll')],
                            check=True, capture_output=True)
             subprocess.run([str(path/'poll')], check=True, capture_output=True, timeout=10)
+
+
+@unittest.skipUnless(shutil.which('c++'), 'C++ compiler required')
+class TextureTimelineChecks(unittest.TestCase):
+    patched = sources.CompatibilityChecks.patched
+
+    def compiled(self, folder, text, name='check'):
+        path = Path(folder)
+        (path / (name + '.cpp')).write_text(text)
+        build = subprocess.run(['c++', '-std=c++17', '-pthread', '-I', str(path), str(path / (name + '.cpp')),
+                                '-o', str(path / name)], capture_output=True, text=True)
+        self.assertEqual(build.returncode, 0, build.stderr)
+        return str(path / name)
+
+    def test_nvidia_defaults_to_no_texture_timelines_and_the_files_are_read_once(self):
+        header = self.patched('metal--deps--indium', 'private-include/indium/texture-sync.private.hpp')
+        device = self.patched('metal--deps--indium', 'src/indium/device.cpp')
+        start = device.index('bool Indium::PrivateDevice::textureTimelines() const {')
+        method = device[start:device.index('\n}\n', start) + 3]
+        program = r'''
+#include "texture-sync.private.hpp"
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
+#define F_OK 0
+static bool forceOn, forceOff;
+static int lookups;
+static int test_access(const char* path, int) {
+    ++lookups;
+    if (!strcmp(path, "/tmp/metal-texture-timelines")) return forceOn ? 0 : -1;
+    if (!strcmp(path, "/tmp/metal-no-texture-timelines")) return forceOff ? 0 : -1;
+    return -1;
+}
+#define access test_access
+namespace Indium {
+class PrivateDevice {
+public:
+    struct { uint32_t vendorID; } _properties;
+    bool textureTimelines() const;
+};
+}
+''' + method + r'''
+int main(int argc, char** argv) {
+    using Indium::textureTimelinesWanted;
+    assert(!textureTimelinesWanted(0x10de, false, false));
+    assert(textureTimelinesWanted(0x1002, false, false) && textureTimelinesWanted(0x8086, false, false));
+    assert(textureTimelinesWanted(0x10de, true, false) && textureTimelinesWanted(0x10de, true, true));
+    assert(!textureTimelinesWanted(0x1002, false, true) && textureTimelinesWanted(0x1002, true, true));
+
+    assert(argc == 4);
+    forceOn = argv[2][0] == '1';
+    forceOff = argv[3][0] == '1';
+    const bool on = forceOn, off = forceOff;
+    Indium::PrivateDevice device, radeon;
+    device._properties.vendorID = strtoul(argv[1], nullptr, 16);
+    radeon._properties.vendorID = 0x1002;
+    assert(device.textureTimelines() == textureTimelinesWanted(device._properties.vendorID, on, off));
+    // a texture keeps the choice made when it was created, so the files must not be read again
+    forceOn = !forceOn;
+    forceOff = !forceOff;
+    assert(device.textureTimelines() == textureTimelinesWanted(device._properties.vendorID, on, off));
+    assert(radeon.textureTimelines() == textureTimelinesWanted(0x1002, on, off));
+    assert(lookups == 2);
+}
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'texture-sync.private.hpp').write_text(header)
+            check = self.compiled(folder, program)
+            for vendor in ('10de', '1002'):
+                for on in '01':
+                    for off in '01':
+                        result = subprocess.run([check, vendor, on, off], capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 0, (vendor, on, off, result.stderr))
+
+    def test_texture_without_a_timeline_adds_no_semaphore_operations(self):
+        texture = self.patched('metal--deps--indium', 'src/indium/texture.cpp')
+        self.assertIn('if (device->textureTimelines()) _syncSemaphore = device->getWrappedTimelineSemaphore();', texture)
+        acquire = texture[texture.index('const Indium::TimelineSemaphore& Indium::PrivateTexture::acquire('):
+                          texture.index('void Indium::PrivateTexture::beginUpdatingPresentationSemaphore(')]
+        program = r'''
+#include <cassert>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+struct VkSemaphore_T;
+using VkSemaphore = VkSemaphore_T*;
+#define VK_NULL_HANDLE nullptr
+namespace Indium {
+class PrivateDevice;
+struct TimelineSemaphore { std::shared_ptr<PrivateDevice> device; VkSemaphore semaphore; uint64_t count; };
+struct BinarySemaphore { std::shared_ptr<PrivateDevice> device; VkSemaphore semaphore; };
+class PrivateTexture {
+public:
+    std::mutex _syncMutex;
+    std::shared_ptr<TimelineSemaphore> _syncSemaphore;
+    std::shared_ptr<BinarySemaphore> _extraWaitSemaphore;
+    const TimelineSemaphore& acquire(uint64_t& waitValue, std::shared_ptr<BinarySemaphore>& extraWaitSemaphore, uint64_t& signalValue);
+};
+}
+''' + acquire + r'''
+int main() {
+    using namespace Indium;
+    const auto handle = reinterpret_cast<VkSemaphore>(uintptr_t(7));
+    uint64_t wait = 99, signal = 99;
+    std::shared_ptr<BinarySemaphore> extra;
+
+    // no timeline: nothing to wait on or signal, but a drawable's acquire semaphore is still handed over once
+    PrivateTexture bare;
+    bare._extraWaitSemaphore = std::make_shared<BinarySemaphore>();
+    const TimelineSemaphore& none = bare.acquire(wait, extra, signal);
+    assert(none.semaphore == VK_NULL_HANDLE && wait == 0 && signal == 0);
+    assert(extra && !bare._extraWaitSemaphore);
+    extra.reset();
+    bare.acquire(wait, extra, signal);
+    assert(!extra);
+
+    // with a timeline the values advance exactly as before
+    PrivateTexture owned;
+    owned._syncSemaphore = std::make_shared<TimelineSemaphore>(TimelineSemaphore { nullptr, handle, 4 });
+    const TimelineSemaphore& first = owned.acquire(wait, extra, signal);
+    assert(first.semaphore == handle && wait == 4 && signal == 5);
+    owned.acquire(wait, extra, signal);
+    assert(wait == 5 && signal == 6);
+}
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            result = subprocess.run([self.compiled(folder, program)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        commands = self.patched('metal--deps--indium', 'src/indium/command-buffer.cpp')
+        commit = commands[commands.index('void Indium::PrivateCommandBuffer::commit()'):]
+        extra_wait = commit.index('waitInfos.push_back(extraWaitInfo);')
+        skipped = commit.index('if (sema.semaphore == VK_NULL_HANDLE) return;')
+        self.assertLess(extra_wait, skipped)
+        self.assertLess(skipped, commit.index('waitInfo.semaphore = sema.semaphore;'))
+        self.assertLess(skipped, commit.index('signalInfo.semaphore = sema.semaphore;'))
+        unbatched = commit.split('if (Indium::submitBatchEnabled()) {', 1)[1].split('\n\t} else {', 1)[1]
+        barrier = unbatched.index('orderedInfos[orderedCount++].commandBuffer = submitBatchBarrier(_privateDevice);')
+        self.assertLess(unbatched.index('if (!_privateDevice->textureTimelines()) {'), barrier)
+        self.assertLess(barrier, unbatched.index('orderedInfos[orderedCount++] = commandBufferInfo;'))
+        self.assertIn('info.commandBufferInfoCount = orderedCount;\n\t\tinfo.pCommandBufferInfos = orderedInfos;', unbatched)
+
+    def test_a_batch_leads_with_the_barrier_only_without_texture_timelines(self):
+        commands = self.patched('metal--deps--indium', 'src/indium/command-buffer.cpp')
+        batch = commands[commands.index('std::vector<VkSemaphore> flushSubmitBatchLocked('):
+                         commands.index('// darling-lol: tunable batch window and size.')]
+        program = r'''
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <map>
+#include <memory>
+#include <vector>
+using VkSemaphore = uint64_t;
+using VkCommandBuffer = uint64_t;
+using VkFence = uint64_t;
+using VkQueue = int;
+using VkDevice = int;
+constexpr uint64_t VK_NULL_HANDLE = 0;
+constexpr int VK_SUCCESS = 0, VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO = 1, VK_STRUCTURE_TYPE_SUBMIT_INFO_2 = 2;
+struct VkSemaphoreSubmitInfo { int sType; VkSemaphore semaphore; uint64_t value; };
+struct VkCommandBufferSubmitInfo { int sType; VkCommandBuffer commandBuffer; };
+struct VkSubmitInfo2 {
+    int sType;
+    size_t commandBufferInfoCount; const VkCommandBufferSubmitInfo* pCommandBufferInfos;
+    size_t signalSemaphoreInfoCount; const VkSemaphoreSubmitInfo* pSignalSemaphoreInfos;
+    size_t waitSemaphoreInfoCount; const VkSemaphoreSubmitInfo* pWaitSemaphoreInfos;
+};
+static std::vector<VkCommandBuffer> submitted;
+static std::vector<VkSemaphoreSubmitInfo> waited, signalled;
+struct FrameIntervalSample { std::atomic<uint64_t> submitted {0}; };
+static uint64_t frameIntervalNow() { return 1; }
+static std::atomic<uint64_t> statSubmits {0};
+namespace Indium {
+struct PrivateDevice {
+    bool timelines = true;
+    bool textureTimelines() const { return timelines; }
+    VkDevice device() { return 0; }
+    VkQueue graphicsQueue() { return 0; }
+};
+static int globalInstance;
+struct BinaryRetirementSubmit { VkFence fence = 0; std::vector<VkSemaphore> destroy; };
+static BinaryRetirementSubmit beginBinaryRetirementSubmit(VkDevice) { return {}; }
+static void finishBinaryRetirementSubmit(VkDevice, VkQueue, BinaryRetirementSubmit&, bool) {}
+static void count(const char*, uint64_t) {}
+namespace DynamicVK {
+static void beginDiagnosticCapture(int) {}
+static void endDiagnosticCapture(bool) {}
+static int vkQueueSubmit2(VkQueue, uint32_t count, const VkSubmitInfo2* info, VkFence) {
+    assert(count == 1);
+    submitted.clear();
+    for (size_t i = 0; i < info->commandBufferInfoCount; ++i) submitted.push_back(info->pCommandBufferInfos[i].commandBuffer);
+    waited.assign(info->pWaitSemaphoreInfos, info->pWaitSemaphoreInfos + info->waitSemaphoreInfoCount);
+    signalled.assign(info->pSignalSemaphoreInfos, info->pSignalSemaphoreInfos + info->signalSemaphoreInfoCount);
+    return VK_SUCCESS;
+}
+}
+}
+struct PendingSubmit {
+    VkCommandBuffer commandBuffer = 0;
+    FrameIntervalSample* frameSample = nullptr;
+    std::vector<VkSemaphoreSubmitInfo> waits, signals;
+};
+struct SubmitBatchState {
+    std::vector<PendingSubmit> items;
+    std::map<VkSemaphore, uint64_t> signaled;
+    std::shared_ptr<Indium::PrivateDevice> device;
+    std::chrono::steady_clock::time_point since;
+};
+static SubmitBatchState& submitBatchState() { static SubmitBatchState state; return state; }
+static const VkCommandBuffer barrier = 900;
+static VkCommandBuffer submitBatchBarrier(const std::shared_ptr<Indium::PrivateDevice>&) { return barrier; }
+''' + batch + r'''
+using Order = std::vector<VkCommandBuffer>;
+static Order flushed(const std::shared_ptr<Indium::PrivateDevice>& device, size_t commandBuffers) {
+    for (size_t i = 0; i < commandBuffers; ++i)
+        appendSubmitBatchItemLocked(device, 10 + i, nullptr, {}, {{0, 50 + i, 1}});
+    flushSubmitBatchLocked();
+    assert(signalled.size() == commandBuffers && waited.empty());
+    return submitted;
+}
+int main() {
+    auto device = std::make_shared<Indium::PrivateDevice>();
+    // texture timelines carry the order between batches: a barrier only separates the items of one batch
+    assert(flushed(device, 1) == (Order {10}));
+    assert(flushed(device, 3) == (Order {10, barrier, 11, barrier, 12}));
+    // without them every batch starts with the barrier
+    device->timelines = false;
+    assert(flushed(device, 1) == (Order {barrier, 10}));
+    assert(flushed(device, 3) == (Order {barrier, 10, barrier, 11, barrier, 12}));
+    assert(flushSubmitBatchLocked().empty() && submitted.size() == 6);
+}
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            result = subprocess.run([self.compiled(folder, program)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)

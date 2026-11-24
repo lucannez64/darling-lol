@@ -1000,6 +1000,8 @@ On the NVIDIA proprietary driver, check the submit worker's kernel time: a threa
 The NVIDIA performance figures above were reported on an earlier runtime base;
 they have not been remeasured after integration with current `main`. On `bcb3245` an RTX 5060 Laptop reported ~200–215 FPS in Practice Tool ([#53](https://github.com/lucannez64/darling-lol/issues/53)). On a hybrid laptop, check the GPU mode first: PRIME render offload measured at less than half the frame rate of the MUX's discrete-only mode ([hybrid graphics](#prime-render-offload-halves-the-frame-rate)).
 
+Also on NVIDIA, check the CPU that takes the GPU interrupt. `/proc/interrupts` shows which one on its `nvidia` line; read that CPU's `hi` share in `top` (press `1` for per-CPU lines) or the sixth value of its line in `/proc/stat`. A CPU that spends most of a match in hard interrupts means the handler's list of semaphore listeners has grown with the textures loaded. Since 2026-11-24 NVIDIA devices run without texture timelines for that reason, and `/tmp/metal-texture-timelines` brings them back for a comparison ([setup](SETUP.md#game-process-switches)).
+
 ## darlingserver message loop and idle-wait switches
 
 darlingserver runs its message loop on io_uring when the build target's kernel

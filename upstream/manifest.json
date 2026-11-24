@@ -386,7 +386,8 @@
         "private-include/indium/completion-spin.private.hpp",
         "private-include/indium/vertex-input.private.hpp",
         "private-include/indium/black-trace.private.hpp",
-        "private-include/indium/slow-log.private.hpp"
+        "private-include/indium/slow-log.private.hpp",
+        "private-include/indium/texture-sync.private.hpp"
       ]
     },
     {
