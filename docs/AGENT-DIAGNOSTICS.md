@@ -142,7 +142,7 @@ Work in this order; stop at the first line that explains the observation.
 | Window size is the monitor, `_NET_WM_STATE_FULLSCREEN`, content black | the window was touched during startup, or presentation never composited | compare the child size; ask the user to leave and re-enter fullscreen once (that separates engine from compositor) |
 | Window size is neither the requested mode nor the monitor | stale size hints or an EWMH pin | `xprop` `WM_NORMAL_HINTS` and `_NET_WM_STATE` |
 | Content visible with the desktop around it | emulated smaller mode | expected; see above |
-| Pointer offset from the drawn target | window origin differs from the guest frame, or relative mode is off | ask for `RCLOL_INPUT_TRACE=1`, read `/tmp/rclol-input-trace.log` in the guest |
+| Pointer offset from the drawn target | window origin differs from the guest frame, or relative mode is off | create `/tmp/rclol-input-trace` in the guest before launch, then read `/tmp/rclol-input-trace.log`; `RCLOL_INPUT_TRACE=1` only adds separate stderr lines |
 
 Do not diagnose from a single sample of a window that is still being configured;
 take two samples a few seconds apart. Do not conclude that the compositor is
