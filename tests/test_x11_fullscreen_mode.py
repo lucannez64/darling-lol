@@ -159,3 +159,49 @@ int main() {
         wrapper = body(source, '- (NSArray *) screens')
         self.assertIn('@synchronized (self)', wrapper)
         self.assertIn('[self _screensLocked]', wrapper)
+
+    def test_display_mode_helper_is_declared_before_its_callers(self):
+        source = self.source('AppKit/X11.backend/X11Display.m')
+        declaration = ('static NSRect X11ScreenFrameForMode('
+                       'NSRect physicalFrame, NSSize mode);')
+        self.assertIn(declaration, source)
+        # The screen cache calls it before the definition; without this
+        # declaration the backend relies on an implicit function declaration.
+        self.assertLess(source.index(declaration),
+                        source.index('X11ScreenFrameForMode(physicalFrame'))
+
+    def test_emulated_primary_keeps_coregraphics_bounds_at_the_origin(self):
+        source = self.source('CoreGraphics/CGDirectDisplay.m')
+        convert = sources.function(source, 'globalRectForFrameOnPrimary')
+        self.run_cpp(r'''
+#include <cassert>
+struct NSPoint { double x,y; };
+struct NSSize { double width,height; };
+struct NSRect { NSPoint origin; NSSize size; };
+typedef NSRect CGRect;
+static NSRect NSMakeRect(double x,double y,double w,double h) {return {{x,y},{w,h}};}
+static CGRect CGRectMake(double x,double y,double w,double h) {return {{x,y},{w,h}};}
+static double NSMaxY(NSRect r) {return r.origin.y+r.size.height;}
+static bool NSIsEmptyRect(NSRect r) {return r.size.width<=0||r.size.height<=0;}
+''' + convert + r'''
+int main() {
+    /* A 1368x768 mode on a 1920x1080 primary reports (0,312,1368,768) in
+     * Cocoa coordinates; its CoreGraphics bounds still start at the origin. */
+    NSRect emulated=NSMakeRect(0,312,1368,768);
+    CGRect bounds=globalRectForFrameOnPrimary(emulated,emulated);
+    assert(bounds.origin.x==0 && bounds.origin.y==0);
+    assert(bounds.size.width==1368 && bounds.size.height==768);
+    /* A monitor beside the primary keeps its x and shares the top edge. */
+    NSRect secondary=NSMakeRect(1920,0,1920,1080);
+    CGRect beside=globalRectForFrameOnPrimary(emulated,secondary);
+    assert(beside.origin.x==1920 && beside.origin.y==0);
+    /* Without emulation the conversion is unchanged. */
+    NSRect native=NSMakeRect(0,0,1920,1080);
+    CGRect unchanged=globalRectForFrameOnPrimary(native,native);
+    assert(unchanged.origin.x==0 && unchanged.origin.y==0);
+    assert(unchanged.size.width==1920 && unchanged.size.height==1080);
+    /* An empty frame is passed through. */
+    CGRect none=globalRectForFrameOnPrimary(emulated,NSMakeRect(0,0,0,0));
+    assert(none.size.width==0 && none.size.height==0);
+}
+''')
