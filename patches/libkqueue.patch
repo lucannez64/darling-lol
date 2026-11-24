@@ -109,7 +109,7 @@ index f5d53a2..ca91b33 100644
          kqueue_unlock(kq);
  
 diff --git a/src/common/knote.c b/src/common/knote.c
-index a328f80..b9d186c 100644
+index a328f80..b54e92b 100644
 --- a/src/common/knote.c
 +++ b/src/common/knote.c
 @@ -33,7 +33,17 @@ knote_init(void)
@@ -193,7 +193,7 @@ index a328f80..b9d186c 100644
  
      pthread_rwlock_rdlock(&filt->kf_knote_mtx);
      ent = RB_FIND(knt, &filt->kf_knote, &query);
-@@ -160,3 +204,14 @@ knote_disable(struct filter *filt, struct knote *kn)
+@@ -160,3 +208,14 @@ knote_disable(struct filter *filt, struct knote *kn)
  
  //TODO: knote_enable()
  
@@ -209,7 +209,7 @@ index a328f80..b9d186c 100644
 +    return result;
 +}
 diff --git a/src/common/kqueue.c b/src/common/kqueue.c
-index 61cc9dc..5df71a9 100644
+index 61cc9dc..1788ae3 100644
 --- a/src/common/kqueue.c
 +++ b/src/common/kqueue.c
 @@ -23,6 +23,8 @@
@@ -237,7 +237,7 @@ index 61cc9dc..5df71a9 100644
      kqops.kqueue_free(kq);
      free(kq);
  }
-@@ -297,11 +301,26 @@ kqueue_dup(int oldfd, int newfd)
+@@ -297,19 +301,37 @@ kqueue_dup(int oldfd, int newfd)
  static void _kqueue_close_atfork_cb(int kqfd, void* kqptr, void* private)
  {
  	struct kqueue* kq = (struct kqueue*) kqptr;
@@ -267,7 +267,20 @@ index 61cc9dc..5df71a9 100644
  }
  
  void VISIBLE kqueue_atfork(void)
-@@ -329,6 +348,7 @@ void kqueue_delref(struct kqueue *kq)
+ {
++    // Mutexes are not valid after a fork, reset them to unlocked state
++    pthread_mutex_init(&kq_mtx, NULL);
++#ifdef DARLING
++    __darling_kqueue_listen_atfork();
++#endif
+     if (kqmap != NULL)
+     {
+-        // Mutexes are not valid after a fork, reset it to unlocked state
+-        pthread_mutex_init(&kq_mtx, NULL);
+         map_foreach(kqmap, _kqueue_close_atfork_cb, NULL);
+     }
+ }
+@@ -329,6 +351,7 @@ void kqueue_delref(struct kqueue *kq)
  int VISIBLE
  kqueue_impl(void)
  {
@@ -388,6 +401,65 @@ index 5c0718e..790fdec 100644
  int  knote_init(void);
  int  knote_disable(struct filter *, struct knote *);
  #define knote_get_filter(knt) &((knt)->kn_kq->kq_filt[(knt)->kev.filter])
+diff --git a/src/darling/listenregistry.c b/src/darling/listenregistry.c
+index 05b2b82..c8718b2 100644
+--- a/src/darling/listenregistry.c
++++ b/src/darling/listenregistry.c
+@@ -32,12 +32,12 @@ void __darling_kqueue_register_listen(int fd)
+     pthread_mutex_lock(&registry_mtx);
+ 
+     if (registry_vector == NULL) {
+-        registry_vector = malloc(REGISTRY_VECTOR_INITIAL_CAPACITY);
++        registry_vector = malloc(REGISTRY_VECTOR_INITIAL_CAPACITY * sizeof(int));
+         if (registry_vector == NULL)
+             goto quit;
+         registry_vector_capacity = REGISTRY_VECTOR_INITIAL_CAPACITY;
+     } else if (registry_vector_size == registry_vector_capacity) {
+-        int* newPtr = realloc(registry_vector, registry_vector_capacity * 2);
++        int* newPtr = realloc(registry_vector, registry_vector_capacity * 2 * sizeof(int));
+         if (newPtr == NULL)
+             goto quit;
+         registry_vector = newPtr;
+@@ -60,12 +60,25 @@ void __darling_kqueue_unregister_listen(int fd)
+ {
+     pthread_mutex_lock(&registry_mtx);
+ 
+-    for (size_t i = 0; i < registry_vector_size; ++i) {
+-        while (registry_vector[i] == fd) {
+-            registry_vector[i] = registry_vector[registry_vector_size];
++    for (size_t i = 0; i < registry_vector_size; ) {
++        if (registry_vector[i] == fd) {
+             --registry_vector_size;
++            registry_vector[i] = registry_vector[registry_vector_size];
++        } else {
++            ++i;
+         }
+     }
+ 
+     pthread_mutex_unlock(&registry_mtx);
+ }
++
++void __darling_kqueue_listen_atfork(void)
++{
++    /* Another thread may have held registry_mtx or been mutating registry_vector
++     * across fork()/posix_spawn(). Reinitialize the mutex and drop the inherited
++     * vector without freeing it so post-fork dup2()/close() never deadlocks. */
++    pthread_mutex_init(&registry_mtx, NULL);
++    registry_vector = NULL;
++    registry_vector_capacity = 0;
++    registry_vector_size = 0;
++}
+diff --git a/src/darling/listenregistry.h b/src/darling/listenregistry.h
+index 917f272..6af0bcb 100644
+--- a/src/darling/listenregistry.h
++++ b/src/darling/listenregistry.h
+@@ -6,5 +6,6 @@
+ bool VISIBLE __darling_kqueue_get_listen_status(int fd);
+ void VISIBLE __darling_kqueue_register_listen(int fd);
+ void VISIBLE __darling_kqueue_unregister_listen(int fd);
++void __darling_kqueue_listen_atfork(void);
+ 
+ #endif
 diff --git a/src/linux/machport.c b/src/linux/machport.c
 index 074958e..1e99023 100644
 --- a/src/linux/machport.c

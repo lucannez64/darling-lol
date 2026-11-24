@@ -443,6 +443,7 @@ if not keep_identity:
     archive_targets.extend([
         prefix / 'private/etc/darling-platform.plist',
         prefix / 'private/etc/darling-smbios.conf',
+        prefix / 'private/etc/darling-identity-salt',
         *identity_backups,
     ])
 
@@ -529,7 +530,10 @@ remove_targets = [
     prefix / 'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.update-status.json',
 ]
 if not keep_identity:
-    remove_targets.extend(identity_backups)
+    remove_targets.extend([
+        prefix / 'private/etc/darling-identity-salt',
+        *identity_backups,
+    ])
 
 caches_dir = guest / 'Library/Caches'
 if os.path.lexists(caches_dir) and not caches_dir.is_symlink() and parent_within_prefix(caches_dir) and safe_within(caches_dir):
