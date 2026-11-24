@@ -112,9 +112,9 @@ int main() {
         source = self.source('AppKit/X11.backend/X11Window.m')
         method = body(source, '- (BOOL) wantsFullscreenWithStyleMask: (NSUInteger) mask rootFrame: (O2Rect) frame')
         self.assertIn('X11ShouldRequestFullscreen(', method)
-        # Coverage must be the physical XRandR monitor: an emulated mode makes
-        # the NSScreen frame smaller, and EWMH would pin the window back.
-        self.assertIn('X11RootRectCoversMonitor(_display, frame)', method)
+        # Coverage must be the physical monitor: an emulated mode makes the
+        # NSScreen frame smaller, and EWMH would pin the window back.
+        self.assertIn('[display frameCoversPhysicalScreen: frame]', method)
         self.assertNotIn('[display screens]', method)
         self.assertNotIn('if (mask & NSWindowStyleMaskFullScreen) return YES;', method)
 
@@ -136,6 +136,18 @@ int main() {
                         method.index('pthread_main_np()'))
         self.assertLess(method.index('pthread_main_np()'),
                         method.index('[game setFrame: frame display: YES]'))
+        # The resize is a fallback: never touch a window the game has not mapped
+        # and sized to the monitor yet, and never "resize" to the native mode.
+        self.assertIn('NSEqualSizes(requested, physicalFrame.size)', method)
+        self.assertIn('if (![window isVisible]', method)
+        self.assertIn('NSEqualRects([window frame], physicalFrame)', method)
+
+    def test_physical_coverage_ignores_the_emulated_mode(self):
+        source = self.source('AppKit/X11.backend/X11Display.m')
+        method = body(source, '- (BOOL) frameCoversPhysicalScreen: (NSRect) frame')
+        self.assertIn('_physicalScreenFrames', method)
+        self.assertIn('[self rootRectForFrame: physical]', method)
+        self.assertNotIn('[screen frame]', method)
 
     def test_screens_apply_the_emulated_mode(self):
         source = self.source('AppKit/X11.backend/X11Display.m')
