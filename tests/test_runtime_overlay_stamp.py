@@ -10,6 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tests'))
+import git_environment  # noqa: E402
+
 spec = importlib.util.spec_from_file_location(
     'runtime_overlay_stamp', ROOT / 'tools/runtime-overlay-stamp.py')
 stamp = importlib.util.module_from_spec(spec)
@@ -66,6 +69,8 @@ def build_fixture(root):
 
 class OverlayStampTests(unittest.TestCase):
     def setUp(self):
+        # A hook can point Git at its own repository; keep the fixture here.
+        git_environment.isolate(self)
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.root = Path(self.folder.name)

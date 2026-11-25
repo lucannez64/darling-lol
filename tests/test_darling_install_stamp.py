@@ -9,6 +9,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tests'))
+import git_environment  # noqa: E402
+
 spec = importlib.util.spec_from_file_location(
     'darling_install_stamp', ROOT / 'tools/darling-install-stamp.py')
 stamp = importlib.util.module_from_spec(spec)
@@ -57,6 +60,8 @@ def build_fixture(root):
 
 class InstallStampTests(unittest.TestCase):
     def setUp(self):
+        # A hook can point Git at its own repository; keep the fixture here.
+        git_environment.isolate(self)
         self.folder = tempfile.TemporaryDirectory(prefix='install-stamp-')
         self.addCleanup(self.folder.cleanup)
         self.root = Path(self.folder.name)
