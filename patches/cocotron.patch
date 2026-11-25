@@ -17438,10 +17438,10 @@ index 0000000..9ab9ccd
 +@end
 diff --git a/AppKit/X11.backend/WaylandWindow.m b/AppKit/X11.backend/WaylandWindow.m
 new file mode 100644
-index 0000000..65dcd6e
+index 0000000..ff83c5d
 --- /dev/null
 +++ b/AppKit/X11.backend/WaylandWindow.m
-@@ -0,0 +1,1257 @@
+@@ -0,0 +1,1259 @@
 +/* darling-lol: a League game or client window served by native Wayland. See WaylandWindow.h. */
 +#import <AppKit/NSApplication.h>
 +#import <AppKit/NSMenuWindow.h>
@@ -18633,6 +18633,7 @@ index 0000000..65dcd6e
 +        _hostTimingGeneration=t.surface_generation;_timingOutput=t.output_id;
 +        _timingRateNum=t.rate_num;_timingRateDen=t.rate_den;
 +        memset(&_timingClock,0,sizeof _timingClock);
++        memset(&_publishedTiming,0,sizeof _publishedTiming);
 +    }
 +    if (!_timingGeneration || !memcmp(&t, &_publishedTiming, sizeof t)) return;
 +    DGTimingSnapshot s={0};s.target=[self displayTimingTarget];s.generation=_timingGeneration;
@@ -18647,7 +18648,8 @@ index 0000000..65dcd6e
 +        if(t.flags&DWL_TIMING_COUNTER)s.flags|=DG_TIMING_COUNTER;
 +        s.presentationCounter=t.counter;
 +    }
-+    if (DGTimingPublish(&s)) _publishedTiming = t;
++    int published = _publishedTiming.rate_num ? DGTimingTryPublish(&s) : DGTimingPublish(&s);
++    if (published) _publishedTiming = t;
 +}
 +
 +- (uint64_t) beginPresentationFor: (id) owner {

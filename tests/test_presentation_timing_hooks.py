@@ -163,8 +163,8 @@ int main(){
                 '[_layerDrawableOwners addObject: key]': '_layerDrawableOwners.insert(key)',
                 '[_layerDrawableOwners removeObject: key]': '_layerDrawableOwners.erase(key)',
                 '[_layerDrawableOwners count]': '_layerDrawableOwners.size()',
-                '[self invalidateDisplayTiming]': '++invalidations',
-                '[self updateDisplayTiming]': '(void)0',
+                '[self invalidateDisplayTiming]': '++hostGeneration',
+                '[self updateDisplayTiming]': '_hostTimingGeneration = hostGeneration',
             }.items():
                 body = body.replace(original, host)
             methods.append(declaration + '{' + body + '}')
@@ -173,20 +173,23 @@ int main(){
 #include <set>
 static dwl_api api{};
 static dwl_api *WaylandAPI(){return &api;}
+static uint64_t hostGeneration = 1;
 struct Window {
     int _dwlID=1;
     uint64_t _hostTimingGeneration=1;
-    unsigned invalidations=0;
     std::set<void*> _layerDrawableOwners;
 """ + '\n'.join(methods) + r"""
 };
 int main(){
     Window w; int a,b;
-    api.version=3;api.presentation_begin=[](int32_t,uint64_t){return uint64_t(17);};
+    api.version=3;
+    api.presentation_begin=[](int32_t,uint64_t generation){
+        return uint64_t(generation == hostGeneration ? 17 : 0);
+    };
     w.acquire(&a);assert(w.begin(&a)==17);w.acquire(&b);
     assert(w.begin(&a)==0 && w.begin(&b)==0);
     w.release(&a);assert(w.begin(&b)==17 && w.begin(&a)==0);
-    w.release(&a);w.acquire(&b);assert(w.invalidations==3);
+    w.release(&a);w.acquire(&b);assert(hostGeneration==4);
     w.release(&b);assert(w.begin(&b)==0);
 }
 """)
@@ -203,7 +206,7 @@ int main(){
 #include <cstring>
 static dwl_timing host{};
 static dwl_api api{};
-static unsigned invalidations, writes;
+static unsigned invalidations, writes, tries;
 static bool failWrite;
 static uint64_t target=1234;
 static int readTiming(int32_t, dwl_timing *out){*out=host;return 0;}
@@ -213,6 +216,9 @@ static uint32_t WaylandOutputDisplayID(uint64_t id){return id;}
 uint64_t DGTimingInvalidate(uint64_t value){assert(value==target);return ++invalidations;}
 int DGTimingPublish(const DGTimingSnapshot *snapshot){
     assert(snapshot->generation==invalidations); ++writes;return !failWrite;
+}
+int DGTimingTryPublish(const DGTimingSnapshot *snapshot){
+    assert(snapshot->generation==invalidations); ++tries;return !failWrite;
 }
 int DGTimingMonotonicToMach(uint64_t stamp,DGTimingClock*,uint64_t *result){
     *result=stamp;return 1;
@@ -235,10 +241,14 @@ int main(){
     failWrite=true;w.update();assert(writes==1 && invalidations==1);
     failWrite=false;w.update();w.update();assert(writes==2 && invalidations==1);
     host.flags|=DWL_TIMING_PRESENTATION|DWL_TIMING_CLOCK_MONOTONIC;
-    host.presentation_ns=44;w.update();w.update();assert(writes==3);
+    host.presentation_ns=44;failWrite=true;w.update();
+    assert(tries==1 && writes==2 && w._publishedTiming.presentation_ns==0);
+    failWrite=false;w.update();w.update();
+    assert(tries==2 && writes==2 && w._publishedTiming.presentation_ns==44);
+    ++host.output_id;w.update();assert(writes==3 && tries==2 && invalidations==2);
     ++host.surface_generation;host.flags=0;
-    w.update();w.update();assert(writes==3 && invalidations==2 && !w._timingRateNum);
-    host.flags=DWL_TIMING_NOMINAL;w.update();assert(writes==4 && invalidations==3);
+    w.update();w.update();assert(writes==3 && invalidations==3 && !w._timingRateNum);
+    host.flags=DWL_TIMING_NOMINAL;w.update();assert(writes==4 && invalidations==4);
 }
 """)
 
