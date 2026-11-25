@@ -92,18 +92,19 @@ index 4920879..d2c4a41 100644
  	-pthread
  	-Wl,--gc-sections
 diff --git a/duct-tape/CMakeLists.txt b/duct-tape/CMakeLists.txt
-index 5950c7f..cf4f1ba 100644
+index 5950c7f..97833a2 100644
 --- a/duct-tape/CMakeLists.txt
 +++ b/duct-tape/CMakeLists.txt
-@@ -268,6 +268,7 @@ add_library(darlingserver_duct_tape STATIC
+@@ -268,6 +268,8 @@ add_library(darlingserver_duct_tape STATIC
  	src/kqchan.c
  	src/semaphore.c
  	src/psynch.c
 +	src/fileport.c
++	src/kext_info.c
  	src/condvar.c
  	src/debug.c
  
-@@ -380,3 +381,9 @@ add_dependencies(darlingserver_duct_tape
+@@ -380,3 +382,9 @@ add_dependencies(darlingserver_duct_tape
  target_link_libraries(darlingserver_duct_tape PUBLIC
  	libsimple_darlingserver
  )
@@ -1231,7 +1232,7 @@ index afe60fc..02968b2 100644
  
  void Assert(const char* file, int line, const char* expression) {
 diff --git a/duct-tape/src/stubs.c b/duct-tape/src/stubs.c
-index dc1cfa5..39a8c8d 100644
+index dc1cfa5..3783f82 100644
 --- a/duct-tape/src/stubs.c
 +++ b/duct-tape/src/stubs.c
 @@ -37,9 +37,18 @@ extern char* getenv(const char* name);
@@ -1262,15 +1263,14 @@ index dc1cfa5..39a8c8d 100644
  		kind_info = " (unsafe)";
  	} else {
  		if (!log_safe_stubs) {
-@@ -210,11 +219,15 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
+@@ -209,12 +218,12 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
+ 	return KERN_NOT_SUPPORTED;
  };
  
- kern_return_t kext_request(host_priv_t hostPriv, uint32_t clientLogSpec, vm_offset_t requestIn, mach_msg_type_number_t requestLengthIn, vm_offset_t* responseOut, mach_msg_type_number_t* responseLengthOut, vm_offset_t* logDataOut, mach_msg_type_number_t* logDataLengthOut, kern_return_t* op_result) {
+-kern_return_t kext_request(host_priv_t hostPriv, uint32_t clientLogSpec, vm_offset_t requestIn, mach_msg_type_number_t requestLengthIn, vm_offset_t* responseOut, mach_msg_type_number_t* responseLengthOut, vm_offset_t* logDataOut, mach_msg_type_number_t* logDataLengthOut, kern_return_t* op_result) {
 -	dtape_stub_unsafe();
-+	// there are no kernel extensions to query or load; fail the request
-+	dtape_stub_safe();
-+	return KERN_NOT_SUPPORTED;
- };
+-};
++/* kext_request() is implemented in src/kext_info.c */
  
  uint32_t PE_i_can_has_debugger(uint32_t* something) {
 -	dtape_stub_unsafe();
@@ -7808,3 +7808,2044 @@ index 26bbb8f..6da6249 100644
  
  			return entry;
  		};
+diff --git a/duct-tape/src/kext_info.c b/duct-tape/src/kext_info.c
+new file mode 100644
+index 0000000..6dd46c4
+--- /dev/null
++++ b/duct-tape/src/kext_info.c
+@@ -0,0 +1,2035 @@
++/*
++ * darling-lol: kext_request() Mach server implementation for darlingserver
++ * duct-tape.
++ *
++ * Serves read-only OSKext query predicates ("Get Loaded Kext Info",
++ * "Get Loaded Kext Info By UUID", "Get Kexts in Collection",
++ * "Get Kext UUID by Address", "Get All Load Requests") using the standard
++ * Apple kext set matching the emulated MacBookPro16,1 / macOS 14.7 (23H124,
++ * Darwin 23.6.0, x86_64) platform identity. The catalog is served only under
++ * the compat hardware presentation profile (RCLOL_PLATFORM_PROFILE=compat);
++ * otherwise kext_request() stays unsupported, see dtape_kext_catalog_enabled().
++ *
++ * Mutating / privileged predicates (Load, Unload, Start, Stop, etc.) are not
++ * supported and return kOSKextReturnNotPrivileged or kOSKextReturnUnsupported.
++ */
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef DTAPE_KEXT_INFO_STANDALONE
++#include <stdlib.h>
++#include <string.h>
++#else
++#include <darlingserver/duct-tape/stubs.h>
++#include <darlingserver/duct-tape/log.h>
++#include <kern/host.h>
++#include <vm/vm_map.h>
++#include <libkern/kext_request_keys.h>
++#include <libkern/OSKextLib.h>
++#include <stdlib.h>
++#include <string.h>
++void* realloc(void* ptr, size_t size);
++extern char* getenv(const char* name);
++#endif
++
++#ifndef kKextRequestPredicateKey
++#define kKextRequestPredicateKey                    "Kext Request Predicate"
++#define kKextRequestArgumentsKey                    "Kext Request Arguments"
++#define kKextRequestPredicateGetLoaded              "Get Loaded Kext Info"
++#define kKextRequestPredicateGetLoadedByUUID        "Get Loaded Kext Info By UUID"
++#define kKextRequestPredicateGetUUIDByAddress       "Get Kext UUID by Address"
++#define kKextRequestPredicateGetAllLoadRequests     "Get All Load Requests"
++#define kKextRequestPredicateGetKextsInCollection   "Get Kexts in Collection"
++#define kKextRequestArgumentBundleIdentifierKey     "CFBundleIdentifier"
++#define kKextRequestArgumentInfoKeysKey             "Kext Request Info Keys"
++#define kKextRequestArgumentLookupAddressKey        "Kext Request Lookup Address"
++#define kKextRequestArgumentCollectionTypeKey       "Collection Type"
++#define kKextRequestArgumentLoadedStateKey          "Loaded State"
++#endif
++
++#ifndef kOSKextReturnInternalError
++#define kOSKextReturnInternalError                  ((int32_t)0xdc008001u)
++#define kOSKextReturnNoMemory                       ((int32_t)0xdc008002u)
++#define kOSKextReturnNotPrivileged                  ((int32_t)0xdc008004u)
++#define kOSKextReturnInvalidArgument                ((int32_t)0xdc008005u)
++#define kOSKextReturnNotFound                       ((int32_t)0xdc008006u)
++#define kOSKextReturnUnsupported                    ((int32_t)0xdc008009u)
++#endif
++
++#define DTAPE_KEXT_KC_BASE_ADDR       0xffffff8000200000ULL
++#define DTAPE_KEXT_FIRST_KEXT_ADDR    0xffffff8001200000ULL
++#define DTAPE_KEXT_CPU_TYPE_X86_64    0x01000007u
++#define DTAPE_KEXT_CPU_SUBTYPE_ALL    0x00000003u
++#define DTAPE_KEXT_MAX_DEPS           8
++#define DTAPE_KEXT_MAX_FILTER_ITEMS   256
++#define DTAPE_KEXT_MAX_IDREFS         256
++#define DTAPE_KEXT_MAX_XML_DEPTH      32
++#define DTAPE_KEXT_MAX_REQUEST_BYTES  (1024u * 1024u)
++
++#define DTAPE_KEXT_FLAG_KERNEL_RESOURCE  (1u << 0)
++#define DTAPE_KEXT_FLAG_INTERFACE        (1u << 1)
++#define DTAPE_KEXT_FLAG_PRELINKED        (1u << 2)
++#define DTAPE_KEXT_FLAG_KEXTS_IN_KTEXT   (1u << 3)
++
++typedef struct dtape_kext_entry {
++	uint32_t load_tag;
++	const char* bundle_id;
++	const char* version;
++	const char* compat_version;
++	const char* bundle_path;
++	const char* exec_rel_path;
++	uint32_t load_size;
++	uint32_t exec_size;
++	uint32_t retain_count;
++	uint32_t flags;
++	uint32_t dep_count;
++	uint32_t deps[DTAPE_KEXT_MAX_DEPS];
++} dtape_kext_entry_t;
++
++/*
++ * Standard Apple loaded kext catalog for MacBookPro16,1 (Intel Core i7-9750H
++ * Coffee Lake-H, UHD 630 + AMD Radeon Pro 5500M, Apple T2, Broadcom Wi-Fi,
++ * Apple NVMe, Thunderbolt 3) running macOS 14.7 (23H124, Darwin 23.6.0, x86_64).
++ *
++ * Invariants:
++ *  - load_tag values are strictly sequential starting at 0 (__kernel__).
++ *  - KPI interfaces (tags 1..7) have load_size == 0 and share __kernel__'s UUID.
++ *  - deps[] lists load_tags in descending order (matching XNU OSKext::copyInfo)
++ *    and every referenced dependency has a strictly smaller load_tag.
++ *  - load_size and exec_size are page-aligned (0x1000) for non-interface kexts.
++ */
++static const dtape_kext_entry_t k_macos_14_7_mbp16_1_kexts[] = {
++	{
++		0, "__kernel__", "23.6.0", "23.6.0",
++		NULL, NULL,
++		0x1000000u, 0x0c00000u, 1u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_KEXTS_IN_KTEXT,
++		0, { 0 }
++	},
++	/* KPI interface pseudo-kexts (tags 1..7) */
++	{
++		1, "com.apple.kpi.bsd", "23.6.0", "23.6.0",
++		"/System/Library/Extensions/System.kext/PlugIns/BSDKernel.kext", NULL,
++		0u, 0u, 48u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
++		0, { 0 }
++	},
++	{
++		2, "com.apple.kpi.dsep", "23.6.0", "23.6.0",
++		"/System/Library/Extensions/System.kext/PlugIns/MACFramework.kext", NULL,
++		0u, 0u, 14u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
++		0, { 0 }
++	},
++	{
++		3, "com.apple.kpi.iokit", "23.6.0", "23.6.0",
++		"/System/Library/Extensions/System.kext/PlugIns/IOKit.kext", NULL,
++		0u, 0u, 46u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
++		0, { 0 }
++	},
++	{
++		4, "com.apple.kpi.libkern", "23.6.0", "23.6.0",
++		"/System/Library/Extensions/System.kext/PlugIns/Libkern.kext", NULL,
++		0u, 0u, 52u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
++		0, { 0 }
++	},
++	{
++		5, "com.apple.kpi.mach", "23.6.0", "23.6.0",
++		"/System/Library/Extensions/System.kext/PlugIns/Mach.kext", NULL,
++		0u, 0u, 44u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
++		0, { 0 }
++	},
++	{
++		6, "com.apple.kpi.private", "23.6.0", "23.6.0",
++		"/System/Library/Extensions/System.kext/PlugIns/Private.kext", NULL,
++		0u, 0u, 40u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
++		0, { 0 }
++	},
++	{
++		7, "com.apple.kpi.unsupported", "23.6.0", "23.6.0",
++		"/System/Library/Extensions/System.kext/PlugIns/Unsupported.kext", NULL,
++		0u, 0u, 32u,
++		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
++		0, { 0 }
++	},
++	/* Core kernel libraries & security/policy kexts (tags 8..20) */
++	{
++		8, "com.apple.kec.corecrypto", "14.0", "14.0",
++		"/System/Library/Extensions/corecrypto.kext", "Contents/MacOS/corecrypto",
++		0x0c0000u, 0x098000u, 14u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 1 }
++	},
++	{
++		9, "com.apple.kec.Libm", "1", "1",
++		"/System/Library/Extensions/Libm.kext", "Contents/MacOS/Libm",
++		0x018000u, 0x012000u, 6u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		1, { 4 }
++	},
++	{
++		10, "com.apple.kec.pthread", "1", "1",
++		"/System/Library/Extensions/pthread.kext", "Contents/MacOS/pthread",
++		0x014000u, 0x00e000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 1 }
++	},
++	{
++		11, "com.apple.iokit.CoreAnalyticsFamily", "1", "1",
++		"/System/Library/Extensions/CoreAnalyticsFamily.kext", "Contents/MacOS/CoreAnalyticsFamily",
++		0x014000u, 0x00d000u, 10u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 6, 5, 4, 3, 1 }
++	},
++	{
++		12, "com.apple.kext.CoreTrust", "1", "1",
++		"/System/Library/Extensions/CoreTrust.kext", "Contents/MacOS/CoreTrust",
++		0x024000u, 0x01a000u, 5u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 8, 6, 4, 1 }
++	},
++	{
++		13, "com.apple.driver.AppleImage4", "5.0.0", "5.0.0",
++		"/System/Library/Extensions/AppleImage4.kext", "Contents/MacOS/AppleImage4",
++		0x02c000u, 0x020000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 8, 6, 5, 4, 3 }
++	},
++	{
++		14, "com.apple.driver.AppleMobileFileIntegrity", "1.0.5", "1.0.5",
++		"/System/Library/Extensions/AppleMobileFileIntegrity.kext", "Contents/MacOS/AppleMobileFileIntegrity",
++		0x038000u, 0x02a000u, 6u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		7, { 13, 12, 8, 6, 5, 4, 2 }
++	},
++	{
++		15, "com.apple.security.sandbox", "300.0", "300.0",
++		"/System/Library/Extensions/Sandbox.kext", "Contents/MacOS/Sandbox",
++		0x068000u, 0x04e000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 14, 6, 5, 4, 2, 1 }
++	},
++	{
++		16, "com.apple.security.quarantine", "4", "4",
++		"/System/Library/Extensions/Quarantine.kext", "Contents/MacOS/Quarantine",
++		0x010000u, 0x00a000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 15, 6, 4, 2, 1 }
++	},
++	{
++		17, "com.apple.security.TMSafetyNet", "8", "8",
++		"/System/Library/Extensions/TMSafetyNet.kext", "Contents/MacOS/TMSafetyNet",
++		0x00c000u, 0x008000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 4, 2, 1 }
++	},
++	{
++		18, "com.apple.driver.AppleKeyStore", "2", "2",
++		"/System/Library/Extensions/AppleKeyStore.kext", "Contents/MacOS/AppleKeyStore",
++		0x058000u, 0x042000u, 6u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 14, 8, 6, 5, 4, 3 }
++	},
++	{
++		19, "com.apple.driver.AppleCredentialManager", "1.0", "1.0",
++		"/System/Library/Extensions/AppleCredentialManager.kext", "Contents/MacOS/AppleCredentialManager",
++		0x040000u, 0x030000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 18, 8, 6, 4, 3 }
++	},
++	{
++		20, "com.apple.iokit.EndpointSecurity", "1", "1",
++		"/System/Library/Extensions/EndpointSecurity.kext", "Contents/MacOS/EndpointSecurity",
++		0x034000u, 0x026000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 14, 6, 5, 4, 3, 2 }
++	},
++	/* Platform, ACPI, PCI, SMC, EFI, CPU, and T2 Bridge (tags 21..34) */
++	{
++		21, "com.apple.iokit.IOACPIFamily", "1.4", "1.4",
++		"/System/Library/Extensions/IOACPIFamily.kext", "Contents/MacOS/IOACPIFamily",
++		0x008000u, 0x005000u, 18u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		3, { 5, 4, 3 }
++	},
++	{
++		22, "com.apple.iokit.IOPCIFamily", "2.9", "2.9",
++		"/System/Library/Extensions/IOPCIFamily.kext", "Contents/MacOS/IOPCIFamily",
++		0x048000u, 0x036000u, 24u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 7, 6, 5, 4, 3 }
++	},
++	{
++		23, "com.apple.driver.AppleACPIPlatform", "6.1", "6.1",
++		"/System/Library/Extensions/AppleACPIPlatform.kext", "Contents/MacOS/AppleACPIPlatform",
++		0x084000u, 0x064000u, 6u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 22, 21, 6, 5, 4, 3 }
++	},
++	{
++		24, "com.apple.driver.AppleAPIC", "1.7", "1.7",
++		"/System/Library/Extensions/AppleAPIC.kext", "Contents/MacOS/AppleAPIC",
++		0x00a000u, 0x006000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 21, 5, 4, 3 }
++	},
++	{
++		25, "com.apple.driver.AppleSMBIOS", "2.1", "2.1",
++		"/System/Library/Extensions/AppleSMBIOS.kext", "Contents/MacOS/AppleSMBIOS",
++		0x010000u, 0x00a000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 3 }
++	},
++	{
++		26, "com.apple.driver.AppleSMC", "3.1.9", "3.1.9",
++		"/System/Library/Extensions/AppleSMC.kext", "Contents/MacOS/AppleSMC",
++		0x02c000u, 0x020000u, 10u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 21, 6, 5, 4, 3 }
++	},
++	{
++		27, "com.apple.driver.AppleRTC", "2.0.1", "2.0.1",
++		"/System/Library/Extensions/AppleRTC.kext", "Contents/MacOS/AppleRTC",
++		0x010000u, 0x00a000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 21, 6, 5, 4, 3 }
++	},
++	{
++		28, "com.apple.driver.AppleEFIRuntime", "2.1", "2.1",
++		"/System/Library/Extensions/AppleEFIRuntime.kext", "Contents/MacOS/AppleEFIRuntime",
++		0x00e000u, 0x008000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 3 }
++	},
++	{
++		29, "com.apple.driver.AppleEFINVRAM", "2.1", "2.1",
++		"/System/Library/Extensions/AppleEFIRuntime.kext/Contents/PlugIns/AppleEFINVRAM.kext", "Contents/MacOS/AppleEFINVRAM",
++		0x014000u, 0x00c000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 28, 6, 5, 4, 3 }
++	},
++	{
++		30, "com.apple.driver.AppleIntelCPUPowerManagement", "222.0.0", "222.0.0",
++		"/System/Library/Extensions/AppleIntelCPUPowerManagement.kext", "Contents/MacOS/AppleIntelCPUPowerManagement",
++		0x038000u, 0x028000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 7, 6, 5, 4, 3 }
++	},
++	{
++		31, "com.apple.driver.X86PlatformPlugin", "1.0.0", "1.0.0",
++		"/System/Library/Extensions/IOPlatformPluginFamily.kext/Contents/PlugIns/X86PlatformPlugin.kext", "Contents/MacOS/X86PlatformPlugin",
++		0x024000u, 0x018000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 26, 21, 6, 4, 3 }
++	},
++	{
++		32, "com.apple.iokit.IOReportFamily", "47", "47",
++		"/System/Library/Extensions/IOReportFamily.kext", "Contents/MacOS/IOReportFamily",
++		0x00e000u, 0x009000u, 14u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 3 }
++	},
++	{
++		33, "com.apple.driver.AppleSEPManager", "1.0.1", "1.0.1",
++		"/System/Library/Extensions/AppleSEPManager.kext", "Contents/MacOS/AppleSEPManager",
++		0x03c000u, 0x02c000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 22, 18, 6, 5, 4, 3 }
++	},
++	{
++		34, "com.apple.driver.AppleBusPowerController", "1.0", "1.0",
++		"/System/Library/Extensions/AppleBusPowerController.kext", "Contents/MacOS/AppleBusPowerController",
++		0x00c000u, 0x008000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 26, 5, 4, 3 }
++	},
++	/* Storage & filesystems (tags 35..43) */
++	{
++		35, "com.apple.iokit.IOStorageFamily", "2.1", "2.1",
++		"/System/Library/Extensions/IOStorageFamily.kext", "Contents/MacOS/IOStorageFamily",
++		0x02c000u, 0x020000u, 12u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 6, 5, 4, 3, 1 }
++	},
++	{
++		36, "com.apple.iokit.IONVMeFamily", "2.1.0", "2.1.0",
++		"/System/Library/Extensions/IONVMeFamily.kext", "Contents/MacOS/IONVMeFamily",
++		0x048000u, 0x036000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 35, 32, 22, 5, 4, 3 }
++	},
++	{
++		37, "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib", "1.0.0", "1.0.0",
++		"/System/Library/Extensions/AppleFSCompressionTypeZlib.kext", "Contents/MacOS/AppleFSCompressionTypeZlib",
++		0x00a000u, 0x006000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 1 }
++	},
++	{
++		38, "com.apple.AppleFSCompression.AppleFSCompressionTypeDataless", "1.0.0d1", "1.0.0d1",
++		"/System/Library/Extensions/AppleFSCompressionTypeDataless.kext", "Contents/MacOS/AppleFSCompressionTypeDataless",
++		0x008000u, 0x005000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 1 }
++	},
++	{
++		39, "com.apple.filesystems.apfs", "2236.141.1", "2236.141.1",
++		"/System/Library/Extensions/apfs.kext", "Contents/MacOS/apfs",
++		0x18c000u, 0x138000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		8, { 38, 37, 35, 18, 8, 6, 4, 1 }
++	},
++	{
++		40, "com.apple.filesystems.hfs.kext", "650.140.2", "650.140.2",
++		"/System/Library/Extensions/HFS.kext", "Contents/MacOS/HFS",
++		0x074000u, 0x058000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 35, 6, 5, 4, 1 }
++	},
++	{
++		41, "com.apple.filesystems.tmpfs", "1", "1",
++		"/System/Library/Extensions/tmpfs.kext", "Contents/MacOS/tmpfs",
++		0x00c000u, 0x008000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 1 }
++	},
++	{
++		42, "com.apple.filesystems.lifs", "1", "1",
++		"/System/Library/Extensions/lifs.kext", "Contents/MacOS/lifs",
++		0x018000u, 0x011000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		4, { 6, 5, 4, 1 }
++	},
++	{
++		43, "com.apple.iokit.IOHDIXController", "493.0.0", "493.0.0",
++		"/System/Library/Extensions/IOHDIXController.kext", "Contents/MacOS/IOHDIXController",
++		0x03c000u, 0x02c000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 35, 6, 5, 4, 3 }
++	},
++	/* Graphics & display: Intel UHD 630 (CFL/KBL) + AMD Radeon Pro 5500M (X6000) (tags 44..54) */
++	{
++		44, "com.apple.iokit.IOSurface", "352.50.1", "352.50.1",
++		"/System/Library/Extensions/IOSurface.kext", "Contents/MacOS/IOSurface",
++		0x03c000u, 0x02c000u, 12u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 6, 5, 4, 3, 1 }
++	},
++	{
++		45, "com.apple.iokit.IOGraphicsFamily", "598", "598",
++		"/System/Library/Extensions/IOGraphicsFamily.kext", "Contents/MacOS/IOGraphicsFamily",
++		0x058000u, 0x040000u, 10u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 22, 7, 6, 5, 4, 3 }
++	},
++	{
++		46, "com.apple.iokit.IONDRVSupport", "598", "598",
++		"/System/Library/Extensions/IONDRVSupport.kext", "Contents/MacOS/IONDRVSupport",
++		0x018000u, 0x010000u, 6u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 45, 22, 5, 4, 3 }
++	},
++	{
++		47, "com.apple.iokit.IOAcceleratorFamily2", "481.40.2", "481.40.2",
++		"/System/Library/Extensions/IOAcceleratorFamily2.kext", "Contents/MacOS/IOAcceleratorFamily2",
++		0x0c4000u, 0x094000u, 6u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		7, { 45, 44, 32, 22, 6, 4, 3 }
++	},
++	{
++		48, "com.apple.driver.AppleIntelCFLGraphicsFramebuffer", "22.0.1", "22.0.1",
++		"/System/Library/Extensions/AppleIntelCFLGraphicsFramebuffer.kext", "Contents/MacOS/AppleIntelCFLGraphicsFramebuffer",
++		0x188000u, 0x130000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		7, { 47, 45, 32, 22, 21, 4, 3 }
++	},
++	{
++		49, "com.apple.driver.AppleIntelKBLGraphics", "22.0.1", "22.0.1",
++		"/System/Library/Extensions/AppleIntelKBLGraphics.kext", "Contents/MacOS/AppleIntelKBLGraphics",
++		0x13c000u, 0x0f0000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 48, 47, 44, 22, 4, 3 }
++	},
++	{
++		50, "com.apple.kext.AMDSupport", "5.0.5", "5.0.5",
++		"/System/Library/Extensions/AMDSupport.kext", "Contents/MacOS/AMDSupport",
++		0x068000u, 0x04e000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 45, 22, 21, 5, 4, 3 }
++	},
++	{
++		51, "com.apple.kext.AMDRadeonX6000Framebuffer", "5.0.5", "5.0.5",
++		"/System/Library/Extensions/AMDRadeonX6000Framebuffer.kext", "Contents/MacOS/AMDRadeonX6000Framebuffer",
++		0x2d0000u, 0x240000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 50, 45, 22, 21, 4, 3 }
++	},
++	{
++		52, "com.apple.kext.AMDRadeonX6000", "5.0.5", "5.0.5",
++		"/System/Library/Extensions/AMDRadeonX6000.kext", "Contents/MacOS/AMDRadeonX6000",
++		0x220000u, 0x1b0000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		7, { 51, 50, 47, 44, 22, 4, 3 }
++	},
++	{
++		53, "com.apple.driver.AppleMuxControl2", "8.1.9", "8.1.9",
++		"/System/Library/Extensions/AppleGraphicsControl.kext/Contents/PlugIns/AppleMuxControl2.kext", "Contents/MacOS/AppleMuxControl2",
++		0x020000u, 0x016000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 45, 26, 22, 21, 4, 3 }
++	},
++	{
++		54, "com.apple.driver.AppleBacklight", "180.9", "180.9",
++		"/System/Library/Extensions/AppleBacklight.kext", "Contents/MacOS/AppleBacklight",
++		0x00c000u, 0x007000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 45, 22, 5, 4, 3 }
++	},
++	/* USB, Thunderbolt, HID, Networking, Wi-Fi, Bluetooth, Audio (tags 55..67) */
++	{
++		55, "com.apple.iokit.IOUSBHostFamily", "1.2", "1.2",
++		"/System/Library/Extensions/IOUSBHostFamily.kext", "Contents/MacOS/IOUSBHostFamily",
++		0x0a4000u, 0x07c000u, 10u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 34, 26, 21, 6, 4, 3 }
++	},
++	{
++		56, "com.apple.driver.usb.AppleUSBXHCI", "1.2", "1.2",
++		"/System/Library/Extensions/IOUSBHostFamily.kext/Contents/PlugIns/AppleUSBXHCI.kext", "Contents/MacOS/AppleUSBXHCI",
++		0x04c000u, 0x038000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 55, 22, 21, 5, 4, 3 }
++	},
++	{
++		57, "com.apple.driver.usb.AppleUSBVHCIBCE", "1.2", "1.2",
++		"/System/Library/Extensions/AppleUSBVHCIBCE.kext", "Contents/MacOS/AppleUSBVHCIBCE",
++		0x028000u, 0x01c000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 55, 33, 22, 5, 4, 3 }
++	},
++	{
++		58, "com.apple.iokit.IOThunderboltFamily", "9.3.3", "9.3.3",
++		"/System/Library/Extensions/IOThunderboltFamily.kext", "Contents/MacOS/IOThunderboltFamily",
++		0x110000u, 0x0d0000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 22, 21, 6, 5, 4, 3 }
++	},
++	{
++		59, "com.apple.iokit.IOHIDFamily", "2.0.0", "2.0.0",
++		"/System/Library/Extensions/IOHIDFamily.kext", "Contents/MacOS/IOHIDFamily",
++		0x0b4000u, 0x088000u, 8u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 6, 5, 4, 3, 1 }
++	},
++	{
++		60, "com.apple.driver.AppleHIDTransport", "7440.1", "7440.1",
++		"/System/Library/Extensions/AppleHIDTransport.kext", "Contents/MacOS/AppleHIDTransport",
++		0x048000u, 0x034000u, 3u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 59, 55, 5, 4, 3 }
++	},
++	{
++		61, "com.apple.iokit.IONetworkingFamily", "3.4", "3.4",
++		"/System/Library/Extensions/IONetworkingFamily.kext", "Contents/MacOS/IONetworkingFamily",
++		0x044000u, 0x032000u, 8u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 6, 5, 4, 3, 1 }
++	},
++	{
++		62, "com.apple.iokit.IOSkywalkFamily", "1.0", "1.0",
++		"/System/Library/Extensions/IOSkywalkFamily.kext", "Contents/MacOS/IOSkywalkFamily",
++		0x060000u, 0x048000u, 6u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 61, 6, 5, 4, 3, 1 }
++	},
++	{
++		63, "com.apple.iokit.IO80211Family", "1200.13.0", "1200.13.0",
++		"/System/Library/Extensions/IO80211Family.kext", "Contents/MacOS/IO80211Family",
++		0x150000u, 0x104000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		7, { 62, 61, 8, 6, 4, 3, 1 }
++	},
++	{
++		64, "com.apple.driver.AirPort.BrcmNIC", "1400.1.1", "1400.1.1",
++		"/System/Library/Extensions/IO80211Family.kext/Contents/PlugIns/AirPortBrcmNIC.kext", "Contents/MacOS/AirPortBrcmNIC",
++		0x6a0000u, 0x520000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		7, { 63, 62, 61, 22, 4, 3, 1 }
++	},
++	{
++		65, "com.apple.iokit.IOBluetoothFamily", "9.0.0", "9.0.0",
++		"/System/Library/Extensions/IOBluetoothFamily.kext", "Contents/MacOS/IOBluetoothFamily",
++		0x0c8000u, 0x098000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 55, 6, 5, 4, 3, 1 }
++	},
++	{
++		66, "com.apple.iokit.IOAudioFamily", "540.3", "540.3",
++		"/System/Library/Extensions/IOAudioFamily.kext", "Contents/MacOS/IOAudioFamily",
++		0x040000u, 0x030000u, 4u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 9, 5, 4, 3, 1 }
++	},
++	{
++		67, "com.apple.driver.AppleHDA", "540.3", "540.3",
++		"/System/Library/Extensions/AppleHDA.kext", "Contents/MacOS/AppleHDA",
++		0x110000u, 0x0cc000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 66, 22, 21, 5, 4, 3 }
++	},
++	{
++		68, "com.apple.driver.AppleBridgeAudioCommunication", "440.1", "440.1",
++		"/System/Library/Extensions/AppleBridgeAudioCommunication.kext", "Contents/MacOS/AppleBridgeAudioCommunication",
++		0x030000u, 0x022000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		6, { 66, 57, 33, 5, 4, 3 }
++	},
++	{
++		69, "com.apple.iokit.IOTimeSyncFamily", "1240.15", "1240.15",
++		"/System/Library/Extensions/IOTimeSyncFamily.kext", "Contents/MacOS/IOTimeSyncFamily",
++		0x058000u, 0x040000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 61, 6, 5, 4, 3 }
++	},
++	{
++		70, "com.apple.driver.mDNSOffloadUserClient", "1.0.1b8", "1.0.1b8",
++		"/System/Library/Extensions/mDNSOffloadUserClient.kext", "Contents/MacOS/mDNSOffloadUserClient",
++		0x00c000u, 0x008000u, 2u,
++		DTAPE_KEXT_FLAG_PRELINKED,
++		5, { 61, 6, 5, 4, 3 }
++	},
++};
++
++#define DTAPE_KEXT_COUNT (sizeof(k_macos_14_7_mbp16_1_kexts) / sizeof(k_macos_14_7_mbp16_1_kexts[0]))
++
++/* --- Deterministic 16-byte UUID & load address helpers --- */
++
++static uint64_t dtape_fnv1a_64(uint64_t basis, const char* s) {
++	uint64_t h = basis;
++	if (!s) {
++		return h;
++	}
++	while (*s) {
++		h ^= (uint8_t)(*s++);
++		h *= 1099511628211ULL;
++	}
++	return h;
++}
++
++static void dtape_kext_uuid_bytes(const dtape_kext_entry_t* kext, uint8_t out[16]) {
++	/* KPI interface kexts inherit the kernel UUID in XNU (OSKext.cpp). */
++	const dtape_kext_entry_t* src = (kext->flags & DTAPE_KEXT_FLAG_INTERFACE)
++		? &k_macos_14_7_mbp16_1_kexts[0]
++		: kext;
++
++	uint64_t h1 = dtape_fnv1a_64(0xcbf29ce484222325ULL, "macOS-14.7-23H124-x86_64:hi:");
++	h1 = dtape_fnv1a_64(h1, src->bundle_id);
++	h1 = dtape_fnv1a_64(h1, ":");
++	h1 = dtape_fnv1a_64(h1, src->version);
++
++	uint64_t h2 = dtape_fnv1a_64(0x84222325cbf29ce4ULL, "macOS-14.7-23H124-x86_64:lo:");
++	h2 = dtape_fnv1a_64(h2, src->version);
++	h2 = dtape_fnv1a_64(h2, ":");
++	h2 = dtape_fnv1a_64(h2, src->bundle_id);
++
++	for (int i = 0; i < 8; i++) {
++		out[i] = (uint8_t)((h1 >> (56 - i * 8)) & 0xffu);
++		out[8 + i] = (uint8_t)((h2 >> (56 - i * 8)) & 0xffu);
++	}
++	/* Set RFC 4122 version 5 and variant 1 bits. */
++	out[6] = (uint8_t)((out[6] & 0x0fu) | 0x50u);
++	out[8] = (uint8_t)((out[8] & 0x3fu) | 0x80u);
++}
++
++static void dtape_uuid_format_upper(const uint8_t uuid[16], char out[37]) {
++	static const char hex[] = "0123456789ABCDEF";
++	size_t pos = 0;
++	for (int i = 0; i < 16; i++) {
++		if (i == 4 || i == 6 || i == 8 || i == 10) {
++			out[pos++] = '-';
++		}
++		out[pos++] = hex[(uuid[i] >> 4) & 0xfu];
++		out[pos++] = hex[uuid[i] & 0xfu];
++	}
++	out[pos] = '\0';
++}
++
++static int dtape_ascii_tolower(int c) {
++	if (c >= 'A' && c <= 'Z') {
++		return c - 'A' + 'a';
++	}
++	return c;
++}
++
++static bool dtape_strcasecmp_eq(const char* a, const char* b) {
++	if (!a || !b) {
++		return false;
++	}
++	while (*a && *b) {
++		if (dtape_ascii_tolower((unsigned char)*a) != dtape_ascii_tolower((unsigned char)*b)) {
++			return false;
++		}
++		a++;
++		b++;
++	}
++	return *a == '\0' && *b == '\0';
++}
++
++static uint64_t dtape_kext_load_address(size_t index) {
++	const dtape_kext_entry_t* kext = &k_macos_14_7_mbp16_1_kexts[index];
++	if (kext->flags & DTAPE_KEXT_FLAG_INTERFACE) {
++		return 0ULL;
++	}
++	if (index == 0) {
++		return DTAPE_KEXT_KC_BASE_ADDR;
++	}
++	uint64_t addr = DTAPE_KEXT_FIRST_KEXT_ADDR;
++	for (size_t i = 1; i < index; i++) {
++		if (!(k_macos_14_7_mbp16_1_kexts[i].flags & DTAPE_KEXT_FLAG_INTERFACE)) {
++			addr += (uint64_t)k_macos_14_7_mbp16_1_kexts[i].load_size;
++		}
++	}
++	return addr;
++}
++
++/* --- Dynamic byte buffer for OSSerialize-compatible XML emission --- */
++
++typedef struct dtape_xml_buf {
++	char* data;
++	size_t len;
++	size_t cap;
++	bool failed;
++} dtape_xml_buf_t;
++
++static bool dtape_buf_reserve(dtape_xml_buf_t* b, size_t extra) {
++	if (b->failed) {
++		return false;
++	}
++	if (extra > SIZE_MAX - b->len - 1) {
++		b->failed = true;
++		return false;
++	}
++	size_t needed = b->len + extra + 1;
++	if (needed <= b->cap) {
++		return true;
++	}
++	size_t new_cap = b->cap ? b->cap : 4096;
++	while (new_cap < needed) {
++		if (new_cap > SIZE_MAX / 2) {
++			new_cap = needed;
++			break;
++		}
++		new_cap *= 2;
++	}
++	char* next = (char*)realloc(b->data, new_cap);
++	if (!next) {
++		b->failed = true;
++		return false;
++	}
++	b->data = next;
++	b->cap = new_cap;
++	return true;
++}
++
++static void dtape_buf_append_mem(dtape_xml_buf_t* b, const char* s, size_t n) {
++	if (!n || !dtape_buf_reserve(b, n)) {
++		return;
++	}
++	memcpy(b->data + b->len, s, n);
++	b->len += n;
++	b->data[b->len] = '\0';
++}
++
++static void dtape_buf_append_str(dtape_xml_buf_t* b, const char* s) {
++	if (!s) {
++		return;
++	}
++	dtape_buf_append_mem(b, s, strlen(s));
++}
++
++static void dtape_buf_append_escaped(dtape_xml_buf_t* b, const char* s) {
++	if (!s) {
++		return;
++	}
++	while (*s) {
++		char c = *s++;
++		if (c == '&') {
++			dtape_buf_append_mem(b, "&amp;", 5);
++		} else if (c == '<') {
++			dtape_buf_append_mem(b, "&lt;", 4);
++		} else if (c == '>') {
++			dtape_buf_append_mem(b, "&gt;", 4);
++		} else {
++			dtape_buf_append_mem(b, &c, 1);
++		}
++	}
++}
++
++/*
++ * IOCFUnserialize's getNumber() parses 0x... hex strictly using lowercase
++ * digits ('0'..'9', 'a'..'f'). Always emit lowercase hex here.
++ */
++static void dtape_buf_append_hex_u64(dtape_xml_buf_t* b, uint64_t v) {
++	static const char hex[] = "0123456789abcdef";
++	char tmp[20];
++	size_t idx = sizeof(tmp);
++	if (v == 0) {
++		dtape_buf_append_mem(b, "0x0", 3);
++		return;
++	}
++	while (v != 0) {
++		tmp[--idx] = hex[v & 0xfu];
++		v >>= 4;
++	}
++	tmp[--idx] = 'x';
++	tmp[--idx] = '0';
++	dtape_buf_append_mem(b, tmp + idx, sizeof(tmp) - idx);
++}
++
++static void dtape_buf_append_base64(dtape_xml_buf_t* b, const uint8_t* data, size_t len) {
++	static const char b64[] =
++		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++	char out[4];
++	size_t i = 0;
++	while (i < len) {
++		uint32_t a = data[i++];
++		bool has_b = i < len;
++		uint32_t c2 = has_b ? data[i++] : 0u;
++		bool has_c = i < len;
++		uint32_t c3 = has_c ? data[i++] : 0u;
++		uint32_t triple = (a << 16) | (c2 << 8) | c3;
++
++		out[0] = b64[(triple >> 18) & 0x3fu];
++		out[1] = b64[(triple >> 12) & 0x3fu];
++		out[2] = has_b ? b64[(triple >> 6) & 0x3fu] : '=';
++		out[3] = has_c ? b64[triple & 0x3fu] : '=';
++		dtape_buf_append_mem(b, out, 4);
++	}
++}
++
++static void dtape_xml_kv_string(dtape_xml_buf_t* b, const char* key, const char* val) {
++	dtape_buf_append_str(b, "<key>");
++	dtape_buf_append_escaped(b, key);
++	dtape_buf_append_str(b, "</key><string>");
++	dtape_buf_append_escaped(b, val);
++	dtape_buf_append_str(b, "</string>");
++}
++
++static void dtape_xml_kv_bool(dtape_xml_buf_t* b, const char* key, bool val) {
++	dtape_buf_append_str(b, "<key>");
++	dtape_buf_append_escaped(b, key);
++	dtape_buf_append_str(b, val ? "</key><true/>" : "</key><false/>");
++}
++
++static void dtape_xml_kv_u32(dtape_xml_buf_t* b, const char* key, uint32_t val) {
++	dtape_buf_append_str(b, "<key>");
++	dtape_buf_append_escaped(b, key);
++	dtape_buf_append_str(b, "</key><integer size=\"32\">");
++	dtape_buf_append_hex_u64(b, (uint64_t)val);
++	dtape_buf_append_str(b, "</integer>");
++}
++
++static void dtape_xml_kv_u64(dtape_xml_buf_t* b, const char* key, uint64_t val) {
++	dtape_buf_append_str(b, "<key>");
++	dtape_buf_append_escaped(b, key);
++	dtape_buf_append_str(b, "</key><integer size=\"64\">");
++	dtape_buf_append_hex_u64(b, val);
++	dtape_buf_append_str(b, "</integer>");
++}
++
++static void dtape_xml_kv_data(dtape_xml_buf_t* b, const char* key, const uint8_t* bytes, size_t n) {
++	dtape_buf_append_str(b, "<key>");
++	dtape_buf_append_escaped(b, key);
++	dtape_buf_append_str(b, "</key><data>");
++	dtape_buf_append_base64(b, bytes, n);
++	dtape_buf_append_str(b, "</data>");
++}
++
++/* --- Lightweight bounded parser for IOCFSerialize request XML --- */
++
++typedef struct dtape_str_list {
++	char** items;
++	size_t count;
++} dtape_str_list_t;
++
++/*
++ * IOCFUnserialize resolves an IDREF to the earlier object with that ID, whatever
++ * the referencing tag's name, so each remembered value keeps its own type.
++ */
++typedef enum dtape_idref_kind {
++	DTAPE_IDREF_STRING = 0,
++	DTAPE_IDREF_INTEGER,
++} dtape_idref_kind_t;
++
++typedef struct dtape_idref_entry {
++	int32_t id;
++	dtape_idref_kind_t kind;
++	char* str_val;
++} dtape_idref_entry_t;
++
++typedef struct dtape_kext_req_parsed {
++	char* predicate;
++	dtape_str_list_t bundle_ids;
++	dtape_str_list_t info_keys;
++	char* collection_type;
++	char* loaded_state;
++	bool has_lookup_addr;
++	uint64_t lookup_addr;
++	bool invalid_info_keys;
++} dtape_kext_req_parsed_t;
++
++typedef struct dtape_xml_scanner {
++	const char* buf;
++	size_t len;
++	size_t pos;
++	dtape_idref_entry_t idrefs[DTAPE_KEXT_MAX_IDREFS];
++	size_t idref_count;
++} dtape_xml_scanner_t;
++
++typedef enum dtape_tag_kind {
++	DTAPE_TAG_EOF = 0,
++	DTAPE_TAG_OPEN,
++	DTAPE_TAG_CLOSE,
++	DTAPE_TAG_EMPTY,
++	DTAPE_TAG_ERROR,
++} dtape_tag_kind_t;
++
++typedef struct dtape_xml_tag {
++	dtape_tag_kind_t kind;
++	char name[32];
++	int32_t id;
++	int32_t idref;
++} dtape_xml_tag_t;
++
++static void dtape_str_list_free(dtape_str_list_t* list) {
++	if (!list) {
++		return;
++	}
++	for (size_t i = 0; i < list->count; i++) {
++		free(list->items[i]);
++	}
++	free(list->items);
++	list->items = NULL;
++	list->count = 0;
++}
++
++static bool dtape_str_list_push(dtape_str_list_t* list, const char* s) {
++	if (!s || list->count >= DTAPE_KEXT_MAX_FILTER_ITEMS) {
++		return false;
++	}
++	size_t slen = strlen(s);
++	char* copy = (char*)malloc(slen + 1);
++	if (!copy) {
++		return false;
++	}
++	memcpy(copy, s, slen + 1);
++	char** next = (char**)realloc(list->items, (list->count + 1) * sizeof(char*));
++	if (!next) {
++		free(copy);
++		return false;
++	}
++	list->items = next;
++	list->items[list->count++] = copy;
++	return true;
++}
++
++static bool dtape_str_list_contains(const dtape_str_list_t* list, const char* needle) {
++	for (size_t i = 0; i < list->count; i++) {
++		if (strcmp(list->items[i], needle) == 0) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static void dtape_scanner_free_idrefs(dtape_xml_scanner_t* sc) {
++	for (size_t i = 0; i < sc->idref_count; i++) {
++		free(sc->idrefs[i].str_val);
++	}
++	sc->idref_count = 0;
++}
++
++static void dtape_scanner_remember(dtape_xml_scanner_t* sc, int32_t id, dtape_idref_kind_t kind, const char* s) {
++	if (id < 0 || !s || sc->idref_count >= DTAPE_KEXT_MAX_IDREFS) {
++		return;
++	}
++	size_t slen = strlen(s);
++	char* copy = (char*)malloc(slen + 1);
++	if (!copy) {
++		return;
++	}
++	memcpy(copy, s, slen + 1);
++	sc->idrefs[sc->idref_count].id = id;
++	sc->idrefs[sc->idref_count].kind = kind;
++	sc->idrefs[sc->idref_count].str_val = copy;
++	sc->idref_count++;
++}
++
++/* The text of the earlier value with this ID, or NULL when it is unknown or of another kind. */
++static const char* dtape_scanner_lookup(const dtape_xml_scanner_t* sc, int32_t idref, dtape_idref_kind_t kind) {
++	if (idref < 0) {
++		return NULL;
++	}
++	for (size_t i = 0; i < sc->idref_count; i++) {
++		if (sc->idrefs[i].id == idref) {
++			return sc->idrefs[i].kind == kind ? sc->idrefs[i].str_val : NULL;
++		}
++	}
++	return NULL;
++}
++
++static void dtape_req_free(dtape_kext_req_parsed_t* req) {
++	free(req->predicate);
++	dtape_str_list_free(&req->bundle_ids);
++	dtape_str_list_free(&req->info_keys);
++	free(req->collection_type);
++	free(req->loaded_state);
++	memset(req, 0, sizeof(*req));
++}
++
++static bool dtape_is_space(char c) {
++	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
++}
++
++static bool dtape_is_ident(char c) {
++	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
++}
++
++static int32_t dtape_parse_i32(const char* s) {
++	int64_t v = 0;
++	if (!s || !*s) {
++		return -1;
++	}
++	while (*s >= '0' && *s <= '9') {
++		v = v * 10 + (*s - '0');
++		if (v > 0x7fffffffLL) {
++			return -1;
++		}
++		s++;
++	}
++	return (int32_t)v;
++}
++
++static bool dtape_parse_u64_text(const char* s, uint64_t* out) {
++	if (!s) {
++		return false;
++	}
++	while (dtape_is_space(*s)) {
++		s++;
++	}
++	if (!*s) {
++		return false;
++	}
++	uint64_t v = 0;
++	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
++		s += 2;
++		if (!*s) {
++			return false;
++		}
++		while (*s && !dtape_is_space(*s)) {
++			uint64_t d;
++			if (*s >= '0' && *s <= '9') {
++				d = (uint64_t)(*s - '0');
++			} else if (*s >= 'a' && *s <= 'f') {
++				d = (uint64_t)(10 + *s - 'a');
++			} else if (*s >= 'A' && *s <= 'F') {
++				d = (uint64_t)(10 + *s - 'A');
++			} else {
++				return false;
++			}
++			/* More than 64 significant bits is malformed, not a wrapped value. */
++			if (v > (UINT64_MAX >> 4)) {
++				return false;
++			}
++			v = (v << 4) | d;
++			s++;
++		}
++		while (dtape_is_space(*s)) {
++			s++;
++		}
++		if (*s) {
++			return false;
++		}
++		*out = v;
++		return true;
++	}
++	bool neg = false;
++	if (*s == '-') {
++		neg = true;
++		s++;
++	}
++	if (!(*s >= '0' && *s <= '9')) {
++		return false;
++	}
++	while (*s >= '0' && *s <= '9') {
++		uint64_t d = (uint64_t)(*s - '0');
++		if (v > (UINT64_MAX - d) / 10u) {
++			return false;
++		}
++		v = v * 10u + d;
++		s++;
++	}
++	while (dtape_is_space(*s)) {
++		s++;
++	}
++	if (*s) {
++		return false;
++	}
++	/*
++	 * A negative value is the 64-bit two's complement of its magnitude, so
++	 * "-1" is 0xffffffffffffffff. Negate in unsigned arithmetic: converting
++	 * 2^63 to int64_t and negating it is undefined. Magnitudes above 2^63 do
++	 * not fit in 64 bits and are malformed.
++	 */
++	if (neg) {
++		if (v > (UINT64_C(1) << 63)) {
++			return false;
++		}
++		v = UINT64_C(0) - v;
++	}
++	*out = v;
++	return true;
++}
++
++static dtape_xml_tag_t dtape_next_tag(dtape_xml_scanner_t* sc) {
++	dtape_xml_tag_t tag;
++	memset(&tag, 0, sizeof(tag));
++	tag.id = -1;
++	tag.idref = -1;
++
++	for (;;) {
++		while (sc->pos < sc->len && (dtape_is_space(sc->buf[sc->pos]) || sc->buf[sc->pos] == '\0')) {
++			if (sc->buf[sc->pos] == '\0') {
++				tag.kind = DTAPE_TAG_EOF;
++				return tag;
++			}
++			sc->pos++;
++		}
++		if (sc->pos >= sc->len) {
++			tag.kind = DTAPE_TAG_EOF;
++			return tag;
++		}
++		if (sc->buf[sc->pos] != '<') {
++			tag.kind = DTAPE_TAG_ERROR;
++			return tag;
++		}
++		sc->pos++;
++		if (sc->pos >= sc->len) {
++			tag.kind = DTAPE_TAG_ERROR;
++			return tag;
++		}
++		/* Skip XML declarations, DOCTYPE, and comments. */
++		if (sc->buf[sc->pos] == '?' || sc->buf[sc->pos] == '!') {
++			if (sc->pos + 2 < sc->len && sc->buf[sc->pos] == '!' &&
++			    sc->buf[sc->pos + 1] == '-' && sc->buf[sc->pos + 2] == '-') {
++				sc->pos += 3;
++				while (sc->pos + 2 < sc->len &&
++				       !(sc->buf[sc->pos] == '-' && sc->buf[sc->pos + 1] == '-' && sc->buf[sc->pos + 2] == '>')) {
++					sc->pos++;
++				}
++				if (sc->pos + 2 >= sc->len) {
++					tag.kind = DTAPE_TAG_ERROR;
++					return tag;
++				}
++				sc->pos += 3;
++			} else {
++				while (sc->pos < sc->len && sc->buf[sc->pos] != '>') {
++					sc->pos++;
++				}
++				if (sc->pos >= sc->len) {
++					tag.kind = DTAPE_TAG_ERROR;
++					return tag;
++				}
++				sc->pos++;
++			}
++			continue;
++		}
++
++		tag.kind = DTAPE_TAG_OPEN;
++		if (sc->buf[sc->pos] == '/') {
++			tag.kind = DTAPE_TAG_CLOSE;
++			sc->pos++;
++		}
++
++		size_t nlen = 0;
++		while (sc->pos < sc->len && dtape_is_ident(sc->buf[sc->pos])) {
++			if (nlen + 1 < sizeof(tag.name)) {
++				tag.name[nlen++] = sc->buf[sc->pos];
++			}
++			sc->pos++;
++		}
++		tag.name[nlen] = '\0';
++		if (nlen == 0) {
++			tag.kind = DTAPE_TAG_ERROR;
++			return tag;
++		}
++
++		/* Parse optional attributes (ID="...", IDREF="...", size="...", etc.). */
++		while (sc->pos < sc->len) {
++			while (sc->pos < sc->len && dtape_is_space(sc->buf[sc->pos])) {
++				sc->pos++;
++			}
++			if (sc->pos >= sc->len) {
++				tag.kind = DTAPE_TAG_ERROR;
++				return tag;
++			}
++			if (sc->buf[sc->pos] == '/') {
++				sc->pos++;
++				if (sc->pos >= sc->len || sc->buf[sc->pos] != '>') {
++					tag.kind = DTAPE_TAG_ERROR;
++					return tag;
++				}
++				sc->pos++;
++				tag.kind = DTAPE_TAG_EMPTY;
++				break;
++			}
++			if (sc->buf[sc->pos] == '>') {
++				sc->pos++;
++				break;
++			}
++			char attr[32];
++			char val[32];
++			size_t alen = 0, vlen = 0;
++			while (sc->pos < sc->len && dtape_is_ident(sc->buf[sc->pos])) {
++				if (alen + 1 < sizeof(attr)) {
++					attr[alen++] = sc->buf[sc->pos];
++				}
++				sc->pos++;
++			}
++			attr[alen] = '\0';
++			while (sc->pos < sc->len && dtape_is_space(sc->buf[sc->pos])) {
++				sc->pos++;
++			}
++			if (sc->pos >= sc->len || sc->buf[sc->pos] != '=') {
++				tag.kind = DTAPE_TAG_ERROR;
++				return tag;
++			}
++			sc->pos++;
++			while (sc->pos < sc->len && dtape_is_space(sc->buf[sc->pos])) {
++				sc->pos++;
++			}
++			if (sc->pos >= sc->len || (sc->buf[sc->pos] != '"' && sc->buf[sc->pos] != '\'')) {
++				tag.kind = DTAPE_TAG_ERROR;
++				return tag;
++			}
++			char quote = sc->buf[sc->pos++];
++			while (sc->pos < sc->len && sc->buf[sc->pos] != quote) {
++				if (vlen + 1 < sizeof(val)) {
++					val[vlen++] = sc->buf[sc->pos];
++				}
++				sc->pos++;
++			}
++			val[vlen] = '\0';
++			if (sc->pos >= sc->len) {
++				tag.kind = DTAPE_TAG_ERROR;
++				return tag;
++			}
++			sc->pos++;
++
++			if (strcmp(attr, "ID") == 0) {
++				tag.id = dtape_parse_i32(val);
++			} else if (strcmp(attr, "IDREF") == 0) {
++				tag.idref = dtape_parse_i32(val);
++			}
++		}
++
++		/* Ignore wrapper <plist> / </plist> tags just like IOCFUnserialize. */
++		if (strcmp(tag.name, "plist") == 0) {
++			continue;
++		}
++		return tag;
++	}
++}
++
++static char* dtape_read_text_and_close(dtape_xml_scanner_t* sc, const char* expected_tag) {
++	size_t start = sc->pos;
++	while (sc->pos < sc->len && sc->buf[sc->pos] != '<' && sc->buf[sc->pos] != '\0') {
++		sc->pos++;
++	}
++	if (sc->pos >= sc->len || sc->buf[sc->pos] != '<') {
++		return NULL;
++	}
++	size_t raw_len = sc->pos - start;
++	char* out = (char*)malloc(raw_len + 1);
++	if (!out) {
++		return NULL;
++	}
++	size_t i = 0, j = 0;
++	while (i < raw_len) {
++		char c = sc->buf[start + i++];
++		if (c != '&') {
++			out[j++] = c;
++			continue;
++		}
++		if (i + 3 <= raw_len && memcmp(sc->buf + start + i, "lt;", 3) == 0) {
++			out[j++] = '<';
++			i += 3;
++		} else if (i + 3 <= raw_len && memcmp(sc->buf + start + i, "gt;", 3) == 0) {
++			out[j++] = '>';
++			i += 3;
++		} else if (i + 4 <= raw_len && memcmp(sc->buf + start + i, "amp;", 4) == 0) {
++			out[j++] = '&';
++			i += 4;
++		} else if (i + 5 <= raw_len && memcmp(sc->buf + start + i, "quot;", 5) == 0) {
++			out[j++] = '"';
++			i += 5;
++		} else if (i + 5 <= raw_len && memcmp(sc->buf + start + i, "apos;", 5) == 0) {
++			out[j++] = '\'';
++			i += 5;
++		} else {
++			out[j++] = '&';
++		}
++	}
++	out[j] = '\0';
++
++	dtape_xml_tag_t close = dtape_next_tag(sc);
++	if (close.kind != DTAPE_TAG_CLOSE || strcmp(close.name, expected_tag) != 0) {
++		free(out);
++		return NULL;
++	}
++	return out;
++}
++
++static bool dtape_skip_value(dtape_xml_scanner_t* sc, const dtape_xml_tag_t* open_tag, int depth) {
++	if (depth > DTAPE_KEXT_MAX_XML_DEPTH) {
++		return false;
++	}
++	if (open_tag->kind == DTAPE_TAG_EMPTY) {
++		return true;
++	}
++	if (open_tag->kind != DTAPE_TAG_OPEN) {
++		return false;
++	}
++	if (strcmp(open_tag->name, "string") == 0 ||
++	    strcmp(open_tag->name, "integer") == 0 ||
++	    strcmp(open_tag->name, "data") == 0 ||
++	    strcmp(open_tag->name, "real") == 0 ||
++	    strcmp(open_tag->name, "date") == 0) {
++		char* text = dtape_read_text_and_close(sc, open_tag->name);
++		if (!text) {
++			return false;
++		}
++		if (open_tag->id >= 0 && strcmp(open_tag->name, "string") == 0) {
++			dtape_scanner_remember(sc, open_tag->id, DTAPE_IDREF_STRING, text);
++		} else if (open_tag->id >= 0 && strcmp(open_tag->name, "integer") == 0) {
++			dtape_scanner_remember(sc, open_tag->id, DTAPE_IDREF_INTEGER, text);
++		}
++		free(text);
++		return true;
++	}
++	if (strcmp(open_tag->name, "dict") == 0) {
++		for (;;) {
++			dtape_xml_tag_t ktag = dtape_next_tag(sc);
++			if (ktag.kind == DTAPE_TAG_CLOSE && strcmp(ktag.name, "dict") == 0) {
++				return true;
++			}
++			if (ktag.kind != DTAPE_TAG_OPEN || strcmp(ktag.name, "key") != 0) {
++				return false;
++			}
++			char* ktext = dtape_read_text_and_close(sc, "key");
++			if (!ktext) {
++				return false;
++			}
++			free(ktext);
++			dtape_xml_tag_t vtag = dtape_next_tag(sc);
++			if (!dtape_skip_value(sc, &vtag, depth + 1)) {
++				return false;
++			}
++		}
++	}
++	if (strcmp(open_tag->name, "array") == 0 || strcmp(open_tag->name, "set") == 0) {
++		for (;;) {
++			dtape_xml_tag_t item = dtape_next_tag(sc);
++			if (item.kind == DTAPE_TAG_CLOSE && strcmp(item.name, open_tag->name) == 0) {
++				return true;
++			}
++			if (!dtape_skip_value(sc, &item, depth + 1)) {
++				return false;
++			}
++		}
++	}
++	return false;
++}
++
++static char* dtape_parse_string_value(dtape_xml_scanner_t* sc, const dtape_xml_tag_t* tag) {
++	if (tag->idref >= 0 && tag->kind == DTAPE_TAG_EMPTY) {
++		const char* prev = dtape_scanner_lookup(sc, tag->idref, DTAPE_IDREF_STRING);
++		if (!prev) {
++			return NULL;
++		}
++		size_t n = strlen(prev);
++		char* copy = (char*)malloc(n + 1);
++		if (!copy) {
++			return NULL;
++		}
++		memcpy(copy, prev, n + 1);
++		return copy;
++	}
++	if (strcmp(tag->name, "string") != 0) {
++		return NULL;
++	}
++	if (tag->kind == DTAPE_TAG_EMPTY) {
++		char* empty = (char*)malloc(1);
++		if (empty) {
++			empty[0] = '\0';
++			if (tag->id >= 0) {
++				dtape_scanner_remember(sc, tag->id, DTAPE_IDREF_STRING, empty);
++			}
++		}
++		return empty;
++	}
++	if (tag->kind != DTAPE_TAG_OPEN) {
++		return NULL;
++	}
++	char* text = dtape_read_text_and_close(sc, "string");
++	if (text && tag->id >= 0) {
++		dtape_scanner_remember(sc, tag->id, DTAPE_IDREF_STRING, text);
++	}
++	return text;
++}
++
++static bool dtape_parse_string_array(dtape_xml_scanner_t* sc, const dtape_xml_tag_t* tag, dtape_str_list_t* out) {
++	if (strcmp(tag->name, "array") != 0) {
++		return false;
++	}
++	if (tag->kind == DTAPE_TAG_EMPTY) {
++		return true;
++	}
++	if (tag->kind != DTAPE_TAG_OPEN) {
++		return false;
++	}
++	for (;;) {
++		dtape_xml_tag_t item = dtape_next_tag(sc);
++		if (item.kind == DTAPE_TAG_CLOSE && strcmp(item.name, "array") == 0) {
++			return true;
++		}
++		char* s = dtape_parse_string_value(sc, &item);
++		if (!s) {
++			return false;
++		}
++		bool ok = dtape_str_list_push(out, s);
++		free(s);
++		if (!ok) {
++			return false;
++		}
++	}
++}
++
++static bool dtape_parse_arguments_dict(dtape_xml_scanner_t* sc, const dtape_xml_tag_t* dict_tag, dtape_kext_req_parsed_t* req) {
++	if (strcmp(dict_tag->name, "dict") != 0) {
++		return false;
++	}
++	if (dict_tag->kind == DTAPE_TAG_EMPTY) {
++		return true;
++	}
++	if (dict_tag->kind != DTAPE_TAG_OPEN) {
++		return false;
++	}
++	for (;;) {
++		dtape_xml_tag_t ktag = dtape_next_tag(sc);
++		if (ktag.kind == DTAPE_TAG_CLOSE && strcmp(ktag.name, "dict") == 0) {
++			return true;
++		}
++		if (ktag.kind != DTAPE_TAG_OPEN || strcmp(ktag.name, "key") != 0) {
++			return false;
++		}
++		char* key = dtape_read_text_and_close(sc, "key");
++		if (!key) {
++			return false;
++		}
++		dtape_xml_tag_t vtag = dtape_next_tag(sc);
++
++		if (strcmp(key, kKextRequestArgumentBundleIdentifierKey) == 0) {
++			free(key);
++			if (strcmp(vtag.name, "array") == 0) {
++				if (!dtape_parse_string_array(sc, &vtag, &req->bundle_ids)) {
++					return false;
++				}
++			} else if (strcmp(vtag.name, "string") == 0 || vtag.idref >= 0) {
++				char* s = dtape_parse_string_value(sc, &vtag);
++				if (!s) {
++					return false;
++				}
++				bool ok = dtape_str_list_push(&req->bundle_ids, s);
++				free(s);
++				if (!ok) {
++					return false;
++				}
++			} else {
++				if (!dtape_skip_value(sc, &vtag, 2)) {
++					return false;
++				}
++			}
++		} else if (strcmp(key, kKextRequestArgumentInfoKeysKey) == 0) {
++			free(key);
++			if (strcmp(vtag.name, "array") == 0) {
++				if (!dtape_parse_string_array(sc, &vtag, &req->info_keys)) {
++					req->invalid_info_keys = true;
++					return false;
++				}
++			} else {
++				req->invalid_info_keys = true;
++				if (!dtape_skip_value(sc, &vtag, 2)) {
++					return false;
++				}
++			}
++		} else if (strcmp(key, kKextRequestArgumentCollectionTypeKey) == 0) {
++			free(key);
++			free(req->collection_type);
++			req->collection_type = dtape_parse_string_value(sc, &vtag);
++			if (!req->collection_type) {
++				return false;
++			}
++		} else if (strcmp(key, kKextRequestArgumentLoadedStateKey) == 0) {
++			free(key);
++			free(req->loaded_state);
++			req->loaded_state = dtape_parse_string_value(sc, &vtag);
++			if (!req->loaded_state) {
++				return false;
++			}
++		} else if (strcmp(key, kKextRequestArgumentLookupAddressKey) == 0) {
++			free(key);
++			if (vtag.kind == DTAPE_TAG_EMPTY && vtag.idref >= 0) {
++				/*
++				 * A reference to an earlier <integer ID="n">. A reference that
++				 * names no earlier integer makes the request malformed rather
++				 * than reading as address 0.
++				 */
++				const char* prev = dtape_scanner_lookup(sc, vtag.idref, DTAPE_IDREF_INTEGER);
++				uint64_t addr = 0;
++				if (!prev || !dtape_parse_u64_text(prev, &addr)) {
++					return false;
++				}
++				req->has_lookup_addr = true;
++				req->lookup_addr = addr;
++			} else if (strcmp(vtag.name, "integer") == 0 && vtag.kind == DTAPE_TAG_OPEN) {
++				char* num = dtape_read_text_and_close(sc, "integer");
++				if (!num) {
++					return false;
++				}
++				if (vtag.id >= 0) {
++					dtape_scanner_remember(sc, vtag.id, DTAPE_IDREF_INTEGER, num);
++				}
++				uint64_t addr = 0;
++				if (dtape_parse_u64_text(num, &addr)) {
++					req->has_lookup_addr = true;
++					req->lookup_addr = addr;
++				}
++				free(num);
++			} else if (strcmp(vtag.name, "integer") == 0 && vtag.kind == DTAPE_TAG_EMPTY) {
++				req->has_lookup_addr = true;
++				req->lookup_addr = 0;
++			} else {
++				if (!dtape_skip_value(sc, &vtag, 2)) {
++					return false;
++				}
++			}
++		} else {
++			free(key);
++			if (!dtape_skip_value(sc, &vtag, 2)) {
++				return false;
++			}
++		}
++	}
++}
++
++static bool dtape_parse_kext_request_xml(const char* xml, size_t len, dtape_kext_req_parsed_t* req) {
++	memset(req, 0, sizeof(*req));
++	if (!xml || len == 0 || len > DTAPE_KEXT_MAX_REQUEST_BYTES) {
++		return false;
++	}
++	dtape_xml_scanner_t sc;
++	memset(&sc, 0, sizeof(sc));
++	sc.buf = xml;
++	sc.len = len;
++	sc.pos = 0;
++
++	dtape_xml_tag_t root = dtape_next_tag(&sc);
++	if (strcmp(root.name, "dict") != 0) {
++		dtape_scanner_free_idrefs(&sc);
++		return false;
++	}
++	if (root.kind == DTAPE_TAG_EMPTY) {
++		dtape_scanner_free_idrefs(&sc);
++		return true;
++	}
++	if (root.kind != DTAPE_TAG_OPEN) {
++		dtape_scanner_free_idrefs(&sc);
++		return false;
++	}
++
++	bool ok = true;
++	for (;;) {
++		dtape_xml_tag_t ktag = dtape_next_tag(&sc);
++		if (ktag.kind == DTAPE_TAG_CLOSE && strcmp(ktag.name, "dict") == 0) {
++			break;
++		}
++		if (ktag.kind != DTAPE_TAG_OPEN || strcmp(ktag.name, "key") != 0) {
++			ok = false;
++			break;
++		}
++		char* key = dtape_read_text_and_close(&sc, "key");
++		if (!key) {
++			ok = false;
++			break;
++		}
++		dtape_xml_tag_t vtag = dtape_next_tag(&sc);
++
++		if (strcmp(key, kKextRequestPredicateKey) == 0) {
++			free(key);
++			free(req->predicate);
++			req->predicate = dtape_parse_string_value(&sc, &vtag);
++			if (!req->predicate) {
++				ok = false;
++				break;
++			}
++		} else if (strcmp(key, kKextRequestArgumentsKey) == 0) {
++			free(key);
++			if (!dtape_parse_arguments_dict(&sc, &vtag, req)) {
++				ok = false;
++				break;
++			}
++		} else {
++			free(key);
++			if (!dtape_skip_value(&sc, &vtag, 1)) {
++				ok = false;
++				break;
++			}
++		}
++	}
++
++	dtape_scanner_free_idrefs(&sc);
++	if (!ok) {
++		dtape_req_free(req);
++	}
++	return ok;
++}
++
++/* --- Response serializer matching XNU OSKext::copyInfo() --- */
++
++static bool dtape_want_key(const dtape_str_list_t* info_keys, const char* key) {
++	if (!info_keys || info_keys->count == 0) {
++		return true;
++	}
++	return dtape_str_list_contains(info_keys, key);
++}
++
++static void dtape_serialize_kext_dict(dtape_xml_buf_t* b, size_t index, const dtape_str_list_t* info_keys) {
++	const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[index];
++	bool is_interface = (k->flags & DTAPE_KEXT_FLAG_INTERFACE) != 0;
++	bool is_kernel_resource = (k->flags & DTAPE_KEXT_FLAG_KERNEL_RESOURCE) != 0;
++	bool is_prelinked = (k->flags & DTAPE_KEXT_FLAG_PRELINKED) != 0;
++	uint64_t load_addr = dtape_kext_load_address(index);
++	uint32_t load_size = is_interface ? 0u : k->load_size;
++	uint64_t exec_addr = is_interface ? 0ULL : load_addr;
++	uint32_t exec_size = is_interface ? 0u : k->exec_size;
++	uint32_t wired_size = (is_interface || load_size <= 0x1000u) ? 0u : (load_size - 0x1000u);
++	uint8_t uuid[16];
++	dtape_kext_uuid_bytes(k, uuid);
++
++	dtape_buf_append_str(b, "<dict>");
++
++	/* Always included per XNU OSKext::copyInfo(). */
++	dtape_xml_kv_string(b, "CFBundleIdentifier", k->bundle_id);
++	dtape_xml_kv_string(b, "CFBundlePackageType", "KEXT");
++
++	if (!is_interface) {
++		if (dtape_want_key(info_keys, "OSBundleCPUType")) {
++			dtape_xml_kv_u32(b, "OSBundleCPUType", DTAPE_KEXT_CPU_TYPE_X86_64);
++		}
++		if (dtape_want_key(info_keys, "OSBundleCPUSubtype")) {
++			dtape_xml_kv_u32(b, "OSBundleCPUSubtype", DTAPE_KEXT_CPU_SUBTYPE_ALL);
++		}
++	}
++
++	if (dtape_want_key(info_keys, "CFBundleVersion") && k->version) {
++		dtape_xml_kv_string(b, "CFBundleVersion", k->version);
++	}
++	if (dtape_want_key(info_keys, "OSBundleCompatibleVersion") && k->compat_version) {
++		dtape_xml_kv_string(b, "OSBundleCompatibleVersion", k->compat_version);
++	}
++	if (dtape_want_key(info_keys, "OSBundlePath") && k->bundle_path) {
++		dtape_xml_kv_string(b, "OSBundlePath", k->bundle_path);
++	}
++	if (dtape_want_key(info_keys, "OSBundleExecutablePath") && k->bundle_path && k->exec_rel_path) {
++		dtape_buf_append_str(b, "<key>OSBundleExecutablePath</key><string>");
++		dtape_buf_append_escaped(b, k->bundle_path);
++		dtape_buf_append_mem(b, "/", 1);
++		dtape_buf_append_escaped(b, k->exec_rel_path);
++		dtape_buf_append_str(b, "</string>");
++	}
++	if (dtape_want_key(info_keys, "OSBundleUUID")) {
++		dtape_xml_kv_data(b, "OSBundleUUID", uuid, sizeof(uuid));
++	}
++	if (dtape_want_key(info_keys, "OSBundleTextUUID")) {
++		dtape_xml_kv_data(b, "OSBundleTextUUID", uuid, sizeof(uuid));
++	}
++	if (dtape_want_key(info_keys, "_BundleCollectionType")) {
++		dtape_xml_kv_string(b, "_BundleCollectionType", "Primary");
++	}
++	if (dtape_want_key(info_keys, "_AuxKCAvailability")) {
++		dtape_xml_kv_bool(b, "_AuxKCAvailability", true);
++	}
++	if (dtape_want_key(info_keys, "OSKernelResource")) {
++		dtape_xml_kv_bool(b, "OSKernelResource", is_kernel_resource);
++	}
++	if (dtape_want_key(info_keys, "OSBundleIsInterface")) {
++		dtape_xml_kv_bool(b, "OSBundleIsInterface", is_interface);
++	}
++	if (dtape_want_key(info_keys, "OSBundlePrelinked")) {
++		dtape_xml_kv_bool(b, "OSBundlePrelinked", is_prelinked);
++	}
++	if (dtape_want_key(info_keys, "OSBundleStarted")) {
++		dtape_xml_kv_bool(b, "OSBundleStarted", true);
++	}
++	if (dtape_want_key(info_keys, "OSBundleLoadTag")) {
++		dtape_xml_kv_u32(b, "OSBundleLoadTag", k->load_tag);
++	}
++	if (dtape_want_key(info_keys, "OSBundleLoadAddress")) {
++		dtape_xml_kv_u64(b, "OSBundleLoadAddress", load_addr);
++	}
++	if (dtape_want_key(info_keys, "OSBundleCacheLoadAddress") && load_addr && load_size) {
++		dtape_xml_kv_u64(b, "OSBundleCacheLoadAddress", DTAPE_KEXT_KC_BASE_ADDR);
++	}
++	if (dtape_want_key(info_keys, "OSBundleKextsInKernelText") &&
++	    (k->flags & DTAPE_KEXT_FLAG_KEXTS_IN_KTEXT)) {
++		dtape_xml_kv_bool(b, "OSBundleKextsInKernelText", true);
++	}
++	if (dtape_want_key(info_keys, "OSBundleExecLoadAddress")) {
++		dtape_xml_kv_u64(b, "OSBundleExecLoadAddress", exec_addr);
++	}
++	if (dtape_want_key(info_keys, "OSBundleLoadSize")) {
++		dtape_xml_kv_u32(b, "OSBundleLoadSize", load_size);
++	}
++	if (dtape_want_key(info_keys, "OSBundleExecLoadSize")) {
++		dtape_xml_kv_u32(b, "OSBundleExecLoadSize", exec_size);
++	}
++	if (dtape_want_key(info_keys, "OSBundleWiredSize")) {
++		dtape_xml_kv_u32(b, "OSBundleWiredSize", wired_size);
++	}
++	if (dtape_want_key(info_keys, "OSBundleDependencies") && k->dep_count > 0) {
++		dtape_buf_append_str(b, "<key>OSBundleDependencies</key><array>");
++		for (uint32_t i = 0; i < k->dep_count; i++) {
++			dtape_buf_append_str(b, "<integer size=\"32\">");
++			dtape_buf_append_hex_u64(b, (uint64_t)k->deps[i]);
++			dtape_buf_append_str(b, "</integer>");
++		}
++		dtape_buf_append_str(b, "</array>");
++	}
++	if (dtape_want_key(info_keys, "OSBundleRetainCount")) {
++		dtape_xml_kv_u32(b, "OSBundleRetainCount", k->retain_count);
++	}
++
++	dtape_buf_append_str(b, "</dict>");
++}
++
++static int32_t dtape_handle_get_loaded(const dtape_kext_req_parsed_t* req, dtape_xml_buf_t* out) {
++	if (req->invalid_info_keys) {
++		return kOSKextReturnInvalidArgument;
++	}
++	dtape_buf_append_str(out, "<dict>");
++	for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
++		const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++		if (req->bundle_ids.count > 0 && !dtape_str_list_contains(&req->bundle_ids, k->bundle_id)) {
++			continue;
++		}
++		dtape_buf_append_str(out, "<key>");
++		dtape_buf_append_escaped(out, k->bundle_id);
++		dtape_buf_append_str(out, "</key>");
++		dtape_serialize_kext_dict(out, i, &req->info_keys);
++	}
++	dtape_buf_append_str(out, "</dict>");
++	return out->failed ? kOSKextReturnNoMemory : 0;
++}
++
++static int32_t dtape_handle_get_loaded_by_uuid(const dtape_kext_req_parsed_t* req, dtape_xml_buf_t* out) {
++	if (req->invalid_info_keys) {
++		return kOSKextReturnInvalidArgument;
++	}
++	bool emitted_kernel_uuid = false;
++	dtape_buf_append_str(out, "<dict>");
++	for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
++		const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++		if ((k->flags & DTAPE_KEXT_FLAG_INTERFACE) && emitted_kernel_uuid) {
++			/* KPI interfaces share __kernel__'s UUID; avoid duplicate dictionary keys. */
++			continue;
++		}
++		uint8_t uuid[16];
++		char uuid_str[37];
++		dtape_kext_uuid_bytes(k, uuid);
++		dtape_uuid_format_upper(uuid, uuid_str);
++
++		if (req->bundle_ids.count > 0) {
++			bool matched = false;
++			for (size_t j = 0; j < req->bundle_ids.count; j++) {
++				if (dtape_strcasecmp_eq(req->bundle_ids.items[j], uuid_str)) {
++					matched = true;
++					break;
++				}
++			}
++			if (!matched) {
++				continue;
++			}
++		}
++
++		if (i == 0 || (k->flags & DTAPE_KEXT_FLAG_INTERFACE)) {
++			emitted_kernel_uuid = true;
++		}
++		dtape_buf_append_str(out, "<key>");
++		dtape_buf_append_str(out, uuid_str);
++		dtape_buf_append_str(out, "</key>");
++		dtape_serialize_kext_dict(out, i, &req->info_keys);
++	}
++	dtape_buf_append_str(out, "</dict>");
++	return out->failed ? kOSKextReturnNoMemory : 0;
++}
++
++static int32_t dtape_handle_get_collection(const dtape_kext_req_parsed_t* req, dtape_xml_buf_t* out) {
++	if (req->invalid_info_keys || !req->collection_type) {
++		return kOSKextReturnInvalidArgument;
++	}
++	bool want_primary = false;
++	if (strcmp(req->collection_type, "Primary") == 0 ||
++	    strcmp(req->collection_type, "Any") == 0 ||
++	    strcmp(req->collection_type, "All") == 0) {
++		want_primary = true;
++	} else if (strcmp(req->collection_type, "System") == 0 ||
++	           strcmp(req->collection_type, "Auxiliary") == 0 ||
++	           strcmp(req->collection_type, "Codeless") == 0) {
++		want_primary = false;
++	} else {
++		return kOSKextReturnInvalidArgument;
++	}
++
++	bool only_unloaded = false;
++	if (req->loaded_state) {
++		if (strcmp(req->loaded_state, "Unloaded") == 0) {
++			only_unloaded = true;
++		} else if (strcmp(req->loaded_state, "Loaded") != 0 &&
++		           strcmp(req->loaded_state, "Any") != 0) {
++			return kOSKextReturnInvalidArgument;
++		}
++	}
++
++	dtape_buf_append_str(out, "<dict>");
++	if (want_primary && !only_unloaded) {
++		for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
++			const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++			dtape_buf_append_str(out, "<key>");
++			dtape_buf_append_escaped(out, k->bundle_id);
++			dtape_buf_append_str(out, "</key>");
++			dtape_serialize_kext_dict(out, i, &req->info_keys);
++		}
++	}
++	dtape_buf_append_str(out, "</dict>");
++	return out->failed ? kOSKextReturnNoMemory : 0;
++}
++
++static int32_t dtape_handle_get_uuid_by_addr(const dtape_kext_req_parsed_t* req, dtape_xml_buf_t* out) {
++	if (!req->has_lookup_addr) {
++		return kOSKextReturnInvalidArgument;
++	}
++	for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
++		const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++		if (k->flags & DTAPE_KEXT_FLAG_INTERFACE) {
++			continue;
++		}
++		uint64_t start = dtape_kext_load_address(i);
++		uint64_t end = start + (uint64_t)k->load_size;
++		if (req->lookup_addr >= start && req->lookup_addr < end) {
++			uint8_t uuid[16];
++			dtape_kext_uuid_bytes(k, uuid);
++			dtape_buf_append_str(out, "<data>");
++			dtape_buf_append_base64(out, uuid, sizeof(uuid));
++			dtape_buf_append_str(out, "</data>");
++			return out->failed ? kOSKextReturnNoMemory : 0;
++		}
++	}
++	return kOSKextReturnNotFound;
++}
++
++/* The root-only predicates XNU's OSKext::handleRequest() refuses without host_priv. */
++static bool dtape_is_privileged_predicate(const char* pred) {
++	return strcmp(pred, "Get Kernel Requests") == 0 ||
++	       strcmp(pred, "Daemon Ready") == 0 ||
++	       strcmp(pred, "Load") == 0 ||
++	       strcmp(pred, "LoadFromKC") == 0 ||
++	       strcmp(pred, "LoadCodelessKext") == 0 ||
++	       strcmp(pred, "Start") == 0 ||
++	       strcmp(pred, "Stop") == 0 ||
++	       strcmp(pred, "Unload") == 0 ||
++	       strcmp(pred, "loadfilesetkc") == 0 ||
++	       strcmp(pred, "MissingAuxKCBundles") == 0 ||
++	       strcmp(pred, "AuxKCBundleAvailable") == 0 ||
++	       strcmp(pred, "Send Resource") == 0;
++}
++
++/*
++ * The catalog describes the MacBookPro16,1 of the compat hardware
++ * presentation profile (tools/system.prop), so it is served only when the
++ * launcher selected that profile. The launcher exports RCLOL_PLATFORM_PROFILE
++ * before it starts the runtime, and darlingserver inherits it; the check is
++ * the exact "compat" match libsystem_kernel's darling_compat_profile_enabled()
++ * makes. Under profile=host, or with no profile in darlingserver's
++ * environment, kext_request() keeps its previous KERN_NOT_SUPPORTED answer
++ * instead of listing Intel, AMD and Broadcom kexts the host does not have.
++ */
++#define DTAPE_KEXT_PROFILE_ENV "RCLOL_PLATFORM_PROFILE"
++
++bool dtape_kext_catalog_enabled(void) {
++	const char* profile = getenv(DTAPE_KEXT_PROFILE_ENV);
++	return profile != NULL && strcmp(profile, "compat") == 0;
++}
++
++/*
++ * Pure C request dispatcher shared by duct-tape's kext_request() and host
++ * unit tests. On success with a payload, *response_out is a heap-allocated
++ * NUL-terminated XML buffer and *response_len_out includes the trailing NUL
++ * byte (matching OSSerialize::getLength() expected by IOCFUnserialize()).
++ */
++int32_t dtape_kext_handle_request(
++	const char* request_xml,
++	size_t request_len,
++	bool is_privileged,
++	char** response_out,
++	size_t* response_len_out)
++{
++	if (!response_out || !response_len_out) {
++		return kOSKextReturnInvalidArgument;
++	}
++	*response_out = NULL;
++	*response_len_out = 0;
++
++	if (!request_xml || request_len == 0) {
++		return kOSKextReturnInvalidArgument;
++	}
++
++	/* Reject binary mkext payloads cleanly. */
++	if (request_len >= 8 &&
++	    (uint8_t)request_xml[0] == 0x4du && (uint8_t)request_xml[1] == 0x4bu &&
++	    (uint8_t)request_xml[2] == 0x58 && (uint8_t)request_xml[3] == 0x54) {
++		return is_privileged ? kOSKextReturnUnsupported : kOSKextReturnNotPrivileged;
++	}
++
++	dtape_kext_req_parsed_t req;
++	if (!dtape_parse_kext_request_xml(request_xml, request_len, &req)) {
++		return kOSKextReturnInvalidArgument;
++	}
++	if (!req.predicate || req.predicate[0] == '\0') {
++		dtape_req_free(&req);
++		return kOSKextReturnInvalidArgument;
++	}
++
++	dtape_xml_buf_t out;
++	memset(&out, 0, sizeof(out));
++	int32_t op_result = kOSKextReturnInvalidArgument;
++
++	if (strcmp(req.predicate, kKextRequestPredicateGetLoaded) == 0) {
++		op_result = dtape_handle_get_loaded(&req, &out);
++	} else if (strcmp(req.predicate, kKextRequestPredicateGetLoadedByUUID) == 0) {
++		op_result = dtape_handle_get_loaded_by_uuid(&req, &out);
++	} else if (strcmp(req.predicate, kKextRequestPredicateGetKextsInCollection) == 0) {
++		op_result = dtape_handle_get_collection(&req, &out);
++	} else if (strcmp(req.predicate, kKextRequestPredicateGetUUIDByAddress) == 0) {
++		op_result = dtape_handle_get_uuid_by_addr(&req, &out);
++	} else if (strcmp(req.predicate, kKextRequestPredicateGetAllLoadRequests) == 0) {
++		dtape_buf_append_str(&out, "<set/>");
++		op_result = out.failed ? kOSKextReturnNoMemory : 0;
++	} else if (dtape_is_privileged_predicate(req.predicate)) {
++		op_result = is_privileged ? kOSKextReturnUnsupported : kOSKextReturnNotPrivileged;
++	} else {
++		op_result = kOSKextReturnInvalidArgument;
++	}
++
++	dtape_req_free(&req);
++
++	if (op_result == 0 && out.data && out.len > 0) {
++		*response_out = out.data;
++		*response_len_out = out.len + 1; /* include trailing NUL for IOCFUnserialize */
++	} else {
++		free(out.data);
++	}
++	return op_result;
++}
++
++#ifndef DTAPE_KEXT_INFO_STANDALONE
++
++kern_return_t kext_request(
++	host_priv_t hostPriv,
++	uint32_t clientLogSpec,
++	vm_offset_t requestIn,
++	mach_msg_type_number_t requestLengthIn,
++	vm_offset_t* responseOut,
++	mach_msg_type_number_t* responseLengthOut,
++	vm_offset_t* logDataOut,
++	mach_msg_type_number_t* logDataLengthOut,
++	kern_return_t* op_result)
++{
++	(void)clientLogSpec;
++
++	if (!dtape_kext_catalog_enabled()) {
++		/* Same answer as the stub this file replaced. */
++		dtape_stub_safe();
++		return KERN_NOT_SUPPORTED;
++	}
++
++	*op_result = KERN_FAILURE;
++	*responseOut = 0;
++	*responseLengthOut = 0;
++	*logDataOut = 0;
++	*logDataLengthOut = 0;
++
++	if (!requestIn || requestLengthIn == 0) {
++		*op_result = KERN_INVALID_ARGUMENT;
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	vm_map_copy_t req_copy = (vm_map_copy_t)requestIn;
++	if (req_copy->type != VM_MAP_COPY_KERNEL_BUFFER ||
++	    req_copy->cpy_kdata == NULL ||
++	    req_copy->size < requestLengthIn) {
++		*op_result = KERN_INVALID_ARGUMENT;
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	char* resp_buf = NULL;
++	size_t resp_len = 0;
++	int32_t op_res = dtape_kext_handle_request(
++		(const char*)req_copy->cpy_kdata,
++		(size_t)requestLengthIn,
++		hostPriv != HOST_PRIV_NULL,
++		&resp_buf,
++		&resp_len);
++
++	if (resp_buf != NULL && resp_len > 0) {
++		vm_map_copy_t out_copy = (vm_map_copy_t)malloc(sizeof(struct vm_map_copy) + resp_len);
++		if (!out_copy) {
++			free(resp_buf);
++			*op_result = kOSKextReturnNoMemory;
++			/* Return error without discarding req_copy: ipc_kmsg_destroy handles it. */
++			return KERN_RESOURCE_SHORTAGE;
++		}
++		out_copy->type = VM_MAP_COPY_KERNEL_BUFFER;
++		out_copy->size = resp_len;
++		out_copy->offset = 0;
++		out_copy->cpy_kdata = out_copy->dtape_copy_data;
++		memcpy(out_copy->cpy_kdata, resp_buf, resp_len);
++		free(resp_buf);
++
++		*responseOut = (vm_offset_t)out_copy;
++		*responseLengthOut = (mach_msg_type_number_t)resp_len;
++	}
++
++	/* On KERN_SUCCESS, the MIG server routine owns requestIn's OOL copy object. */
++	vm_map_copy_discard(req_copy);
++	*op_result = (kern_return_t)op_res;
++	return KERN_SUCCESS;
++}
++
++#endif /* DTAPE_KEXT_INFO_STANDALONE */
