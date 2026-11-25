@@ -70,6 +70,7 @@ GUEST_TUNING_SWITCHES = (
     'metal-present-dispatch-wait', 'metal-deferred-blit', 'metal-worker-lease',
     'metal-skip-cpu-devices', 'metal-all-devices', 'metal-no-drawable-vram',
     'metal-no-lazy-wakeup', 'metal-submit-batch-us', 'metal-submit-batch-max',
+    'metal-texture-timelines', 'metal-no-texture-timelines',
 )
 HOST_TUNING_SWITCHES = (
     'rclol-no-local-mutex', 'rclol-no-local-condvars', 'rclol-no-local-semaphores',
