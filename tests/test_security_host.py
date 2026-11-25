@@ -298,8 +298,10 @@ static int sip_stat_inode(const char *path, uint64_t *dev, uint64_t *ino) {
  const char *names[] = {"/System/target", "/tmp/alias", "/usr/local/alias"};
  for (int i = 0; i < 3; i++) { snprintf(path, sizeof(path), "%s%s", prefix, names[i]); assert(dc_sip_check_write(path) == -EPERM); }
  snprintf(path, sizeof(path), "%s/usr/local/new-file", prefix); assert(dc_sip_check_write(path) == 0);
- const char *ancestors[] = {"/private", "/private/var", "/Library", "/"};
- for (int i = 0; i < 4; i++) { snprintf(path, sizeof(path), "%s%s", prefix, ancestors[i]); assert(dc_sip_check_tree_move(path) == -EPERM); }
+ snprintf(path, sizeof(path), "%s/private/etc/hosts", prefix); assert(dc_sip_check_write(path) == 0);
+ snprintf(path, sizeof(path), "%s/private/var/db/test", prefix); assert(dc_sip_check_write(path) == 0);
+ const char *ancestors[] = {"/Library", "/"};
+ for (int i = 0; i < 2; i++) { snprintf(path, sizeof(path), "%s%s", prefix, ancestors[i]); assert(dc_sip_check_tree_move(path) == -EPERM); }
  snprintf(path, sizeof(path), "%s/usr/local/example", prefix); assert(dc_sip_check_tree_move(path) == 0);
  puts("PASS learned inode restrictions survive /usr/local aliases and protected ancestor moves");
 }

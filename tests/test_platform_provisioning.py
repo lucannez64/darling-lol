@@ -48,7 +48,9 @@ class ProvisioningChecks(unittest.TestCase):
             self.assertEqual(value['system-id'], parsed.bytes_le)
             self.assertEqual(value['provisioning_UDID'], str(parsed).upper())
             self.assertEqual(len(value['ROM']), 6)
-            self.assertEqual(value['ROM'][0] & 3, 2)
+            # A Mac's en0 is globally administered unicast under an Apple OUI.
+            self.assertEqual(value['ROM'][0] & 3, 0)
+            self.assertIn(value['ROM'][:3], platform.APPLE_OUIS)
         self.assertEqual(len({v['IOPlatformUUID'] for v in values}), len(values))
 
     def test_system_version_normalized_to_one_macos_identity(self):
@@ -61,7 +63,7 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(out['ProductBuildVersion'], platform.EMULATED_BUILD_VERSION)
         self.assertNotIn('Darling', out['ProductBuildVersion'])
         # Unrelated keys survive; the Darling copyright is replaced.
-        self.assertEqual(out['iOSSupportVersion'], '14.7')
+        self.assertEqual(out['iOSSupportVersion'], '17.7')
         self.assertNotIn('Dolezel', out['ProductCopyright'])
         self.assertIn('Apple', out['ProductCopyright'])
 

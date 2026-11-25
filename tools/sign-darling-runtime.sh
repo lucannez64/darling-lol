@@ -81,9 +81,8 @@ while [ $# -gt 0 ]; do
 		for d in \
 		    "$prefix_root"/Users/*/RuntimeLibraries \
 		    "$prefix_root"/Users/*/RuntimeFrameworks \
-		    "$prefix_root"/usr/lib/system \
-		    "$prefix_root"/System/Library/Frameworks/CoreServices.framework \
-		    "$prefix_root"/System/Library/Frameworks/Accelerate.framework \
+		    "$prefix_root"/usr/lib \
+		    "$prefix_root"/System/Library/Frameworks \
 		    "$prefix_root"/Users/*/Library/Audio/Plug-Ins/Components \
 		    "$prefix_root"/Users/*/libDarlingXShm.dylib \
 		    "$prefix_root"/Users/*/libDarlingWayland.dylib; do
@@ -115,9 +114,8 @@ if [ "$explicit" -eq 0 ]; then
 	for d in \
 	    "$prefix_root"/Users/*/RuntimeLibraries \
 	    "$prefix_root"/Users/*/RuntimeFrameworks \
-	    "$prefix_root"/usr/lib/system \
-	    "$prefix_root"/System/Library/Frameworks/CoreServices.framework \
-	    "$prefix_root"/System/Library/Frameworks/Accelerate.framework \
+	    "$prefix_root"/usr/lib \
+	    "$prefix_root"/System/Library/Frameworks \
 	    "$prefix_root"/Users/*/Library/Audio/Plug-Ins/Components \
 	    "$prefix_root"/Users/*/libDarlingXShm.dylib \
 	    "$prefix_root"/Users/*/libDarlingWayland.dylib; do

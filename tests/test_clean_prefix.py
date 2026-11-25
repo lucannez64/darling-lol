@@ -89,8 +89,11 @@ class CleanPrefixTests(unittest.TestCase):
         }))
         (prefix / 'private/etc/darling-smbios.conf').write_text(
             f'SMBIOS_SERIAL_NUMBER={self.old_serial}\nSMBIOS_PLATFORM_UUID={self.old_uuid}\n')
+        (prefix / 'private/etc/darling-identity-salt').write_bytes(b'0' * 32)
         (prefix / 'private/etc/darling-platform.plist.before-platform-change').write_text('first-plist\n')
         (prefix / 'private/etc/darling-smbios.conf.before-platform-change').write_text('first-conf\n')
+        (prefix / 'System/Library/CoreServices').mkdir(parents=True, exist_ok=True)
+        (prefix / 'System/Library/CoreServices/SystemVersion.plist.before-platform-change').write_text('old-sv\n')
         (lol / 'game.bin').write_text('game\n')
         (lol / 'Logs/GameLogs/r3dlog.txt').write_text('match\n')
         (lol / 'Config/LeagueClientSettings.yaml').write_text('install-identifier: old-id\n')
@@ -99,6 +102,10 @@ class CleanPrefixTests(unittest.TestCase):
         (lol / 'Config/game.cfg').write_text('[General]\n')
         (lol / 'Config/input.ini').write_text('[GameEvents]\n')
         (lol / 'Config/LCULocalPreferences.yaml').write_text('potatoModeEnabled: true\n')
+        (lol / 'Config/PerksPreferences.yaml').write_text('currentPageId: 1234\n')
+        (lol / 'lockfile').write_text('LeagueClient:1:2:pass:https\n')
+        (prefix / 'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.update-status.json').write_text('{"productSessionId":"old"}\n')
+        (prefix / 'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.product_settings.yaml').write_text('keep\n')
         (lol / 'Saved/webcache/Cookies').write_text('cookie\n')
         (prefix / 'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices').write_text('bin\n')
         (prefix / 'Users/Shared/Riot Games/machine.cfg').write_text('machine-shared\n')
@@ -114,6 +121,16 @@ class CleanPrefixTests(unittest.TestCase):
         (guest / 'Library/Application Support/riot-client-ux/sentry/scope_v3.json').write_text('{"user":{"id":"old"}}\n')
         (guest / 'Library/Application Support/riot-client-ux/Crashpad/settings.dat').write_text('crashpad\n')
         (guest / 'Library/Application Support/CEF/cache.dat').write_text('cef\n')
+        (guest / 'Library/Keychains/Darling').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/Keychains/Darling/items-v1.plist').write_text('keychain\n')
+        (guest / 'Library/Cookies').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/Cookies/Cookies.binarycookies').write_text('cookies\n')
+        (guest / 'Library/HTTPStorages').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/HTTPStorages/com.riotgames.httpstorages').write_text('http\n')
+        (guest / 'Library/WebKit').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/WebKit/WebsiteData').write_text('webkit\n')
+        (guest / 'Library/Saved Application State').mkdir(parents=True, exist_ok=True)
+        (guest / 'Library/Saved Application State/com.riotgames.savedState').write_text('state\n')
         (guest / 'Library/Application Support/Other/keep.txt').write_text('keep\n')
         (guest / 'Library/Logs/Riot Games/Riot Client/rc.log').write_text('riot log\n')
         (guest / 'Library/Caches/com.riotgames.RiotClient/cache.bin').write_text('cache\n')
@@ -186,8 +203,11 @@ class CleanPrefixTests(unittest.TestCase):
             'Applications/League of Legends.app/Contents/LoL/Config/PersistedSettings.json',
             'Applications/League of Legends.app/Contents/LoL/Config/game.cfg',
             'Applications/League of Legends.app/Contents/LoL/Config/input.ini',
+            'Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/PerksPreferences.yaml',
             'private/etc/darling-platform.plist',
             'private/etc/darling-smbios.conf',
+            'private/etc/darling-identity-salt',
             'private/etc/darling-platform.plist.before-platform-change',
             'private/etc/darling-smbios.conf.before-platform-change',
         ):
@@ -206,26 +226,36 @@ class CleanPrefixTests(unittest.TestCase):
             'Applications/League of Legends.app/Contents/LoL/Config/PersistedSettings.json',
             'Applications/League of Legends.app/Contents/LoL/Config/game.cfg',
             'Applications/League of Legends.app/Contents/LoL/Config/input.ini',
+            'Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/Config/PerksPreferences.yaml',
+            'Applications/League of Legends.app/Contents/LoL/lockfile',
+            'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.update-status.json',
             'Users/Shared/Riot Games/machine.cfg',
             'Users/tester/Library/Application Support/Riot Games',
             'Users/tester/Library/Application Support/Riot Client',
             'Users/tester/Library/Application Support/riot-client-ux',
             'Users/tester/Library/Application Support/CEF',
+            'Users/tester/Library/Keychains/Darling/items-v1.plist',
+            'Users/tester/Library/Cookies',
+            'Users/tester/Library/HTTPStorages',
+            'Users/tester/Library/WebKit',
+            'Users/tester/Library/Saved Application State',
             'Users/tester/Library/Preferences/com.riotgames.RiotClient.plist',
             'Users/tester/Library/Caches/com.riotgames.RiotClient',
             '.init.pid.stale-1-2',
-            # No *.before-platform-change identity copies left readable inside the prefix.
+            # No *.before-platform-change identity copies or old fallback salt left readable inside the prefix.
+            'private/etc/darling-identity-salt',
             'private/etc/darling-platform.plist.before-platform-change',
             'private/etc/darling-smbios.conf.before-platform-change',
+            'System/Library/CoreServices/SystemVersion.plist.before-platform-change',
         ):
             self.assertFalse(os.path.lexists(self.prefix / gone), gone)
 
         for kept in (
             'private/etc/darling-system.prop',
             'Applications/League of Legends.app/Contents/LoL/game.bin',
-            'Applications/League of Legends.app/Contents/LoL/Config/LCULocalPreferences.yaml',
             'Users/Shared/Riot Games/Riot Client.app/Contents/MacOS/RiotClientServices',
-            'Users/Shared/Riot Games/Metadata/league_of_legends.live',
+            'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.product_settings.yaml',
             'Users/tester/Library/Application Support/Other/keep.txt',
             'Users/tester/Library/Preferences/other.plist',
             'Users/tester/Library/Caches/mesa/shader',
@@ -237,12 +267,14 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertNotEqual(updated['IOPlatformSerialNumber'], self.old_serial)
         self.assertEqual(updated['model'], 'MacBookPro16,1')
 
-    def test_keep_game_settings_preserves_game_cfg_and_input_ini(self):
+    def test_keep_game_settings_preserves_game_cfg_input_ini_and_local_prefs(self):
         result = self.run_script('--keep-identity', '--keep-game-settings', '--yes')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lol_cfg = self.prefix / 'Applications/League of Legends.app/Contents/LoL/Config'
         self.assertTrue((lol_cfg / 'game.cfg').exists())
         self.assertTrue((lol_cfg / 'input.ini').exists())
+        self.assertTrue((lol_cfg / 'LCULocalPreferences.yaml').exists())
+        self.assertFalse((lol_cfg / 'PerksPreferences.yaml').exists())
         self.assertFalse((lol_cfg / 'LeagueClientSettings.yaml').exists())
         self.assertFalse((lol_cfg / 'LCUAccountPreferences.yaml').exists())
         self.assertFalse((lol_cfg / 'PersistedSettings.json').exists())
@@ -256,6 +288,7 @@ class CleanPrefixTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual((self.prefix / 'private/etc/darling-platform.plist').read_bytes(), before_plist)
         self.assertEqual((self.prefix / 'private/etc/darling-smbios.conf').read_bytes(), before_conf)
+        self.assertEqual((self.prefix / 'private/etc/darling-identity-salt').read_bytes(), b'0' * 32)
         self.assertTrue((self.prefix / 'private/etc/darling-platform.plist.before-platform-change').exists())
 
         # Recreate a file and run again in the same second; the first archive must survive.

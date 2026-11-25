@@ -120,9 +120,10 @@ class SystemProfileTests(unittest.TestCase):
             }
             env.update(extra)
             script = ('. "$1"; '
-                      'printf "profile=%s\\ncpu=%s\\ngpu=%s\\nvram=%s\\nmetal_mac=%s\\nmetal_vram=%s\\n" '
+                      'printf "profile=%s\\ncpu=%s\\ngpu=%s\\nvram=%s\\nmetal_mac=%s\\nmetal_vram=%s\\nsip=%s\\n" '
                       '"$RCLOL_PLATFORM_PROFILE" "$RCLOL_CPU_BRAND" "$RCLOL_GPU_NAME" '
-                      '"$RCLOL_GPU_VRAM_MB" "${DARLING_METAL_MAC_GPU_NAME-}" "${DARLING_METAL_VRAM_MB-}"')
+                      '"$RCLOL_GPU_VRAM_MB" "${DARLING_METAL_MAC_GPU_NAME-}" "${DARLING_METAL_VRAM_MB-}" '
+                      '"${DARLING_SIP_ENFORCE-}"')
             result = subprocess.run(['sh', '-c', script, 'sh', str(block)], env=env,
                                     check=True, capture_output=True, text=True)
         return dict(line.split('=', 1) for line in result.stdout.splitlines())
@@ -216,6 +217,16 @@ class SystemProfileTests(unittest.TestCase):
             result = self.launcher_handoff_raw('compat', RCLOL_PERF_EVENT_PARANOID_PATH=str(sysctl))
             # Whatever this host answers, the probe runs and never breaks the launch.
             self.assertNotIn('Traceback', result.stderr)
+
+    def test_compat_enables_sip_enforcement_by_default_with_opt_out(self):
+        compat = self.launcher_handoff('compat')
+        self.assertEqual(compat['sip'], '1')
+        opt_out = self.launcher_handoff('compat', RCLOL_SIP_ENFORCE='0')
+        self.assertEqual(opt_out['sip'], '')
+        explicit = self.launcher_handoff('compat', DARLING_SIP_ENFORCE='0')
+        self.assertEqual(explicit['sip'], '0')
+        host = self.launcher_handoff('host')
+        self.assertEqual(host['sip'], '')
 
 
 if __name__ == '__main__':

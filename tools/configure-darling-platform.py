@@ -28,6 +28,12 @@ GENERATED_KEYS = ('IOPlatformSerialNumber', 'mlb-serial-number', 'IOPlatformUUID
 STRINGS = {'IOPlatformSerialNumber': 64, 'manufacturer': 128, 'model': 128,
            'product-name': 128, 'board-id': 128, 'mlb-serial-number': 64}
 BYTES = {'ROM': 6, 'system-id': 16}
+# Apple-registered OUIs (IEEE MA-L) for a generated ROM. iokitd publishes the
+# ROM as en0's IOMACAddress, and a Mac's built-in interface never carries a
+# locally administered address, so the presented MacBook Pro uses one of these.
+APPLE_OUIS = tuple(bytes.fromhex(oui) for oui in (
+    '000393', '000a95', '001b63', '001ec2', '002500', '3c0754', 'a483e7',
+    'f01898', 'acbc32', '8c8590', 'f40f24', '88665a', '14109f', '38f9d3'))
 ALIASES = {
     'SystemProductName': 'model', 'Type': 'model', 'SMBIOS_MODEL': 'model',
     'SMBIOS_PRODUCT_NAME': 'product-name', 'SMBIOS_MANUFACTURER': 'manufacturer',
@@ -219,12 +225,8 @@ def provision(properties, rom_oui=None):
             str(uuid.UUID(bytes_le=result['system-id']) if 'system-id' in result else uuid.uuid4()).upper())
     result.setdefault('provisioning_UDID', result['IOPlatformUUID'])
     if 'ROM' not in result:
-        if rom_oui is not None:
-            result['ROM'] = rom_oui + secrets.token_bytes(3)
-        else:
-            value = bytearray(secrets.token_bytes(6))
-            value[0] = (value[0] | 2) & 0xfe  # locally administered, unicast
-            result['ROM'] = bytes(value)
+        oui = rom_oui if rom_oui is not None else secrets.choice(APPLE_OUIS)
+        result['ROM'] = oui + secrets.token_bytes(3)
     return validate(result)
 
 
@@ -243,6 +245,8 @@ def normalize_system_version(metadata):
     updated['ProductVersion'] = EMULATED_PRODUCT_VERSION
     updated['ProductUserVisibleVersion'] = EMULATED_PRODUCT_VERSION
     updated['ProductBuildVersion'] = EMULATED_BUILD_VERSION
+    if 'iOSSupportVersion' in updated:
+        updated['iOSSupportVersion'] = '17.7'
     # The stock template credits "Lubos Dolezel"; a real install never does.
     updated['ProductCopyright'] = '1983-2024 Apple Inc.'
     return plistlib.dumps(updated, fmt=plistlib.FMT_XML, sort_keys=True)
@@ -331,7 +335,7 @@ def main(argv=None):
     parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE')
     parser.add_argument('--provision', action='store_true', help='Generate missing synthetic identifiers and provision prefix metadata')
     parser.add_argument('--runtime-root', type=Path, help='Runtime supplying SystemVersion.plist (default: saved SDK or /usr/local/libexec/darling)')
-    parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is locally administered')
+    parser.add_argument('--rom-oui', help='Explicit three-byte unicast OUI for a missing ROM; default is a random Apple-registered OUI')
     parser.add_argument('--replace-known-defaults', action='store_true',
                         help='Provision only if an existing prefix has no saved identity (iokitd then reports '
                              'its DARLING- serial) or still has the shared serial or UUID; otherwise change nothing')

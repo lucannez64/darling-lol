@@ -409,7 +409,8 @@ accepted; any other directory is refused.
 ### Clean prefix logs, local state and platform identity
 
 To reset local Riot/League logs, `machine.cfg`, Riot Client / Electron / CEF
-profiles, unsent crash reports, local League client config/webcache, client
+profiles, unsent crash reports, local League client config/webcache, the
+League `lockfile`, the product `update-status.json` session id, client
 caches, stale runtime markers, and the prefix's synthetic platform identity
 without reinstalling the Riot Client or redownloading the game:
 
@@ -426,12 +427,19 @@ copies, and regenerates the synthetic per-prefix identifiers via
 `tools/configure-darling-platform.py --regenerate --no-backup --write` (so no
 copy of the previous identity stays in `private/etc/`). Pass `--keep-identity`
 to keep `darling-platform.plist` and `darling-smbios.conf` unchanged,
-`--keep-game-settings` to preserve `Config/game.cfg` and `Config/input.ini`,
+`--keep-game-settings` to preserve `Config/game.cfg`, `Config/input.ini` and
+`Config/LCULocalPreferences.yaml`,
 and `--yes` to skip the confirmation prompt. A checkout installed with
 `--toolbox` is detected automatically and the cleanup re-enters its recorded
 container, so the host run can stop the container's runtime. The Darling
 runtime, `Riot Client.app`, `League of Legends.app`, product metadata and the
 Mesa shader cache are kept.
+
+The script only touches the prefix. The guest's `Documents`, `Pictures` and
+other home folders are links to your Linux home, so League saves replays to
+`~/Documents/League of Legends/Replays` on the host. Every `.rofl` holds the
+account ids of all players in that match: move them out before a new account
+logs in.
 
 ## Riot exits and League reports that it lost its connection
 

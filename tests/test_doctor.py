@@ -164,7 +164,10 @@ class CheckTests(unittest.TestCase):
 
     def test_runtime_signing_needs_a_trust_store(self):
         self.assertEqual(doctor.check_runtime_signing(facts())[0], 'ok')
-        self.assertEqual(doctor.check_runtime_signing(facts(trust_store=''))[0], 'warn')
+        status, message = doctor.check_runtime_signing(facts(trust_store=''))
+        self.assertEqual(status, 'warn')
+        self.assertIn('sign-darling-runtime.sh --sdk', message)
+        self.assertIn('scripts/update.sh', message)
         self.assertEqual(doctor.check_runtime_signing(facts(trust_store='', prefix_launchd=False))[0], 'ok')
         with tempfile.TemporaryDirectory() as folder:
             store = Path(folder) / 'cfg/darling/trustcache'
@@ -175,6 +178,25 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(doctor.trust_store({'DARLING_TRUST_DIR': str(override.parent),
                                                  'XDG_CONFIG_HOME': str(Path(folder) / 'cfg')}),
                              str(override))
+
+    def test_runtime_signing_expects_no_trust_store_when_rootless(self):
+        # Toolbox runs darlingserver in a rootless namespace, where it ignores
+        # every trust store, so a missing one is not a warning there (#304).
+        status, message = doctor.check_runtime_signing(facts(trust_store='', rootless_namespace=True))
+        self.assertEqual(status, 'ok')
+        self.assertIn('Rootless', message)
+        with tempfile.TemporaryDirectory() as folder:
+            proc = Path(folder)
+            (proc / 'self').mkdir()
+            uid_map = proc / 'self/uid_map'
+            uid_map.write_text('         0     524288       1000\n      1000       1000          1\n')
+            self.assertTrue(doctor.rootless_namespace(proc))
+            uid_map.write_text('         0          0 4294967295\n')
+            self.assertFalse(doctor.rootless_namespace(proc))
+            uid_map.write_text('')
+            self.assertFalse(doctor.rootless_namespace(proc))
+            uid_map.unlink()
+            self.assertFalse(doctor.rootless_namespace(proc))
 
     def test_prefix_follows_dprefix_then_the_configured_prefix(self):
         with tempfile.TemporaryDirectory() as folder:

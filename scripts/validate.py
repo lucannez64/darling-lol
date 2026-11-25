@@ -31,13 +31,32 @@ for p in list((ROOT/'scripts').glob('*.sh'))+list((ROOT/'build/runtime/tools').g
     result=subprocess.run(['bash','-n',str(p)],capture_output=True,text=True)
     if result.returncode:errors.append(p.name+': shell syntax error')
 manifest=json.loads((ROOT/'upstream/manifest.json').read_text())
+hunk_re=re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 for c in manifest['components']:
     if not re.fullmatch('[0-9a-f]{40}',c['revision']):errors.append(c['path']+': invalid pinned revision')
     if not (ROOT/c['patch']).is_file():errors.append(c['path']+': patch missing')
     else:
-        parsed=subprocess.run(['git','apply','--numstat','-'],input=(ROOT/c['patch']).read_text(),
+        patch_text=(ROOT/c['patch']).read_text()
+        parsed=subprocess.run(['git','apply','--numstat','-'],input=patch_text,
                               text=True,capture_output=True)
         if parsed.returncode:errors.append(c['patch']+': '+parsed.stderr.strip())
+        lines=patch_text.splitlines()
+        i=0
+        while i<len(lines):
+            m=hunk_re.match(lines[i])
+            if not m:i+=1;continue
+            old_exp=int(m.group(2)) if m.group(2) is not None else 1
+            new_exp=int(m.group(4)) if m.group(4) is not None else 1
+            hunk_line=i+1;i+=1;old_got=new_got=0
+            while i<len(lines) and not lines[i].startswith(('diff --git ','@@ ','--- ','+++ ')):
+                ln=lines[i]
+                if ln.startswith('-'):old_got+=1
+                elif ln.startswith('+'):new_got+=1
+                elif ln.startswith(' '):old_got+=1;new_got+=1
+                elif ln=='' and i+1<len(lines) and not lines[i+1].startswith('diff --git '):old_got+=1;new_got+=1
+                i+=1
+            if old_got!=old_exp or new_got!=new_exp:
+                errors.append(f"{c['patch']}:{hunk_line}: hunk count mismatch (header -{old_exp},+{new_exp}, actual -{old_got},+{new_got})")
 if errors:
     print('\n'.join(errors));raise SystemExit(1)
 print('PASS: tracked source audit, rendered Python/shell syntax and',len(manifest['components']),'pinned patch entries')

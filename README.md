@@ -78,7 +78,7 @@ bash scripts/install-native.sh
 - `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`).
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, a native install runs a full `pacman -Syu` and asks first unless this is given.
-- `--region CODE`: Riot region (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`). Without it, an interactive install asks; with `--yes` or without a terminal it is the region of an explicit `--locale`, else `EUW`.
+- `--region CODE`: Riot region (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`, `SG2`). Without it, an interactive install asks; with `--yes` or without a terminal it is the region of an explicit `--locale`, else `EUW`.
 - `--locale CODE`: Riot Client language for new installs, for example `pt_BR`. Without it, an interactive install asks and suggests the system locale; with `--yes` or without a terminal it is `en_GB`. A prefix that already ran the client keeps its saved language unless `RCLOL_LOCALE` is exported at launch.
 
 Options can be combined: `bash scripts/install-native.sh --toolbox --verbose`
@@ -169,7 +169,7 @@ git pull
 
 For a Toolbox install, run these commands from the host. The updater detects the recorded container and runs the update inside it.
 
-`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally and reinstalls the base runtime and per-user overrides. It refuses to run while a Riot or League process is open. Background steps log their output by default. Pass `--verbose` to stream all output to the terminal. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
+`update.sh` re-applies changed patches (reverting the earlier version of each, so other edits survive), rebuilds incrementally, reinstalls the base runtime and per-user overlays (including canonical prefix overlays), signs the prefix overlays and base SDK, and replaces any legacy shared platform identity. It refuses to run while a Riot or League process is open. Background steps log their output by default. Pass `--verbose` to stream all output to the terminal. If you maintain an additional or non-default prefix via `DPREFIX`, update that prefix as well with `DPREFIX=/path/to/prefix sh scripts/install-runtime.sh`. For single components, see [incremental updates](docs/SETUP.md#updating-an-existing-runtime).
 
 A built runtime can also be shipped without the toolchain via `tools/runtime-package.py`: see [prebuilt runtime overlays](docs/PACKAGING.md).
 

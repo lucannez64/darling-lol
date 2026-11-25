@@ -71,7 +71,8 @@ Removed logs, config, profiles and previous identity files are archived
 (mode 0600) before deletion.
 
   --keep-identity       Keep darling-platform.plist and darling-smbios.conf unchanged
-  --keep-game-settings  Keep League of Legends Config/game.cfg and Config/input.ini
+  --keep-game-settings  Keep League of Legends Config/game.cfg, Config/input.ini and
+                        Config/LCULocalPreferences.yaml
   --backup-dir DIR      Directory for timestamped backup archives
                         (default: build/prefix-cleanup-backups)
   --yes                 Do not ask for confirmation (required without a terminal)
@@ -302,14 +303,15 @@ note 'and CEF Application Support profiles, crash reports,'
 note 'com.riotgames.*.plist preferences, and League client Config files.'
 printf '\n'
 info 'Will be cleaned without backup:'
-note 'client caches (com.riotgames.*), League Saved/webcache, and stale runtime markers.'
+note 'client caches (com.riotgames.*), League Saved/webcache, the League lockfile,'
+note 'the Metadata update-status.json session id, and stale runtime markers.'
 printf '\n'
 if [ "$keep_game_settings" = 1 ]; then
 	info 'Game settings:'
-	note 'Config/game.cfg and Config/input.ini kept (--keep-game-settings).'
+	note 'Config/game.cfg, input.ini and LCULocalPreferences.yaml kept (--keep-game-settings).'
 else
 	info 'Game settings:'
-	note 'Config/game.cfg and Config/input.ini backed up and removed.'
+	note 'Config/game.cfg, input.ini and LCULocalPreferences.yaml backed up and removed.'
 fi
 printf '\n'
 if [ "$keep_identity" = 1 ]; then
@@ -395,11 +397,15 @@ lol_config_files = [
     lol_config / 'LeagueClientSettings.yaml',
     lol_config / 'LCUAccountPreferences.yaml',
     lol_config / 'PersistedSettings.json',
+    # The selected rune page id belongs to the account.
+    lol_config / 'PerksPreferences.yaml',
 ]
 if not keep_game_settings:
     lol_config_files.extend([
         lol_config / 'game.cfg',
         lol_config / 'input.ini',
+        # Also holds the voice capture device handle, the same for every account.
+        lol_config / 'LCULocalPreferences.yaml',
     ])
 
 prefs_files = []
@@ -418,12 +424,18 @@ backed_up_targets = [
     guest / 'Library/Application Support/Riot Client',
     guest / 'Library/Application Support/riot-client-ux',
     guest / 'Library/Application Support/CEF',
+    guest / 'Library/Keychains/Darling/items-v1.plist',
+    guest / 'Library/Cookies',
+    guest / 'Library/HTTPStorages',
+    guest / 'Library/WebKit',
+    guest / 'Library/Saved Application State',
     *prefs_files,
     *lol_config_files,
 ]
 identity_backups = [
     prefix / 'private/etc/darling-platform.plist.before-platform-change',
     prefix / 'private/etc/darling-smbios.conf.before-platform-change',
+    prefix / 'System/Library/CoreServices/SystemVersion.plist.before-platform-change',
 ]
 
 archive_targets = list(backed_up_targets)
@@ -431,6 +443,7 @@ if not keep_identity:
     archive_targets.extend([
         prefix / 'private/etc/darling-platform.plist',
         prefix / 'private/etc/darling-smbios.conf',
+        prefix / 'private/etc/darling-identity-salt',
         *identity_backups,
     ])
 
@@ -512,9 +525,15 @@ if to_archive:
 remove_targets = [
     *backed_up_targets,
     lol_root / 'Saved/webcache',
+    lol_root / 'lockfile',
+    # Its productSessionId survives across accounts; the client starts without it.
+    prefix / 'Users/Shared/Riot Games/Metadata/league_of_legends.live/league_of_legends.live.update-status.json',
 ]
 if not keep_identity:
-    remove_targets.extend(identity_backups)
+    remove_targets.extend([
+        prefix / 'private/etc/darling-identity-salt',
+        *identity_backups,
+    ])
 
 caches_dir = guest / 'Library/Caches'
 if os.path.lexists(caches_dir) and not caches_dir.is_symlink() and parent_within_prefix(caches_dir) and safe_within(caches_dir):

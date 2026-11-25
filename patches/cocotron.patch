@@ -18981,10 +18981,10 @@ index 0000000..98fd051
 +@end
 diff --git a/AppKit/X11.backend/RemoteFrameSlot.h b/AppKit/X11.backend/RemoteFrameSlot.h
 new file mode 100644
-index 0000000..584f4d6
+index 0000000..84d2580
 --- /dev/null
 +++ b/AppKit/X11.backend/RemoteFrameSlot.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,70 @@
 +/* darling-lol: the cross-process CA frame slots that Chromium's GPU/browser processes publish
 + * (/dev/shm/darling-ca-frame-<uid>-<pid>, written by QuartzCore's CALayer) and that a window's presenter consumes.
 + * The slot selection and the seqlock-checked read are shared by X11Window (XShm put into a child X window) and
@@ -19016,6 +19016,9 @@ index 0000000..584f4d6
 +    char mappingPath[128];
 +    double selectionRefresh; /* the scan of /dev/shm is repeated at most every 250 ms */
 +    BOOL softwarePublisher;
++    BOOL softwareMismatchActive;
++    uint64_t softwareMatchedMtime; /* latest mtime when the mapped software slot matched a target */
++    double softwareMismatchSince;  /* first scan time a fresher live candidate appeared during mismatch */
 +} RemoteFrameSlot;
 +
 +typedef struct {
@@ -19032,7 +19035,8 @@ index 0000000..584f4d6
 +
 +/* The shared scan: every publisher's slot whose size matches one of the targets and that actually contains pixels
 + * (an all-black frame only when nothing else exists), preferring a software publisher, then the newest. A software
-+ * owner is kept while the size presented (presentedWidth x presentedHeight) still matches a target. */
++ * owner is kept across brief popup updates and stale readback slots, and handed off if a fresher visible candidate
++ * persists after the software slot stops matching a target (or immediately on resize). */
 +RemoteFrameSelection RemoteFrameSelect(RemoteFrameSlot *slot, const RemoteFrameTarget *targets, unsigned count,
 +                                       double now, unsigned presentedWidth, unsigned presentedHeight, char *path,
 +                                       size_t pathSize);
@@ -19053,10 +19057,10 @@ index 0000000..584f4d6
 +#endif
 diff --git a/AppKit/X11.backend/RemoteFrameSlot.m b/AppKit/X11.backend/RemoteFrameSlot.m
 new file mode 100644
-index 0000000..f24e230
+index 0000000..8aec6f4
 --- /dev/null
 +++ b/AppKit/X11.backend/RemoteFrameSlot.m
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,239 @@
 +/* darling-lol: shared remote CA frame slot selection (see RemoteFrameSlot.h). The scan rules are the ones X11Window
 + * has always used. */
 +#import "RemoteFrameSlot.h"
@@ -19100,8 +19104,8 @@ index 0000000..f24e230
 +    }
 +    slot->selectionRefresh = now + 0.25;
 +    bestPath[0] = bestBlackPath[0] = '\0';
-+    uint64_t bestMtime = 0, bestBlackMtime = 0;
-+    BOOL bestSoftware = NO;
++    uint64_t bestMtime = 0, bestBlackMtime = 0, currentMatchedMtime = 0;
++    BOOL bestSoftware = NO, bestBlackSoftware = NO, currentMatched = NO;
 +
 +    char prefix[32];
 +    snprintf(prefix, sizeof(prefix), "darling-ca-frame-%u-", getuid());
@@ -19154,14 +19158,19 @@ index 0000000..f24e230
 +                close(pfd);
 +            }
 +
++            BOOL software = (head.pixelFormat & 0x80000000u) != 0;
 +            if (hasPixels) {
-+                BOOL software = (head.pixelFormat & 0x80000000u) != 0;
++                if (slot->mapping && strcmp(candidate, slot->mappingPath) == 0) {
++                    currentMatched = YES;
++                    currentMatchedMtime = updateTime;
++                }
 +                if ((software && !bestSoftware) || (software == bestSoftware && updateTime > bestMtime)) {
 +                    bestSoftware = software;
 +                    bestMtime = updateTime;
 +                    snprintf(bestPath, sizeof(bestPath), "%s", candidate);
 +                }
 +            } else if (updateTime > bestBlackMtime) {
++                bestBlackSoftware = software;
 +                bestBlackMtime = updateTime;
 +                snprintf(bestBlackPath, sizeof(bestBlackPath), "%s", candidate);
 +            }
@@ -19169,24 +19178,49 @@ index 0000000..f24e230
 +        closedir(dir);
 +    }
 +
-+    /* Keep a software owner across popup updates while the presented size still belongs to this window. After a
-+     * real resize, retaining that owner can strand us on its popup slot even though a matching readback frame is
-+     * ready from another publisher. Let normal candidate selection make that handoff when the old presentation no
-+     * longer matches a target. */
++    if (currentMatched) {
++        slot->softwareMatchedMtime = currentMatchedMtime;
++        slot->softwareMismatchActive = NO;
++        slot->softwareMismatchSince = 0.0;
++    }
++
++    /* Keep a software owner across brief popup updates while the presented size still belongs to this window,
++     * and against older stale readback slots. Release ownership immediately on resize, or once the software slot
++     * stops matching this window with visible pixels while another publisher delivers fresher visible frames
++     * (e.g., a Chromium renderer that unlocked a window-sized tile at startup and moved on to smaller tiles while
++     * the GPU process renders the window). */
 +    BOOL presentationMatchesTarget = RemoteFrameTargetIndex(targets, count, presentedWidth, presentedHeight) >= 0;
 +    if (slot->softwarePublisher && slot->mapping && !bestSoftware && presentationMatchesTarget) {
 +        const char *pidText = strrchr(slot->mappingPath, '-');
 +        int publisher = pidText ? atoi(pidText + 1) : 0;
 +        if (publisher > 0 && (kill(publisher, 0) == 0 || errno != ESRCH)) {
-+            snprintf(path, pathSize, "%s", slot->mappingPath);
-+            return RemoteFrameSelectChosen;
++            BOOL fresherCandidate = bestPath[0] != '\0' && bestMtime > slot->softwareMatchedMtime;
++            if (fresherCandidate) {
++                if (!slot->softwareMismatchActive) {
++                    slot->softwareMismatchActive = YES;
++                    slot->softwareMismatchSince = now;
++                }
++            } else {
++                slot->softwareMismatchActive = NO;
++                slot->softwareMismatchSince = 0.0;
++            }
++            if (!fresherCandidate || now - slot->softwareMismatchSince < 0.5) {
++                snprintf(path, pathSize, "%s", slot->mappingPath);
++                return RemoteFrameSelectChosen;
++            }
 +        }
 +    }
-+    if (bestPath[0] != '\0')
++    if (bestPath[0] != '\0') {
++        slot->softwareMatchedMtime = bestSoftware ? bestMtime : 0;
++        slot->softwareMismatchActive = NO;
++        slot->softwareMismatchSince = 0.0;
 +        snprintf(path, pathSize, "%s", bestPath);
-+    else if (bestBlackPath[0] != '\0')
++    } else if (bestBlackPath[0] != '\0') {
++        slot->softwareMatchedMtime = bestBlackSoftware ? bestBlackMtime : 0;
++        slot->softwareMismatchActive = NO;
++        slot->softwareMismatchSince = 0.0;
 +        snprintf(path, pathSize, "%s", bestBlackPath);
-+    else {
++    } else {
 +        /* A writer's odd sequence is a temporary gap, not a hidden window: the caller keeps the last frame. */
 +        if (!slot->mapping)
 +            slot->selectionRefresh = now + 0.5;
@@ -19215,6 +19249,8 @@ index 0000000..f24e230
 +        munmap(slot->mapping, slot->mappingSize);
 +    slot->mapping = mapping;
 +    slot->softwarePublisher = NO;
++    slot->softwareMismatchActive = NO;
++    slot->softwareMismatchSince = 0.0;
 +    slot->mappingSize = st.st_size;
 +    snprintf(slot->mappingPath, sizeof(slot->mappingPath), "%s", path);
 +    return YES;
@@ -19258,6 +19294,11 @@ index 0000000..f24e230
 +        slot->mapping = NULL;
 +        slot->mappingSize = 0;
 +    }
++    slot->mappingPath[0] = '\0';
++    slot->softwarePublisher = NO;
++    slot->softwareMismatchActive = NO;
++    slot->softwareMatchedMtime = 0;
++    slot->softwareMismatchSince = 0.0;
 +}
 diff --git a/QuartzCore/CAMetalDrawableInternal.h b/QuartzCore/CAMetalDrawableInternal.h
 index 757dd8c9..ad98c3dc 100644

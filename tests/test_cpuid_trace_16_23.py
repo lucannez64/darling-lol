@@ -172,6 +172,29 @@ int main(void) {{
     assert(rclol_arm_group1_select(img, slide, static_sites) == 0);
     assert(g_site_count == 0);
     assert(closed_count == 2 && closed_fds[0] == 10 && closed_fds[1] == 11);
+
+    // 5. mvg.framework dylib (__TEXT vmaddr = 0, slide = base): locate both cpuinfo helpers.
+    uint8_t mvg_img[0x1000];
+    init_image(mvg_img, sizeof(mvg_img), 0ULL, 0x800ULL, 0x200ULL, 0x400ULL);
+    static const uint8_t pat_cpuid[17] = {{
+        0x48, 0x89, 0xe5, 0x89, 0x7d, 0xec, 0x8b, 0x45,
+        0xec, 0x48, 0x87, 0xf3, 0x0f, 0xa2, 0x48, 0x87, 0xf3
+    }};
+    static const uint8_t pat_cpuidex[17] = {{
+        0x89, 0x75, 0xe8, 0x8b, 0x45, 0xec, 0x8b, 0x4d,
+        0xe8, 0x48, 0x87, 0xf3, 0x0f, 0xa2, 0x48, 0x87, 0xf3
+    }};
+    memcpy(mvg_img + 0x240, pat_cpuid, sizeof(pat_cpuid));
+    memcpy(mvg_img + 0x380, pat_cpuidex, sizeof(pat_cpuidex));
+    // Duplicate outside __text must be ignored.
+    memcpy(mvg_img + 0x700, pat_cpuid, sizeof(pat_cpuid));
+    reset_mock();
+    assert(rclol_arm_mvg_cpuinfo(mvg_img, (unsigned long) mvg_img) == 2);
+    assert(g_site_count == 2 && armed_total == 2);
+    assert(armed_addr[0] == (unsigned long) (mvg_img + 0x240 + 12));
+    assert(armed_cookie[0] == 0x240UL + 12UL);
+    assert(armed_addr[1] == (unsigned long) (mvg_img + 0x380 + 12));
+    assert(armed_cookie[1] == 0x380UL + 12UL);
     return 0;
 }}
 """
@@ -355,21 +378,39 @@ int main(void) {{
         rclol_cpuid_trace_spoof(beyond[i], 0u, &a, &b, &c, &d);
         assert(a == 2600u && b == 4500u && c == 100u && d == 0u);
     }}
-    // The hypervisor range and the feature leaves pass through.
+    // The hypervisor range and XSAVE leaf (0xd) pass through.
     a = b = c = d = 0x12345678u;
     rclol_cpuid_trace_spoof(0x40000000u, 0u, &a, &b, &c, &d);
     assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
-    rclol_cpuid_trace_spoof(7u, 0u, &a, &b, &c, &d);
+    rclol_cpuid_trace_spoof(0xdu, 0u, &a, &b, &c, &d);
     assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
+
+    // Leaf 7: subleaf 0 masks host EBX to Coffee Lake-H (drops AVX-512/SHA)
+    // and clears EAX/ECX/EDX; subleaf > 0 zeroes all registers.
+    a = 2u; b = 0xffffffffu; c = 0xffffffffu; d = 0xffffffffu;
+    rclol_cpuid_trace_spoof(7u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0x029c6fbfu && c == 0u && d == 0u);
+    // Bits the host lacks are not synthesized.
+    a = 1u; b = (1u << 5) | (1u << 16) | (1u << 29); c = 0x1234u; d = 0x5678u;
+    rclol_cpuid_trace_spoof(7u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == (1u << 5) && c == 0u && d == 0u);
+    a = b = c = d = 0xdeadbeefu;
+    rclol_cpuid_trace_spoof(7u, 1u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0u && d == 0u);
 
     // Leaf 0x80000001: AMD extended signature and package type cleared;
     // 0x80000005 (AMD L1 caches) is reserved on Intel.
     a = 0x00a20f12u; b = 0x40000000u; c = 0xffffffffu; d = 0xffffffffu;
     rclol_cpuid_trace_spoof(0x80000001u, 0u, &a, &b, &c, &d);
-    assert(a == 0u && b == 0u && (c & 0x00003fc4u) == 0u && (d & 0xc0400000u) == 0u);
+    assert(a == 0u && b == 0u && (c & 0x00c03fdeu) == 0u && (d & 0xc0400000u) == 0u);
     a = b = c = d = 0xdeadbeefu;
     rclol_cpuid_trace_spoof(0x80000005u, 0u, &a, &b, &c, &d);
     assert(a == 0u && b == 0u && c == 0u && d == 0u);
+
+    // Leaf 0x80000007: Intel reserves EAX/EBX/ECX and keeps only invariant TSC in EDX.
+    a = b = c = d = 0xffffffffu;
+    rclol_cpuid_trace_spoof(0x80000007u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0u && d == 0x00000100u);
 
     // Leaf 0x80000006: Intel L2 256 KiB, 4-way (0x4), 64-byte line (0x40); EAX/EBX/EDX zero.
     a = 0xdeadbeefu; b = 0xdeadbeefu; c = 0xdeadbeefu; d = 0xdeadbeefu;
