@@ -74,8 +74,10 @@ FRAMEWORKS = {
 }
 
 # Digests of the installed stub binaries as they are on disk, written after the
-# update signs them. Signing rewrites the bytes, so without this record every
-# install replaces and re-signs an unchanged stub.
+# update signs them, together with the digest of the source stub they were built
+# from. Signing rewrites the bytes, so without this record every install replaces
+# and re-signs an unchanged stub; the source digest keeps an older signed copy
+# from vouching for a newer stub built from different sources.
 DIGESTS = 'unsigned-digests.json'
 
 
@@ -203,7 +205,7 @@ def check(binary):
 
 
 def recorded_digests(backup):
-    """The digests of the stubs the previous install left on disk."""
+    """The source and signed digests the previous install left on disk."""
     try:
         data = json.loads((Path(backup) / DIGESTS).read_text())
     except (OSError, ValueError):
@@ -211,8 +213,20 @@ def recorded_digests(backup):
     frameworks = data.get('frameworks') if isinstance(data, dict) else None
     if not isinstance(frameworks, dict):
         return {}
-    return {name: value for name, value in frameworks.items()
-            if isinstance(name, str) and isinstance(value, str)}
+    recorded = {}
+    for name, value in frameworks.items():
+        if not isinstance(name, str):
+            continue
+        if isinstance(value, str):
+            # Version 1 recorded only the signed copy; it cannot vouch for a
+            # source stub that differs from the one it was signed for.
+            recorded[name] = {'source': None, 'signed': value}
+        elif isinstance(value, dict):
+            source = value.get('source')
+            signed = value.get('signed')
+            if isinstance(signed, str) and (source is None or isinstance(source, str)):
+                recorded[name] = {'source': source, 'signed': signed}
+    return recorded
 
 
 def store_digests(backup, digests):
@@ -220,7 +234,7 @@ def store_digests(backup, digests):
     try:
         folder.mkdir(parents=True, exist_ok=True)
         part = folder / (DIGESTS + '.part')
-        part.write_text(json.dumps({'version': 1, 'frameworks': digests},
+        part.write_text(json.dumps({'version': 2, 'frameworks': digests},
                                    indent=1, sort_keys=True) + '\n')
         os.replace(part, folder / DIGESTS)
     except OSError:
@@ -234,10 +248,16 @@ def record_installed(backup):
     digests = {}
     for name in FRAMEWORKS:
         installed = target / f'{name}.framework' / name
+        source = OUTPUT / f'{name}.framework' / name
         try:
-            digests[name] = hashlib.sha256(installed.read_bytes()).hexdigest()
+            signed = hashlib.sha256(installed.read_bytes()).hexdigest()
         except OSError:
             continue
+        try:
+            original = hashlib.sha256(source.read_bytes()).hexdigest()
+        except OSError:
+            original = None
+        digests[name] = {'source': original, 'signed': signed}
     store_digests(backup, digests)
     print('Recorded the installed stub digests: %d of %d framework(s)'
           % (len(digests), len(FRAMEWORKS)))
@@ -259,8 +279,12 @@ def install(backup):
         if final.is_file():
             current = hashlib.sha256(final.read_bytes()).hexdigest()
             # The updater signs the copy below, so the installed bytes no longer
-            # match the built stub; the post-signing record identifies it.
-            if current == digest or current == recorded.get(name):
+            # match the built stub. Accept that copy only through a record that
+            # also names the source stub it was built from, so a rebuilt stub
+            # with the same name is never mistaken for the signed one.
+            record = recorded.get(name) or {}
+            if current == digest or (record.get('source') == digest
+                                     and current == record.get('signed')):
                 link_versions(destination, name)
                 installed.append({'framework': name, 'path': str(final),
                                   'already_current': True})
