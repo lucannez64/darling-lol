@@ -8,10 +8,12 @@ import os
 import sys
 
 GREEN = '\033[32m'
+YELLOW = '\033[33m'
 RED = '\033[31m'
 RESET = '\033[0m'
 
 OK = '✔'
+NOTE = '!'
 FAIL = '✖'
 
 
@@ -34,6 +36,11 @@ def status(icon, color, message, stream):
 def ok(message, stream=None):
     """Report a step that was skipped because nothing it consumes changed."""
     status(OK, GREEN, message, sys.stdout if stream is None else stream)
+
+
+def note(message, stream=None):
+    """Report why the next step runs, such as a stamp that no longer matches."""
+    status(NOTE, YELLOW, message, sys.stdout if stream is None else stream)
 
 
 def fail(message, stream=None):

@@ -4,6 +4,7 @@ import argparse
 import json
 import fcntl
 import secrets
+import sys
 from contextlib import nullcontext
 import os
 from pathlib import Path
@@ -12,6 +13,9 @@ import shlex
 import tempfile
 import uuid
 from xml.parsers.expat import ExpatError
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from console import ok  # noqa: E402
 
 MAX_SIZE = 65536
 BASE34 = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ'
@@ -388,14 +392,14 @@ def main(argv=None):
         # provisioned like one with the shared defaults. A missing prefix is left alone.
         saved_identity = any(path.exists() for path in identity_files)
         if args.replace_known_defaults and not saved_identity and not prefix.is_dir():
-            print('Prefix does not exist; nothing to replace.')
+            ok('Prefix does not exist; nothing to replace.')
             return 0
         with prefix_lock(prefix) if args.write else nullcontext():
             path = destination(prefix)
             properties = {}
             if args.replace_known_defaults and saved_identity and not any(
                     path.exists() and has_known_defaults(load(path)) for path in identity_files):
-                print('Platform identity has no shared defaults; nothing changed.')
+                ok('Platform identity has no shared defaults; nothing changed.')
                 return 0
             if args.provision:
                 legacy = identity_files[0]

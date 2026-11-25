@@ -39,10 +39,17 @@ class StatusIconTests(unittest.TestCase):
         self.assertEqual('\033[31m✖\033[0m install stamp: cannot record outputs\n',
                          stream.getvalue())
 
+    def test_notice_is_yellow_on_a_terminal(self):
+        stream = FakeTerminal()
+        console.note('install stamp: changed outputs', stream)
+        self.assertEqual('\033[33m!\033[0m install stamp: changed outputs\n',
+                         stream.getvalue())
+
     def test_a_pipe_keeps_the_line_plain(self):
         for stream in (FakePipe(), io.StringIO()):
             self.assertFalse(console.supports_color(stream))
             console.ok('configure stamp: up to date', stream)
+            console.note('configure stamp: changed tree', stream)
             console.fail('configure stamp: stale format', stream)
             self.assertNotIn('\033', stream.getvalue())
 

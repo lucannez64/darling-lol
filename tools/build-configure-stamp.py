@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from console import fail, ok  # noqa: E402
+from console import fail, note, ok  # noqa: E402
 from checkout_digest import digest as checkout_digest  # noqa: E402
 from file_digest import sha256  # noqa: E402
 
@@ -89,14 +89,14 @@ def check(state, sections):
     try:
         recorded = json.loads(Path(state).read_text())
     except (OSError, ValueError):
-        print('configure stamp: no usable state at %s' % state)
+        note('configure stamp: no usable state at %s' % state)
         return 1
     if not isinstance(recorded, dict) or recorded.get('version') != VERSION:
-        print('configure stamp: stale format at %s' % state)
+        note('configure stamp: stale format at %s' % state)
         return 1
     previous = recorded.get('sections')
     if not isinstance(previous, dict):
-        print('configure stamp: missing sections at %s' % state)
+        note('configure stamp: missing sections at %s' % state)
         return 1
     changed = []
     for name in sorted(sections):
@@ -105,7 +105,7 @@ def check(state, sections):
         elif previous.get(name) != sections[name]:
             changed.append(name)
     if changed:
-        print('configure stamp: changed %s' % ', '.join(changed))
+        note('configure stamp: changed %s' % ', '.join(changed))
         return 1
     ok('configure stamp: up to date')
     return 0
