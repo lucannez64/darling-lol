@@ -1,5 +1,4 @@
 """Exercise shipped per-link scheduling with synthetic clocks and outputs."""
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,7 +9,7 @@ import test_runtime_compatibility as runtime
 
 PROVIDER = r'''
 enum { DG_TIMING_NOMINAL=1, DG_TIMING_FEEDBACK=2, DG_TIMING_FIXED=4,
-       DG_TIMING_COUNTER=8, DG_TIMING_SOFTWARE=16 };
+       DG_TIMING_COUNTER=8, DG_TIMING_SOFTWARE=16, DG_TIMING_BUSY=128 };
 struct DGTimingSnapshot {
  uint32_t version,flags,displayID,reserved;
  uint64_t processID,target,outputID,generation,rateNumerator,rateDenominator;
@@ -25,6 +24,8 @@ class DisplayLinkTimingChecks(unittest.TestCase):
     def test_mixed_rates_phase_changes_and_reentrant_lifecycle(self):
         source = runtime.CompatibilityChecks().patched(
             'darling', 'src/frameworks/CoreVideo/src/CVDisplayLink.mm')
+        create = runtime.function(source, 'CVDisplayLinkCreateWithActiveCGDisplays')
+        self.assertIn('registerDisplayLink((CVDisplayLinkRef)self, displayCount ? displays[0] : 1)', create)
         record = source[source.index('struct CVLinkStateRec {'):]
         record = record[:record.index('\n};') + 3]
         start = source.index('struct DisplayLinkClock {')
@@ -131,6 +132,9 @@ int main(int argc,char** argv) {
  assert(records[1].deadlineNS==uint64_t((__uint128_t(600)*1000000000ull*1001)/60000));
  assert(records[2].deadlineNS==uint64_t((__uint128_t(1441)*1000000000ull)/144));
  assert(displayClockSleepNS()<=16000000);
+ outputs[2].displayID=0; // The selected rate has no identity of its own.
+ assert(CVDisplayLinkGetCurrentCGDisplay((void*)2)==2);
+ outputs[2].displayID=2;
  CVTime period=CVDisplayLinkGetNominalOutputVideoRefreshPeriod((void*)1);
  assert(period.timeScale==1000000000 && period.timeValue==16683333 && !period.flags);
  unsigned before=counts[1];setNS(90000000000ull);dispatchTimerFire(nullptr);
@@ -181,6 +185,16 @@ int main(int argc,char** argv) {
  assert(!records[1].alive && !records[2].alive && releases==2);
  reset();setNS(0);dispatchTimerFire(nullptr);
  assert(displayClockSleepNS()==6944444);
+ uint64_t due=records[2].deadlineNS;
+ outputs[2]={};outputs[2].flags=DG_TIMING_NOMINAL|DG_TIMING_SOFTWARE|DG_TIMING_BUSY;
+ outputs[2].rateNumerator=60;outputs[2].rateDenominator=1;
+ setNS(1000000);dispatchTimerFire(nullptr);
+ assert(counts[2]==1 && records[2].deadlineNS==due);
+ setNS(due+50);dispatchTimerFire(nullptr);
+ assert(counts[2]==2 && records[2].deadlineNS==13888888);
+ outputs[2].flags &= ~DG_TIMING_BUSY; // A committed fallback can rebase.
+ dispatchTimerFire(nullptr);assert(counts[2]==3 && records[2].periodDenominator==60);
+ reset();setNS(0);dispatchTimerFire(nullptr);
  records[2].running=0;assert(displayClockSleepNS()==16000000);
  CVTimeStamp stamp;
  assert(CVDisplayLinkGetCurrentTime(nullptr,&stamp)==kCVReturnInvalidArgument);
@@ -193,12 +207,7 @@ int main(int argc,char** argv) {
             result = subprocess.run(['c++', '-std=c++17', str(path / 'clock.cpp'),
                                      '-o', str(path / 'clock')], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for value in (None, '30', '59.94', '144', 'invalid'):
-                for numer, denom in ((1, 1), (3, 2), (125, 3)):
-                    with self.subTest(inherited_refresh=value, timebase=(numer, denom)):
-                        env = dict(os.environ)
-                        env.pop('RCLOL_REFRESH_HZ', None)
-                        if value is not None:
-                            env['RCLOL_REFRESH_HZ'] = value
-                        subprocess.run([str(path / 'clock'), str(numer), str(denom)],
-                                       env=env, check=True, timeout=10)
+            for numer, denom in ((1, 1), (3, 2), (125, 3)):
+                with self.subTest(timebase=(numer, denom)):
+                    subprocess.run([str(path / 'clock'), str(numer), str(denom)],
+                                   check=True, timeout=10)

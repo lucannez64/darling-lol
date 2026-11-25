@@ -4762,7 +4762,7 @@ index bdc97bd..1369fd1 100644
      if (display)
          XFreeCursor(display, _cursor);
 diff --git a/AppKit/X11.backend/X11Display.h b/AppKit/X11.backend/X11Display.h
-index 1818940..8f4c50f 100644
+index 1818940..e676588 100644
 --- a/AppKit/X11.backend/X11Display.h
 +++ b/AppKit/X11.backend/X11Display.h
 @@ -10,13 +10,62 @@
@@ -4829,7 +4829,7 @@ index 1818940..8f4c50f 100644
  
  @interface X11Display : NSDisplay {
      Display *_display;
-@@ -36,19 +85,130 @@
+@@ -36,19 +85,131 @@
      NSTimeInterval lastClickTimeStamp;
      int clickCount;
      X11Cursor *_blankCursor, *_defaultCursor;
@@ -4897,7 +4897,8 @@ index 1818940..8f4c50f 100644
 +- (void) _startOcclusionTracking;
 +- (void) _updateOcclusion;
  - (Display *) display;
-+- (int) screenIndexForDisplayID: (uint32_t) displayID;
++- (NSArray *) modesForDisplayID: (uint32_t) displayID;
++- (NSDictionary *) currentModeForDisplayID: (uint32_t) displayID;
 +- (void) updateDisplayTimingForWindow: (Window) window;
 +- (void) forgetDisplayTimingForWindow: (Window) window;
 +- (void) refreshDisplayTiming;
@@ -4962,7 +4963,7 @@ index 1818940..8f4c50f 100644
 +- (BOOL) waylandHandleGrabMouse: (BOOL) doGrab;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf..45f05e6 100644
+index 5ae29bf..84d86ce 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -23,8 +23,10 @@
@@ -5356,11 +5357,11 @@ index 5ae29bf..45f05e6 100644
      [_blankCursor release];
      [_defaultCursor release];
 +    [_definedCursor release];
-+
-+    if (_xim)
-+        XCloseIM(_xim);
  
 -    XCloseIM(_xim);
++    if (_xim)
++        XCloseIM(_xim);
++
 +    if (_portWaitQueue >= 0)
 +        close(_portWaitQueue);
  
@@ -5566,7 +5567,7 @@ index 5ae29bf..45f05e6 100644
  - (void) _enableDetectableAutoRepeat {
      int major = XkbMajorVersion, minor = XkbMinorVersion;
      XkbStateRec state;
-@@ -185,11 +706,152 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -185,11 +706,142 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
      XkbSetDetectableAutoRepeat(_display, TRUE, &supported);
  }
  
@@ -5582,22 +5583,11 @@ index 5ae29bf..45f05e6 100644
 +    return [value unsignedIntValue];
 +}
 +
-+- (int) screenIndexForDisplayID: (uint32_t) displayID {
-+    [self screens];
-+    int eventBase, errorBase;
-+    if (!XRRQueryExtension(_display, &eventBase, &errorBase))
-+        return displayID == 1 ? 0 : -1;
-+    XRRScreenResources *resources = XRRGetScreenResourcesCurrent(_display, DefaultRootWindow(_display));
-+    if (!resources) return -1;
-+    uint64_t outputID = 0;
++- (int) indexForDisplayID: (uint32_t) displayID resources: (XRRScreenResources *) resources {
 +    for (NSNumber *key in _displayIDsByOutput)
-+        if ([[_displayIDsByOutput objectForKey: key] unsignedIntValue] == displayID) {
-+            outputID = [key unsignedLongLongValue];
-+            break;
-+        }
-+    int index = X11TimingIndexForOutput(resources->outputs, resources->noutput, outputID);
-+    XRRFreeScreenResources(resources);
-+    return index;
++        if ([[_displayIDsByOutput objectForKey: key] unsignedIntValue] == displayID)
++            return X11TimingIndexForOutput(resources->outputs, resources->noutput, [key unsignedLongLongValue]);
++    return -1;
 +}
 +
 +- (void) forgetDisplayTimingForWindow: (Window) window {
@@ -5636,13 +5626,14 @@ index 5ae29bf..45f05e6 100644
 +        snapshot.rateNumerator = selected->rateNumerator;
 +        snapshot.rateDenominator = selected->rateDenominator;
 +        if (snapshot.rateNumerator && snapshot.rateDenominator) snapshot.flags |= DG_TIMING_NOMINAL;
++        else snapshot.rateNumerator = snapshot.rateDenominator = 0;
 +    }
 +    if (previous.generation && previous.outputID == snapshot.outputID &&
 +        previous.displayID == snapshot.displayID && previous.rateNumerator == snapshot.rateNumerator &&
 +        previous.rateDenominator == snapshot.rateDenominator && previous.flags == snapshot.flags)
 +        return; // Preserve newer EGL presentation observations for an unchanged association.
 +    snapshot.generation = DGTimingInvalidate(window);
-+    if (snapshot.generation && DGTimingPublish(&snapshot)) {
++    if (!(snapshot.flags & DG_TIMING_NOMINAL) || (snapshot.generation && DGTimingPublish(&snapshot))) {
 +        [_timingWindows setObject: [NSData dataWithBytes: &snapshot length: sizeof(snapshot)] forKey: key];
 +        [self notifyNominalDisplayTimingForWindow: window];
 +    }
@@ -5719,7 +5710,7 @@ index 5ae29bf..45f05e6 100644
  }
  
  - (NSArray *) screens {
-@@ -201,25 +863,73 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -201,25 +853,73 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  
      int eventBase, errorBase;
  
@@ -5803,7 +5794,7 @@ index 5ae29bf..45f05e6 100644
  
                  nsscreen =
                          [[[NSScreen alloc] initWithFrame: frame
-@@ -228,52 +938,81 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -228,52 +928,81 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
                  Atom actualType;
                  unsigned long nitems, bytesAfter;
                  int actualFormat;
@@ -5906,16 +5897,26 @@ index 5ae29bf..45f05e6 100644
  
      return @{
          @"Width" : @(mi->width),
-@@ -299,6 +1038,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -283,7 +1012,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+     };
+ }
+ 
+-- (NSArray *) modesForScreen: (int) screenIndex {
++- (NSArray *) modesForScreen: (int) screenIndex displayID: (uint32_t) displayID {
+     int eventBase, errorBase;
+     const int defaultDepth =
+             XDefaultDepthOfScreen(XDefaultScreenOfDisplay(_display));
+@@ -299,6 +1028,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          XRRScreenResources *screen =
                  XRRGetScreenResources(_display, DefaultRootWindow(_display));
  
 +        if (!screen) return nil;
 +
++        if (displayID) screenIndex = [self indexForDisplayID: displayID resources: screen];
          if (screenIndex < 0 || screenIndex >= screen->noutput) {
              XRRFreeScreenResources(screen);
              return nil;
-@@ -306,6 +1047,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -306,6 +1038,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
          XRROutputInfo *oinfo = XRRGetOutputInfo(_display, screen,
                                                  screen->outputs[screenIndex]);
@@ -5923,16 +5924,43 @@ index 5ae29bf..45f05e6 100644
  
          NSMutableArray<NSDictionary *> *retval =
                  [NSMutableArray arrayWithCapacity: oinfo->nmode];
-@@ -350,6 +1092,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -331,6 +1064,16 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+     }
+ }
+ 
++- (NSArray *) modesForScreen: (int) screenIndex {
++    return [self modesForScreen: screenIndex displayID: 0];
++}
++
++- (NSArray *) modesForDisplayID: (uint32_t) displayID {
++    if (!displayID) return nil;
++    [self screens];
++    return [self modesForScreen: -1 displayID: displayID];
++}
++
+ - (BOOL) setMode: (NSDictionary *) mode forScreen: (int) screenIndex {
+     int eventBase, errorBase;
+ 
+@@ -342,7 +1085,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+     return FALSE;
+ }
+ 
+-- (NSDictionary *) currentModeForScreen: (int) screenIndex {
++- (NSDictionary *) currentModeForScreen: (int) screenIndex displayID: (uint32_t) displayID {
+     int eventBase, errorBase;
+     NSDictionary *dict = @{};
+ 
+@@ -350,6 +1093,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          XRRScreenResources *screen =
                  XRRGetScreenResources(_display, DefaultRootWindow(_display));
  
 +        if (!screen) return dict;
 +
++        if (displayID) screenIndex = [self indexForDisplayID: displayID resources: screen];
          if (screenIndex < 0 || screenIndex >= screen->noutput) {
              XRRFreeScreenResources(screen);
              return dict;
-@@ -357,6 +1101,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -357,12 +1103,13 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
          XRROutputInfo *oinfo = XRRGetOutputInfo(_display, screen,
                                                  screen->outputs[screenIndex]);
@@ -5940,7 +5968,31 @@ index 5ae29bf..45f05e6 100644
  
          if (oinfo->crtc) {
              XRRCrtcInfo *crtc = XRRGetCrtcInfo(_display, screen, oinfo->crtc);
-@@ -536,12 +1281,116 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+ 
+             for (int i = 0; i < screen->nmode; i++) {
+-                if (screen->modes[i].id == crtc->mode) {
++                if (crtc && screen->modes[i].id == crtc->mode) {
+                     const int defaultDepth = XDefaultDepthOfScreen(
+                             XDefaultScreenOfDisplay(_display));
+                     dict = modeInfoToDictionary(&screen->modes[i],
+@@ -381,6 +1128,16 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+     return dict;
+ }
+ 
++- (NSDictionary *) currentModeForScreen: (int) screenIndex {
++    return [self currentModeForScreen: screenIndex displayID: 0];
++}
++
++- (NSDictionary *) currentModeForDisplayID: (uint32_t) displayID {
++    if (!displayID) return nil;
++    [self screens];
++    return [self currentModeForScreen: -1 displayID: displayID];
++}
++
+ - (int) keyboardLayoutId {
+     int major = XkbMajorVersion, minor = XkbMinorVersion;
+     XkbStateRec state;
+@@ -536,12 +1293,116 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return &layout->layout;
  }
  
@@ -6059,7 +6111,7 @@ index 5ae29bf..45f05e6 100644
  }
  
  - (NSPasteboard *) pasteboardWithName: (NSString *) name {
-@@ -675,6 +1524,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -675,6 +1536,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                      blue: 0.60f
                                      alpha: 1.0f];
  
@@ -6075,7 +6127,7 @@ index 5ae29bf..45f05e6 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -688,6 +1546,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -688,6 +1558,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) hideCursor {
@@ -6086,7 +6138,7 @@ index 5ae29bf..45f05e6 100644
      if (!_blankCursor)
          _blankCursor = [[X11Cursor alloc] initBlank];
      [self setCursor: _blankCursor];
-@@ -695,6 +1557,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -695,6 +1569,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) unhideCursor {
      NSCursor *current = [NSCursor currentCursor];
@@ -6097,7 +6149,7 @@ index 5ae29bf..45f05e6 100644
      if (current != nil) {
          [current push];
          [current pop];
-@@ -746,13 +1612,31 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -746,13 +1624,31 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) setCursor: (id) cursor {
@@ -6134,7 +6186,7 @@ index 5ae29bf..45f05e6 100644
      }
  }
  
-@@ -921,15 +1805,25 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -921,15 +1817,25 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -6169,7 +6221,7 @@ index 5ae29bf..45f05e6 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -948,6 +1842,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -948,6 +1854,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          // retaining the window causes it to keep popping back up endlessly even after dismissing it
          if (lastFocusedWindow && [[lastFocusedWindow platformWindow] windowHandle] == i)
              lastFocusedWindow = nil;
@@ -6189,7 +6241,7 @@ index 5ae29bf..45f05e6 100644
      }
  }
  
-@@ -955,6 +1862,130 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -955,6 +1874,130 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return [_windowsByID objectForKey: [NSNumber numberWithUnsignedLong: i]];
  }
  
@@ -6320,7 +6372,7 @@ index 5ae29bf..45f05e6 100644
  - (NSEvent *) nextEventMatchingMask: (NSEventMask) mask
                            untilDate: (NSDate *) untilDate
                               inMode: (NSRunLoopMode) mode
-@@ -962,20 +1993,104 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +2005,104 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -6430,7 +6482,7 @@ index 5ae29bf..45f05e6 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1005,22 +2120,441 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1005,22 +2132,441 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          [result addObject: @([win windowNumber])];
      }
  
@@ -6874,7 +6926,7 @@ index 5ae29bf..45f05e6 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1030,7 +2564,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +2576,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              break;
  
          if (ev->type == KeyPress) {
@@ -6887,7 +6939,7 @@ index 5ae29bf..45f05e6 100644
              buf[strLen] = 0;
          } else {
              // Xutf8LookupString() may not be used with KeyRelease
-@@ -1038,18 +2576,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,18 +2588,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -6906,7 +6958,7 @@ index 5ae29bf..45f05e6 100644
          BOOL isARepeat = NO;
  
          if (ev->type == KeyPress) {
-@@ -1059,24 +2588,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1059,24 +2600,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              _lastKeySym = 0;
          }
  
@@ -6954,7 +7006,7 @@ index 5ae29bf..45f05e6 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +2623,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +2635,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -6965,7 +7017,7 @@ index 5ae29bf..45f05e6 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +2633,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +2645,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -6976,7 +7028,7 @@ index 5ae29bf..45f05e6 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +2646,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +2658,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -7003,7 +7055,7 @@ index 5ae29bf..45f05e6 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +2671,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +2683,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -7018,7 +7070,7 @@ index 5ae29bf..45f05e6 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +2684,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +2696,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -7029,7 +7081,7 @@ index 5ae29bf..45f05e6 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +2695,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +2707,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -7151,7 +7203,7 @@ index 5ae29bf..45f05e6 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +2792,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +2804,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -7212,7 +7264,7 @@ index 5ae29bf..45f05e6 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2854,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2866,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -7277,7 +7329,7 @@ index 5ae29bf..45f05e6 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2946,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2958,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -7305,7 +7357,7 @@ index 5ae29bf..45f05e6 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2974,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2986,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -7328,7 +7380,7 @@ index 5ae29bf..45f05e6 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +3013,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +3025,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -7337,7 +7389,7 @@ index 5ae29bf..45f05e6 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1392,6 +3063,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1392,6 +3075,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
      case MappingNotify:
          NSLog(@"MappingNotify");
@@ -7347,7 +7399,7 @@ index 5ae29bf..45f05e6 100644
          break;
  
      case GenericEvent:
-@@ -1399,7 +3073,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +3085,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -7358,7 +7410,15 @@ index 5ae29bf..45f05e6 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1426,6 +3102,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1415,6 +3103,7 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+ #else
+ - (void) processPendingEvents {
+ #endif
++    /* darling-lol: native Wayland events are drained on every pass that drains X events. */
+     int numEvents;
+ 
+     while ((numEvents = XPending(_display)) > 0) {
+@@ -1426,6 +3115,14 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          else
              [self postXEvent: &e];
      }
@@ -7368,13 +7428,12 @@ index 5ae29bf..45f05e6 100644
 +        [self screens];
 +        [self refreshDisplayTiming];
 +    }
-+    /* darling-lol: native Wayland events are drained on every pass that drains X events. */
 +    if (_wayland)
 +        [self waylandDispatchEvents];
  }
  
  - (int) handleError: (XErrorEvent *) errorEvent {
-@@ -1433,6 +3118,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +3130,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -7385,7 +7444,7 @@ index 5ae29bf..45f05e6 100644
      return 0;
  }
  
-@@ -1476,54 +3165,289 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +3177,289 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -7440,8 +7499,8 @@ index 5ae29bf..45f05e6 100644
 -                 position.x, position.y);
 -    XSync(_display, False);
 +    [self warpPointerToRootX: x y: y];
-+}
-+
+ }
+ 
 +/* Confinement preserves absolute motion and edge panning. Relative mode holds
 + * its own grab and is left alone while requested. */
 +- (void) updateMouseConfinementForWindow:(X11Window *)window {
@@ -7634,8 +7693,8 @@ index 5ae29bf..45f05e6 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
- }
- 
++}
++
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    if (_wayland && [self waylandHandleGrabMouse: doGrab])
@@ -10744,10 +10803,10 @@ index db8869c..6fea510 100644
 +    CGContextSetTextPosition(c, savedPosition.x, savedPosition.y);
  }
 diff --git a/CoreGraphics/CGDirectDisplay.m b/CoreGraphics/CGDirectDisplay.m
-index e213b06..86afb65 100644
+index e213b06..c01066e 100644
 --- a/CoreGraphics/CGDirectDisplay.m
 +++ b/CoreGraphics/CGDirectDisplay.m
-@@ -53,6 +53,42 @@ static NSDisplay *currentDisplay(void) {
+@@ -53,6 +53,53 @@ static NSDisplay *currentDisplay(void) {
      return [cls currentDisplay];
  }
  
@@ -10764,16 +10823,27 @@ index e213b06..86afb65 100644
 +}
 +
 +@interface NSDisplay (DarlingDisplayModeMapping)
-+- (int) screenIndexForDisplayID: (uint32_t) displayID;
++- (NSArray *) modesForDisplayID: (uint32_t) displayID;
++- (NSDictionary *) currentModeForDisplayID: (uint32_t) displayID;
 +@end
 +
 +static int modeIndexForDisplayID(NSDisplay *display, CGDirectDisplayID displayID) {
-+    if ([display respondsToSelector: @selector(screenIndexForDisplayID:)])
-+        return [display screenIndexForDisplayID: displayID];
 +    NSArray *screens = [display screens];
 +    for (NSUInteger index = 0; index < [screens count]; ++index)
 +        if ([[screens objectAtIndex: index] cgDirectDisplayID] == displayID) return (int) index;
 +    return -1;
++}
++
++static NSArray *modesForDisplayID(NSDisplay *display, CGDirectDisplayID displayID) {
++    if ([display respondsToSelector: @selector(modesForDisplayID:)])
++        return [display modesForDisplayID: displayID];
++    return [display modesForScreen: modeIndexForDisplayID(display, displayID)];
++}
++
++static NSDictionary *currentModeForDisplayID(NSDisplay *display, CGDirectDisplayID displayID) {
++    if ([display respondsToSelector: @selector(currentModeForDisplayID:)])
++        return [display currentModeForDisplayID: displayID];
++    return [display currentModeForScreen: modeIndexForDisplayID(display, displayID)];
 +}
 +
 +/* NSScreen frames have y up from the primary's bottom edge; CoreGraphics
@@ -10790,7 +10860,7 @@ index e213b06..86afb65 100644
  CGDirectDisplayID CGMainDisplayID(void) {
      NSDisplay *display = currentDisplay();
      if (!display)
-@@ -60,9 +96,9 @@ CGDirectDisplayID CGMainDisplayID(void) {
+@@ -60,9 +107,9 @@ CGDirectDisplayID CGMainDisplayID(void) {
  
      NSArray<NSScreen *> *screens = [display screens];
  
@@ -10803,7 +10873,7 @@ index e213b06..86afb65 100644
          }
      }
  
-@@ -89,10 +125,11 @@ CGError CGGetOnlineDisplayList(uint32_t maxDisplays,
+@@ -89,10 +136,11 @@ CGError CGGetOnlineDisplayList(uint32_t maxDisplays,
              onlineDisplays[0] = mainDisplay;
      }
  
@@ -10818,7 +10888,7 @@ index e213b06..86afb65 100644
              (*displayCount)++;
          }
      }
-@@ -105,11 +142,11 @@ size_t CGDisplayPixelsHigh(CGDirectDisplayID displayIndex) {
+@@ -105,11 +153,11 @@ size_t CGDisplayPixelsHigh(CGDirectDisplayID displayIndex) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10833,7 +10903,7 @@ index e213b06..86afb65 100644
  }
  
  size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
-@@ -117,11 +154,11 @@ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
+@@ -117,11 +165,11 @@ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10848,7 +10918,7 @@ index e213b06..86afb65 100644
  }
  
  CGError CGGetActiveDisplayList(uint32_t maxDisplays,
-@@ -135,10 +172,10 @@ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
+@@ -135,10 +183,10 @@ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
  
      *displayCount = 0;
@@ -10862,7 +10932,7 @@ index e213b06..86afb65 100644
              (*displayCount)++;
          }
      }
-@@ -169,11 +206,11 @@ CGError CGGetDisplaysWithPoint(CGPoint point, uint32_t maxDisplays,
+@@ -169,11 +217,11 @@ CGError CGGetDisplaysWithPoint(CGPoint point, uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
      *matchingDisplayCount = 0;
  
@@ -10877,7 +10947,7 @@ index e213b06..86afb65 100644
              (*matchingDisplayCount)++;
          }
      }
-@@ -192,11 +229,11 @@ CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays,
+@@ -192,11 +240,11 @@ CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
      *matchingDisplayCount = 0;
  
@@ -10892,7 +10962,7 @@ index e213b06..86afb65 100644
              (*matchingDisplayCount)++;
          }
      }
-@@ -218,10 +255,11 @@ CGRect CGDisplayBounds(CGDirectDisplayID displayIndex) {
+@@ -218,10 +266,11 @@ CGRect CGDisplayBounds(CGDirectDisplayID displayIndex) {
          return NSZeroRect;
  
      NSArray<NSScreen *> *screens = [display screens];
@@ -10906,16 +10976,16 @@ index e213b06..86afb65 100644
  }
  
  CGError CGDisplayHideCursor(CGDirectDisplayID displayIndex) {
-@@ -246,7 +284,7 @@ CFArrayRef CGDisplayAvailableModes(CGDirectDisplayID displayIndex) {
+@@ -246,7 +295,7 @@ CFArrayRef CGDisplayAvailableModes(CGDirectDisplayID displayIndex) {
      NSDisplay *display = currentDisplay();
      if (!display)
          return NULL;
 -    return (CFArrayRef) [display modesForScreen: displayIndex - 1];
-+    return (CFArrayRef) [display modesForScreen: modeIndexForDisplayID(display, displayIndex)];
++    return (CFArrayRef) modesForDisplayID(display, displayIndex);
  }
  
  boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
-@@ -256,7 +294,7 @@ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
+@@ -256,7 +305,7 @@ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
  }
  
  Boolean CGDisplayIsMain(CGDirectDisplayID display) {
@@ -10924,16 +10994,16 @@ index e213b06..86afb65 100644
  }
  
  CGDirectDisplayID CGDisplayMirrorsDisplay(CGDirectDisplayID display) {
-@@ -270,7 +308,7 @@ CGDisplayModeRef CGDisplayCopyDisplayMode(CGDirectDisplayID displayId) {
+@@ -270,7 +319,7 @@ CGDisplayModeRef CGDisplayCopyDisplayMode(CGDirectDisplayID displayId) {
      if (!display)
          return NULL;
  
 -    NSDictionary *dict = [[display currentModeForScreen: displayId - 1] retain];
-+    NSDictionary *dict = [[display currentModeForScreen: modeIndexForDisplayID(display, displayId)] retain];
++    NSDictionary *dict = [currentModeForDisplayID(display, displayId) retain];
  
      return (CGDisplayModeRef) dict;
  }
-@@ -319,10 +357,15 @@ CFStringRef CGDisplayModeCopyPixelEncoding(CGDisplayModeRef mode) {
+@@ -319,10 +368,15 @@ CFStringRef CGDisplayModeCopyPixelEncoding(CGDisplayModeRef mode) {
  CFArrayRef CGDisplayCopyAllDisplayModes(CGDirectDisplayID displayIndex,
                                          CFDictionaryRef options)
  {
@@ -10945,14 +11015,14 @@ index e213b06..86afb65 100644
 -    if (!display)
 -        return NULL;
 -    return (CFArrayRef)[[display modesForScreen: displayIndex - 1] retain];
-+    NSArray *modes = [display modesForScreen: modeIndexForDisplayID(display, displayIndex)];
++    NSArray *modes = modesForDisplayID(display, displayIndex);
 +    if (modes == nil)
-+        modes = [display modesForScreen: modeIndexForDisplayID(display, CGMainDisplayID())];
++        modes = modesForDisplayID(display, CGMainDisplayID());
 +    return (CFArrayRef)[(modes ? modes : @[]) retain];
  }
  
  CGError CGDisplaySetDisplayMode(CGDirectDisplayID displayId,
-@@ -331,7 +374,7 @@ CGError CGDisplaySetDisplayMode(CGDirectDisplayID displayId,
+@@ -331,7 +385,7 @@ CGError CGDisplaySetDisplayMode(CGDirectDisplayID displayId,
      NSDisplay *display = currentDisplay();
      if (!display)
          return kCGErrorInvalidConnection;
@@ -10961,7 +11031,7 @@ index e213b06..86afb65 100644
  
      return result ? kCGErrorSuccess : kCGErrorFailure;
  }
-@@ -341,11 +384,10 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
+@@ -341,11 +395,10 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
      if (!display)
          return nil;
  
@@ -10975,7 +11045,7 @@ index e213b06..86afb65 100644
      NSData *edid = [screen edid];
      if (edid && [edid length] >= 16)
          return edid;
-@@ -354,17 +396,33 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
+@@ -354,17 +407,33 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
  }
  
  CGSize CGDisplayScreenSize(CGDirectDisplayID display) {
@@ -11016,7 +11086,7 @@ index e213b06..86afb65 100644
  }
  
  uint32_t CGDisplaySerialNumber(CGDirectDisplayID displayId) {
-@@ -474,7 +532,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
+@@ -474,7 +543,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -11027,7 +11097,7 @@ index e213b06..86afb65 100644
      return kCGErrorSuccess;
  }
  
-@@ -500,3 +560,54 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
+@@ -500,3 +571,54 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
  size_t CGDisplayModeGetPixelWidth(CGDisplayModeRef mode) {
      return 0;
  }
@@ -14501,7 +14571,7 @@ index 5dcac11..5de4f03 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c5..3f625a2 100644
+index 5dce8c5..0d3dce0 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
 @@ -1,47 +1,101 @@
@@ -14766,7 +14836,7 @@ index 5dce8c5..3f625a2 100644
  
      glEnable(GL_DEPTH_TEST);
      glShadeModel(GL_SMOOTH);
-@@ -118,27 +266,64 @@
+@@ -118,27 +266,66 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -14784,7 +14854,9 @@ index 5dce8c5..3f625a2 100644
  
 +    CFTimeInterval rendererStart = CACurrentMediaTime();
      [_renderer render];
-+    __atomic_store_n(&_readyFrame, frame, __ATOMIC_RELEASE);
++    uint64_t ready = __atomic_load_n(&_readyFrame, __ATOMIC_RELAXED);
++    while (ready < frame && !__atomic_compare_exchange_n(&_readyFrame, &ready, frame, 0,
++                                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
 +    darlingQCTiming("rendererRender", CACurrentMediaTime() - rendererStart);
  }
  
@@ -14836,7 +14908,7 @@ index 5dce8c5..3f625a2 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,15 +332,61 @@
+@@ -147,15 +334,61 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -15520,7 +15592,7 @@ index d6f86b3..81602d8 100644
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
 diff --git a/QuartzCore/CAMetalLayer.mm b/QuartzCore/CAMetalLayer.mm
-index b81e2e1..87a31df 100644
+index b81e2e1..7eed1e0 100644
 --- a/QuartzCore/CAMetalLayer.mm
 +++ b/QuartzCore/CAMetalLayer.mm
 @@ -25,7 +25,79 @@
@@ -15889,7 +15961,7 @@ index b81e2e1..87a31df 100644
  			reportGLErrors();
  		}
  	}
-@@ -514,13 +769,26 @@ static void reportGLErrors(void) {
+@@ -514,13 +769,27 @@ static void reportGLErrors(void) {
  }
  
  - (void)prepareRender
@@ -15907,6 +15979,7 @@ index b81e2e1..87a31df 100644
  
  	[_drawableCondition lock];
 +    [self retireSwappedPresentation];
++    const bool previousSwapped = _preparedPresentation && _retiredPresentation == _preparedPresentation;
 +    _preparedFrame = (context == _context) ? frame : 0;
  	if (_queuedDrawableCount > 0) {
  		drawable = _drawables[_queuedDrawables[0]];
@@ -15916,7 +15989,7 @@ index b81e2e1..87a31df 100644
  		std::copy(_queuedDrawables.begin() + 1, _queuedDrawables.end(), _queuedDrawables.begin());
  	}
  	[_drawableCondition unlock];
-@@ -528,27 +796,81 @@ static void reportGLErrors(void) {
+@@ -528,27 +797,84 @@ static void reportGLErrors(void) {
  	if (drawable) {
  		// wait for the drawable to be fully rendered before copying it to the render texture
  		// (this is a GPU-side wait)
@@ -15990,7 +16063,10 @@ index b81e2e1..87a31df 100644
 +        @synchronized(self) {
 +            _lastPresentedDrawable.swap(drawable);
 +        }
-+        if (drawable) drawable->didPresent();
++        if (drawable) {
++            if (previousSwapped) drawable->didPresent();
++            else drawable->didDrop();
++        }
  	}
  }
  
@@ -16010,7 +16086,7 @@ index b81e2e1..87a31df 100644
  }
  
  //
-@@ -575,6 +897,11 @@ static void reportGLErrors(void) {
+@@ -575,6 +901,11 @@ static void reportGLErrors(void) {
  {
  	[super _setContext: context];
  
@@ -16022,7 +16098,7 @@ index b81e2e1..87a31df 100644
  	if (_tex == 0) {
  		// create our textures now using the context's CGLContext
  		CGLContextObj prev = CGLGetCurrentContext();
-@@ -589,10 +916,15 @@ static void reportGLErrors(void) {
+@@ -589,10 +920,15 @@ static void reportGLErrors(void) {
  		glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -17207,7 +17283,7 @@ index 0000000..ae7ce24
 +@end
 diff --git a/AppKit/X11.backend/WaylandWindow.h b/AppKit/X11.backend/WaylandWindow.h
 new file mode 100644
-index 0000000..fe99458
+index 0000000..9ab9ccd
 --- /dev/null
 +++ b/AppKit/X11.backend/WaylandWindow.h
 @@ -0,0 +1,149 @@
@@ -17260,12 +17336,12 @@ index 0000000..fe99458
 +
 +    O2Context *_context;
 +    CGLWindowRef _cglWindow;
-+    id _layerDrawableOwner;
-+    NSUInteger _layerDrawableOwnerCount;
++    NSMutableSet *_layerDrawableOwners; /* nonretained owner pointers */
 +    BOOL _loggedKeptOnHide;
 +    uint64_t _timingGeneration, _hostTimingGeneration, _timingOutput;
 +    uint64_t _timingRateNum, _timingRateDen;
 +    DGTimingClock _timingClock;
++    struct dwl_timing _publishedTiming;
 +
 +    /* Client windows. */
 +    WaylandWindowKind _kind;
@@ -17362,10 +17438,10 @@ index 0000000..fe99458
 +@end
 diff --git a/AppKit/X11.backend/WaylandWindow.m b/AppKit/X11.backend/WaylandWindow.m
 new file mode 100644
-index 0000000..faf3471
+index 0000000..65dcd6e
 --- /dev/null
 +++ b/AppKit/X11.backend/WaylandWindow.m
-@@ -0,0 +1,1241 @@
+@@ -0,0 +1,1257 @@
 +/* darling-lol: a League game or client window served by native Wayland. See WaylandWindow.h. */
 +#import <AppKit/NSApplication.h>
 +#import <AppKit/NSMenuWindow.h>
@@ -17373,6 +17449,8 @@ index 0000000..faf3471
 +#import <AppKit/NSToolTipWindow.h>
 +#import <AppKit/NSWindow.h>
 +#import <Foundation/NSException.h>
++#import <Foundation/NSSet.h>
++#import <Foundation/NSValue.h>
 +#import <Foundation/NSNotification.h>
 +#import <Onyx2D/O2BitmapContext.h>
 +#import <Onyx2D/O2Context_builtin_FT.h>
@@ -17527,6 +17605,7 @@ index 0000000..faf3471
 +    RemoteFrameRelease(&_remoteFrameSlot);
 +    free(_remotePixels);
 +    [self invalidate];
++    [_layerDrawableOwners release];
 +    [_deviceDictionary release];
 +    [_title release];
 +    [super dealloc];
@@ -18371,7 +18450,7 @@ index 0000000..faf3471
 +    if (_context == nil)
 +        return;
 +    O2ContextFlush(_context);
-+    if (_cglWindow != NULL || _layerDrawableOwner != nil)
++    if (_cglWindow != NULL || [_layerDrawableOwners count] != 0)
 +        return;
 +    /* Chromium's frame owns the surface once one was presented (the X11 presenter's child window stays on top the
 +     * same way). */
@@ -18416,7 +18495,7 @@ index 0000000..faf3471
 +    if (_kind == WaylandWindowKindGame || _dwlID == 0 || !_configured || _popupDismissed || _suspended)
 +        return NO;
 +    /* A GL surface (or a layer drawing into it) owns the window. */
-+    if (_cglWindow != NULL || _layerDrawableOwner != nil)
++    if (_cglWindow != NULL || [_layerDrawableOwners count] != 0)
 +        return NO;
 +    if (_delegate != nil && ![_delegate isVisible])
 +        return NO;
@@ -18492,15 +18571,18 @@ index 0000000..faf3471
 +}
 +
 +- (void) acquireLayerDrawable: (id) owner {
-+    if (_layerDrawableOwner != owner) [self invalidateDisplayTiming];
-+    if (!_layerDrawableOwnerCount) _layerDrawableOwner = owner;
-+    ++_layerDrawableOwnerCount;
++    NSValue *key = [NSValue valueWithPointer: owner];
++    if (!owner || [_layerDrawableOwners containsObject: key]) return;
++    [self invalidateDisplayTiming];
++    if (!_layerDrawableOwners) _layerDrawableOwners = [NSMutableSet new];
++    [_layerDrawableOwners addObject: key];
 +}
 +
 +- (void) releaseLayerDrawable: (id) owner {
++    NSValue *key = [NSValue valueWithPointer: owner];
++    if (![_layerDrawableOwners containsObject: key]) return;
 +    [self invalidateDisplayTiming];
-+    if (_layerDrawableOwnerCount) --_layerDrawableOwnerCount;
-+    if (!_layerDrawableOwnerCount) _layerDrawableOwner = nil;
++    [_layerDrawableOwners removeObject: key];
 +}
 +
 +- (uint64_t) displayTimingTarget {
@@ -18510,7 +18592,8 @@ index 0000000..faf3471
 +- (void) invalidateDisplayTiming {
 +    /* The provider epoch changes before host association or commit ownership. */
 +    _timingGeneration = DGTimingInvalidate([self displayTimingTarget]);
-+    _hostTimingGeneration = _timingOutput = 0;
++    _hostTimingGeneration = _timingOutput = _timingRateNum = _timingRateDen = 0;
++    memset(&_publishedTiming, 0, sizeof _publishedTiming);
 +    memset(&_timingClock, 0, sizeof _timingClock);
 +    const struct dwl_api *api = WaylandAPI();
 +    if (api && api->version >= 3 && api->window_invalidate_timing && _dwlID)
@@ -18534,7 +18617,16 @@ index 0000000..faf3471
 +            }
 +        }
 +    }
-+    if (!(t.flags&DWL_TIMING_NOMINAL) || !t.rate_num || !t.rate_den) return;
++    if (!(t.flags&DWL_TIMING_NOMINAL) || !t.rate_num || !t.rate_den) {
++        if (!_timingGeneration || _timingRateNum || _hostTimingGeneration != t.surface_generation) {
++            _timingGeneration = DGTimingInvalidate([self displayTimingTarget]);
++            _hostTimingGeneration = t.surface_generation;
++            _timingOutput = _timingRateNum = _timingRateDen = 0;
++            memset(&_timingClock, 0, sizeof _timingClock);
++            memset(&_publishedTiming, 0, sizeof _publishedTiming);
++        }
++        return;
++    }
 +    if (!_timingGeneration || _hostTimingGeneration!=t.surface_generation ||
 +        _timingOutput!=t.output_id || _timingRateNum!=t.rate_num || _timingRateDen!=t.rate_den) {
 +        _timingGeneration=DGTimingInvalidate([self displayTimingTarget]);
@@ -18542,7 +18634,7 @@ index 0000000..faf3471
 +        _timingRateNum=t.rate_num;_timingRateDen=t.rate_den;
 +        memset(&_timingClock,0,sizeof _timingClock);
 +    }
-+    if (!_timingGeneration)return;
++    if (!_timingGeneration || !memcmp(&t, &_publishedTiming, sizeof t)) return;
 +    DGTimingSnapshot s={0};s.target=[self displayTimingTarget];s.generation=_timingGeneration;
 +    s.displayID=WaylandOutputDisplayID(t.output_id);s.outputID=t.output_id;
 +    s.rateNumerator=t.rate_num;s.rateDenominator=t.rate_den;
@@ -18555,13 +18647,13 @@ index 0000000..faf3471
 +        if(t.flags&DWL_TIMING_COUNTER)s.flags|=DG_TIMING_COUNTER;
 +        s.presentationCounter=t.counter;
 +    }
-+    DGTimingPublish(&s);
++    if (DGTimingPublish(&s)) _publishedTiming = t;
 +}
 +
 +- (uint64_t) beginPresentationFor: (id) owner {
 +    const struct dwl_api *api=WaylandAPI();
 +    if (!api || api->version<3 || !api->presentation_begin ||
-+        !_dwlID || _layerDrawableOwnerCount!=1 || _layerDrawableOwner!=owner) return 0;
++        !_dwlID || [_layerDrawableOwners count]!=1 || ![_layerDrawableOwners containsObject: [NSValue valueWithPointer: owner]]) return 0;
 +    [self updateDisplayTiming];
 +    return api->presentation_begin(_dwlID,_hostTimingGeneration);
 +}
@@ -20084,10 +20176,10 @@ index 757dd8c9..ad98c3dc 100644
  public:
 diff --git a/CoreGraphics/DarlingDisplayTiming.c b/CoreGraphics/DarlingDisplayTiming.c
 new file mode 100644
-index 0000000..a1d187f
+index 0000000..926cdc9
 --- /dev/null
 +++ b/CoreGraphics/DarlingDisplayTiming.c
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,247 @@
 +/* SPDX-License-Identifier: GPL-3.0-only */
 +#ifdef DG_TIMING_HOSTED
 +#include "DarlingDisplayTiming.h"
@@ -20149,6 +20241,7 @@ index 0000000..a1d187f
 +    return dgRead(fd,h,sizeof(*h),0)==sizeof(*h) && h->magic==DG_MAGIC &&
 +        h->version==DG_TIMING_VERSION && h->pid==pid && h->birth==birth;
 +}
++enum { DG_READ, DG_WRITE, DG_TRY_WRITE };
 +static int dgOpen(DGHeader *h,int writer) {
 +    uint64_t pid=dgSys(0,0,0,0,0,0,39),birth=DGTimingHostProcessBirth();
 +    if (!birth) return -1;
@@ -20161,7 +20254,7 @@ index 0000000..a1d187f
 +    if (writer) {
 +        /* Publishers serialize before changing backend association. Readers
 +         * never wait for this lock; no backend call or callback holds it. */
-+        if (dgSys(fd,2,0,0,0,0,73)<0) { dgSys(fd,0,0,0,0,0,3); return -1; }
++        if (dgSys(fd,writer==DG_TRY_WRITE ? 2|4 : 2,0,0,0,0,73)<0) { dgSys(fd,0,0,0,0,0,3); return -1; }
 +        int valid=dgHeader(fd,h,pid,birth);
 +        if (!valid || (h->epoch&1)) {
 +            uint64_t epoch=valid?h->epoch+1:0;
@@ -20232,11 +20325,11 @@ index 0000000..a1d187f
 +    }
 +    dgClose(fd);
 +}
-+int DGTimingPublish(const DGTimingSnapshot *snapshot) {
++static int dgPublish(const DGTimingSnapshot *snapshot,int mode) {
 +    if (!snapshot || !(snapshot->flags&DG_TIMING_NOMINAL) ||
 +        !snapshot->rateNumerator || !snapshot->rateDenominator ||
 +        snapshot->rateNumerator>1000000000000ull || snapshot->rateDenominator>1000000000ull) return 0;
-+    DGHeader h;int fd=dgOpen(&h,1);if(fd<0)return 0;
++    DGHeader h;int fd=dgOpen(&h,mode);if(fd<0)return 0;
 +    DGRecord r;unsigned slot;int ok=0;
 +    uint64_t kind=snapshot->target?DG_DRAWABLE:DG_OUTPUT,key=snapshot->target?snapshot->target:snapshot->displayID;
 +    if (dgFind(fd,kind,key,&r,&slot) &&
@@ -20252,6 +20345,8 @@ index 0000000..a1d187f
 +    }
 +    dgClose(fd);return ok;
 +}
++int DGTimingPublish(const DGTimingSnapshot *snapshot) { return dgPublish(snapshot,DG_WRITE); }
++int DGTimingTryPublish(const DGTimingSnapshot *snapshot) { return dgPublish(snapshot,DG_TRY_WRITE); }
 +void DGTimingBind(uint64_t context,uint64_t target) {
 +    if (!context)return;
 +    DGHeader h;int fd=dgOpen(&h,1);if(fd<0)return;
@@ -20279,16 +20374,17 @@ index 0000000..a1d187f
 +    }
 +    DGHeader h;int fd=dgOpen(&h,0);
 +    if (fd<0)return dgSoftware();
-+    if (h.epoch&1) { dgClose(fd);return dgSoftware(); }
-+    if(cache && cache->epoch==h.epoch && cache->context==context && cache->display==display &&
++    if(!(h.epoch&1) && cache && cache->epoch==h.epoch && cache->context==context && cache->display==display &&
 +        cache->snapshot.version==DG_TIMING_VERSION) {dgClose(fd);return cache->snapshot;}
 +    if (dgSys(fd,1|4,0,0,0,0,73)<0) {
 +        dgClose(fd);
-+        return cache && cache->epoch==h.epoch && cache->context==context && cache->display==display ? cache->snapshot:dgSoftware();
++        DGTimingSnapshot busy=dgSoftware();
++        busy.flags|=DG_TIMING_BUSY;
++        return busy;
 +    }
 +    DGHeader current;
 +    DGTimingSnapshot s=dgSoftware();DGRecord r;unsigned slot;
-+    if (!dgHeader(fd,&current,h.pid,h.birth) || current.epoch!=h.epoch) {
++    if (!dgHeader(fd,&current,h.pid,h.birth) || (current.epoch&1)) {
 +        dgClose(fd);return s;
 +    }
 +    uint64_t target=0;
@@ -20298,7 +20394,7 @@ index 0000000..a1d187f
 +        if(dgFind(fd,DG_OUTPUT,display,&r,&slot) && r.kind && (r.snapshot.flags&DG_TIMING_NOMINAL)) s=r.snapshot;
 +        else if(display && dgFind(fd,DG_OUTPUT,0,&r,&slot) && r.kind && (r.snapshot.flags&DG_TIMING_NOMINAL)) s=r.snapshot;
 +    }
-+    if(cache) {cache->epoch=h.epoch;cache->snapshot=s;cache->context=context;cache->display=display;}
++    if(cache) {cache->epoch=current.epoch;cache->snapshot=s;cache->context=context;cache->display=display;}
 +    dgClose(fd);return s;
 +}
 +int DGTimingMapClock(uint64_t stamp,uint64_t before,uint64_t target,uint64_t after,
@@ -20333,10 +20429,10 @@ index 0000000..a1d187f
 +}
 diff --git a/CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h b/CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h
 new file mode 100644
-index 0000000..1eb3d5d
+index 0000000..10d7ed1
 --- /dev/null
 +++ b/CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,52 @@
 +/* SPDX-License-Identifier: GPL-3.0-only
 + * Private Darling display timing. No backend or Objective-C objects cross this API. */
 +#ifndef DARLING_DISPLAY_TIMING_H
@@ -20353,6 +20449,7 @@ index 0000000..1eb3d5d
 +#define DG_TIMING_SOFTWARE 16u
 +#define DG_TIMING_X11_SERVER 32u
 +#define DG_TIMING_WAYLAND 64u
++#define DG_TIMING_BUSY 128u /* Transient read; preserve a running clock's deadline. */
 +typedef struct DGTimingSnapshot {
 +    uint32_t version, flags, displayID, reserved;
 +    uint64_t processID, target, outputID, generation;
@@ -20376,6 +20473,8 @@ index 0000000..1eb3d5d
 +void DGTimingForget(uint64_t target);
 +uint64_t DGTimingHostProcessBirth(void);
 +int DGTimingPublish(const DGTimingSnapshot *snapshot);
++/* Optional feedback must never wait for another publisher. */
++int DGTimingTryPublish(const DGTimingSnapshot *snapshot);
 +void DGTimingBind(uint64_t context, uint64_t target);
 +DGTimingSnapshot DGTimingRead(uint64_t context, uint32_t display, DGTimingCache *cache);
 +/* Bracket target-clock sampling with two source-clock samples, all in ns. */

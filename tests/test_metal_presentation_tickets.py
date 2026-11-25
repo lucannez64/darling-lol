@@ -121,6 +121,9 @@ class MetalPresentationTicketChecks(unittest.TestCase):
     def test_failed_swap_keeps_the_callback_live(self):
         self.check_scenario('swap-failure')
 
+    def test_failed_swap_drops_superseded_drawable(self):
+        self.check_scenario('superseded')
+
     def test_failed_attach_keeps_the_drawable_queued(self):
         self.check_scenario('attach-failure')
 
@@ -375,6 +378,15 @@ int main(int argc,char** argv){
   assert(c.renderer.renders==2 && swaps==2 && layer._retiredPresentation==0);
   layer.condition.lock(); layer.retireSwappedPresentation(); layer.condition.unlock();
   assert(layer._retiredPresentation==1);
+ }else if(scenario=="superseded"){
+  auto a=layer._drawables[0], b=layer._drawables[1];
+  int drops=0, presentations=0;
+  a->_didPresentCallback=[&]{assert(a->_presentedTime==0);++drops;};
+  b->_didPresentCallback=[&]{assert(b->_presentedTime>0);++presentations;};
+  assert(layer.submit(0)); failSwap=true; runCallback();
+  assert(drops==0); failSwap=false;
+  assert(layer.submit(1)); runCallback(); assert(drops==1);
+  assert(layer.submit(2)); runCallback(); assert(presentations==1);
  }else if(scenario=="attach-failure"){
   assert(layer.submit(1)); failAttach=true; c.render(); c.flush();
   assert(c.renderer.renders==0 && swaps==0 && layer._queuedDrawableCount==1);
@@ -416,6 +428,7 @@ int main(int argc,char** argv){
   };
   assert(layer.submit(1)); c.render(); c.flush();
   assert(presented==1 && layer._lastPresentedDrawable->id==1);
+  assert(c._readyFrame==c._renderFrame && c._swappedFrame==c._readyFrame);
   assert(old->_texture->releases==1);
   old->didPresent(); assert(presented==2); // New callback was not cleared by the outer call.
   runCallback(); assert(callbacks.empty());

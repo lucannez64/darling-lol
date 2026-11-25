@@ -129,7 +129,7 @@ DGTimingSnapshot DGTimingRead(uint64_t,uint32_t,DGTimingCache*){
     s.flags=DG_TIMING_NOMINAL;s.rateNumerator=144;s.rateDenominator=1;return s;
 }
 int DGTimingMonotonicToMach(uint64_t value,DGTimingClock*,uint64_t *out){*out=value+700;return knownClock;}
-int DGTimingPublish(const DGTimingSnapshot *s){published=*s;++publications;return 1;}
+int DGTimingTryPublish(const DGTimingSnapshot *s){published=*s;++publications;return 1;}
 ''' + method + r'''
 int main(){
     Context context;
@@ -144,6 +144,103 @@ int main(){
     recordEGLPresentation(&context);assert(publications==2);
 }
 ''')
+
+    def test_only_remaining_wayland_owner_can_request_feedback(self):
+        patched = runtime.CompatibilityChecks().patched
+        bridge = patched('cocotron', 'AppKit/X11.backend/DarlingWaylandAPI.h')
+        source = patched('cocotron', 'AppKit/X11.backend/WaylandWindow.m')
+        methods = []
+        for declaration, selector in [('void acquire(void *owner)', '- (void) acquireLayerDrawable:'),
+                                      ('void release(void *owner)', '- (void) releaseLayerDrawable:'),
+                                      ('uint64_t begin(void *owner)', '- (uint64_t) beginPresentationFor:')]:
+            body = tickets.method(source, selector)
+            for original, host in {
+                'NSValue *key': 'void *key',
+                '[NSValue valueWithPointer: owner]': 'owner',
+                '[_layerDrawableOwners containsObject: key]': '_layerDrawableOwners.count(key)',
+                '[_layerDrawableOwners containsObject: owner]': '_layerDrawableOwners.count(owner)',
+                'if (!_layerDrawableOwners) _layerDrawableOwners = [NSMutableSet new];': '',
+                '[_layerDrawableOwners addObject: key]': '_layerDrawableOwners.insert(key)',
+                '[_layerDrawableOwners removeObject: key]': '_layerDrawableOwners.erase(key)',
+                '[_layerDrawableOwners count]': '_layerDrawableOwners.size()',
+                '[self invalidateDisplayTiming]': '++invalidations',
+                '[self updateDisplayTiming]': '(void)0',
+            }.items():
+                body = body.replace(original, host)
+            methods.append(declaration + '{' + body + '}')
+        self.compile_run(bridge + r"""
+#include <cassert>
+#include <set>
+static dwl_api api{};
+static dwl_api *WaylandAPI(){return &api;}
+struct Window {
+    int _dwlID=1;
+    uint64_t _hostTimingGeneration=1;
+    unsigned invalidations=0;
+    std::set<void*> _layerDrawableOwners;
+""" + '\n'.join(methods) + r"""
+};
+int main(){
+    Window w; int a,b;
+    api.version=3;api.presentation_begin=[](int32_t,uint64_t){return uint64_t(17);};
+    w.acquire(&a);assert(w.begin(&a)==17);w.acquire(&b);
+    assert(w.begin(&a)==0 && w.begin(&b)==0);
+    w.release(&a);assert(w.begin(&b)==17 && w.begin(&a)==0);
+    w.release(&a);w.acquire(&b);assert(w.invalidations==3);
+    w.release(&b);assert(w.begin(&b)==0);
+}
+""")
+
+    def test_window_retries_publication_and_invalidates_lost_output(self):
+        patched = runtime.CompatibilityChecks().patched
+        bridge = patched('cocotron', 'AppKit/X11.backend/DarlingWaylandAPI.h')
+        timing = patched('cocotron', 'CoreGraphics/include/CoreGraphics/DarlingDisplayTiming.h')
+        window = patched('cocotron', 'AppKit/X11.backend/WaylandWindow.m')
+        method = tickets.method(window, '- (void) updateDisplayTiming {')
+        method = method.replace('[self displayTimingTarget]', 'target')
+        self.compile_run(bridge + timing + r"""
+#include <cassert>
+#include <cstring>
+static dwl_timing host{};
+static dwl_api api{};
+static unsigned invalidations, writes;
+static bool failWrite;
+static uint64_t target=1234;
+static int readTiming(int32_t, dwl_timing *out){*out=host;return 0;}
+static dwl_api *WaylandAPI(){return &api;}
+static uint64_t WaylandOutputIdentity(const dwl_output*){return 77;}
+static uint32_t WaylandOutputDisplayID(uint64_t id){return id;}
+uint64_t DGTimingInvalidate(uint64_t value){assert(value==target);return ++invalidations;}
+int DGTimingPublish(const DGTimingSnapshot *snapshot){
+    assert(snapshot->generation==invalidations); ++writes;return !failWrite;
+}
+int DGTimingMonotonicToMach(uint64_t stamp,DGTimingClock*,uint64_t *result){
+    *result=stamp;return 1;
+}
+struct Window {
+    enum {WaylandWindowKindGame=0};
+    int _kind=WaylandWindowKindGame, _dwlID=1;
+    uint64_t _timingGeneration=0,_hostTimingGeneration=0,_timingOutput=0;
+    uint64_t _timingRateNum=0,_timingRateDen=0;
+    DGTimingClock _timingClock{};
+    dwl_timing _publishedTiming{};
+    void update(){
+""" + method + r"""
+    }
+};
+int main(){
+    Window w;api.version=3;api.window_get_timing=readTiming;
+    host.flags=DWL_TIMING_NOMINAL;host.rate_num=144;host.rate_den=1;
+    host.surface_generation=1;host.output_id=42;
+    failWrite=true;w.update();assert(writes==1 && invalidations==1);
+    failWrite=false;w.update();w.update();assert(writes==2 && invalidations==1);
+    host.flags|=DWL_TIMING_PRESENTATION|DWL_TIMING_CLOCK_MONOTONIC;
+    host.presentation_ns=44;w.update();w.update();assert(writes==3);
+    ++host.surface_generation;host.flags=0;
+    w.update();w.update();assert(writes==3 && invalidations==2 && !w._timingRateNum);
+    host.flags=DWL_TIMING_NOMINAL;w.update();assert(writes==4 && invalidations==3);
+}
+""")
 
     def test_embedded_presenter_nominal_metadata_is_coherent_and_versioned(self):
         header = runtime.CompatibilityChecks().patched(

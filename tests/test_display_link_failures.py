@@ -24,6 +24,8 @@ class DisplayLinkFailureChecks(unittest.TestCase):
         release = runtime.function(source, 'CVDisplayLinkRelease')
         bodies += release.replace('[(NSMutableDictionary*) displayLink release];',
                                   'releaseObject(displayLink);')
+        bodies += runtime.function(source.replace('void *displayClockThread', 'void* displayClockThread'),
+                                   'displayClockThread')
         bodies += runtime.function(source, 'InstallDispatchPump')
         bodies += runtime.function(source, 'CVDisplayLinkStart')
         harness = r'''
@@ -72,7 +74,14 @@ static int fake_create(pthread_t *thread, const pthread_attr_t *,
     return ++creates == 1 ? 11 : 0;
 }
 static int fake_detach(pthread_t) { return 0; }
-static void *displayClockThread(void *) { return nullptr; }
+static void dispatchTimerFire(void *) {}
+static uint64_t displayClockSleepNS() { return 10; }
+static int fail_call=230;
+static long __lolsys_syscall(long,long address,long,long,long,long,int number) {
+    if (number==fail_call) return -22;
+    assert(number==228);
+    memset((void*)address,0,2*sizeof(long));return 0;
+}
 static void installFrameSinkBridge() {}
 #define pthread_create fake_create
 #define pthread_detach fake_detach
@@ -119,6 +128,13 @@ int main() {
     assert(state.running == 1 && creates == 2);
     assert(CVDisplayLinkStart((void *)1) == kCVReturnSuccess);
     assert(creates == 2);
+    for (int i=0;i<2;++i) {
+        fail_call=i==0?230:228;
+        assert(records[0].reserved);
+        displayClockThread(nullptr);
+        assert(!records[0].reserved && open_fds==0);
+        assert(CVDisplayLinkStart((void *)1)==kCVReturnSuccess && creates==3+i);
+    }
     fd_limit=1; // The guard owns the only available descriptor.
     assert(CVDisplayLinkStop((void *)1) == kCVReturnSuccess);
     assert(state.running == 0 && open_fds == 0);

@@ -160,7 +160,8 @@ struct Display {
     static void dataGet(const DGTimingSnapshot* a,DGTimingSnapshot* b) {*b=*a;}
     void storeSet(Window w,const DGTimingSnapshot& s) {stored[w]=s;}
     void forget(Window w) {DGTimingInvalidate(w); stored.erase(w);}
-    void notify(Window) {}
+    DGTimingSnapshot notified{};
+    void notify(Window w) {notified=stored.at(w);}
     void update(Window window) {
 ''' + method + r'''
     }
@@ -193,6 +194,10 @@ int main() {
     geometry.erase(1); display.update(1); assert(!published.count(1));
     geometry[1]={0,0,1920,1080}; display.update(1);
     assert(published[1].generation>oldGeneration && published[1].presentationNS==0);
+    display.outputs[0].width=0; display.update(1);
+    assert(!published.count(1) && display.notified.target==1);
+    assert(!display.notified.rateNumerator && !display.notified.rateDenominator);
+    display.notify(1); assert(!display.notified.rateNumerator && !display.notified.rateDenominator);
 }
 ''')
 
@@ -203,7 +208,11 @@ int main() {
                      'CGDisplayCopyAllDisplayModes', 'CGDisplaySetDisplayMode'):
             with self.subTest(name=name):
                 body = runtime.function(source, name)
-                self.assertIn('modeIndexForDisplayID(', body)
+                helper = {'CGDisplayAvailableModes': 'modesForDisplayID',
+                          'CGDisplayCopyDisplayMode': 'currentModeForDisplayID',
+                          'CGDisplayCopyAllDisplayModes': 'modesForDisplayID',
+                          'CGDisplaySetDisplayMode': 'modeIndexForDisplayID'}[name]
+                self.assertIn(helper + '(', body)
                 self.assertNotIn(' - 1', body)
 
     def test_embedded_presenter_receives_only_nominal_rational_timing(self):

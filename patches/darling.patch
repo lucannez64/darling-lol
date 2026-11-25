@@ -4316,10 +4316,10 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba22..a20d3660 100644
+index 3e9cba22..a594c878 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,1087 @@
+@@ -1,38 +1,1096 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -5235,6 +5235,8 @@ index 3e9cba22..a20d3660 100644
 +
 +static bool prepareDisplayDeadline(CVLinkStateRec* rec, const DGTimingSnapshot& timing,
 +                                   uint64_t now) {
++    if ((timing.flags & DG_TIMING_BUSY) && rec->periodNumerator)
++        return rec->deadlineNS <= now;
 +    __uint128_t product = (__uint128_t)1000000000 * timing.rateDenominator;
 +    // Defensive bounds only protect record arithmetic; ordinary rational rates stay exact.
 +    uint64_t numerator = product <= UINT64_MAX ? (uint64_t)product : displayLinkPeriod(timing);
@@ -5285,7 +5287,7 @@ index 3e9cba22..a20d3660 100644
 +    uint64_t outputNS = rec->deadlineNS;
 +    if (outputNS <= rec->lastOutputNS) outputNS = rec->lastOutputNS + 1;
 +    rec->lastOutputNS = outputNS;
-+    uint64_t periodNS = displayLinkPeriod(timing);
++    uint64_t periodNS = rec->periodNumerator / rec->periodDenominator;
 +    CVTimeStamp now = clock.stamp(nowNS, periodNS);
 +    CVTimeStamp outputTime = clock.stamp(outputNS, periodNS);
 +    CVOptionFlags flagsOut = 0;
@@ -5348,13 +5350,20 @@ index 3e9cba22..a20d3660 100644
 +        dispatchTimerFire(NULL);
 +        uint64_t interval = displayClockSleepNS();
 +        struct { long sec, nsec; } deadline;
-+        if (__lolsys_syscall(1,(long)&deadline,0,0,0,0,228)<0) return NULL;
++        if (__lolsys_syscall(1,(long)&deadline,0,0,0,0,228)<0) break;
 +        deadline.nsec += interval;
 +        if (deadline.nsec >= 1000000000) { deadline.nsec -= 1000000000; ++deadline.sec; }
 +        long result;
 +        do { result=__lolsys_syscall(1,1,(long)&deadline,0,0,0,230); } while(result==-4);
-+        if (result<0) return NULL;
++        if (result<0) break;
 +    }
++    CVStateGuard guard;
++    CVLinkStateRec header;
++    if (guard.fd >= 0 && readHeader(guard.fd, &header)) {
++        header.reserved = 0;
++        clockWrite(guard.fd, &header, sizeof(header), 0);
++    }
++    return NULL;
 +}
 +static bool InstallDispatchPump(void) {
 +    pthread_attr_t attr;
@@ -5408,14 +5417,14 @@ index 3e9cba22..a20d3660 100644
  	[self setObject: array
  			forKey: kDirectDisplayArray];
  
-+	if (!registerDisplayLink((CVDisplayLinkRef)self)) {
++	if (!registerDisplayLink((CVDisplayLinkRef)self, displayCount ? displays[0] : 1)) {
 +        [self release];
 +        return kCVReturnAllocationFailed;
 +    }
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,112 +1090,212 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,112 +1099,212 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;
@@ -7322,7 +7331,7 @@ index deca16b87..d75d5e22d 100644
  
  set_property(TARGET OpenGL APPEND_STRING PROPERTY LINK_FLAGS
 diff --git a/src/frameworks/OpenGL/OpenGL.c b/src/frameworks/OpenGL/OpenGL.c
-index ffd7fe05..ec73204b 100644
+index ffd7fe05..4f934969 100644
 --- a/src/frameworks/OpenGL/OpenGL.c
 +++ b/src/frameworks/OpenGL/OpenGL.c
 @@ -2,11 +2,23 @@
@@ -8100,11 +8109,11 @@ index ffd7fe05..ec73204b 100644
 +    uint64_t ns;
 +    if(!DGTimingMonotonicToMach(ust*1000,&mapping,&ns)) {
 +        s.flags&=~(DG_TIMING_FEEDBACK|DG_TIMING_FIXED|DG_TIMING_COUNTER);
-+        s.presentationNS=s.presentationCounter=0;DGTimingPublish(&s);return;
++        s.presentationNS=s.presentationCounter=0;DGTimingTryPublish(&s);return;
 +    }
 +    s.flags|=DG_TIMING_FEEDBACK|DG_TIMING_FIXED|DG_TIMING_COUNTER|DG_TIMING_X11_SERVER;
 +    s.presentationNS=ns;s.presentationCounter=msc;
-+    DGTimingPublish(&s);
++    DGTimingTryPublish(&s);
 +}
 +
  CGLError CGLFlushDrawable(CGLContextObj context) {
@@ -11036,10 +11045,10 @@ index 00000000..3bbcc581
 +}
 diff --git a/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h b/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h
 new file mode 100644
-index 00000000..df17a548
+index 00000000..cb966cb2
 --- /dev/null
 +++ b/src/frameworks/OpenGL/include/OpenGL/DarlingNativePresent.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +#ifndef DARLING_NATIVE_PRESENT_H
 +#define DARLING_NATIVE_PRESENT_H
 +#include <stdint.h>
@@ -11060,7 +11069,8 @@ index 00000000..df17a548
 + if(!(before&DARLING_NATIVE_TIMING_V2) || (before&1))return 16666667ull;
 + uint32_t numerator=__atomic_load_n(&target->reserved[4],__ATOMIC_RELAXED);
 + uint32_t denominator=__atomic_load_n(&target->reserved[5],__ATOMIC_RELAXED);
-+ uint32_t after=__atomic_load_n(&target->reserved[0],__ATOMIC_ACQUIRE);
++ __atomic_thread_fence(__ATOMIC_ACQUIRE);
++ uint32_t after=__atomic_load_n(&target->reserved[0],__ATOMIC_RELAXED);
 + if(before!=after || !numerator || !denominator)return 16666667ull;
 + return (1000000000ull*denominator+numerator/2)/numerator;
 +}

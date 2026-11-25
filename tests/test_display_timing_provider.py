@@ -31,8 +31,8 @@ class DisplayTimingProviderTests(unittest.TestCase):
 #include <unistd.h>
 static void checkOverrides(DGTimingSnapshot (*readTiming)(uint64_t,uint32_t,DGTimingCache*),
                            DGTimingCache *cache) {
-    const char *values[]={"1","60","144","1000","  +144","59.94","144Hz","0","1001","invalid","-1",""};
-    const unsigned rates[]={1,60,144,1000,144,59,144,60,60,60,60,60};
+    const char *values[]={"1","30","60","144","1000","  +144","59.94","144Hz","0","1001","invalid","-1",""};
+    const unsigned rates[]={1,30,60,144,1000,144,59,144,60,60,60,60,60};
     for(unsigned i=0;i<sizeof(rates)/sizeof(*rates);++i) {
         assert(!setenv("RCLOL_REFRESH_HZ",values[i],1));
         DGTimingSnapshot s=readTiming(7,0,cache);
@@ -48,6 +48,8 @@ int main(int argc, char **argv) {
     void *b = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
     assert(a && b);
     int (*publish)(const DGTimingSnapshot*) = dlsym(a, "DGTimingPublish");
+    int (*tryPublish)(const DGTimingSnapshot*) = dlsym(a, "DGTimingTryPublish");
+    assert(tryPublish);
     uint64_t (*invalidate)(uint64_t) = dlsym(a, "DGTimingInvalidate");
     void (*bind)(uint64_t,uint64_t) = dlsym(a,"DGTimingBind");
     void (*forget)(uint64_t) = dlsym(a,"DGTimingForget");
@@ -61,7 +63,7 @@ int main(int argc, char **argv) {
     s = (DGTimingSnapshot){.target=99,.outputID=401,.displayID=2,
         .rateNumerator=60000,.rateDenominator=1001,.flags=DG_TIMING_NOMINAL};
     s.generation = invalidate(99);
-    assert(s.generation && publish(&s));
+    assert(s.generation && tryPublish(&s));
     bind(7,99);
     s = readTiming(7,0,&cache);
     assert(s.outputID==401 && s.rateNumerator==60000 && s.rateDenominator==1001);
@@ -104,12 +106,15 @@ int main(int argc, char **argv) {
     char path[256]; snprintf(path,sizeof path,"/dev/shm/darling-display-timing-v1-%u-%u.state",(unsigned)getuid(),(unsigned)getpid());
     int fd=open(path,O_RDWR); assert(fd>=0);
     assert(flock(fd,LOCK_EX|LOCK_NB)==0);
+    assert(!tryPublish(&s)); /* Optional feedback must return while the lock is held. */
     /* A coherent same-epoch cache survives contention without waiting. */
     s=readTiming(7,0,&cache); assert(s.outputID==402);
     /* An interrupted publication invalidates cached feedback before the lock releases. */
     uint64_t epoch=cache.epoch+1;
     assert(pwrite(fd,&epoch,sizeof epoch,32)==sizeof epoch);
-    s=readTiming(7,0,&cache); assert(s.flags & DG_TIMING_SOFTWARE);
+    s=readTiming(7,0,&cache); assert(s.flags & DG_TIMING_BUSY);
+    assert(!flock(fd,LOCK_UN));
+    s=readTiming(7,0,&cache); assert((s.flags & DG_TIMING_SOFTWARE) && !(s.flags & DG_TIMING_BUSY));
     close(fd); unlink(path);
     dlclose(b); dlclose(a);
 }

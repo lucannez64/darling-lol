@@ -283,6 +283,7 @@ DarlingXShmSetTiming(void *handle, uint32_t numerator, uint32_t denominator) {
   uint32_t seq=__atomic_load_n(&t->reserved[0],__ATOMIC_RELAXED);
   seq=(seq+2)|DARLING_NATIVE_TIMING_V2;
   __atomic_store_n(&t->reserved[0],seq|1,__ATOMIC_RELEASE);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
   __atomic_store_n(&t->reserved[4],numerator,__ATOMIC_RELAXED);
   __atomic_store_n(&t->reserved[5],denominator,__ATOMIC_RELAXED);
   __atomic_store_n(&t->reserved[0],seq&~1u,__ATOMIC_RELEASE);
