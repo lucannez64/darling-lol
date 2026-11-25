@@ -14513,7 +14513,7 @@ index 5ad375f..c8e8381 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..81602d86 100644
+index d6f86b31..53b94d82 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
 @@ -31,6 +31,14 @@
@@ -15011,7 +15011,7 @@ index d6f86b31..81602d86 100644
  	}
  }
  
-@@ -662,27 +951,33 @@ void CAMetalDrawableActual::disown() {
+@@ -662,27 +951,41 @@ void CAMetalDrawableActual::disown() {
  };
  
  void CAMetalDrawableActual::didPresent() {
@@ -15027,6 +15027,10 @@ index d6f86b31..81602d86 100644
 -	}
 +    // The callback can release the final owner or allow the pool to reuse this drawable.
 +    auto callback = std::move(_didPresentCallback);
++    // libc++ leaves a moved-from small std::function set: clear it before the
++    // callback runs, so a second present or drop cannot run it again, while a
++    // callback that installs a new one keeps it.
++    _didPresentCallback = nullptr;
 +    if (callback) callback();
  };
  
@@ -15043,6 +15047,10 @@ index d6f86b31..81602d86 100644
 -	}
 +    // The callback can release the final owner or allow the pool to reuse this drawable.
 +    auto callback = std::move(_didPresentCallback);
++    // libc++ leaves a moved-from small std::function set: clear it before the
++    // callback runs, so a second present or drop cannot run it again, while a
++    // callback that installs a new one keeps it.
++    _didPresentCallback = nullptr;
 +    if (callback) callback();
  };
  
@@ -15054,7 +15062,7 @@ index d6f86b31..81602d86 100644
  	}
  };
  
-@@ -694,6 +989,7 @@ void CAMetalDrawableActual::reset() {
+@@ -694,6 +997,7 @@ void CAMetalDrawableActual::reset() {
  		reportGLErrors();
  	}
  
@@ -15062,7 +15070,7 @@ index d6f86b31..81602d86 100644
  	_semaphore = nullptr;
  	_wantsToPresentCallback = nullptr;
  	_didPresentCallback = nullptr;
-@@ -702,9 +998,55 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +1006,55 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {

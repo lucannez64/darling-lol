@@ -477,3 +477,72 @@ int main(int argc,char** argv){
  puts("PASS");
 }
 '''
+
+
+MOVED_FROM_FIXTURE = r'''
+#include <cassert>
+#include <functional>
+#include <memory>
+// Guest libc++ moves a small std::function by cloning it into the new object
+// and leaves the source set (__functional/function.h, __value_func(&&)).
+struct SmallFunction {
+ std::function<void()> f;
+ SmallFunction() = default;
+ SmallFunction(const SmallFunction&) = default;
+ SmallFunction(SmallFunction&& other) : f(other.f) {}
+ SmallFunction& operator=(const SmallFunction&) = default;
+ SmallFunction& operator=(std::function<void()> g) { f = std::move(g); return *this; }
+ explicit operator bool() const { return bool(f); }
+ void operator()() const { f(); }
+};
+static double CACurrentMediaTime() { return 1; }
+struct Texture { int releases=0; void releasePersistentPresentationSemaphore() { ++releases; } };
+struct CAMetalDrawableActual {
+ bool _waitedPersistentSemaphore=false;
+ double _presentedTime=0;
+ std::shared_ptr<Texture> _texture=std::make_shared<Texture>();
+ SmallFunction _didPresentCallback;
+ void didPresent();
+ void didDrop();
+};
+'''
+
+MOVED_FROM_SCENARIO = r'''
+int main() {
+ CAMetalDrawableActual drawable; int runs=0;
+ drawable._didPresentCallback=[&]{++runs;};
+ drawable.didPresent(); drawable.didDrop(); drawable.didPresent();
+ assert(runs==1); // A second present or drop must not repeat the release.
+ drawable._didPresentCallback=[&]{++runs; drawable._didPresentCallback=[&]{runs+=10;};};
+ drawable.didDrop(); assert(runs==2);
+ drawable.didDrop(); assert(runs==12); // A callback installed by the handler survives.
+ drawable.didDrop(); assert(runs==12);
+}
+'''
+
+
+@unittest.skipUnless(shutil.which('c++') and shutil.which('patch'), 'C++ compiler and patch required')
+class MovedFromCallbackChecks(unittest.TestCase):
+    def setUp(self):
+        self.drawable = sources.CompatibilityChecks().patched('cocotron', 'QuartzCore/CAMetalDrawable.mm')
+
+    def test_each_moved_callback_is_cleared_before_it_runs(self):
+        moves = self.drawable.split('std::move(_didPresentCallback);')[1:]
+        self.assertGreaterEqual(len(moves), 2)
+        for after in moves:
+            statements = [line.strip() for line in after.splitlines()[1:]
+                          if line.strip() and not line.strip().startswith('//')]
+            self.assertEqual(statements[0], '_didPresentCallback = nullptr;')
+
+    def test_callback_runs_once_when_moves_leave_the_source_set(self):
+        definitions = ''.join(sources.function(self.drawable, 'CAMetalDrawableActual::' + name)
+                              for name in ('didPresent', 'didDrop'))
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'callback.cpp'
+            binary = Path(folder) / 'callback'
+            source.write_text(MOVED_FROM_FIXTURE + definitions + MOVED_FROM_SCENARIO)
+            result = subprocess.run(['c++', '-std=c++17', str(source), '-o', str(binary)],
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
