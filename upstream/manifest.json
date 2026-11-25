@@ -154,7 +154,8 @@
         "src/trustcache.cpp",
         "include/darlingserver/dc_entitlements.h",
         "internal-include/darlingserver/uring.hpp",
-        "src/uring.cpp"
+        "src/uring.cpp",
+        "duct-tape/src/kext_info.c"
       ]
     },
     {
