@@ -393,7 +393,7 @@ struct presentation_pending {
     struct window *window;
     uint64_t token, generation, output_id, submitted_ns, expires_ns;
     int64_t clock_low, clock_high;
-    bool clock_valid, committed;
+    bool clock_valid, committed, failed_swap, has_sync_output;
 #ifdef DWL_HAVE_PRESENTATION
     struct wp_presentation_feedback *feedback;
 #endif
@@ -414,7 +414,12 @@ static void timing_invalidate(struct window *w) {
      * this generation into its own process-scoped timing snapshots. */
     w->surface_generation = ++next_surface_generation;
     memset(&w->observation, 0, sizeof w->observation);
-    while (w->feedback) timing_drop_feedback(w->feedback);
+    struct presentation_pending *pending = w->feedback;
+    while (pending) {
+        struct presentation_pending *next = pending->next;
+        if (!pending->failed_swap) timing_drop_feedback(pending);
+        pending = next;
+    }
 }
 
 static void timing_reassociate(struct window *w, uint64_t sync_output) {
@@ -430,7 +435,7 @@ static void timing_expire(struct window *w, uint64_t now) {
     struct presentation_pending *pending = w->feedback;
     while (pending) {
         struct presentation_pending *next = pending->next;
-        if (now >= pending->expires_ns) timing_drop_feedback(pending);
+        if (!pending->failed_swap && now >= pending->expires_ns) timing_drop_feedback(pending);
         pending = next;
     }
 }
@@ -472,6 +477,7 @@ static const struct wl_surface_listener timing_surface_listener = {
 };
 
 static void timing_attach_surface(struct window *w) {
+    while (w->feedback) timing_drop_feedback(w->feedback);
     timing_invalidate(w);
     w->entered_count = 0;
     w->timing_output = 0;
@@ -540,6 +546,7 @@ static const struct wp_presentation_listener presentation_listener = {.clock_id 
 
 static void timing_sync_output(void *data, struct wp_presentation_feedback *feedback UNUSED, struct wl_output *output) {
     struct presentation_pending *pending = data;
+    pending->has_sync_output = true;
     for (size_t i = 0; i < g.output_count; ++i)
         if (g.outputs[i]->output == output) pending->output_id = g.outputs[i]->identity;
 }
@@ -569,7 +576,10 @@ static void timing_presented(void *data, struct wp_presentation_feedback *feedba
     /* Receipt delay does not alter phase. A future timestamp or clock reset
      * is retained as an observation without granting scheduling eligibility. */
     if (clock_valid && (timestamp > now || (__uint128_t)timestamp + 1000000000ull < pending->submitted_ns)) clock_valid = false;
-    uint64_t output_id = timing_output(pending->output_id) ? pending->output_id : w->timing_output;
+    uint64_t output_id = pending->has_sync_output ? pending->output_id : w->timing_output;
+    if (pending->has_sync_output && !timing_output(output_id)) {
+        timing_drop_feedback(pending); return;
+    }
     uint32_t timing_flags = DWL_TIMING_PRESENTATION;
     if (clock_valid) timing_flags |= DWL_TIMING_CLOCK_MONOTONIC;
     if (sequence) timing_flags |= DWL_TIMING_COUNTER;
@@ -592,6 +602,7 @@ static void timing_presented(void *data, struct wp_presentation_feedback *feedba
     /* Detach before reassociation: changing output cancels all other feedback. */
     timing_drop_feedback(pending);
     timing_reassociate(w, output_id);
+    if (output_id != w->timing_output) return;
     w->observation = (struct dwl_timing){.version = 1, .flags = timing_flags,
         .output_id = w->timing_output, .surface_generation = w->surface_generation,
         .presentation_ns = timestamp, .counter = sequence, .refresh_ns = refresh,
@@ -641,7 +652,7 @@ static void dwl_presentation_end(int32_t window, uint64_t token, int success) {
     while (pending && pending->token != token) pending = pending->next;
     if (pending) {
         if (success) pending->committed = true;
-        else timing_drop_feedback(pending);
+        else pending->failed_swap = true; /* No protocol request cancels this feedback. */
     }
     w->presentation_token = 0;
     if (w->deferred_commit) {
@@ -1303,7 +1314,8 @@ static void registry_global(void *d UNUSED, struct wl_registry *reg, uint32_t na
                             uint32_t version) {
     remember_advertised(iface);
     if (!strcmp(iface, wl_compositor_interface.name)) {
-        if (version >= 4) g.compositor = bind_global(reg, name, &wl_compositor_interface, version, 6);
+        /* damage_buffer needs v4; the surface listener consumes v4 events. */
+        if (version >= 4) g.compositor = bind_global(reg, name, &wl_compositor_interface, version, 4);
     } else if (!strcmp(iface, wl_shm_interface.name)) {
         g.shm = bind_global(reg, name, &wl_shm_interface, version, 1);
     } else if (!strcmp(iface, wl_seat_interface.name)) {
@@ -1545,7 +1557,7 @@ static void dwl_window_destroy(int32_t window) {
         wl_surface_set_user_data(w->surface, NULL);
         wl_surface_destroy(w->surface);
     }
-    timing_invalidate(w);
+    while (w->feedback) timing_drop_feedback(w->feedback);
     free(w->entered);
     free(w->app_id);
     free(w);

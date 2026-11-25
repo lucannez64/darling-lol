@@ -24,6 +24,7 @@ FIXTURE = r'''
 static uint64_t synthetic_now = 100000000000ull;
 static int64_t synthetic_offset = 5000000000ll;
 static int commits;
+static uint32_t compositor_version;
 #ifdef DWL_HAVE_PRESENTATION
 static int requests, destroyed;
 #endif
@@ -57,6 +58,13 @@ static void synthetic_feedback_destroy(struct wp_presentation_feedback *feedback
 #define wp_presentation_feedback_add_listener synthetic_feedback_listener
 #define wp_presentation_feedback_destroy synthetic_feedback_destroy
 #endif
+static void *synthetic_registry_bind(struct wl_registry *registry, uint32_t name,
+                                     const struct wl_interface *iface, uint32_t version) {
+    assert(registry && name && iface == &wl_compositor_interface);
+    compositor_version = version;
+    return (void*)1;
+}
+#define wl_registry_bind synthetic_registry_bind
 #define clock_gettime synthetic_clock_gettime
 #define wl_surface_commit synthetic_commit
 #define wl_surface_add_listener synthetic_surface_listener
@@ -94,6 +102,10 @@ static void present(struct window *w, unsigned version, uint32_t refresh, uint64
 }
 #endif
 int main(void) {
+    registry_global(NULL,(void*)1,1,wl_compositor_interface.name,6);
+    assert(g.compositor && compositor_version == 4);
+    free(g.advertised[0]); free(g.advertised);
+
     struct output *outputs[3] = {make_output(100, 59940), make_output(200, 144000), make_output(300, 144000)};
     struct window *windows[2] = {make_window(1), make_window(2)};
     g.outputs = outputs; g.output_count = 3; g.windows = windows; g.window_count = 2;
@@ -128,9 +140,14 @@ int main(void) {
     token = dwl_presentation_begin(w->id, w->surface_generation);
     window_commit(w);
     dwl_presentation_end(w->id, token, 0);
-    assert(commits == before+2); /* failed swap: feedback cancelled before deferred commit */
+    assert(commits == before+2); /* deferred state committed after failed swap */
 #ifdef DWL_HAVE_PRESENTATION
     g.presentation = (void*)1; g.presentation_clock_known = true; g.presentation_clock = CLOCK_REALTIME;
+    outputs[1]->timing_refresh = 0;
+    present(w, 3, 8333333, 7, 1|0x10, outputs[1]->output);
+    assert(dwl_window_get_timing(w->id, &timing) == 0 && timing.output_id == 100);
+    assert(!(timing.flags & DWL_TIMING_PRESENTATION));
+    outputs[1]->timing_refresh = 144000;
     present(w, 3, 8333333, 7, 1|0x10, outputs[1]->output);
     assert(dwl_window_get_timing(w->id, &timing) == 0 && timing.output_id == 200);
     assert(timing.flags & DWL_TIMING_FIXED);
@@ -211,7 +228,20 @@ int main(void) {
     token = dwl_presentation_begin(w->id,w->surface_generation);
     window_commit(w);
     dwl_presentation_end(w->id,token,0);
-    assert(!strcmp(order,"rdc"));
+    assert(!strcmp(order,"rc"));
+    pending = w->feedback;
+    timing_presented(pending,pending->feedback,0,90,0,8333333,0,12,1);
+    assert(w->feedback_count == 0 && !(w->observation.flags & DWL_TIMING_PRESENTATION));
+    request_count = requests;
+    for (int i=0;i<12;++i) {
+        token = dwl_presentation_begin(w->id,w->surface_generation);
+        assert(token);
+        dwl_presentation_end(w->id,token,0);
+        synthetic_now += 1000000001;
+        dwl_window_invalidate_timing(w->id);
+    }
+    assert(requests == request_count+8 && w->feedback_count == 8);
+    while (w->feedback) timing_discarded(w->feedback,w->feedback->feedback);
     /* Late delivery from an older generation is ignored. */
     token = dwl_presentation_begin(w->id,w->surface_generation);
     pending = w->feedback;
@@ -262,7 +292,6 @@ class WaylandTiming(unittest.TestCase):
                 'relative-pointer-unstable-v1': 'unstable/relative-pointer/relative-pointer-unstable-v1.xml',
                 'xdg-output-unstable-v1': 'unstable/xdg-output/xdg-output-unstable-v1.xml',
                 'idle-inhibit-unstable-v1': 'unstable/idle-inhibit/idle-inhibit-unstable-v1.xml',
-                'presentation-time': 'stable/presentation-time/presentation-time.xml',
             }
             generated = []
             for name, xml in protocols.items():
@@ -275,10 +304,13 @@ class WaylandTiming(unittest.TestCase):
             (folder / 'fixture.c').write_text(FIXTURE)
             import shlex
             flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'wayland-client', 'wayland-egl', 'xkbcommon'], text=True))
+            presentation_xml = pkgdata / 'stable/presentation-time/presentation-time.xml'
             for presentation in (None, 1, 2, 3):
                 with self.subTest(presentation=presentation):
                     if presentation:
-                        xml = ET.parse(pkgdata / protocols['presentation-time'])
+                        if not presentation_xml.is_file():
+                            self.skipTest('presentation-time XML unavailable')
+                        xml = ET.parse(presentation_xml)
                         for interface in xml.getroot().findall('interface'):
                             interface.set('version', str(presentation))
                             for enum in interface.findall('enum'):
@@ -291,7 +323,7 @@ class WaylandTiming(unittest.TestCase):
                         subprocess.run(['wayland-scanner', 'private-code', str(old), str(folder / 'presentation-time-protocol.c')], check=True, capture_output=True)
                     command = ['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I' + str(folder), '-I' + str(ROOT / 'tools')]
                     if presentation:
-                        command.append('-DDWL_HAVE_PRESENTATION')
+                        command += ['-DDWL_HAVE_PRESENTATION', str(folder / 'presentation-time-protocol.c')]
                     command += [str(folder / 'fixture.c'), *generated, *flags, '-o', str(folder / 'fixture')]
                     result = subprocess.run(command, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
