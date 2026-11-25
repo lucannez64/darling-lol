@@ -4316,10 +4316,10 @@ index 299caa5b1..bdff6028c 100644
  
  __END_DECLS
 diff --git a/src/frameworks/CoreVideo/src/CVDisplayLink.mm b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-index 3e9cba22..a594c878 100644
+index 3e9cba22..6ab54edd 100644
 --- a/src/frameworks/CoreVideo/src/CVDisplayLink.mm
 +++ b/src/frameworks/CoreVideo/src/CVDisplayLink.mm
-@@ -1,38 +1,1096 @@
+@@ -1,38 +1,1113 @@
  #include <CoreVideo/CVDisplayLink.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -5346,20 +5346,37 @@ index 3e9cba22..a594c878 100644
 +}
 +
 +static void *displayClockThread(void *) {
++    unsigned failures = 0;
 +    for (;;) {
-+        dispatchTimerFire(NULL);
++        if (!failures) dispatchTimerFire(NULL);
 +        uint64_t interval = displayClockSleepNS();
 +        struct { long sec, nsec; } deadline;
-+        if (__lolsys_syscall(1,(long)&deadline,0,0,0,0,228)<0) break;
-+        deadline.nsec += interval;
-+        if (deadline.nsec >= 1000000000) { deadline.nsec -= 1000000000; ++deadline.sec; }
-+        long result;
-+        do { result=__lolsys_syscall(1,1,(long)&deadline,0,0,0,230); } while(result==-4);
-+        if (result<0) break;
++        long result = __lolsys_syscall(1,(long)&deadline,0,0,0,0,228);
++        if (result == 0) {
++            deadline.nsec += interval;
++            if (deadline.nsec >= 1000000000) { deadline.nsec -= 1000000000; ++deadline.sec; }
++            do { result=__lolsys_syscall(1,1,(long)&deadline,0,0,0,230); } while(result==-4);
++        }
++        if (result == 0) { failures = 0; continue; }
++        // Retry the wait without dispatching extra ticks. Use an independent
++        // relative host sleep, bounded to 1, 2 and 4 ms per failure sequence.
++        if (++failures > 3) break;
++        struct { long sec, nsec; } backoff = {0, 1000000L << (failures - 1)};
++        __lolsys_syscall((long)&backoff,0,0,0,0,0,35);
 +    }
 +    CVStateGuard guard;
 +    CVLinkStateRec header;
 +    if (guard.fd >= 0 && readHeader(guard.fd, &header)) {
++        // Sustained clock failure stops every link served by this worker.
++        // A subsequent Start can claim a new worker under the same lock.
++        for (uint32_t i = 0; i < header.refs; ++i) {
++            CVLinkStateRec rec;
++            if (clockRead(guard.fd, &rec, sizeof(rec), slotOffset(i)) != sizeof(rec)) break;
++            if (rec.alive && rec.running) {
++                rec.running = 0;
++                clockWrite(guard.fd, &rec, sizeof(rec), slotOffset(i));
++            }
++        }
 +        header.reserved = 0;
 +        clockWrite(guard.fd, &header, sizeof(header), 0);
 +    }
@@ -5424,7 +5441,7 @@ index 3e9cba22..a594c878 100644
  	*displayLinkOut = (CVDisplayLinkRef) self;
  	return kCVReturnSuccess;
  }
-@@ -41,112 +1099,212 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
+@@ -41,112 +1116,212 @@ CVReturn CVDisplayLinkStart(CVDisplayLinkRef displayLink)
  {
  	if (!displayLink)
  		return kCVReturnInvalidArgument;

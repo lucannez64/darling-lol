@@ -40,7 +40,7 @@ using CVReturn = int;
 constexpr int kCVReturnSuccess = 0, kCVReturnError = -1;
 constexpr int kCVReturnInvalidArgument = -2, LOCK_EX = 2, LOCK_UN = 8;
 // RECORD_DEFINITION
-static CVLinkStateRec records[2];
+static CVLinkStateRec records[3];
 static CVLinkStateRec &state = records[1];
 static const uint32_t kStateMagic = 0xc81dfa10;
 static int open_fds, fd_limit=100, releases;
@@ -74,11 +74,20 @@ static int fake_create(pthread_t *thread, const pthread_attr_t *,
     return ++creates == 1 ? 11 : 0;
 }
 static int fake_detach(pthread_t) { return 0; }
-static void dispatchTimerFire(void *) {}
+static int dispatches, successful_waits, failures, backoffs;
+static void dispatchTimerFire(void *) { assert(state.running); ++dispatches; }
 static uint64_t displayClockSleepNS() { return 10; }
 static int fail_call=230;
-static long __lolsys_syscall(long,long address,long,long,long,long,int number) {
-    if (number==fail_call) return -22;
+static long __lolsys_syscall(long arg,long address,long,long,long,long,int number) {
+    if (number==35) {
+        long *delay=(long*)arg;
+        assert(delay[0]==0 && delay[1]==(1000000L << (failures-1)));
+        ++backoffs; return 0;
+    }
+    if (number==fail_call && (failures==0 || successful_waits)) {
+        ++failures; return -22;
+    }
+    if (number==230) { ++successful_waits; failures=0; return 0; }
     assert(number==228);
     memset((void*)address,0,2*sizeof(long));return 0;
 }
@@ -130,9 +139,15 @@ int main() {
     assert(creates == 2);
     for (int i=0;i<2;++i) {
         fail_call=i==0?230:228;
+        dispatches=successful_waits=failures=backoffs=0;
+        records[0].refs=2;
+        records[2].alive=records[2].running=1;
         assert(records[0].reserved);
         displayClockThread(nullptr);
-        assert(!records[0].reserved && open_fds==0);
+        // One failed wait recovers and dispatch resumes with no Start call.
+        assert(dispatches==2 && successful_waits==1 && backoffs==4);
+        // A sustained failure leaves all active links stopped and restartable.
+        assert(!records[0].reserved && !state.running && !records[2].running && open_fds==0);
         assert(CVDisplayLinkStart((void *)1)==kCVReturnSuccess && creates==3+i);
     }
     fd_limit=1; // The guard owns the only available descriptor.
