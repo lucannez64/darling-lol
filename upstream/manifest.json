@@ -66,7 +66,7 @@
       "revision": "c8d38d16a9f613d300157bebbab2b9501bc0c274",
       "repository": "https://github.com/darlinghq/darling-cocotron.git",
       "patch": "patches/cocotron.patch",
-      "modified_files": 137,
+      "modified_files": 138,
       "new_files": [
         "AppKit/NSAccessibilityCustomAction.m",
         "AppKit/NSColorSampler.m",
