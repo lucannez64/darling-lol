@@ -4762,7 +4762,7 @@ index bdc97bd..1369fd1 100644
      if (display)
          XFreeCursor(display, _cursor);
 diff --git a/AppKit/X11.backend/X11Display.h b/AppKit/X11.backend/X11Display.h
-index 18189404..6549492b 100644
+index 1818940..e7ccec0 100644
 --- a/AppKit/X11.backend/X11Display.h
 +++ b/AppKit/X11.backend/X11Display.h
 @@ -10,13 +10,62 @@
@@ -4829,7 +4829,7 @@ index 18189404..6549492b 100644
  
  @interface X11Display : NSDisplay {
      Display *_display;
-@@ -36,19 +85,118 @@
+@@ -36,19 +85,141 @@
      NSTimeInterval lastClickTimeStamp;
      int clickCount;
      X11Cursor *_blankCursor, *_defaultCursor;
@@ -4852,6 +4852,13 @@ index 18189404..6549492b 100644
 +    unsigned char _modifierKeysDown[256];
      int _rrEventBase;
      NSArray* _lastScreens;
++    /* darling-lol: exclusive display modes emulated for League's game process.
++     * display id -> NSValue(NSSize); the matching NSScreen reports that mode's
++     * frame while it is active, as macOS does after a real mode change. */
++    NSMutableDictionary *_emulatedModes;
++    /* display id -> NSValue(NSRect): the physical monitor frame a mode must
++     * fit and the EWMH fullscreen policy compares window coverage against. */
++    NSMutableDictionary *_physicalScreenFrames;
 +    // Root-window rectangle of the primary monitor (macOS's global origin).
 +    NSRect _primaryRootFrame;
 +    BOOL _primaryRootFrameValid;
@@ -4905,6 +4912,22 @@ index 18189404..6549492b 100644
 +- (NSRect) rootRectForFrame: (NSRect) frame;
 +- (NSRect) frameForRootRect: (NSRect) rect;
 +
++/* Rebuilds the cached screens. -screens serializes it with the mode emulation,
++ * which a game may ask for from a worker thread. */
++- (NSArray *) _screensLocked;
++
++/* Whether a window frame (in root coordinates) covers a physical monitor. An
++ * emulated exclusive mode shrinks the NSScreen frame a game reads back, so the
++ * EWMH fullscreen policy must compare the monitor geometry X reports. */
++- (BOOL) frameCoversPhysicalScreen: (NSRect) frame;
++
++/* Whether a window rectangle (in root coordinates) matches the frame of an
++ * emulated exclusive mode (setMode:forScreen:) on its monitor. The game fills
++ * that frame, which is smaller than the monitor, so the monitor check above
++ * misses it while the pointer must still stay inside. */
++- (BOOL) rootRectMatchesEmulatedMode: (NSRect) rect;
++- (void) refreshMouseConfinement;
++
 +/* Key and modifier handling shared by X key events and native Wayland key events. */
 +- (BOOL) postModifierKeyIfNeeded: (unsigned int) key pressed: (BOOL) pressed state: (unsigned int) state
 +                          window: (id) delegate;
@@ -4950,7 +4973,7 @@ index 18189404..6549492b 100644
 +- (BOOL) waylandHandleGrabMouse: (BOOL) doGrab;
  @end
 diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
-index 5ae29bf4..4f394712 100644
+index 5ae29bf..fc378ac 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
 @@ -23,6 +23,7 @@
@@ -5273,7 +5296,7 @@ index 5ae29bf4..4f394712 100644
  
          lastFocusedWindow = nil;
          lastClickTimeStamp = 0.0;
-@@ -145,26 +424,45 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -145,26 +424,47 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  }
  
  - (void) dealloc {
@@ -5281,11 +5304,11 @@ index 5ae29bf4..4f394712 100644
      [_blankCursor release];
      [_defaultCursor release];
 +    [_definedCursor release];
- 
--    XCloseIM(_xim);
++
 +    if (_xim)
 +        XCloseIM(_xim);
-+
+ 
+-    XCloseIM(_xim);
 +    if (_portWaitQueue >= 0)
 +        close(_portWaitQueue);
  
@@ -5305,6 +5328,8 @@ index 5ae29bf4..4f394712 100644
      [_windowsByID release];
 +    [_waylandWindowsByID release];
 +    [_waylandPopups release];
++    [_emulatedModes release];
++    [_physicalScreenFrames release];
      [super dealloc];
  }
  
@@ -5322,7 +5347,7 @@ index 5ae29bf4..4f394712 100644
      return [[X11Window alloc] initWithDelegate: delegate];
  }
  
-@@ -172,6 +470,165 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -172,6 +472,165 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
      return _display;
  }
  
@@ -5488,13 +5513,22 @@ index 5ae29bf4..4f394712 100644
  - (void) _enableDetectableAutoRepeat {
      int major = XkbMajorVersion, minor = XkbMinorVersion;
      XkbStateRec state;
-@@ -190,6 +647,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
-         [_lastScreens release];
-         _lastScreens = nil;
+@@ -186,13 +645,110 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+ }
+ 
+ - (void) _invalidateRRCache {
+-    if (_lastScreens) {
+-        [_lastScreens release];
+-        _lastScreens = nil;
++    @synchronized (self) {
++        if (_lastScreens) {
++            [_lastScreens release];
++            _lastScreens = nil;
++        }
++        _primaryRootFrameValid = NO;
      }
-+    _primaryRootFrameValid = NO;
-+}
-+
+ }
+ 
 +/* Cocoa's global origin is the bottom-left corner of the primary screen, with
 + * y up; X's is the top-left corner of the root window, with y down. Screen
 + * frames and window frames are both expressed relative to the primary
@@ -5521,10 +5555,79 @@ index 5ae29bf4..4f394712 100644
 +                      NSMaxY(primary) - rect.origin.y - rect.size.height,
 +                      fmax(rect.size.width, 1.0),
 +                      fmax(rect.size.height, 1.0));
- }
- 
++}
++
++- (BOOL) frameCoversPhysicalScreen: (NSRect) frame {
++    @synchronized (self) {
++        [self screens]; /* records _physicalScreenFrames */
++        for (NSValue *value in [_physicalScreenFrames allValues]) {
++            NSRect physical = [value rectValue];
++            if (!NSIsEmptyRect(physical) &&
++                NSEqualRects([self rootRectForFrame: physical], frame))
++                return YES;
++        }
++    }
++    return NO;
++}
++
++/* Defined with the display-mode helpers below; the screen cache is rebuilt
++ * before them, so the compiler needs the declaration first. */
++static NSRect X11ScreenFrameForMode(NSRect physicalFrame, NSSize mode);
++
++/* Two root rectangles describe the same window placement, within the 2 px
++ * tolerance X11RootRectCoversMonitor allows. */
++static BOOL X11RootRectsMatch(NSRect a, NSRect b) {
++    return fabs(NSMinX(a) - NSMinX(b)) <= 2 && fabs(NSMinY(a) - NSMinY(b)) <= 2 &&
++           fabs(NSWidth(a) - NSWidth(b)) <= 2 && fabs(NSHeight(a) - NSHeight(b)) <= 2;
++}
++
++- (BOOL) rootRectMatchesEmulatedMode: (NSRect) rect {
++    @synchronized (self) {
++        if ([_emulatedModes count] == 0)
++            return NO;
++        [self screens]; /* records _physicalScreenFrames */
++        for (NSNumber *displayKey in _emulatedModes) {
++            NSValue *physicalValue = [_physicalScreenFrames objectForKey: displayKey];
++            if (physicalValue == nil || NSIsEmptyRect([physicalValue rectValue]))
++                continue;
++            NSRect physical = [physicalValue rectValue];
++            NSRect modeFrame = X11ScreenFrameForMode(
++                    physical, [[_emulatedModes objectForKey: displayKey] sizeValue]);
++            /* A mode that does not fit leaves the monitor frame, which the
++             * monitor check already handles. */
++            if (NSEqualSizes(modeFrame.size, physical.size))
++                continue;
++            if (X11RootRectsMatch(rect, [self rootRectForFrame: modeFrame]))
++                return YES;
++        }
++    }
++    return NO;
++}
++
++/* Re-check the pointer confinement after an emulated mode change. The game
++ * normally resizes its window right after the change, and that ConfigureNotify
++ * re-checks it too; this covers a mode change without a resize. */
++- (void) refreshMouseConfinement {
++    X11Window *window = _confinedWindow != None
++            ? [self windowForID: _confinedWindow]
++            : (X11Window *) [lastFocusedWindow platformWindow];
++    if (window)
++        [self updateMouseConfinementForWindow: window];
++}
++
  - (NSArray *) screens {
-@@ -201,25 +687,60 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
++    /* A worker thread may emulate an exclusive mode while the main thread
++     * rebuilds or reads this cache. */
++    @synchronized (self) {
++        return [self _screensLocked];
++    }
++}
++
++- (NSArray *) _screensLocked {
+ 
+     NSArray* last = [_lastScreens retain];
+     if (last) {
+@@ -201,25 +757,68 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
  
      int eventBase, errorBase;
  
@@ -5577,6 +5680,7 @@ index 5ae29bf4..4f394712 100644
          NSMutableArray<NSScreen *> *retval =
                  [NSMutableArray arrayWithCapacity: screen->noutput];
 +        NSMutableArray<NSScreen *> *inactive = [NSMutableArray array];
++        NSMutableDictionary *physicalFrames = [[NSMutableDictionary alloc] init];
  
          Atom edidAtom = XInternAtom(_display, "EDID", FALSE);
  
@@ -5591,11 +5695,18 @@ index 5ae29bf4..4f394712 100644
 -                NSRect frame =
 -                        NSMakeRect(crtc->x, crtc->y, crtc->width, crtc->height);
 +            if (!NSIsEmptyRect(rootFrames[i])) {
-+                NSRect frame = [self frameForRootRect: rootFrames[i]];
++                NSRect physicalFrame = [self frameForRootRect: rootFrames[i]];
++                NSNumber *displayKey = [NSNumber numberWithInt: i + 1];
++                [physicalFrames setObject: [NSValue valueWithRect: physicalFrame]
++                                   forKey: displayKey];
++                NSValue *emulated = [_emulatedModes objectForKey: displayKey];
++                NSRect frame = physicalFrame;
++                if (emulated)
++                    frame = X11ScreenFrameForMode(physicalFrame, [emulated sizeValue]);
  
                  nsscreen =
                          [[[NSScreen alloc] initWithFrame: frame
-@@ -228,18 +749,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -228,18 +827,17 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
                  Atom actualType;
                  unsigned long nitems, bytesAfter;
                  int actualFormat;
@@ -5617,7 +5728,7 @@ index 5ae29bf4..4f394712 100644
              } else {
                  nsscreen = [[[NSScreen alloc] initWithFrame: NSZeroRect
                                                 visibleFrame: NSZeroRect]
-@@ -247,25 +767,35 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
+@@ -247,25 +845,45 @@ static void socketCallback(CFSocketRef s, CFSocketCallBackType type,
              }
              [nsscreen setCgDirectDisplayID: (i + 1)];
  
@@ -5633,6 +5744,8 @@ index 5ae29bf4..4f394712 100644
          }
 +        [retval addObjectsFromArray: inactive];
  
++        [_physicalScreenFrames release];
++        _physicalScreenFrames = physicalFrames;
 +        free(rootFrames);
          XRRFreeScreenResources(screen);
  
@@ -5652,11 +5765,19 @@ index 5ae29bf4..4f394712 100644
 +}
 +
 +- (NSArray *) _rootScreenFallback {
-+    NSRect frame = NSMakeRect(
++    NSRect physicalFrame = NSMakeRect(
 +            0, 0, DisplayWidth(_display, DefaultScreen(_display)),
 +            DisplayHeight(_display, DefaultScreen(_display)));
-+    _primaryRootFrame = frame;
++    _primaryRootFrame = physicalFrame;
 +    _primaryRootFrameValid = YES;
++    NSNumber *displayKey = [NSNumber numberWithInt: 1];
++    if (_physicalScreenFrames == nil)
++        _physicalScreenFrames = [[NSMutableDictionary alloc] init];
++    [_physicalScreenFrames setObject: [NSValue valueWithRect: physicalFrame]
++                              forKey: displayKey];
++    NSValue *emulated = [_emulatedModes objectForKey: displayKey];
++    NSRect frame = emulated
++            ? X11ScreenFrameForMode(physicalFrame, [emulated sizeValue]) : physicalFrame;
 +    NSScreen *nsscreen = [[[NSScreen alloc] initWithFrame: frame
 +                                             visibleFrame: frame] autorelease];
 +    [nsscreen setCgDirectDisplayID: 1];
@@ -5664,7 +5785,146 @@ index 5ae29bf4..4f394712 100644
  }
  
  static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
-@@ -536,12 +1066,116 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -331,15 +949,132 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+     }
+ }
+ 
+-- (BOOL) setMode: (NSDictionary *) mode forScreen: (int) screenIndex {
+-    int eventBase, errorBase;
++static BOOL rclolHasGameTitle(NSString *title);
+ 
+-    if (XRRQueryExtension(_display, &eventBase, &errorBase)) {
+-        // TODO: Use XRRSetCrtcConfig
+-        // https://cgit.freedesktop.org/xorg/lib/libXrandr/tree/include/X11/extensions/Xrandr.h#n283
++/* A requested mode can be emulated only when it fits the monitor. */
++static BOOL X11ModeFitsScreen(NSSize mode, NSRect screenFrame) {
++    return mode.width > 0 && mode.height > 0 &&
++           mode.width <= NSWidth(screenFrame) && mode.height <= NSHeight(screenFrame);
++}
++
++/* macOS keeps the monitor's top-left corner fixed when an exclusive-fullscreen
++ * mode changes; Cocoa window frames have their origin at the bottom-left. */
++static NSRect X11FrameForModeOnScreen(NSRect screenFrame, NSSize mode) {
++    return NSMakeRect(NSMinX(screenFrame), NSMaxY(screenFrame) - mode.height,
++                      mode.width, mode.height);
++}
++
++/* The frame an NSScreen reports while an emulated mode is active. A mode that
++ * does not fit the physical monitor leaves the screen untouched. */
++static NSRect X11ScreenFrameForMode(NSRect physicalFrame, NSSize mode) {
++    return X11ModeFitsScreen(mode, physicalFrame)
++            ? X11FrameForModeOnScreen(physicalFrame, mode) : physicalFrame;
++}
++
++/* macOS changes the monitor mode for an exclusive-fullscreen game. Xwayland
++ * cannot switch the host mode, and changing it would resize the whole desktop
++ * on every monitor. Emulate the result the game depends on instead: the target
++ * NSScreen reports the mode's frame, so the game's own window placement (it
++ * reads [NSScreen frame] after this call) lands on the mode size, and the
++ * window, drawable, framebuffer and pointer share one coordinate space.
++ *
++ * League reads the old mode with CGDisplayCopyDisplayMode before asking for a
++ * new one and restores that mode when it leaves fullscreen. Requesting the
++ * monitor's own size therefore ends the emulation. */
++- (BOOL) setMode: (NSDictionary *) mode forScreen: (int) screenIndex {
++    /* The native Wayland path scales a lower-resolution game buffer into the
++     * fullscreen surface already; resizing its window would undo that. */
++    if (X11WaylandModeActive())
++        return FALSE;
++    /* Only League's game asks for an exclusive mode. The League client and
++     * unrelated processes keep the X11 desktop geometry untouched. */
++    if (!X11IsLeagueGameProcess())
++        return FALSE;
++    NSSize requested = NSMakeSize([[mode objectForKey: @"Width"] unsignedIntegerValue],
++                                  [[mode objectForKey: @"Height"] unsignedIntegerValue]);
++    if (screenIndex < 0 || requested.width <= 0 || requested.height <= 0)
++        return FALSE;
++
++    NSRect physicalFrame;
++    @synchronized (self) {
++        /* Reading the screens also records each monitor's physical frame. Read
++         * it before replacing the emulated mode: a second mode change while the
++         * previous one is active must still fit the real monitor. */
++        NSScreen *target = nil;
++        for (NSScreen *screen in [self screens]) {
++            if ([screen cgDirectDisplayID] == (CGDirectDisplayID)(screenIndex + 1)) {
++                target = screen;
++                break;
++            }
++        }
++        if (target == nil)
++            return FALSE;
++        NSNumber *displayKey = [NSNumber numberWithInt: screenIndex + 1];
++        NSValue *storedPhysical = [_physicalScreenFrames objectForKey: displayKey];
++        physicalFrame = storedPhysical ? [storedPhysical rectValue] : [target frame];
++        if (NSIsEmptyRect(physicalFrame) || !X11ModeFitsScreen(requested, physicalFrame))
++            return FALSE;
++
++        if (NSEqualSizes(requested, physicalFrame.size)) {
++            [_emulatedModes removeObjectForKey: displayKey];
++        } else {
++            if (_emulatedModes == nil)
++                _emulatedModes = [[NSMutableDictionary alloc] init];
++            [_emulatedModes setObject: [NSValue valueWithSize: requested] forKey: displayKey];
++        }
++        /* The cached NSScreens still carry the previous frame. Drop them so the
++         * next [NSScreen screens] rebuild applies the new mode. */
++        [_lastScreens release];
++        _lastScreens = nil;
+     }
+ 
+-    return FALSE;
++    /* The pointer confinement follows the emulated mode. The main thread owns
++     * the grab, and a worker thread may ask for the mode. */
++    if (pthread_main_np())
++        [self refreshMouseConfinement];
++    else
++        [self performSelectorOnMainThread: @selector(refreshMouseConfinement)
++                               withObject: nil
++                            waitUntilDone: NO];
++
++    /* The game places its own window from [NSScreen frame] right after this
++     * call, so the resize below is only a fallback for callers that do not.
++     * Resize only a window that already shows the whole physical monitor: at
++     * startup League has not configured or mapped its window yet, and touching
++     * it there interrupts the game's own fullscreen setup. AppKit window calls
++     * must also stay on the main thread. */
++    if (!pthread_main_np() || NSEqualSizes(requested, physicalFrame.size))
++        return YES;
++
++    NSRect frame = X11ScreenFrameForMode(physicalFrame, requested);
++
++    /* The splash and helper windows are borderless too. Only the game window
++     * that currently fills the monitor is a candidate, and a title match wins:
++     * a 512x216 splash must never take the resize. */
++    NSWindow *titledGame = nil, *largest = nil;
++    CGFloat largestArea = 0;
++    for (NSWindow *window in [NSApp windows]) {
++        if (![window isVisible] || ([window styleMask] & NSTitledWindowMask) != 0)
++            continue;
++        if (!X11IsLeagueGameWindow(_display, None, window))
++            continue;
++        if (!NSEqualRects([window frame], physicalFrame))
++            continue;
++        if (rclolHasGameTitle([window title])) {
++            titledGame = window;
++            break;
++        }
++        NSRect windowFrame = [window frame];
++        CGFloat area = NSWidth(windowFrame) * NSHeight(windowFrame);
++        if (area > largestArea) {
++            largestArea = area;
++            largest = window;
++        }
++    }
++    NSWindow *game = titledGame ? titledGame : largest;
++    if (game != nil)
++        [game setFrame: frame display: YES];
++    return YES;
+ }
+ 
+ - (NSDictionary *) currentModeForScreen: (int) screenIndex {
+@@ -536,12 +1271,116 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return &layout->layout;
  }
  
@@ -5783,7 +6043,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (NSPasteboard *) pasteboardWithName: (NSString *) name {
-@@ -675,6 +1309,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -675,6 +1514,15 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                      blue: 0.60f
                                      alpha: 1.0f];
  
@@ -5799,7 +6059,7 @@ index 5ae29bf4..4f394712 100644
      NSLog(@"missing color for %@", colorName);
      return [NSColor redColor];
  }
-@@ -688,6 +1331,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -688,6 +1536,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) hideCursor {
@@ -5810,7 +6070,7 @@ index 5ae29bf4..4f394712 100644
      if (!_blankCursor)
          _blankCursor = [[X11Cursor alloc] initBlank];
      [self setCursor: _blankCursor];
-@@ -695,6 +1342,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -695,6 +1547,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
  - (void) unhideCursor {
      NSCursor *current = [NSCursor currentCursor];
@@ -5821,7 +6081,7 @@ index 5ae29bf4..4f394712 100644
      if (current != nil) {
          [current push];
          [current pop];
-@@ -746,13 +1397,31 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -746,13 +1602,31 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (void) setCursor: (id) cursor {
@@ -5858,7 +6118,7 @@ index 5ae29bf4..4f394712 100644
      }
  }
  
-@@ -921,15 +1590,25 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -921,15 +1795,25 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  }
  
  - (NSPoint) mouseLocation {
@@ -5893,7 +6153,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (void) setWindow: (id) window forID: (XID) i {
-@@ -948,6 +1627,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -948,6 +1832,19 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          // retaining the window causes it to keep popping back up endlessly even after dismissing it
          if (lastFocusedWindow && [[lastFocusedWindow platformWindow] windowHandle] == i)
              lastFocusedWindow = nil;
@@ -5913,7 +6173,7 @@ index 5ae29bf4..4f394712 100644
      }
  }
  
-@@ -955,6 +1647,130 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -955,6 +1852,130 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      return [_windowsByID objectForKey: [NSNumber numberWithUnsignedLong: i]];
  }
  
@@ -6044,7 +6304,7 @@ index 5ae29bf4..4f394712 100644
  - (NSEvent *) nextEventMatchingMask: (NSEventMask) mask
                            untilDate: (NSDate *) untilDate
                               inMode: (NSRunLoopMode) mode
-@@ -962,20 +1778,104 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -962,20 +1983,104 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  {
  #ifndef DARLING
      [[NSRunLoop currentRunLoop] addInputSource: _inputSource forMode: mode];
@@ -6154,7 +6414,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (NSEventModifierFlags) modifierFlagsForState: (unsigned int) state {
-@@ -1005,22 +1905,441 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1005,22 +2110,441 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          [result addObject: @([win windowNumber])];
      }
  
@@ -6598,7 +6858,7 @@ index 5ae29bf4..4f394712 100644
          NSEventModifierFlags modifierFlags = [self modifierFlagsForState: ev->xkey.state];
          char buf[20] = {0};
          KeySym keySym;
-@@ -1030,7 +2349,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1030,7 +2554,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              break;
  
          if (ev->type == KeyPress) {
@@ -6611,7 +6871,7 @@ index 5ae29bf4..4f394712 100644
              buf[strLen] = 0;
          } else {
              // Xutf8LookupString() may not be used with KeyRelease
-@@ -1038,18 +2361,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1038,18 +2566,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              buf[strLen] = 0;
          }
  
@@ -6630,7 +6890,7 @@ index 5ae29bf4..4f394712 100644
          BOOL isARepeat = NO;
  
          if (ev->type == KeyPress) {
-@@ -1059,24 +2373,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1059,24 +2578,32 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              _lastKeySym = 0;
          }
  
@@ -6678,7 +6938,7 @@ index 5ae29bf4..4f394712 100644
          NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
  
          if (now - lastClickTimeStamp < [self doubleClickInterval]) {
-@@ -1086,8 +2408,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1086,8 +2613,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          }
          lastClickTimeStamp = now;
  
@@ -6689,7 +6949,7 @@ index 5ae29bf4..4f394712 100644
  
          switch (ev->xbutton.button) {
          case Button1:
-@@ -1096,10 +2418,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1096,10 +2623,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseDown;
              break;
@@ -6700,7 +6960,7 @@ index 5ae29bf4..4f394712 100644
          default:
              type = NSOtherMouseDown;
          }
-@@ -1113,14 +2431,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1113,14 +2636,22 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: 0.0];
@@ -6727,7 +6987,7 @@ index 5ae29bf4..4f394712 100644
          CGFloat deltaY = 0.0;
  
          switch (ev->xbutton.button) {
-@@ -1130,14 +2456,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1130,14 +2661,6 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          case Button3:
              type = NSRightMouseUp;
              break;
@@ -6742,7 +7002,7 @@ index 5ae29bf4..4f394712 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,7 +2469,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,7 +2674,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -6753,7 +7013,7 @@ index 5ae29bf4..4f394712 100644
          [self postEvent: event atStart: NO];
          break;
  
-@@ -1160,49 +2480,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1160,49 +2685,95 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
  
@@ -6875,7 +7135,7 @@ index 5ae29bf4..4f394712 100644
                      mouseEventWithType: type
                                location: pos
                           modifierFlags:
-@@ -1211,28 +2577,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1211,28 +2782,58 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                              clickCount: 1
                                  deltaX: deltaX
                                  deltaY: deltaY];
@@ -6936,7 +7196,7 @@ index 5ae29bf4..4f394712 100644
          NSLog(@"FocusIn");
          if ([delegate attachedSheet]) {
              [[delegate attachedSheet] makeKeyAndOrderFront: delegate];
-@@ -1243,28 +2639,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1243,28 +2844,62 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                                   checkForAppDeactivation: NO];
              lastFocusedWindow = nil;
          }
@@ -7001,7 +7261,7 @@ index 5ae29bf4..4f394712 100644
          O2Rect rect = NSMakeRect(ev->xexpose.x, ev->xexpose.y,
                                   ev->xexpose.width, ev->xexpose.height);
  
-@@ -1301,11 +2731,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1301,11 +2936,23 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case UnmapNotify:
@@ -7029,7 +7289,7 @@ index 5ae29bf4..4f394712 100644
          break;
  
      case MapRequest:
-@@ -1317,10 +2759,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1317,10 +2964,21 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case ConfigureNotify:
@@ -7051,7 +7311,7 @@ index 5ae29bf4..4f394712 100644
          break;
  
      case ConfigureRequest:
-@@ -1344,6 +2797,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1344,6 +3002,8 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      case PropertyNotify:
@@ -7060,7 +7320,7 @@ index 5ae29bf4..4f394712 100644
          if ([window respondsToSelector: @selector(propertyNotify:)]) {
              [window propertyNotify: &ev->xproperty];
          }
-@@ -1392,6 +2847,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1392,6 +3052,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
      case MappingNotify:
          NSLog(@"MappingNotify");
@@ -7070,7 +7330,7 @@ index 5ae29bf4..4f394712 100644
          break;
  
      case GenericEvent:
-@@ -1399,7 +2857,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1399,7 +3062,9 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          break;
  
      default:
@@ -7081,7 +7341,7 @@ index 5ae29bf4..4f394712 100644
              [self _invalidateRRCache];
              break;
          }
-@@ -1426,6 +2886,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1426,6 +3091,11 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
          else
              [self postXEvent: &e];
      }
@@ -7093,7 +7353,7 @@ index 5ae29bf4..4f394712 100644
  }
  
  - (int) handleError: (XErrorEvent *) errorEvent {
-@@ -1433,6 +2898,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1433,6 +3103,10 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
      NSLog(@"Request code: %d:%d", errorEvent->request_code,
            errorEvent->minor_code);
      NSLog(@"Error code: %d", errorEvent->error_code);
@@ -7104,7 +7364,7 @@ index 5ae29bf4..4f394712 100644
      return 0;
  }
  
-@@ -1476,54 +2945,289 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
+@@ -1476,54 +3150,299 @@ void CGNativeBorderFrameWidthsForStyle(NSUInteger styleMask, CGFloat *top,
      return frame;
  }
  
@@ -7217,10 +7477,20 @@ index 5ae29bf4..4f394712 100644
 +    /* League's borderless fullscreen does not set the EWMH fullscreen bit.
 +     * Recognize a borderless window covering one monitor, including monitor 2. */
 +    BOOL borderless = !([[window delegate] styleMask] & NSTitledWindowMask);
++    BOOL emulatedMode = NO;
 +    if (!fullscreen && borderless) {
 +        Window child; int x, y;
 +        XTranslateCoordinates(_display, win, DefaultRootWindow(_display), 0, 0, &x, &y, &child);
-+        fullscreen = X11RootRectCoversMonitor(_display, NSMakeRect(x, y, attrs.width, attrs.height));
++        NSRect rootRect = NSMakeRect(x, y, attrs.width, attrs.height);
++        fullscreen = X11RootRectCoversMonitor(_display, rootRect);
++        /* An emulated exclusive mode leaves the game in a window smaller than the
++         * monitor, at its top-left corner. macOS keeps the pointer on the display
++         * in that mode, so confine it to the mode's frame. Only the game process
++         * records emulated modes; the frame must match, so leaving the mode or
++         * resizing the window releases the grab below. */
++        if (!fullscreen && [self rootRectMatchesEmulatedMode: rootRect] &&
++            X11IsLeagueGameWindow(_display, win, [window delegate]))
++            fullscreen = emulatedMode = YES;
 +    }
 +    /* X11Window owns EWMH requests on frame/style changes. Confinement only observes the
 +     * resulting state; issuing another fullscreen request here races WM resize decisions. */
@@ -7250,8 +7520,8 @@ index 5ae29bf4..4f394712 100644
 +        win, None, CurrentTime);
 +    if (getenv("RCLOL_INPUT_TRACE")) fprintf(stderr,"CONFINEMENT fullscreen=%d window=%lu result=%d\n",fullscreen,win,status);
 +    if (rclolTraceOn())
-+        rclolTraceRated(&rclolConfineChannel, "confine window=%lu fullscreen=%d ewmh=%d size=%dx%d XGrabPointer=%d(%s)",
-+                        (unsigned long) win, fullscreen, rclolEwmhFullscreen, attrs.width, attrs.height, status,
++        rclolTraceRated(&rclolConfineChannel, "confine window=%lu fullscreen=%d ewmh=%d emulated=%d size=%dx%d XGrabPointer=%d(%s)",
++                        (unsigned long) win, fullscreen, rclolEwmhFullscreen, emulatedMode, attrs.width, attrs.height, status,
 +                        rclolGrabResultName(status));
 +    /* AlreadyGrabbed means another client holds the pointer: nothing is confined. */
 +    if (status == GrabSuccess) {
@@ -7259,8 +7529,8 @@ index 5ae29bf4..4f394712 100644
 +        _confinedWidth = attrs.width;
 +        _confinedHeight = attrs.height;
 +    }
- }
- 
++}
++
 +/* Cache the actual confine_to rectangle, including its root offset. XWarpPointer clips to this
 + * rectangle, not to the primary monitor; refresh on resize/move rather than on every motion. */
 +- (BOOL) updateRelativeMouseBounds {
@@ -7353,8 +7623,8 @@ index 5ae29bf4..4f394712 100644
 +    X11RelativeMouseEnd(&_relativeMouse);
 +    _relativeWindow = None;
 +    rclolPointerStamp = 0;
-+}
-+
+ }
+ 
 +/* CGAssociateMouseAndMouseCursorPosition(!doGrab). */
  - (void) grabMouse: (BOOL) doGrab {
 +    if (_wayland && [self waylandHandleGrabMouse: doGrab])
@@ -7999,7 +8269,7 @@ index bfe3839..8d7d1cb 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b6..909a9d5 100644
+index f4925b6..ef13e8d 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -18,11 +18,14 @@
@@ -8368,7 +8638,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) dealloc {
-@@ -279,24 +486,59 @@ static NSData *makeWindowIcon() {
+@@ -279,24 +486,72 @@ static NSData *makeWindowIcon() {
      return _styleMask;
  }
  
@@ -8385,25 +8655,38 @@ index f4925b6..909a9d5 100644
 -            sh->min_width = sh->max_width = _frame.size.width;
 -            sh->min_height = sh->max_height = _frame.size.height;
 -        }
--
++/* EWMH fullscreen pins a managed window to a monitor. A game that asks for an
++ * explicit fullscreen style at a lower resolution must not be pinned: the
++ * compositor would keep the window at the monitor size while the game resizes
++ * its framebuffer and input space. Ordinary Cocoa fullscreen keeps the explicit
++ * request so non-game windows still become fullscreen. */
++static BOOL X11ShouldRequestFullscreen(BOOL game, BOOL explicitFullscreen,
++                                       BOOL titled, BOOL coversMonitor) {
++    if (explicitFullscreen)
++        return !game || coversMonitor;
++    if (titled)
++        return NO;
++    return coversMonitor;
++}
+ 
 -        XSetWMSizeHints(_display, _window, sh, XA_WM_NORMAL_HINTS);
 -        XFree(sh);
+-    }
 +/* A borderless application covering a monitor needs EWMH fullscreen so the
-+ * compositor places it above desktop panels. Compare full monitor bounds,
-+ * never the work area, and leave unmanaged menus/popups alone. */
++ * compositor places it above desktop panels. Compare the physical monitor
++ * geometry, never the work area and never the emulated NSScreen frame: a game
++ * in an emulated exclusive mode reports a smaller screen, and EWMH fullscreen
++ * would pin it back to the real monitor. Leave unmanaged menus/popups alone. */
 +- (BOOL) wantsFullscreenWithStyleMask: (NSUInteger) mask rootFrame: (O2Rect) frame {
 +    if (_overrideRedirect || [_delegate isKindOfClass:[NSPanel class]] ||
 +        [_delegate isKindOfClass:[NSMenuWindow class]] || [_delegate isKindOfClass:[NSPopUpWindow class]] ||
 +        [_delegate isKindOfClass:NSClassFromString(@"NSToolTipWindow")]) return NO;
-+    if (mask & NSWindowStyleMaskFullScreen) return YES;
-+    if (mask & NSTitledWindowMask) return NO;
 +    X11Display *display = (X11Display *) [NSDisplay currentDisplay];
-+    for (NSScreen *screen in [display screens]) {
-+        if (!NSIsEmptyRect([screen frame]) &&
-+            NSEqualRects([display rootRectForFrame: [screen frame]], frame))
-+            return YES;
-     }
-+    return NO;
++    BOOL coversMonitor = [display frameCoversPhysicalScreen: frame];
++    return X11ShouldRequestFullscreen(X11IsLeagueGameWindow(_display, _window, _delegate),
++                                      (mask & NSWindowStyleMaskFullScreen) != 0,
++                                      (mask & NSTitledWindowMask) != 0,
++                                      coversMonitor);
 +}
 +
 +/* Keep the game on one opaque managed surface. Mutter's VRR frame clock
@@ -8422,7 +8705,7 @@ index f4925b6..909a9d5 100644
 +- (void *) layerDrawableFor: (id) owner {
 +    return (!_layerDrawableOwner || _layerDrawableOwner == owner) && !_hasAlpha && X11IsLeagueGameWindow(_display, _window, _delegate) ? _cglWindow : NULL;
 +}
-+
+ 
 +- (void) acquireLayerDrawable: (id) owner {
 +    if (_layerDrawableOwner && _layerDrawableOwner != owner) return;
 +    _layerDrawableOwner = owner;
@@ -8434,7 +8717,7 @@ index f4925b6..909a9d5 100644
 +    _layerDrawableOwner = nil;
 +    [self updateLayerPresentationHints: _fullscreenRequested];
 +}
- 
++
 +- (void) requestFullscreen: (BOOL) fullscreen force: (BOOL) force {
 +    if (fullscreen) {
 +        unsigned long bypass = 2;
@@ -8444,7 +8727,7 @@ index f4925b6..909a9d5 100644
      if (!_mapped) {
          long states[2];
          int states_cnt = 0;
-@@ -304,7 +546,7 @@ static NSData *makeWindowIcon() {
+@@ -304,7 +559,7 @@ static NSData *makeWindowIcon() {
              states[states_cnt++] =
                      (long) XInternAtom(_display, "_NET_WM_STATE_MODAL", False);
          }
@@ -8453,7 +8736,7 @@ index f4925b6..909a9d5 100644
              states[states_cnt++] = (long) XInternAtom(
                      _display, "_NET_WM_STATE_FULLSCREEN", False);
          }
-@@ -312,14 +554,13 @@ static NSData *makeWindowIcon() {
+@@ -312,14 +567,13 @@ static NSData *makeWindowIcon() {
                          XInternAtom(_display, "_NET_WM_STATE", False), XA_ATOM,
                          32, PropModeReplace, (const unsigned char *) states,
                          states_cnt);
@@ -8470,7 +8753,7 @@ index f4925b6..909a9d5 100644
          event.data.l[1] =
                  (long) XInternAtom(_display, "_NET_WM_STATE_FULLSCREEN", False);
          event.data.l[3] = 1;
-@@ -327,6 +568,48 @@ static NSData *makeWindowIcon() {
+@@ -327,6 +581,48 @@ static NSData *makeWindowIcon() {
                     SubstructureNotifyMask | SubstructureRedirectMask,
                     (XEvent *) &event);
      }
@@ -8519,7 +8802,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) setStyleMask: (NSUInteger) mask {
-@@ -338,7 +621,6 @@ static NSData *makeWindowIcon() {
+@@ -338,7 +634,6 @@ static NSData *makeWindowIcon() {
  }
  
  + (void) removeDecorationForWindow: (Window) w onDisplay: (Display *) dpy {
@@ -8527,7 +8810,7 @@ index f4925b6..909a9d5 100644
      struct {
          unsigned long flags;
          unsigned long functions;
-@@ -356,11 +638,25 @@ static NSData *makeWindowIcon() {
+@@ -356,11 +651,25 @@ static NSData *makeWindowIcon() {
  
  - (void) ensureMapped {
      if (!_mapped) {
@@ -8553,7 +8836,7 @@ index f4925b6..909a9d5 100644
  - (void) showWindowWithoutActivation {
      [self ensureMapped];
  }
-@@ -377,15 +673,27 @@ static NSData *makeWindowIcon() {
+@@ -377,15 +686,27 @@ static NSData *makeWindowIcon() {
  - (void) syncDelegateProperties {
      long mask = KeyPressMask | KeyReleaseMask | ExposureMask |
                  StructureNotifyMask | EnterWindowMask | LeaveWindowMask |
@@ -8586,7 +8869,7 @@ index f4925b6..909a9d5 100644
      // TODO: background color
  }
  
-@@ -393,6 +701,24 @@ static NSData *makeWindowIcon() {
+@@ -393,6 +714,24 @@ static NSData *makeWindowIcon() {
      // This is essentially dealloc; we release our contexts
      // and windows, but unlike dealloc, this method can be called
      // several times, so set everything to nil/NULL/0.
@@ -8611,7 +8894,7 @@ index f4925b6..909a9d5 100644
      [_context release];
      _context = nil;
  
-@@ -421,10 +747,254 @@ static NSData *makeWindowIcon() {
+@@ -421,10 +760,254 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -8866,7 +9149,7 @@ index f4925b6..909a9d5 100644
  - (O2Context *) createCGContextIfNeeded {
      if (_context == nil) {
          O2ColorSpaceRef colorSpace = O2ColorSpaceCreateDeviceRGB();
-@@ -470,14 +1040,32 @@ static NSData *makeWindowIcon() {
+@@ -470,14 +1053,32 @@ static NSData *makeWindowIcon() {
      const char *text = [title cString];
      XStringListToTextProperty((char **) &text, 1, &prop);
      XSetWMName(_display, _window, &prop);
@@ -8900,7 +9183,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -488,6 +1076,25 @@ static NSData *makeWindowIcon() {
+@@ -488,6 +1089,25 @@ static NSData *makeWindowIcon() {
      _level = value;
  }
  
@@ -8926,7 +9209,7 @@ index f4925b6..909a9d5 100644
  - (void) setOpaque: (BOOL) value {
      _isOpaque = value;
  }
-@@ -516,9 +1123,15 @@ static NSData *makeWindowIcon() {
+@@ -516,9 +1136,15 @@ static NSData *makeWindowIcon() {
      _mapped = NO;
  }
  
@@ -8944,7 +9227,7 @@ index f4925b6..909a9d5 100644
  
      if (!other) {
          XRaiseWindow(_display, _window);
-@@ -529,8 +1142,8 @@ static NSData *makeWindowIcon() {
+@@ -529,8 +1155,8 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) placeBelowWindow: (NSInteger) otherNumber {
@@ -8955,7 +9238,7 @@ index f4925b6..909a9d5 100644
  
      if (!other) {
          XLowerWindow(_display, _window);
-@@ -541,8 +1154,23 @@ static NSData *makeWindowIcon() {
+@@ -541,8 +1167,23 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) makeKey {
@@ -8980,7 +9263,7 @@ index f4925b6..909a9d5 100644
  }
  
  - (void) makeMain {
-@@ -559,7 +1187,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1200,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -9010,7 +9293,7 @@ index f4925b6..909a9d5 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -593,8 +1243,10 @@ static NSData *makeWindowIcon() {
+@@ -593,8 +1256,10 @@ static NSData *makeWindowIcon() {
      if (_cglContext == NULL) {
          CGLError error;
  
@@ -9023,7 +9306,7 @@ index f4925b6..909a9d5 100644
              NSLog(@"CGLCreateContext failed at %s %d with error %d", __FILE__,
                    __LINE__, error);
  
-@@ -615,6 +1267,14 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1280,14 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -9038,7 +9321,7 @@ index f4925b6..909a9d5 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -652,7 +1312,7 @@ static NSData *makeWindowIcon() {
+@@ -652,7 +1325,7 @@ static NSData *makeWindowIcon() {
  }
  
  - (O2Rect) frame {
@@ -9047,7 +9330,7 @@ index f4925b6..909a9d5 100644
  }
  
  static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
-@@ -666,6 +1326,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1339,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -9055,7 +9338,7 @@ index f4925b6..909a9d5 100644
      XErrorHandler previousHandler = XSetErrorHandler(ignoreBadWindow);
      @try {
          Window root, parent;
-@@ -710,19 +1371,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -710,19 +1384,13 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
      [_deviceDictionary addEntriesFromDictionary: entries];
  }
  
@@ -10415,10 +10698,10 @@ index db8869c..6fea510 100644
 +    CGContextSetTextPosition(c, savedPosition.x, savedPosition.y);
  }
 diff --git a/CoreGraphics/CGDirectDisplay.m b/CoreGraphics/CGDirectDisplay.m
-index e213b06..f2d492a 100644
+index e213b06..ca3f2d8 100644
 --- a/CoreGraphics/CGDirectDisplay.m
 +++ b/CoreGraphics/CGDirectDisplay.m
-@@ -53,6 +53,29 @@ static NSDisplay *currentDisplay(void) {
+@@ -53,6 +53,35 @@ static NSDisplay *currentDisplay(void) {
      return [cls currentDisplay];
  }
  
@@ -10435,20 +10718,26 @@ index e213b06..f2d492a 100644
 +}
 +
 +/* NSScreen frames have y up from the primary's bottom edge; CoreGraphics
-+ * global coordinates have y down from the primary's top edge. */
++ * global coordinates have y down from the primary's top edge. The reference is
++ * the primary frame's top edge, which an emulated display mode moves. */
++static CGRect globalRectForFrameOnPrimary(NSRect primary, NSRect frame) {
++    if (NSIsEmptyRect(frame))
++        return frame;
++    return CGRectMake(frame.origin.x,
++                      NSMaxY(primary) - NSMaxY(frame),
++                      frame.size.width, frame.size.height);
++}
++
 +static CGRect globalRectForFrame(NSArray<NSScreen *> *screens, NSRect frame) {
 +    if (NSIsEmptyRect(frame) || [screens count] == 0)
 +        return frame;
-+    CGFloat primaryHeight = NSHeight([[screens objectAtIndex: 0] frame]);
-+    return CGRectMake(frame.origin.x,
-+                      primaryHeight - frame.origin.y - frame.size.height,
-+                      frame.size.width, frame.size.height);
++    return globalRectForFrameOnPrimary([[screens objectAtIndex: 0] frame], frame);
 +}
 +
  CGDirectDisplayID CGMainDisplayID(void) {
      NSDisplay *display = currentDisplay();
      if (!display)
-@@ -60,9 +83,9 @@ CGDirectDisplayID CGMainDisplayID(void) {
+@@ -60,9 +89,9 @@ CGDirectDisplayID CGMainDisplayID(void) {
  
      NSArray<NSScreen *> *screens = [display screens];
  
@@ -10461,7 +10750,7 @@ index e213b06..f2d492a 100644
          }
      }
  
-@@ -89,10 +112,11 @@ CGError CGGetOnlineDisplayList(uint32_t maxDisplays,
+@@ -89,10 +118,11 @@ CGError CGGetOnlineDisplayList(uint32_t maxDisplays,
              onlineDisplays[0] = mainDisplay;
      }
  
@@ -10476,7 +10765,7 @@ index e213b06..f2d492a 100644
              (*displayCount)++;
          }
      }
-@@ -105,11 +129,11 @@ size_t CGDisplayPixelsHigh(CGDirectDisplayID displayIndex) {
+@@ -105,11 +135,11 @@ size_t CGDisplayPixelsHigh(CGDirectDisplayID displayIndex) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10491,7 +10780,7 @@ index e213b06..f2d492a 100644
  }
  
  size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
-@@ -117,11 +141,11 @@ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
+@@ -117,11 +147,11 @@ size_t CGDisplayPixelsWide(CGDirectDisplayID displayIndex) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10506,7 +10795,7 @@ index e213b06..f2d492a 100644
  }
  
  CGError CGGetActiveDisplayList(uint32_t maxDisplays,
-@@ -135,10 +159,10 @@ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
+@@ -135,10 +165,10 @@ CGError CGGetActiveDisplayList(uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
  
      *displayCount = 0;
@@ -10520,7 +10809,7 @@ index e213b06..f2d492a 100644
              (*displayCount)++;
          }
      }
-@@ -169,11 +193,11 @@ CGError CGGetDisplaysWithPoint(CGPoint point, uint32_t maxDisplays,
+@@ -169,11 +199,11 @@ CGError CGGetDisplaysWithPoint(CGPoint point, uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
      *matchingDisplayCount = 0;
  
@@ -10535,7 +10824,7 @@ index e213b06..f2d492a 100644
              (*matchingDisplayCount)++;
          }
      }
-@@ -192,11 +216,11 @@ CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays,
+@@ -192,11 +222,11 @@ CGError CGGetDisplaysWithRect(CGRect rect, uint32_t maxDisplays,
      NSArray<NSScreen *> *screens = [display screens];
      *matchingDisplayCount = 0;
  
@@ -10550,7 +10839,7 @@ index e213b06..f2d492a 100644
              (*matchingDisplayCount)++;
          }
      }
-@@ -218,10 +242,11 @@ CGRect CGDisplayBounds(CGDirectDisplayID displayIndex) {
+@@ -218,10 +248,11 @@ CGRect CGDisplayBounds(CGDirectDisplayID displayIndex) {
          return NSZeroRect;
  
      NSArray<NSScreen *> *screens = [display screens];
@@ -10564,7 +10853,7 @@ index e213b06..f2d492a 100644
  }
  
  CGError CGDisplayHideCursor(CGDirectDisplayID displayIndex) {
-@@ -256,7 +281,7 @@ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
+@@ -256,7 +287,7 @@ boolean_t CGDisplayIsInMirrorSet(CGDirectDisplayID display) {
  }
  
  Boolean CGDisplayIsMain(CGDirectDisplayID display) {
@@ -10573,7 +10862,7 @@ index e213b06..f2d492a 100644
  }
  
  CGDirectDisplayID CGDisplayMirrorsDisplay(CGDirectDisplayID display) {
-@@ -319,10 +344,15 @@ CFStringRef CGDisplayModeCopyPixelEncoding(CGDisplayModeRef mode) {
+@@ -319,10 +350,15 @@ CFStringRef CGDisplayModeCopyPixelEncoding(CGDisplayModeRef mode) {
  CFArrayRef CGDisplayCopyAllDisplayModes(CGDirectDisplayID displayIndex,
                                          CFDictionaryRef options)
  {
@@ -10592,7 +10881,7 @@ index e213b06..f2d492a 100644
  }
  
  CGError CGDisplaySetDisplayMode(CGDirectDisplayID displayId,
-@@ -341,11 +371,10 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
+@@ -341,11 +377,10 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
      if (!display)
          return nil;
  
@@ -10606,7 +10895,7 @@ index e213b06..f2d492a 100644
      NSData *edid = [screen edid];
      if (edid && [edid length] >= 16)
          return edid;
-@@ -354,17 +383,33 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
+@@ -354,17 +389,33 @@ static NSData *edidForDisplay(CGDirectDisplayID displayId) {
  }
  
  CGSize CGDisplayScreenSize(CGDirectDisplayID display) {
@@ -10647,7 +10936,7 @@ index e213b06..f2d492a 100644
  }
  
  uint32_t CGDisplaySerialNumber(CGDirectDisplayID displayId) {
-@@ -474,7 +519,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
+@@ -474,7 +525,9 @@ CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected) {
      if (!display)
          return kCGErrorInvalidConnection;
  
@@ -10658,7 +10947,7 @@ index e213b06..f2d492a 100644
      return kCGErrorSuccess;
  }
  
-@@ -500,3 +547,54 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
+@@ -500,3 +553,54 @@ CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
  size_t CGDisplayModeGetPixelWidth(CGDisplayModeRef mode) {
      return 0;
  }
@@ -14130,10 +14419,10 @@ index 5dcac11..5de4f03 100644
 +
  @end
 diff --git a/QuartzCore/CALayerContext.m b/QuartzCore/CALayerContext.m
-index 5dce8c5..103331a 100644
+index 5dce8c56..97100cfb 100644
 --- a/QuartzCore/CALayerContext.m
 +++ b/QuartzCore/CALayerContext.m
-@@ -1,47 +1,89 @@
+@@ -1,47 +1,92 @@
  #import <Foundation/NSString.h>
 +#import <Foundation/NSMutableArray.h>
  #import <QuartzCore/CALayer.h>
@@ -14147,7 +14436,10 @@ index 5dce8c5..103331a 100644
  #import <OpenGL/CGLInternal.h>
  
  @class CAMetalLayerInternal;
- 
++@interface CAMetalLayer (DarlingPresentation)
++- (void)prepareRenderForFrame: (uint64_t)frame inContext: (CALayerContext *)context;
++@end
++
 +/* A flattened IOSurface only replaces local rendering for trees without
 + * Metal content. Skipping a mixed tree also skips prepareRender, exhausting
 + * its drawable pool even though presentation callbacks continue to run. */
@@ -14169,7 +14461,7 @@ index 5dce8c5..103331a 100644
 +    }
 +    return interval;
 +}
-+
+ 
 +/* The X11 transport presents Chromium's flattened full-window surface.
 + * Avoid uploading and compositing that same window again into a covered GL
 + * child. Restrict this to the explicitly configured native presentation path. */
@@ -14243,13 +14535,14 @@ index 5dce8c5..103331a 100644
      [super dealloc];
  }
  
-@@ -51,12 +93,22 @@
+@@ -51,33 +96,80 @@
  }
  
  - (void) setLayer: (CALayer *) layer {
 +    if (_layer == layer)
 +        return;
 +
++    __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
      layer = [layer retain];
 +    /* CALayer keeps a non-owning context pointer. Clear it before the old
 +     * context or layer can be released. */
@@ -14266,7 +14559,8 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) setSubwindow: (CGSubWindow*) subwindow
-@@ -64,20 +116,55 @@
+ {
++    __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
      CGSubWindow* oldSubwindow = _subwindow;
  
      if (_cglWindow) {
@@ -14324,23 +14618,23 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) assignTextureIdsToLayerTree: (CALayer *) layer {
-@@ -93,8 +180,43 @@
+@@ -93,8 +185,47 @@
          [self assignTextureIdsToLayerTree: child];
  }
  
 -- (void) renderLayer: (CALayer *) layer {
 +extern void darlingQCTiming(const char* what, double seconds);
 +
-+- (void) prepareMetalLayers: (CALayer *) layer {
++- (void) prepareMetalLayers: (CALayer *) layer frame: (uint64_t)frame {
 +    // Metal layers may be nested beneath ordinary backing layers. Every queued
 +    // drawable must be consumed before CARenderer samples the layer tree.
 +    if ([[layer class] isSubclassOfClass: [CAMetalLayerInternal class]]) {
 +        CFTimeInterval prepStart = CACurrentMediaTime();
-+        [(CAMetalLayerInternal*)layer prepareRender];
++        [(CAMetalLayer *)layer prepareRenderForFrame: frame inContext: self];
 +        darlingQCTiming("prepareRenderTotal", CACurrentMediaTime() - prepStart);
 +    }
 +    for (CALayer *child in layer.sublayers)
-+        [self prepareMetalLayers: child];
++        [self prepareMetalLayers: child frame: frame];
 +}
 +
 +- (void) updateDrawable {
@@ -14349,6 +14643,8 @@ index 5dce8c5..103331a 100644
 +    void *shared = [_subwindow sharedCGLWindow];
 +    if (shared && shared == _cglWindow && !_ownsCglWindow) return;
 +    if (!shared && _cglWindow && _ownsCglWindow) return;
++    // A new window invalidates every render generation published for the old one.
++    __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
 +    CGLContextObj previous = CGLGetCurrentContext();
 +    if (previous == _glContext) CGLSetCurrentContext(NULL);
 +    if (_ownsCglWindow) CGLDestroyWindow(_cglWindow);
@@ -14361,7 +14657,9 @@ index 5dce8c5..103331a 100644
 +
 +- (void) renderLayer: (CALayer *) layer {
 +    CFTimeInterval renderLayerStart = CACurrentMediaTime();
-+    CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow);
++    uint64_t frame = __atomic_add_fetch(&_renderFrame, 1, __ATOMIC_RELAXED);
++    if (CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow) != kCGLNoError)
++        return;
 +    // CAMetalLayer first makes this context current without a surface, which leaves GL_DRAW_BUFFER
 +    // at GL_NONE on NVIDIA even once the window is attached (Mesa resets it).
 +    glDrawBuffer(GL_BACK);
@@ -14369,7 +14667,7 @@ index 5dce8c5..103331a 100644
  
      glEnable(GL_DEPTH_TEST);
      glShadeModel(GL_SMOOTH);
-@@ -118,27 +240,63 @@
+@@ -118,27 +249,66 @@
  
      [_deleteTextureIds removeAllObjects];
  
@@ -14383,10 +14681,13 @@ index 5dce8c5..103331a 100644
 -        CAMetalLayerInternal* mtl = (CAMetalLayerInternal*)layer;
 -        [mtl prepareRender];
 -    }
-+    [self prepareMetalLayers: layer];
++    [self prepareMetalLayers: layer frame: frame];
  
 +    CFTimeInterval rendererStart = CACurrentMediaTime();
      [_renderer render];
++    uint64_t ready = __atomic_load_n(&_readyFrame, __ATOMIC_RELAXED);
++    while (ready < frame && !__atomic_compare_exchange_n(&_readyFrame, &ready, frame, 0,
++                                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
 +    darlingQCTiming("rendererRender", CACurrentMediaTime() - rendererStart);
  }
  
@@ -14438,7 +14739,7 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) startTimerIfNeeded {
-@@ -147,7 +305,7 @@
+@@ -147,15 +317,49 @@
                                                     target: self
                                                   selector: @selector(timer:)
                                                   userInfo: nil
@@ -14447,25 +14748,46 @@ index 5dce8c5..103331a 100644
  }
  
  - (void) deleteTextureId: (NSNumber *) textureId {
-@@ -155,7 +313,20 @@
+     [_deleteTextureIds addObject: textureId];
  }
  
- - (void) flush {
--    CGLFlushDrawable(_glContext);
-+    if(skipLocalRender(_layer, _frame.size))return;
++- (BOOL) didSwapRenderFrame: (uint64_t) frame {
++    return frame && frame == __atomic_load_n(&_swappedFrame, __ATOMIC_ACQUIRE);
++}
++
++- (BOOL) tryFlush {
++    if(skipLocalRender(_layer, _frame.size))return NO;
 +    if (_glContext != NULL && _cglWindow != NULL) {
 +        CGLContextObj previous = CGLGetCurrentContext();
 +        // EGL applies the interval to the current draw surface, so attach this
 +        // window before setting it (including after late window attachment).
 +        if (CGLContextMakeCurrentAndAttachToWindow(_glContext, _cglWindow) != kCGLNoError)
-+            return;
++            return NO;
 +        GLint interval = metalSwapInterval(_layer);
 +        if (interval >= 0)
 +            CGLSetParameter(_glContext, kCGLCPSwapInterval, &interval);
-+        CGLFlushDrawable(_glContext);
++        uint64_t ready = __atomic_load_n(&_readyFrame, __ATOMIC_ACQUIRE);
++        BOOL rendered = CGLFlushDrawable(_glContext) == kCGLNoError && ready &&
++            ready == __atomic_load_n(&_renderFrame, __ATOMIC_RELAXED);
++        if (rendered) __atomic_store_n(&_swappedFrame, ready, __ATOMIC_RELEASE);
 +        if (previous != _glContext)
 +            CGLSetCurrentContext(previous);
++        return rendered;
 +    }
++    return NO;
++}
++
+ - (void) flush {
+-    CGLFlushDrawable(_glContext);
++    [self tryFlush];
++}
++
++- (void) flushForQueuedPresentation {
++    // Retry a transient attach or swap failure once via the ordinary compositor timer.
++    if (!_layer || !_cglWindow) return;
++    uint64_t ready = __atomic_load_n(&_readyFrame, __ATOMIC_ACQUIRE);
++    if (!ready || ready != __atomic_load_n(&_renderFrame, __ATOMIC_RELAXED) || ![self tryFlush])
++        [self startTimerIfNeeded];
  }
  
  @end
@@ -14480,7 +14802,7 @@ index 5ad375f..c8e8381 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..bfed6710 100644
+index d6f86b31..53b94d82 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
 @@ -31,6 +31,14 @@
@@ -14935,7 +15257,7 @@ index d6f86b31..bfed6710 100644
  //
  // drawable
  //
-@@ -605,35 +912,16 @@ void CAMetalDrawableActual::present() {
+@@ -605,35 +912,17 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -14950,7 +15272,12 @@ index d6f86b31..bfed6710 100644
 -			info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
 -			info.semaphore = _semaphore->semaphore;
 -			info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
--
++        // present() may run on the deferred encoding worker. The window's
++        // EGL context remains current on the main thread, so attempting to
++        // import a semaphore here fails and leaks the exported syncobj FD.
++        // Import it in synchronizeRender(), with the compositor context
++        // current, immediately before the GPU-side wait.
+ 
 -			if (DynamicVK::vkGetSemaphoreFdKHR(_semaphore->device->device(), &info, &fd) != VK_SUCCESS) {
 -				// TODO
 -				abort();
@@ -14958,12 +15285,7 @@ index d6f86b31..bfed6710 100644
 -
 -			CGLContextObj prev = CGLGetCurrentContext();
 -			CGLSetCurrentContext(_glContext);
-+        // present() may run on the deferred encoding worker. The window's
-+        // EGL context remains current on the main thread, so attempting to
-+        // import a semaphore here fails and leaks the exported syncobj FD.
-+        // Import it in synchronizeRender(), with the compositor context
-+        // current, immediately before the GPU-side wait.
- 
+-
 -			reportGLErrors();
 -			glGenSemaphoresEXT(1, &_glSemaphore);
 -			reportGLErrors();
@@ -14973,11 +15295,12 @@ index d6f86b31..bfed6710 100644
 -
 -			CGLSetCurrentContext(prev);
 -		}
-+        [layer queuePresent: _drawableID];
++        if (![layer queuePresent: _drawableID fromDrawable: this])
++            didDrop();
  	}
  }
  
-@@ -662,6 +950,10 @@ void CAMetalDrawableActual::disown() {
+@@ -662,27 +951,41 @@ void CAMetalDrawableActual::disown() {
  };
  
  void CAMetalDrawableActual::didPresent() {
@@ -14987,8 +15310,17 @@ index d6f86b31..bfed6710 100644
 +	}
  	_presentedTime = CACurrentMediaTime();
  
- 	if (_didPresentCallback) {
-@@ -671,6 +963,10 @@ void CAMetalDrawableActual::didPresent() {
+-	if (_didPresentCallback) {
+-		_didPresentCallback();
+-		_didPresentCallback = nullptr;
+-	}
++    // The callback can release the final owner or allow the pool to reuse this drawable.
++    auto callback = std::move(_didPresentCallback);
++    // libc++ leaves a moved-from small std::function set: clear it before the
++    // callback runs, so a second present or drop cannot run it again, while a
++    // callback that installs a new one keeps it.
++    _didPresentCallback = nullptr;
++    if (callback) callback();
  };
  
  void CAMetalDrawableActual::didDrop() {
@@ -14998,8 +15330,28 @@ index d6f86b31..bfed6710 100644
 +	}
  	_presentedTime = 0;
  
- 	if (_didPresentCallback) {
-@@ -694,6 +990,7 @@ void CAMetalDrawableActual::reset() {
+-	if (_didPresentCallback) {
+-		_didPresentCallback();
+-		_didPresentCallback = nullptr;
+-	}
++    // The callback can release the final owner or allow the pool to reuse this drawable.
++    auto callback = std::move(_didPresentCallback);
++    // libc++ leaves a moved-from small std::function set: clear it before the
++    // callback runs, so a second present or drop cannot run it again, while a
++    // callback that installs a new one keeps it.
++    _didPresentCallback = nullptr;
++    if (callback) callback();
+ };
+ 
+ void CAMetalDrawableActual::release() {
+ 	@autoreleasepool {
+ 		CAMetalLayerInternal* layer = objc_loadWeak(&_layer);
+-		[layer releaseDrawable: _drawableID];
++		[layer releaseDrawable: _drawableID fromDrawable: this];
+ 	}
+ };
+ 
+@@ -694,6 +997,7 @@ void CAMetalDrawableActual::reset() {
  		reportGLErrors();
  	}
  
@@ -15007,7 +15359,7 @@ index d6f86b31..bfed6710 100644
  	_semaphore = nullptr;
  	_wantsToPresentCallback = nullptr;
  	_didPresentCallback = nullptr;
-@@ -702,9 +999,55 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +1006,55 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {
@@ -15067,7 +15419,7 @@ index d6f86b31..bfed6710 100644
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
 diff --git a/QuartzCore/CAMetalLayer.mm b/QuartzCore/CAMetalLayer.mm
-index b81e2e14..3bf4cfd9 100644
+index b81e2e14..7eed1e01 100644
 --- a/QuartzCore/CAMetalLayer.mm
 +++ b/QuartzCore/CAMetalLayer.mm
 @@ -25,7 +25,79 @@
@@ -15297,20 +15649,41 @@ index b81e2e14..3bf4cfd9 100644
  
  	drawable = _drawables[drawableID];
  
-@@ -410,20 +588,40 @@ static void reportGLErrors(void) {
+@@ -408,25 +586,79 @@ static void reportGLErrors(void) {
+ 	return [[[CAMetalDrawableInternal alloc] initWithLayer: self drawable: drawable] autorelease];
+ }
  
++// Called under _drawableCondition before replacing or consulting the last prepared frame.
++- (void)retireSwappedPresentation
++{
++    if (_preparedPresentation > _retiredPresentation && [_context didSwapRenderFrame: _preparedFrame])
++        _retiredPresentation = _preparedPresentation;
++}
++
  - (void)queuePresent: (NSUInteger)drawableID
  {
++    [self queuePresent: drawableID fromDrawable: nullptr];
++}
++
++- (BOOL)queuePresent: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable
++{
 +    auto* intervalSample = beginPresentIntervalSample();
  	[_drawableCondition lock];
++    if (drawableID >= _drawables.size() || !_drawables[drawableID] ||
++        (drawable && _drawables[drawableID].get() != drawable) || _queuedDrawableCount == _queuedDrawables.size()) {
++        [_drawableCondition unlock];
++        return NO;
++    }
  	_queuedDrawables[_queuedDrawableCount] = drawableID;
  	++_queuedDrawableCount;
+-	[_drawableCondition unlock];
++    const uint64_t ticket = ++_issuedPresentation;
 +	darlingMetalTrace("queuePresent", (long) drawableID, (long) _queuedDrawableCount);
 +	if (mainThreadDrawableWaiter.load(std::memory_order_relaxed) == (void*) self) {
 +		// The main thread is waiting in nextDrawable and cannot run the block below: let it present this itself.
 +		[_drawableCondition broadcast];
 +	}
- 	[_drawableCondition unlock];
++    // Submit while holding the queue lock so concurrent producers schedule callbacks in FIFO order.
  
  	// we now need to schedule a render
  	//
@@ -15320,6 +15693,12 @@ index b81e2e14..3bf4cfd9 100644
 +    // Present only after the Vulkan/GL synchronization has been prepared, on
 +    // the window thread. display alone does not drive the layer compositor.
 +    dispatch_async(dispatch_get_main_queue(), ^{
++        [self->_drawableCondition lock];
++        [self retireSwappedPresentation];
++        BOOL served = ticket <= self->_retiredPresentation;
++        [self->_drawableCondition unlock];
++        if (served) return;
++
 +        if (intervalSample) intervalSample->renderStart.store(presentIntervalNow());
 +        darlingMetalTrace("present-block-runs", 0, 0);
 +        CFTimeInterval blockStart = CACurrentMediaTime();
@@ -15327,19 +15706,43 @@ index b81e2e14..3bf4cfd9 100644
 +        if (intervalSample) intervalSample->renderDone.store(presentIntervalNow());
 +        CFTimeInterval renderDone = CACurrentMediaTime();
 +        darlingMetalTiming("mainBlockRender", renderDone - blockStart);
-+        [self->_context flush];
++        [self->_context flushForQueuedPresentation];
 +        if (intervalSample) intervalSample->flushDone.store(presentIntervalNow(), std::memory_order_release);
 +        darlingMetalTiming("mainBlockFlush", CACurrentMediaTime() - renderDone);
 +    });
++    [_drawableCondition unlock];
++    return YES;
  }
  
  - (void)releaseDrawable: (NSUInteger)drawableID
  {
++    [self releaseDrawable: drawableID fromDrawable: nullptr];
++}
++
++- (void)releaseDrawable: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable
++{
 +	darlingMetalTrace("releaseDrawable", (long) drawableID, 0);
  	[_drawableCondition lock];
- 	_usableDrawablesBitmap |= 1u << drawableID;
- 	[_drawableCondition signal];
-@@ -455,9 +653,21 @@ static void reportGLErrors(void) {
+-	_usableDrawablesBitmap |= 1u << drawableID;
+-	[_drawableCondition signal];
++    if (drawableID < _drawables.size() && _drawables[drawableID] &&
++        (!drawable || _drawables[drawableID].get() == drawable)) {
++        _usableDrawablesBitmap |= 1u << drawableID;
++        [_drawableCondition signal];
++    }
+ 	[_drawableCondition unlock];
+ }
+ 
+@@ -445,6 +677,8 @@ static void reportGLErrors(void) {
+ 		drawable->didDrop();
+ 	}
+ 	_queuedDrawableCount = 0;
++    _retiredPresentation = _issuedPresentation;
++    _preparedFrame = 0;
+ 
+ 	// clear the drawable array (and disown them so they don't try to queue with us anymore)
+ 	for (auto& drawable: _drawables) {
+@@ -455,9 +689,21 @@ static void reportGLErrors(void) {
  	}
  	_usableDrawablesBitmap = 0;
  
@@ -15362,7 +15765,7 @@ index b81e2e14..3bf4cfd9 100644
  		return;
  	}
  
-@@ -493,6 +703,11 @@ static void reportGLErrors(void) {
+@@ -493,6 +739,11 @@ static void reportGLErrors(void) {
  	[_drawableCondition unlock];
  
  	@synchronized(self) {
@@ -15374,7 +15777,7 @@ index b81e2e14..3bf4cfd9 100644
  		// resize the render texture
  		if (_tex != 0) {
  			reportGLErrors();
-@@ -506,6 +721,10 @@ static void reportGLErrors(void) {
+@@ -506,6 +757,10 @@ static void reportGLErrors(void) {
  			glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -15385,8 +15788,15 @@ index b81e2e14..3bf4cfd9 100644
  			reportGLErrors();
  		}
  	}
-@@ -516,6 +735,10 @@ static void reportGLErrors(void) {
+@@ -514,13 +769,27 @@ static void reportGLErrors(void) {
+ }
+ 
  - (void)prepareRender
++{
++    [self prepareRenderForFrame: 0 inContext: nil];
++}
++
++- (void)prepareRenderForFrame: (uint64_t)frame inContext: (CALayerContext *)context
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
 +	static CFTimeInterval lastPrepare = 0;
@@ -15395,8 +15805,18 @@ index b81e2e14..3bf4cfd9 100644
 +	lastPrepare = prepareStart;
  
  	[_drawableCondition lock];
++    [self retireSwappedPresentation];
++    const bool previousSwapped = _preparedPresentation && _retiredPresentation == _preparedPresentation;
++    _preparedFrame = (context == _context) ? frame : 0;
  	if (_queuedDrawableCount > 0) {
-@@ -528,27 +751,81 @@ static void reportGLErrors(void) {
+ 		drawable = _drawables[_queuedDrawables[0]];
+ 		--_queuedDrawableCount;
++        // Queue entries are consecutive tickets, consumed oldest first.
++        if (drawable) _preparedPresentation = _issuedPresentation - _queuedDrawableCount;
+ 		std::copy(_queuedDrawables.begin() + 1, _queuedDrawables.end(), _queuedDrawables.begin());
+ 	}
+ 	[_drawableCondition unlock];
+@@ -528,27 +797,84 @@ static void reportGLErrors(void) {
  	if (drawable) {
  		// wait for the drawable to be fully rendered before copying it to the render texture
  		// (this is a GPU-side wait)
@@ -15408,6 +15828,13 @@ index b81e2e14..3bf4cfd9 100644
 -		glCopyImageSubData(drawable->texture()->glTexture(), GL_TEXTURE_2D, 0, 0, 0, 0, _tex, GL_TEXTURE_2D, 0, 0, 0, 0, _drawableSize.width, _drawableSize.height, 1);
 -		reportGLErrors();
 -	}
+-
+-	@synchronized(self) {
+-		// FIXME: this is wrong, but there's no good way to tell when the texture is actually fully rendered/presented.
+-		//        this is at least close enough. it should balance out in the long run since we're supposed to be invoked on vsync
+-		//        or at least a fixed interval.
+-		if (_lastPresentedDrawable) {
+-			_lastPresentedDrawable->didPresent();
 +		{
 +			// Diagnostic: statistics of the imported Vulkan image itself, before the copy
 +			static unsigned long sourceCounter = 0;
@@ -15423,7 +15850,8 @@ index b81e2e14..3bf4cfd9 100644
 +				}
 +				darlingMetalTrace("source-stats", (long) lit, (long) (total / (width * height)));
 +			}
-+		}
+ 		}
+-		_lastPresentedDrawable = drawable;
 +		// Diagnostic: every 150th presented frame, log pixel statistics of what is about to be shown
 +		// and save a few of them as /tmp/metal-frame-<n>.ppm.
 +		static unsigned long frameCounter = 0;
@@ -15455,21 +15883,17 @@ index b81e2e14..3bf4cfd9 100644
 +				}
 +			}
 +		}
- 
--	@synchronized(self) {
--		// FIXME: this is wrong, but there's no good way to tell when the texture is actually fully rendered/presented.
--		//        this is at least close enough. it should balance out in the long run since we're supposed to be invoked on vsync
--		//        or at least a fixed interval.
--		if (_lastPresentedDrawable) {
--			_lastPresentedDrawable->didPresent();
++
 +		// CARenderer samples drawable->texture()->glTexture() directly once rotated below.
-+		@synchronized(self) {
-+			if (_lastPresentedDrawable) {
-+				_lastPresentedDrawable->didPresent();
-+			}
-+			_lastPresentedDrawable = drawable;
- 		}
--		_lastPresentedDrawable = drawable;
++        // A presented handler may synchronously render this layer again. Select
++        // the new texture before invoking it, and keep the previous one alive.
++        @synchronized(self) {
++            _lastPresentedDrawable.swap(drawable);
++        }
++        if (drawable) {
++            if (previousSwapped) drawable->didPresent();
++            else drawable->didDrop();
++        }
  	}
  }
  
@@ -15489,7 +15913,7 @@ index b81e2e14..3bf4cfd9 100644
  }
  
  //
-@@ -575,6 +852,11 @@ static void reportGLErrors(void) {
+@@ -575,6 +901,11 @@ static void reportGLErrors(void) {
  {
  	[super _setContext: context];
  
@@ -15501,7 +15925,7 @@ index b81e2e14..3bf4cfd9 100644
  	if (_tex == 0) {
  		// create our textures now using the context's CGLContext
  		CGLContextObj prev = CGLGetCurrentContext();
-@@ -589,10 +871,15 @@ static void reportGLErrors(void) {
+@@ -589,10 +920,15 @@ static void reportGLErrors(void) {
  		glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -16115,14 +16539,17 @@ index 49b0348..5ebbf53 100644
  - (void) display;
  - (void) displayIfNeeded;
 diff --git a/QuartzCore/include/QuartzCore/CALayerContext.h b/QuartzCore/include/QuartzCore/CALayerContext.h
-index e4b0c34..69b3925 100644
+index e4b0c342..5267b7c2 100644
 --- a/QuartzCore/include/QuartzCore/CALayerContext.h
 +++ b/QuartzCore/include/QuartzCore/CALayerContext.h
-@@ -17,9 +17,11 @@
+@@ -17,9 +17,14 @@
      NSTimer *_timer;
      CGSubWindow* _subwindow;
      void* _cglWindow;
 +    BOOL _ownsCglWindow;
++    // A render publishes its generation when the renderer finishes. A swap
++    // confirms it only while the rendered window and generation still match.
++    uint64_t _renderFrame, _readyFrame, _swappedFrame;
  }
  
  @property(readonly) CGLContextObj glContext;
@@ -16130,6 +16557,14 @@ index e4b0c34..69b3925 100644
  
  - initWithFrame: (CGRect) rect;
  
+@@ -36,5 +41,7 @@
+ - (void) deleteTextureId: (NSNumber *) textureId;
+ 
+ - (void) flush;
++- (void) flushForQueuedPresentation;
++- (BOOL) didSwapRenderFrame: (uint64_t) frame;
+ 
+ @end
 diff --git a/QuartzCore/include/QuartzCore/CATransaction.h b/QuartzCore/include/QuartzCore/CATransaction.h
 index 985f77f..db64f55 100644
 --- a/QuartzCore/include/QuartzCore/CATransaction.h
@@ -19349,3 +19784,23 @@ index 757dd8c9..ad98c3dc 100644
  	CGLContextObj _glContext = nullptr;
  
  public:
+diff --git a/QuartzCore/CAMetalLayerInternal.h b/QuartzCore/CAMetalLayerInternal.h
+index 48693da0..2e3c5a4d 100644
+--- a/QuartzCore/CAMetalLayerInternal.h
++++ b/QuartzCore/CAMetalLayerInternal.h
+@@ -48,10 +48,15 @@ class CAMetalDrawableActual;
+ 	std::shared_ptr<CAMetalDrawableActual> _lastPresentedDrawable;
+ 
+ 	GLuint _tex;
++    // Protected by _drawableCondition. Tickets increase across pool recreations.
++    uint64_t _issuedPresentation, _retiredPresentation;
++    uint64_t _preparedPresentation, _preparedFrame;
+ }
+ 
+ - (void)queuePresent: (NSUInteger)drawableID;
++- (BOOL)queuePresent: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable;
+ - (void)releaseDrawable: (NSUInteger)drawableID;
++- (void)releaseDrawable: (NSUInteger)drawableID fromDrawable: (CAMetalDrawableActual *)drawable;
+ 
+ - (void)prepareRender;
+ 

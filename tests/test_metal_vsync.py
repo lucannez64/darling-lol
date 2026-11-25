@@ -71,9 +71,14 @@ int main() {
         policy = policy.replace('[(CAMetalLayer *)layer displaySyncEnabled]', 'layer->sync')
         policy = policy.replace('for (CALayer *child in layer.sublayers)', 'for (CALayer *child : layer->children)')
         flush = source.split('- (void) flush {', 1)[1].split('\n}\n', 1)[0]
+        try_flush = source.split('- (BOOL) tryFlush {', 1)[1].split('\n}\n', 1)[0]
+        did_swap = source.split('- (BOOL) didSwapRenderFrame: (uint64_t) frame {', 1)[1].split('\n}\n', 1)[0]
         fixture = r'''
 #include <cassert>
+#include <cstdint>
 #include <vector>
+using BOOL = bool;
+constexpr bool YES = true, NO = false;
 using GLint = int;
 using CGLContextObj = int;
 constexpr int kCGLNoError = 0, kCGLCPSwapInterval = 1;
@@ -81,7 +86,7 @@ constexpr int NULL_CONTEXT = 0;
 struct CALayer { bool metal=false, sync=true; std::vector<CALayer*> children; };
 struct Context { int interval=-2, swaps=0; } contexts[3];
 static int current=2, attached=0;
-static bool fail=false, skip=false;
+static bool fail=false, failSwap=false, skip=false;
 static int CGLGetCurrentContext() { return current; }
 static int CGLSetCurrentContext(int context) { current=context; return 0; }
 static int CGLContextMakeCurrentAndAttachToWindow(int context, int window) {
@@ -94,13 +99,17 @@ static int CGLSetParameter(int context, int parameter, const int* interval) {
 }
 static int CGLFlushDrawable(int context) {
     assert(current==context && attached==context);
-    ++contexts[context].swaps; return 0;
+    ++contexts[context].swaps; return failSwap ? 1 : 0;
 }
 static bool skipLocalRender(CALayer*, int) { return skip; }
 '''
         fixture += policy
-        fixture += '\nstruct Window { int _glContext=1, _cglWindow=1, _frame=0; CALayer* _layer; void flush() {'
-        fixture += flush.replace('NULL', 'NULL_CONTEXT').replace('_frame.size', '_frame') + '\n} };\n'
+        fixture += '\nstruct Window { int _glContext=1, _cglWindow=1, _frame=0; CALayer* _layer;'
+        fixture += '\nuint64_t _renderFrame=1, _readyFrame=1, _swappedFrame=0;'
+        fixture += '\nbool didSwapRenderFrame(uint64_t frame) {' + did_swap + '\n}'
+        fixture += '\nbool tryFlush() {'
+        fixture += try_flush.replace('NULL', 'NULL_CONTEXT').replace('_frame.size', '_frame') + '\n}'
+        fixture += '\nvoid flush() {' + flush.replace('[self tryFlush]', 'tryFlush()') + '\n} };\n'
         fixture += r'''
 int main() {
     CALayer root, container, metal, other;
@@ -109,6 +118,7 @@ int main() {
     assert(metalSwapInterval(&root)==1);
     Window a{1,1,0,&root};
     a.flush(); assert(contexts[1].interval==1 && current==2);
+    assert(a.didSwapRenderFrame(1) && !a.didSwapRenderFrame(0));
     metal.sync=false;
     a.flush(); assert(contexts[1].interval==0 && current==2);
     container.children.push_back(&other);
@@ -133,6 +143,15 @@ int main() {
     current=1; a.flush(); assert(current==1);
     root.children.clear();
     assert(metalSwapInterval(&root)==-1);
+    a._readyFrame=a._renderFrame=2;
+    failSwap=true; current=2;
+    assert(!a.tryFlush() && !a.didSwapRenderFrame(2) && current==2);
+    failSwap=false;
+    assert(a.tryFlush() && a.didSwapRenderFrame(2) && current==2);
+    a._renderFrame=3; // A stale render must not retire a newer presentation.
+    assert(!a.tryFlush() && !a.didSwapRenderFrame(3) && current==2);
+    a._readyFrame=0;
+    assert(!a.tryFlush() && current==2);
 }
 '''
         self.run_cpp(fixture)
