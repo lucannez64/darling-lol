@@ -115,6 +115,10 @@ bash scripts/install-native.sh --toolbox
 
 If `toolbox` keeps pulling an old image, create the container from an explicit registry tag (for example `toolbox create --image registry.fedoraproject.org/fedora-toolbox:44 darling-lol`). The same requirements apply when you enter the container manually later (Distrobox included): run `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh` from the checkout inside the container.
 
+## Update says the Toolbox container is not reachable
+
+After a hot pull, `./scripts/update.sh` re-enters the Toolbox container recorded at install time. A stopped container is started. If `podman ps` still lists the container as running but every `toolbox run` fails — typically after a host suspend/resume or a container whose init process outlived its runtime — the updater offers to stop and start it again, then retries. When `podman stop` itself is refused (`operation not permitted` against a container whose user namespace outlived a suspend), it signals the container's recorded init PID before starting it. The restart is skipped while a Riot Client or League process is running, because it would end that session. The check refuses the restart when it cannot read the command line of a process owned by you (for example under a restricted `/proc`) instead of assuming no client is running. Answering `n` exits and prints `podman restart darling-lol` for the same recovery by hand. A restart keeps everything installed inside the container; `toolbox rm` would delete it.
+
 ## Darling does not start: `Failed to bind socket: Read-only file system`
 
 The installer or launcher prints a chain of errors that look unrelated:
@@ -1007,6 +1011,8 @@ On the NVIDIA proprietary driver, check the submit worker's kernel time: a threa
 
 The NVIDIA performance figures above were reported on an earlier runtime base;
 they have not been remeasured after integration with current `main`. On `bcb3245` an RTX 5060 Laptop reported ~200–215 FPS in Practice Tool ([#53](https://github.com/lucannez64/darling-lol/issues/53)). On a hybrid laptop, check the GPU mode first: PRIME render offload measured at less than half the frame rate of the MUX's discrete-only mode ([hybrid graphics](#prime-render-offload-halves-the-frame-rate)).
+
+Also on NVIDIA, check the CPU that takes the GPU interrupt. `/proc/interrupts` shows which one on its `nvidia` line; read that CPU's `hi` share in `top` (press `1` for per-CPU lines) or the sixth value of its line in `/proc/stat`. A CPU that spends most of a match in hard interrupts means the handler's list of semaphore listeners has grown with the textures loaded. Since 2026-11-24 NVIDIA devices run without texture timelines for that reason, and `/tmp/metal-texture-timelines` brings them back for a comparison ([setup](SETUP.md#game-process-switches)).
 
 ## darlingserver message loop and idle-wait switches
 
