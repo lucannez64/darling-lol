@@ -7810,10 +7810,10 @@ index 26bbb8f..6da6249 100644
  		};
 diff --git a/duct-tape/src/kext_info.c b/duct-tape/src/kext_info.c
 new file mode 100644
-index 0000000..240dfbf
+index 0000000..6dd46c4
 --- /dev/null
 +++ b/duct-tape/src/kext_info.c
-@@ -0,0 +1,1945 @@
+@@ -0,0 +1,2035 @@
 +/*
 + * darling-lol: kext_request() Mach server implementation for darlingserver
 + * duct-tape.
@@ -7822,7 +7822,9 @@ index 0000000..240dfbf
 + * "Get Loaded Kext Info By UUID", "Get Kexts in Collection",
 + * "Get Kext UUID by Address", "Get All Load Requests") using the standard
 + * Apple kext set matching the emulated MacBookPro16,1 / macOS 14.7 (23H124,
-+ * Darwin 23.6.0, x86_64) platform identity.
++ * Darwin 23.6.0, x86_64) platform identity. The catalog is served only under
++ * the compat hardware presentation profile (RCLOL_PLATFORM_PROFILE=compat);
++ * otherwise kext_request() stays unsupported, see dtape_kext_catalog_enabled().
 + *
 + * Mutating / privileged predicates (Load, Unload, Start, Stop, etc.) are not
 + * supported and return kOSKextReturnNotPrivileged or kOSKextReturnUnsupported.
@@ -7845,6 +7847,7 @@ index 0000000..240dfbf
 +#include <stdlib.h>
 +#include <string.h>
 +void* realloc(void* ptr, size_t size);
++extern char* getenv(const char* name);
 +#endif
 +
 +#ifndef kKextRequestPredicateKey
@@ -8671,8 +8674,18 @@ index 0000000..240dfbf
 +	size_t count;
 +} dtape_str_list_t;
 +
++/*
++ * IOCFUnserialize resolves an IDREF to the earlier object with that ID, whatever
++ * the referencing tag's name, so each remembered value keeps its own type.
++ */
++typedef enum dtape_idref_kind {
++	DTAPE_IDREF_STRING = 0,
++	DTAPE_IDREF_INTEGER,
++} dtape_idref_kind_t;
++
 +typedef struct dtape_idref_entry {
 +	int32_t id;
++	dtape_idref_kind_t kind;
 +	char* str_val;
 +} dtape_idref_entry_t;
 +
@@ -8758,7 +8771,7 @@ index 0000000..240dfbf
 +	sc->idref_count = 0;
 +}
 +
-+static void dtape_scanner_remember(dtape_xml_scanner_t* sc, int32_t id, const char* s) {
++static void dtape_scanner_remember(dtape_xml_scanner_t* sc, int32_t id, dtape_idref_kind_t kind, const char* s) {
 +	if (id < 0 || !s || sc->idref_count >= DTAPE_KEXT_MAX_IDREFS) {
 +		return;
 +	}
@@ -8769,17 +8782,19 @@ index 0000000..240dfbf
 +	}
 +	memcpy(copy, s, slen + 1);
 +	sc->idrefs[sc->idref_count].id = id;
++	sc->idrefs[sc->idref_count].kind = kind;
 +	sc->idrefs[sc->idref_count].str_val = copy;
 +	sc->idref_count++;
 +}
 +
-+static const char* dtape_scanner_lookup(const dtape_xml_scanner_t* sc, int32_t idref) {
++/* The text of the earlier value with this ID, or NULL when it is unknown or of another kind. */
++static const char* dtape_scanner_lookup(const dtape_xml_scanner_t* sc, int32_t idref, dtape_idref_kind_t kind) {
 +	if (idref < 0) {
 +		return NULL;
 +	}
 +	for (size_t i = 0; i < sc->idref_count; i++) {
 +		if (sc->idrefs[i].id == idref) {
-+			return sc->idrefs[i].str_val;
++			return sc->idrefs[i].kind == kind ? sc->idrefs[i].str_val : NULL;
 +		}
 +	}
 +	return NULL;
@@ -8844,8 +8859,18 @@ index 0000000..240dfbf
 +			} else {
 +				return false;
 +			}
++			/* More than 64 significant bits is malformed, not a wrapped value. */
++			if (v > (UINT64_MAX >> 4)) {
++				return false;
++			}
 +			v = (v << 4) | d;
 +			s++;
++		}
++		while (dtape_is_space(*s)) {
++			s++;
++		}
++		if (*s) {
++			return false;
 +		}
 +		*out = v;
 +		return true;
@@ -8859,10 +8884,32 @@ index 0000000..240dfbf
 +		return false;
 +	}
 +	while (*s >= '0' && *s <= '9') {
-+		v = v * 10ULL + (uint64_t)(*s - '0');
++		uint64_t d = (uint64_t)(*s - '0');
++		if (v > (UINT64_MAX - d) / 10u) {
++			return false;
++		}
++		v = v * 10u + d;
 +		s++;
 +	}
-+	*out = neg ? (uint64_t)(-(int64_t)v) : v;
++	while (dtape_is_space(*s)) {
++		s++;
++	}
++	if (*s) {
++		return false;
++	}
++	/*
++	 * A negative value is the 64-bit two's complement of its magnitude, so
++	 * "-1" is 0xffffffffffffffff. Negate in unsigned arithmetic: converting
++	 * 2^63 to int64_t and negating it is undefined. Magnitudes above 2^63 do
++	 * not fit in 64 bits and are malformed.
++	 */
++	if (neg) {
++		if (v > (UINT64_C(1) << 63)) {
++			return false;
++		}
++		v = UINT64_C(0) - v;
++	}
++	*out = v;
 +	return true;
 +}
 +
@@ -9085,7 +9132,9 @@ index 0000000..240dfbf
 +			return false;
 +		}
 +		if (open_tag->id >= 0 && strcmp(open_tag->name, "string") == 0) {
-+			dtape_scanner_remember(sc, open_tag->id, text);
++			dtape_scanner_remember(sc, open_tag->id, DTAPE_IDREF_STRING, text);
++		} else if (open_tag->id >= 0 && strcmp(open_tag->name, "integer") == 0) {
++			dtape_scanner_remember(sc, open_tag->id, DTAPE_IDREF_INTEGER, text);
 +		}
 +		free(text);
 +		return true;
@@ -9126,7 +9175,7 @@ index 0000000..240dfbf
 +
 +static char* dtape_parse_string_value(dtape_xml_scanner_t* sc, const dtape_xml_tag_t* tag) {
 +	if (tag->idref >= 0 && tag->kind == DTAPE_TAG_EMPTY) {
-+		const char* prev = dtape_scanner_lookup(sc, tag->idref);
++		const char* prev = dtape_scanner_lookup(sc, tag->idref, DTAPE_IDREF_STRING);
 +		if (!prev) {
 +			return NULL;
 +		}
@@ -9146,7 +9195,7 @@ index 0000000..240dfbf
 +		if (empty) {
 +			empty[0] = '\0';
 +			if (tag->id >= 0) {
-+				dtape_scanner_remember(sc, tag->id, empty);
++				dtape_scanner_remember(sc, tag->id, DTAPE_IDREF_STRING, empty);
 +			}
 +		}
 +		return empty;
@@ -9156,7 +9205,7 @@ index 0000000..240dfbf
 +	}
 +	char* text = dtape_read_text_and_close(sc, "string");
 +	if (text && tag->id >= 0) {
-+		dtape_scanner_remember(sc, tag->id, text);
++		dtape_scanner_remember(sc, tag->id, DTAPE_IDREF_STRING, text);
 +	}
 +	return text;
 +}
@@ -9262,10 +9311,26 @@ index 0000000..240dfbf
 +			}
 +		} else if (strcmp(key, kKextRequestArgumentLookupAddressKey) == 0) {
 +			free(key);
-+			if (strcmp(vtag.name, "integer") == 0 && vtag.kind == DTAPE_TAG_OPEN) {
++			if (vtag.kind == DTAPE_TAG_EMPTY && vtag.idref >= 0) {
++				/*
++				 * A reference to an earlier <integer ID="n">. A reference that
++				 * names no earlier integer makes the request malformed rather
++				 * than reading as address 0.
++				 */
++				const char* prev = dtape_scanner_lookup(sc, vtag.idref, DTAPE_IDREF_INTEGER);
++				uint64_t addr = 0;
++				if (!prev || !dtape_parse_u64_text(prev, &addr)) {
++					return false;
++				}
++				req->has_lookup_addr = true;
++				req->lookup_addr = addr;
++			} else if (strcmp(vtag.name, "integer") == 0 && vtag.kind == DTAPE_TAG_OPEN) {
 +				char* num = dtape_read_text_and_close(sc, "integer");
 +				if (!num) {
 +					return false;
++				}
++				if (vtag.id >= 0) {
++					dtape_scanner_remember(sc, vtag.id, DTAPE_IDREF_INTEGER, num);
 +				}
 +				uint64_t addr = 0;
 +				if (dtape_parse_u64_text(num, &addr)) {
@@ -9605,8 +9670,10 @@ index 0000000..240dfbf
 +	return kOSKextReturnNotFound;
 +}
 +
++/* The root-only predicates XNU's OSKext::handleRequest() refuses without host_priv. */
 +static bool dtape_is_privileged_predicate(const char* pred) {
 +	return strcmp(pred, "Get Kernel Requests") == 0 ||
++	       strcmp(pred, "Daemon Ready") == 0 ||
 +	       strcmp(pred, "Load") == 0 ||
 +	       strcmp(pred, "LoadFromKC") == 0 ||
 +	       strcmp(pred, "LoadCodelessKext") == 0 ||
@@ -9617,6 +9684,23 @@ index 0000000..240dfbf
 +	       strcmp(pred, "MissingAuxKCBundles") == 0 ||
 +	       strcmp(pred, "AuxKCBundleAvailable") == 0 ||
 +	       strcmp(pred, "Send Resource") == 0;
++}
++
++/*
++ * The catalog describes the MacBookPro16,1 of the compat hardware
++ * presentation profile (tools/system.prop), so it is served only when the
++ * launcher selected that profile. The launcher exports RCLOL_PLATFORM_PROFILE
++ * before it starts the runtime, and darlingserver inherits it; the check is
++ * the exact "compat" match libsystem_kernel's darling_compat_profile_enabled()
++ * makes. Under profile=host, or with no profile in darlingserver's
++ * environment, kext_request() keeps its previous KERN_NOT_SUPPORTED answer
++ * instead of listing Intel, AMD and Broadcom kexts the host does not have.
++ */
++#define DTAPE_KEXT_PROFILE_ENV "RCLOL_PLATFORM_PROFILE"
++
++bool dtape_kext_catalog_enabled(void) {
++	const char* profile = getenv(DTAPE_KEXT_PROFILE_ENV);
++	return profile != NULL && strcmp(profile, "compat") == 0;
 +}
 +
 +/*
@@ -9704,6 +9788,12 @@ index 0000000..240dfbf
 +	kern_return_t* op_result)
 +{
 +	(void)clientLogSpec;
++
++	if (!dtape_kext_catalog_enabled()) {
++		/* Same answer as the stub this file replaced. */
++		dtape_stub_safe();
++		return KERN_NOT_SUPPORTED;
++	}
 +
 +	*op_result = KERN_FAILURE;
 +	*responseOut = 0;

@@ -269,3 +269,31 @@ card, so Dawn falls back to the Metal device name.
 `RCLOL_GPU_*`
 variables are the launcher-to-guest handoff; `RCLOL_SYSTEM_ROOT` is a test-only
 host-root override.
+
+## Loaded kernel extensions (kext_request)
+
+`kext_request` is another platform identity source: it is the Mach call behind
+`KextManagerCopyLoadedKextInfo` and `kextstat`. darlingserver answers its
+read-only predicates (`Get Loaded Kext Info`, `... By UUID`, `Get Kexts in
+Collection`, `Get Kext UUID by Address`, `Get All Load Requests`) from a fixed
+list of the Apple kexts a MacBookPro16,1 loads on macOS 14.7 (23H124): the
+kernel, its KPI interfaces and drivers such as the Intel CPU power management,
+`AMDRadeonX6000` and the Broadcom Wi-Fi driver. Predicates that load, start,
+stop or unload a kext, `Daemon Ready` included, are refused like on macOS
+without root (`kOSKextReturnNotPrivileged`) and unsupported with it. Nothing is
+loaded.
+
+The list describes the compat Mac, not the host, so it is served only under
+`profile=compat`. darlingserver reads `RCLOL_PLATFORM_PROFILE` from the
+environment it starts with: the launcher exports the resolved profile before it
+starts the runtime, and a running darlingserver keeps that value until the
+runtime restarts. Under `profile=host`, or in a runtime started without the
+launcher's profile, `kext_request` returns `KERN_NOT_SUPPORTED` as it did
+before the list existed.
+
+The values are fixed for the OS build, not salted per prefix like the serial
+number and UUID above. A kext's UUID and the unslid load address `kext_request`
+reports come from that macOS build's kernel collection, so every Mac running
+23H124 reports the same ones; a per-prefix value would describe no real build.
+`python3 -m unittest tests.test_kext_request` checks the list and the request
+handling without starting Darling.

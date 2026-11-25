@@ -6,6 +6,7 @@ OSKext predicate, filtering path, XML edge case, and privilege rejection path.
 """
 import base64
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -21,6 +22,23 @@ KEXT_ERR_NOT_PRIVILEGED = 0xDC008004 - (1 << 32)
 KEXT_ERR_INVALID_ARGUMENT = 0xDC008005 - (1 << 32)
 KEXT_ERR_NOT_FOUND = 0xDC008006 - (1 << 32)
 KEXT_ERR_UNSUPPORTED = 0xDC008009 - (1 << 32)
+PROFILE_ENV = 'RCLOL_PLATFORM_PROFILE'
+GET_LOADED = (
+    b'<dict><key>Kext Request Predicate</key>'
+    b'<string>Get Loaded Kext Info</string></dict>\0'
+)
+
+
+def lookup_request(value_xml: str, prefix_xml: str = '') -> bytes:
+    """A Get Kext UUID by Address request whose lookup address is value_xml."""
+    return (
+        '<dict>' + prefix_xml +
+        '<key>Kext Request Predicate</key>'
+        '<string>Get Kext UUID by Address</string>'
+        '<key>Kext Request Arguments</key><dict>'
+        f'<key>Kext Request Lookup Address</key>{value_xml}'
+        '</dict></dict>\0'
+    ).encode('utf-8')
 
 
 def patch_section(target: str) -> str:
@@ -69,9 +87,15 @@ extern int32_t dtape_kext_handle_request(
     bool is_privileged,
     char** response_out,
     size_t* response_len_out);
+extern bool dtape_kext_catalog_enabled(void);
 
 int main(int argc, char** argv) {
     bool is_priv = (argc > 1 && strcmp(argv[1], "priv") == 0);
+    /* kext_request() returns KERN_NOT_SUPPORTED before parsing when this is false. */
+    if (!dtape_kext_catalog_enabled()) {
+        printf("not-supported\n");
+        return 0;
+    }
     size_t cap = 4096;
     size_t len = 0;
     char* buf = (char*)malloc(cap);
@@ -130,23 +154,27 @@ class KextRequestTests(unittest.TestCase):
             binary = td / 'test_kext_info'
             src.write_text(extract_new_file_from_patch('duct-tape/src/kext_info.c'))
             harness.write_text(HARNESS_C)
-            subprocess.run(
-                [
-                    'cc',
-                    '-std=c11',
-                    '-Wall',
-                    '-Wextra',
-                    '-Werror',
-                    '-DDTAPE_KEXT_INFO_STANDALONE',
-                    str(src),
-                    str(harness),
-                    '-o',
-                    str(binary),
-                ],
-                check=True,
+            command = [
+                # GCC folds the signed negation UBSan has to see; prefer clang.
+                'clang' if shutil.which('clang') else 'cc',
+                '-std=c11',
+                '-Wall',
+                '-Wextra',
+                '-Werror',
+                '-DDTAPE_KEXT_INFO_STANDALONE',
+                str(src),
+                str(harness),
+                '-o',
+                str(binary),
+            ]
+            # Undefined behaviour aborts the harness when the toolchain ships UBSan.
+            sanitized = subprocess.run(
+                command[:1] + ['-fsanitize=undefined', '-fno-sanitize-recover=all'] + command[1:],
                 capture_output=True,
                 text=True,
             )
+            if sanitized.returncode != 0:
+                subprocess.run(command, check=True, capture_output=True, text=True)
             cls._bin = binary
 
     @classmethod
@@ -154,17 +182,24 @@ class KextRequestTests(unittest.TestCase):
         if cls._tmpdir is not None:
             cls._tmpdir.cleanup()
 
-    def invoke(self, payload: bytes, privileged: bool = False):
+    def run_harness(self, payload: bytes, privileged: bool = False, profile='compat'):
         self.assertIsNotNone(self._bin, 'C compiler required')
         args = [str(self._bin)]
         if privileged:
             args.append('priv')
-        proc = subprocess.run(
+        env = {k: v for k, v in os.environ.items() if k != PROFILE_ENV}
+        if profile is not None:
+            env[PROFILE_ENV] = profile
+        return subprocess.run(
             args,
             input=payload,
             check=True,
             capture_output=True,
+            env=env,
         )
+
+    def invoke(self, payload: bytes, privileged: bool = False):
+        proc = self.run_harness(payload, privileged)
         header, _, body = proc.stdout.partition(b'\n')
         op_res_s, resp_len_s, nul_ok_s = header.decode('ascii').split()
         return int(op_res_s), int(resp_len_s), int(nul_ok_s), body.decode('utf-8')
@@ -433,7 +468,8 @@ class KextRequestTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
     def test_privileged_and_malformed_requests_rejected(self):
-        for pred in ('Load', 'Unload', 'Start', 'Stop', 'Get Kernel Requests'):
+        # XNU's OSKext::handleRequest() refuses Daemon Ready without host_priv too.
+        for pred in ('Load', 'Unload', 'Start', 'Stop', 'Get Kernel Requests', 'Daemon Ready'):
             req = (
                 '<dict><key>Kext Request Predicate</key>'
                 f'<string>{pred}</string></dict>\0'
@@ -454,6 +490,115 @@ class KextRequestTests(unittest.TestCase):
             op_res, resp_len, _, _ = self.invoke(bad)
             self.assertEqual(op_res, KEXT_ERR_INVALID_ARGUMENT)
             self.assertEqual(resp_len, 0)
+
+    def test_kext_request_checks_profile_before_serving(self):
+        kext_src = extract_new_file_from_patch('duct-tape/src/kext_info.c')
+        body = kext_src.split('kern_return_t kext_request(', 1)[1]
+        gate = body.index('if (!dtape_kext_catalog_enabled()) {')
+        # The gate runs first and answers exactly like the stub it replaced.
+        self.assertLess(gate, body.index('*op_result ='))
+        self.assertLess(gate, body.index('dtape_kext_handle_request('))
+        self.assertIn(
+            'if (!dtape_kext_catalog_enabled()) {\n'
+            '\t\t/* Same answer as the stub this file replaced. */\n'
+            '\t\tdtape_stub_safe();\n'
+            '\t\treturn KERN_NOT_SUPPORTED;\n'
+            '\t}',
+            body,
+        )
+        self.assertIn('getenv(DTAPE_KEXT_PROFILE_ENV)', kext_src)
+        self.assertIn(f'#define DTAPE_KEXT_PROFILE_ENV "{PROFILE_ENV}"', kext_src)
+
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_catalog_served_only_under_compat_profile(self):
+        # profile=host, no profile and anything but the exact "compat" keep
+        # kext_request() unsupported, as before the catalog existed.
+        for profile in ('host', None, '', 'Compat', 'compat ', 'compatx'):
+            with self.subTest(profile=profile):
+                proc = self.run_harness(GET_LOADED, profile=profile)
+                self.assertEqual(proc.stdout, b'not-supported\n')
+        proc = self.run_harness(GET_LOADED, profile='compat')
+        self.assertTrue(proc.stdout.startswith(b'0 '))
+
+    def apfs_entry(self):
+        op_res, _, _, xml = self.invoke(GET_LOADED)
+        self.assertEqual(op_res, 0)
+        return parse_osserialize_xml(xml)['com.apple.filesystems.apfs']
+
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_lookup_address_number_edge_cases(self):
+        apfs = self.apfs_entry()
+        addr = apfs['OSBundleLoadAddress'] + 0x100
+        # A kernel address read as a signed 64-bit decimal is negative.
+        for text in (
+            str(addr - (1 << 64)),
+            str(addr),
+            hex(addr),
+            '0x' + '0' * 8 + f'{addr:016x}',
+            f' {hex(addr)} ',
+        ):
+            with self.subTest(text=text):
+                op_res, _, _, xml = self.invoke(lookup_request(f'<integer size="64">{text}</integer>'))
+                self.assertEqual(op_res, 0)
+                self.assertEqual(parse_osserialize_xml(xml), apfs['OSBundleUUID'])
+        # INT64_MIN and UINT64_MAX are valid values with no kext behind them;
+        # negating INT64_MIN is checked by UBSan when the toolchain has it.
+        for text in ('-9223372036854775808', '18446744073709551615', '0xffffffffffffffff'):
+            with self.subTest(text=text):
+                op_res, resp_len, _, _ = self.invoke(lookup_request(f'<integer>{text}</integer>'))
+                self.assertEqual(op_res, KEXT_ERR_NOT_FOUND)
+                self.assertEqual(resp_len, 0)
+        # Values that do not fit in 64 bits or are not numbers are malformed,
+        # not wrapped into some other address.
+        for text in (
+            '-9223372036854775809',
+            '18446744073709551616',
+            '0x1' + '0' * 16,
+            f'0x1{addr:016x}',
+            '12abc',
+            '0x',
+            '-',
+        ):
+            with self.subTest(text=text):
+                op_res, resp_len, _, _ = self.invoke(lookup_request(f'<integer>{text}</integer>'))
+                self.assertEqual(op_res, KEXT_ERR_INVALID_ARGUMENT)
+                self.assertEqual(resp_len, 0)
+
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_lookup_address_idref_resolves_earlier_integer(self):
+        apfs = self.apfs_entry()
+        addr = apfs['OSBundleLoadAddress'] + 0x100
+        earlier = f'<key>Earlier</key><integer ID="9" size="64">{hex(addr)}</integer>'
+        for ref in ('<integer IDREF="9"/>', '<reference IDREF="9"/>'):
+            with self.subTest(ref=ref):
+                op_res, _, _, xml = self.invoke(lookup_request(ref, earlier))
+                self.assertEqual(op_res, 0)
+                self.assertEqual(parse_osserialize_xml(xml), apfs['OSBundleUUID'])
+        # An ID on the lookup address itself is accepted.
+        op_res, _, _, xml = self.invoke(lookup_request(f'<integer ID="3">{hex(addr)}</integer>'))
+        self.assertEqual(op_res, 0)
+        self.assertEqual(parse_osserialize_xml(xml), apfs['OSBundleUUID'])
+        # A reference to no earlier value, or to a string, is not address 0.
+        string_id = '<key>Earlier</key><string ID="9">0x1000</string>'
+        for ref, prefix in (
+            ('<integer IDREF="42"/>', ''),
+            ('<integer IDREF="42"/>', earlier),
+            ('<integer IDREF="9"/>', string_id),
+        ):
+            with self.subTest(ref=ref, prefix=prefix):
+                op_res, resp_len, _, _ = self.invoke(lookup_request(ref, prefix))
+                self.assertEqual(op_res, KEXT_ERR_INVALID_ARGUMENT)
+                self.assertEqual(resp_len, 0)
+        # An integer ID is not a string: a CFBundleIdentifier reference to it fails.
+        req = (
+            '<dict>' + earlier +
+            '<key>Kext Request Predicate</key><string>Get Loaded Kext Info</string>'
+            '<key>Kext Request Arguments</key><dict>'
+            '<key>CFBundleIdentifier</key><string IDREF="9"/>'
+            '</dict></dict>\0'
+        ).encode('utf-8')
+        op_res, _, _, _ = self.invoke(req)
+        self.assertEqual(op_res, KEXT_ERR_INVALID_ARGUMENT)
 
 
 if __name__ == '__main__':
