@@ -133,7 +133,7 @@ index a5ddfc7..607cf17 100644
  void dtape_semaphore_destroy(dtape_semaphore_t* semaphore);
  
 diff --git a/duct-tape/include/darlingserver/duct-tape/hooks.h b/duct-tape/include/darlingserver/duct-tape/hooks.h
-index 1dde8b7..c88845f 100644
+index 1dde8b7..b761e49 100644
 --- a/duct-tape/include/darlingserver/duct-tape/hooks.h
 +++ b/duct-tape/include/darlingserver/duct-tape/hooks.h
 @@ -28,6 +28,8 @@ typedef dtape_thread_t* (*dtape_hook_current_thread_f)(void);
@@ -145,7 +145,7 @@ index 1dde8b7..c88845f 100644
  typedef void (*dtape_hook_get_load_info_f)(dtape_load_info_t* load_info);
  
  typedef void (*dtape_hook_thread_suspend_f)(void* thread_context, dtape_thread_continuation_callback_f continuation_callback, void* continuation_contex, libsimple_lock_t* unlock_me);
-@@ -52,6 +54,7 @@ typedef void (*dtape_hook_current_thread_set_bsd_retval_f)(uint32_t retval);
+@@ -52,9 +54,11 @@ typedef void (*dtape_hook_current_thread_set_bsd_retval_f)(uint32_t retval);
  typedef bool (*dtape_hook_task_read_memory_f)(void* task_context, uintptr_t remote_address, void* local_buffer, size_t length);
  typedef bool (*dtape_hook_task_write_memory_f)(void* task_context, uintptr_t remote_address, const void* local_buffer, size_t length);
  typedef dtape_task_t* (*dtape_hook_task_lookup_f)(int id, bool id_is_nsid, bool retain);
@@ -153,7 +153,11 @@ index 1dde8b7..c88845f 100644
  typedef dtape_task_t* (*dtape_hook_task_lookup_eternal_f)(dtape_eternal_id_t eid, bool retain);
  typedef void (*dtape_hook_task_get_memory_info_f)(void* task_context, dtape_memory_info_t* memory_info);
  typedef bool (*dtape_hook_task_get_memory_region_info_f)(void* task_context, uintptr_t address, dtape_memory_region_info_t* memory_region_info);
-@@ -103,6 +106,7 @@ typedef struct dtape_hooks {
++typedef bool (*dtape_hook_task_get_page_info_f)(void* task_context, uintptr_t page_address, dtape_page_info_t* page_info);
+ typedef uintptr_t (*dtape_hook_task_allocate_pages_f)(void* task_context, size_t page_count, int protection, uintptr_t address_hint, dtape_memory_flags_t flags);
+ typedef int (*dtape_hook_task_free_pages_f)(void* task_context, uintptr_t address, size_t page_count);
+ typedef uintptr_t (*dtape_hook_task_map_file_f)(void* task_context, int fd, size_t page_count, int protection, uintptr_t address_hint, size_t page_offset, dtape_memory_flags_t flags);
+@@ -103,9 +107,11 @@ typedef struct dtape_hooks {
  	dtape_hook_task_read_memory_f task_read_memory;
  	dtape_hook_task_write_memory_f task_write_memory;
  	dtape_hook_task_lookup_f task_lookup;
@@ -161,7 +165,11 @@ index 1dde8b7..c88845f 100644
  	dtape_hook_task_lookup_eternal_f task_lookup_eternal;
  	dtape_hook_task_get_memory_info_f task_get_memory_info;
  	dtape_hook_task_get_memory_region_info_f task_get_memory_region_info;
-@@ -122,6 +126,8 @@ typedef struct dtape_hooks {
++	dtape_hook_task_get_page_info_f task_get_page_info;
+ 	dtape_hook_task_allocate_pages_f task_allocate_pages;
+ 	dtape_hook_task_free_pages_f task_free_pages;
+ 	dtape_hook_task_map_file_f task_map_file;
+@@ -122,6 +128,8 @@ typedef struct dtape_hooks {
  	dtape_hook_task_remove_port_set_member_f task_remove_port_set_member;
  	dtape_hook_task_clear_port_set_f task_clear_port_set;
  #endif
@@ -705,7 +713,7 @@ index 69bdf24..48199cd 100644
  
  	libsimple_lock_lock(&mutex->dtape_queue_lock);
 diff --git a/duct-tape/src/memory.c b/duct-tape/src/memory.c
-index 3114947..20cd162 100644
+index 3114947..132ff61 100644
 --- a/duct-tape/src/memory.c
 +++ b/duct-tape/src/memory.c
 @@ -11,6 +11,7 @@
@@ -1121,33 +1129,204 @@ index 3114947..20cd162 100644
  };
  
  kern_return_t mach_vm_msync(vm_map_t map, mach_vm_offset_t address, mach_vm_size_t size, vm_sync_t sync_flags) {
-@@ -620,15 +960,22 @@ kern_return_t mach_vm_msync(vm_map_t map, mach_vm_offset_t address, mach_vm_size
+@@ -619,16 +959,193 @@ kern_return_t mach_vm_msync(vm_map_t map, mach_vm_offset_t address, mach_vm_size
+ 	return KERN_SUCCESS;
  };
  
++static vm_prot_t dtape_prot_from_region(dtape_memory_protection_t region_prot) {
++	vm_prot_t prot = VM_PROT_NONE;
++	if (region_prot & dtape_memory_protection_read) {
++		prot |= VM_PROT_READ;
++	}
++	if (region_prot & dtape_memory_protection_write) {
++		prot |= VM_PROT_WRITE;
++	}
++	if (region_prot & dtape_memory_protection_execute) {
++		prot |= VM_PROT_EXECUTE;
++	}
++	return prot;
++}
++
++static vm_prot_t dtape_max_prot_from_prot(vm_prot_t prot) {
++	if ((prot & VM_PROT_EXECUTE) && !(prot & VM_PROT_WRITE)) {
++		return VM_PROT_READ | VM_PROT_EXECUTE;
++	}
++	if (prot & VM_PROT_EXECUTE) {
++		return VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
++	}
++	if (prot == VM_PROT_NONE) {
++		return VM_PROT_NONE;
++	}
++	return VM_PROT_READ | VM_PROT_WRITE;
++}
++
++static kern_return_t dtape_query_page_basic(
++	vm_map_t map,
++	mach_vm_address_t address,
++	int* disposition_out,
++	int* ref_count_out,
++	vm_object_id_t* object_id_out,
++	memory_object_offset_t* offset_out)
++{
++	int disposition = 0;
++	int ref_count = 0;
++	vm_object_id_t object_id = 0;
++	memory_object_offset_t offset = 0;
++
++	if (map != VM_MAP_NULL && map->dtape_task != NULL) {
++		uint64_t page_size = (uint64_t)sysconf(_SC_PAGESIZE);
++		if (page_size == 0) {
++			page_size = 4096;
++		}
++		uintptr_t page_addr = (uintptr_t)(address & ~(page_size - 1));
++		dtape_memory_region_info_t region_info;
++		if (dtape_hooks->task_get_memory_region_info(map->dtape_task->context, page_addr, &region_info)) {
++			dtape_page_info_t pinfo;
++			pinfo.pagemap_entry = 0;
++			pinfo.pagemap_valid = false;
++			pinfo.cs_valid = false;
++			if (dtape_hooks->task_get_page_info != NULL) {
++				(void)dtape_hooks->task_get_page_info(map->dtape_task->context, page_addr, &pinfo);
++			}
++
++			if (pinfo.pagemap_valid) {
++				uint64_t entry = pinfo.pagemap_entry;
++				bool present = (entry & (1ULL << 63)) != 0;
++				bool swapped = (entry & (1ULL << 62)) != 0;
++				bool file_page = (entry & (1ULL << 61)) != 0;
++				bool soft_dirty = (entry & (1ULL << 55)) != 0;
++
++				if (present) {
++					disposition |= VM_PAGE_QUERY_PAGE_PRESENT | VM_PAGE_QUERY_PAGE_REF;
++				}
++				if (swapped) {
++					disposition |= VM_PAGE_QUERY_PAGE_PAGED_OUT;
++				}
++				if (file_page) {
++					disposition |= VM_PAGE_QUERY_PAGE_EXTERNAL;
++				}
++				if (present && (soft_dirty || (!file_page && (region_info.protection & dtape_memory_protection_write)))) {
++					disposition |= VM_PAGE_QUERY_PAGE_DIRTY;
++				}
++			} else {
++				/* Fallback when /proc/<pid>/pagemap is unreadable: mapped pages report present. */
++				disposition |= VM_PAGE_QUERY_PAGE_PRESENT | VM_PAGE_QUERY_PAGE_REF;
++				if ((region_info.protection & dtape_memory_protection_write) && !region_info.shared) {
++					disposition |= VM_PAGE_QUERY_PAGE_DIRTY;
++				}
++			}
++
++			if ((disposition & VM_PAGE_QUERY_PAGE_PRESENT) &&
++			    (region_info.protection & dtape_memory_protection_execute) &&
++			    !(region_info.protection & dtape_memory_protection_write) &&
++			    pinfo.cs_valid) {
++				disposition |= VM_PAGE_QUERY_PAGE_CS_VALIDATED;
++			}
++
++			if (disposition & (VM_PAGE_QUERY_PAGE_PRESENT | VM_PAGE_QUERY_PAGE_PAGED_OUT)) {
++				ref_count = 1;
++			}
++			object_id = (vm_object_id_t)(region_info.start_address >> 12);
++			offset = region_info.map_offset + (memory_object_offset_t)(page_addr - region_info.start_address);
++		}
++	}
++
++	if (disposition_out) *disposition_out = disposition;
++	if (ref_count_out) *ref_count_out = ref_count;
++	if (object_id_out) *object_id_out = object_id;
++	if (offset_out) *offset_out = offset;
++	return KERN_SUCCESS;
++}
++
  kern_return_t mach_vm_page_info(vm_map_t map, mach_vm_address_t address, vm_page_info_flavor_t flavor, vm_page_info_t info, mach_msg_type_number_t* count) {
 -	dtape_stub_unsafe();
-+	// Page accounting is not implemented; let the caller handle unsupported queries.
-+	if (count) *count = 0;
-+	return KERN_NOT_SUPPORTED;
++	if (!count) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (map == VM_MAP_NULL || !info || flavor != VM_PAGE_INFO_BASIC ||
++	    (*count != VM_PAGE_INFO_BASIC_COUNT && *count != VM_PAGE_INFO_BASIC_COUNT - 1)) {
++		*count = 0;
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	vm_page_info_basic_data_t basic;
++	memset(&basic, 0, sizeof(basic));
++	dtape_query_page_basic(map, address, &basic.disposition, &basic.ref_count, &basic.object_id, &basic.offset);
++	basic.depth = 0;
++	memcpy(info, &basic, (*count) * sizeof(int));
++	return KERN_SUCCESS;
  };
  
  kern_return_t mach_vm_page_query(vm_map_t map, mach_vm_offset_t offset, int* disposition, int* ref_count) {
 -	dtape_stub_unsafe();
-+	// Page accounting is not implemented; let the caller handle unsupported queries.
 +	if (disposition) *disposition = 0;
 +	if (ref_count) *ref_count = 0;
-+	return KERN_NOT_SUPPORTED;
++	if (map == VM_MAP_NULL) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	return dtape_query_page_basic(map, offset, disposition, ref_count, NULL, NULL);
  };
  
  kern_return_t mach_vm_page_range_query(vm_map_t map, mach_vm_offset_t address, mach_vm_size_t size, mach_vm_address_t dispositions_addr, mach_vm_size_t* dispositions_count) {
 -	dtape_stub_unsafe();
-+	// Page accounting is not implemented; let the caller handle unsupported queries.
-+	if (dispositions_count) *dispositions_count = 0;
-+	return KERN_NOT_SUPPORTED;
++	if (!dispositions_count) {
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (map == VM_MAP_NULL) {
++		*dispositions_count = 0;
++		return KERN_INVALID_ARGUMENT;
++	}
++	if (size == 0 || *dispositions_count == 0) {
++		*dispositions_count = 0;
++		return KERN_SUCCESS;
++	}
++	if (address > UINT64_MAX - size) {
++		*dispositions_count = 0;
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	uint64_t page_size = (uint64_t)sysconf(_SC_PAGESIZE);
++	if (page_size == 0) {
++		page_size = 4096;
++	}
++	uint64_t page_mask = page_size - 1;
++	uint64_t start = address & ~page_mask;
++	uint64_t end = (address + size + page_mask) & ~page_mask;
++	if (end < start) {
++		*dispositions_count = 0;
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	uint64_t total_pages = (end - start) / page_size;
++	if (total_pages > *dispositions_count) {
++		total_pages = *dispositions_count;
++	}
++
++	int chunk[256];
++	uint64_t written = 0;
++	while (written < total_pages) {
++		uint64_t n = total_pages - written;
++		if (n > 256) {
++			n = 256;
++		}
++		for (uint64_t i = 0; i < n; i++) {
++			int disp = 0;
++			dtape_query_page_basic(map, start + (written + i) * page_size, &disp, NULL, NULL, NULL);
++			chunk[i] = disp;
++		}
++		if (copyoutmap(map, chunk, dispositions_addr + written * sizeof(int), (vm_size_t)(n * sizeof(int)))) {
++			*dispositions_count = written;
++			return KERN_INVALID_ADDRESS;
++		}
++		written += n;
++	}
++
++	*dispositions_count = written;
++	return KERN_SUCCESS;
  };
  
  kern_return_t mach_vm_protect(vm_map_t map, mach_vm_offset_t start, mach_vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection) {
-@@ -756,7 +1103,8 @@ region_info_out:
+@@ -756,7 +1273,8 @@ region_info_out:
  			return kr;
  		};
  		default:
@@ -1157,7 +1336,108 @@ index 3114947..20cd162 100644
  	}
  };
  
-@@ -856,7 +1204,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
+@@ -764,6 +1282,19 @@ kern_return_t mach_vm_region_recurse(vm_map_t map, mach_vm_address_t* address, m
+ 	kern_return_t kr = KERN_FAILURE;
+ 	dtape_memory_region_info_t region_info;
+ 
++	if (map == VM_MAP_NULL || !address || !size || !info || !infoCnt) {
++		return KERN_INVALID_ARGUMENT;
++	}
++
++	mach_msg_type_number_t requested_cnt = *infoCnt;
++	if (requested_cnt != VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 &&
++	    requested_cnt != VM_REGION_SUBMAP_INFO_V0_COUNT_64 &&
++	    requested_cnt != VM_REGION_SUBMAP_INFO_V1_COUNT_64 &&
++	    requested_cnt != VM_REGION_SUBMAP_INFO_V2_COUNT_64) {
++		dtape_stub_safe("unsupported structure size");
++		return KERN_INVALID_ARGUMENT;
++	}
++
+ 	if (depth != NULL) {
+ 		*depth = 0;
+ 	}
+@@ -773,7 +1304,7 @@ kern_return_t mach_vm_region_recurse(vm_map_t map, mach_vm_address_t* address, m
+ 	if (!dtape_hooks->task_get_memory_region_info(map->dtape_task->context, addr_to_check, &region_info)) {
+ 		addr_to_check = dtape_hooks->task_get_next_region(map->dtape_task->context, addr_to_check);
+ 		if (addr_to_check == 0) {
+-			kr = KERN_NO_SPACE;
++			kr = KERN_INVALID_ADDRESS;
+ 			goto out;
+ 		}
+ 		if (!dtape_hooks->task_get_memory_region_info(map->dtape_task->context, addr_to_check, &region_info)) {
+@@ -785,29 +1316,49 @@ kern_return_t mach_vm_region_recurse(vm_map_t map, mach_vm_address_t* address, m
+ 	*address = region_info.start_address;
+ 	*size = region_info.page_count * sysconf(_SC_PAGESIZE);
+ 
+-	if (*infoCnt == VM_REGION_SUBMAP_SHORT_INFO_COUNT_64) {
+-		vm_region_submap_info_64_t out = (vm_region_submap_info_64_t)info;
+-
+-		memset(out, 0, sizeof(*out));
+-
+-		if (region_info.protection & dtape_memory_protection_read) {
+-			out->protection |= VM_PROT_READ;
+-		}
+-		if (region_info.protection & dtape_memory_protection_write) {
+-			out->protection |= VM_PROT_WRITE;
+-		}
+-		if (region_info.protection & dtape_memory_protection_execute) {
+-			out->protection |= VM_PROT_EXECUTE;
+-		}
+-
+-		out->offset = region_info.map_offset;
+-		out->share_mode = region_info.shared ? SM_SHARED : SM_PRIVATE;
+-		out->max_protection = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
++	vm_prot_t prot = dtape_prot_from_region(region_info.protection);
++	vm_prot_t max_prot = dtape_max_prot_from_prot(prot);
++	vm_inherit_t inherit = region_info.shared ? VM_INHERIT_SHARE : VM_INHERIT_COPY;
++	unsigned char share_mode = region_info.shared ? SM_SHARED : SM_PRIVATE;
++	vm_object_id_t obj_id = (vm_object_id_t)(region_info.start_address >> 12);
++
++	if (requested_cnt == VM_REGION_SUBMAP_SHORT_INFO_COUNT_64) {
++		vm_region_submap_short_info_data_64_t out;
++		memset(&out, 0, sizeof(out));
++		out.protection = prot;
++		out.max_protection = max_prot;
++		out.inheritance = inherit;
++		out.offset = region_info.map_offset;
++		out.ref_count = 1;
++		out.share_mode = share_mode;
++		out.is_submap = FALSE;
++		out.behavior = VM_BEHAVIOR_DEFAULT;
++		out.object_id = (vm32_object_id_t)obj_id;
++		memcpy(info, &out, sizeof(out));
++		*infoCnt = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+ 	} else {
+-		// in the LKM, only VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 was implemented and everything was fine,
+-		// so it's fine to return KERN_INVALID_ARGUMENT here; log a message just in case, though.
+-		dtape_stub_safe("unsupported structure size");
+-		kr = KERN_INVALID_ARGUMENT;
++		vm_region_submap_info_data_64_t out;
++		memset(&out, 0, sizeof(out));
++		out.protection = prot;
++		out.max_protection = max_prot;
++		out.inheritance = inherit;
++		out.offset = region_info.map_offset;
++		out.pages_resident = (unsigned int)region_info.page_count;
++		out.ref_count = 1;
++		out.share_mode = share_mode;
++		out.is_submap = FALSE;
++		out.behavior = VM_BEHAVIOR_DEFAULT;
++		out.object_id = (vm32_object_id_t)obj_id;
++		out.object_id_full = obj_id;
++
++		size_t copy_bytes = VM_REGION_SUBMAP_INFO_V2_SIZE;
++		if (requested_cnt == VM_REGION_SUBMAP_INFO_V0_COUNT_64) {
++			copy_bytes = VM_REGION_SUBMAP_INFO_V0_SIZE;
++		} else if (requested_cnt == VM_REGION_SUBMAP_INFO_V1_COUNT_64) {
++			copy_bytes = VM_REGION_SUBMAP_INFO_V1_SIZE;
++		}
++		memcpy(info, &out, copy_bytes);
++		*infoCnt = requested_cnt;
+ 	}
+ 
+ 	kr = KERN_SUCCESS;
+@@ -856,7 +1407,7 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
  
  	src_existing_entry_count = dtape_map_find_shared_entries_locked(src_map, start_memaddr, map_size, src_existing_entries, sizeof(src_existing_entries) / sizeof(*src_existing_entries));
  
@@ -1166,7 +1446,7 @@ index 3114947..20cd162 100644
  		// special case for what LLDB does with dyld info
  		dtape_map_shared_descriptor_retain(src_existing_entries[0]->descriptor);
  		descriptor = src_existing_entries[0]->descriptor;
-@@ -1441,6 +1789,10 @@ mach_destroy_memory_entry(
+@@ -1441,6 +1992,10 @@ mach_destroy_memory_entry(
  	named_entry->ref_count -= 1;
  
  	if (named_entry->ref_count == 0) {
@@ -1177,7 +1457,7 @@ index 3114947..20cd162 100644
  		if (named_entry->is_sub_map) {
  			vm_map_deallocate(named_entry->backing.map);
  		} else if (named_entry->is_copy) {
-@@ -1456,6 +1808,9 @@ mach_destroy_memory_entry(
+@@ -1456,6 +2011,9 @@ mach_destroy_memory_entry(
  
  		named_entry_unlock(named_entry);
  		named_entry_lock_destroy(named_entry);
@@ -2036,7 +2316,7 @@ index 708f3f3..0052d2e 100644
  
  		bool sendMany(int socket);
 diff --git a/internal-include/darlingserver/process.hpp b/internal-include/darlingserver/process.hpp
-index c97be30..19b1f62 100644
+index c97be30..9b659de 100644
 --- a/internal-include/darlingserver/process.hpp
 +++ b/internal-include/darlingserver/process.hpp
 @@ -21,6 +21,8 @@
@@ -2064,7 +2344,7 @@ index c97be30..19b1f62 100644
  		EternalID _eid;
  		std::shared_ptr<FD> _pidfd;
  		mutable std::shared_mutex _rwlock;
-@@ -94,6 +98,13 @@ namespace DarlingServer {
+@@ -94,6 +98,14 @@ namespace DarlingServer {
  		std::shared_ptr<FD> _vchrootDescriptor;
  		dtape_task_t* _dtapeTask;
  		std::weak_ptr<Process> _parentProcess;
@@ -2074,11 +2354,12 @@ index c97be30..19b1f62 100644
 +		// reused descriptor number would hit an unrelated file.
 +		mutable std::mutex _mapsMutex;
 +		mutable int _mapsFd = -1;
++		mutable int _pagemapFd = -1;
 +		int _procmapQuery(uint64_t address, uint64_t flags, void* query) const;
  		bool _startSuspended = false;
  		bool _pendingReplacement = false;
  		std::unordered_map<uintptr_t, std::shared_ptr<Kqchan>> _kqchannels;
-@@ -102,6 +113,22 @@ namespace DarlingServer {
+@@ -102,6 +114,22 @@ namespace DarlingServer {
  		Architecture _architecture;
  		std::weak_ptr<Process> _tracerProcess;
  		std::string _executablePath;
@@ -2101,7 +2382,15 @@ index c97be30..19b1f62 100644
  		bool _dead = false;
  		std::shared_ptr<Process> _selfReference = nullptr;
  		std::vector<uint32_t> _groups;
-@@ -194,6 +221,22 @@ namespace DarlingServer {
+@@ -187,6 +215,7 @@ namespace DarlingServer {
+ 
+ 		MemoryInfo memoryInfo() const;
+ 		MemoryRegionInfo memoryRegionInfo(uintptr_t address) const;
++		bool queryPageInfo(uintptr_t pageAddress, uint64_t& pagemapEntry, bool& pagemapValid, bool& csValid) const;
+ 
+ 		std::shared_ptr<Process> tracerProcess() const;
+ 		bool setTracerProcess(std::shared_ptr<Process> tracerProcess);
+@@ -194,6 +223,22 @@ namespace DarlingServer {
  		std::string executablePath() const;
  		void setExecutablePath(std::string path);
  
@@ -4006,7 +4295,7 @@ index 414c1d6..5799721 100644
 +	}
 +};
 diff --git a/src/process.cpp b/src/process.cpp
-index 9cd7b81..f6b87cf 100644
+index 9cd7b81..925b0f1 100644
 --- a/src/process.cpp
 +++ b/src/process.cpp
 @@ -25,17 +25,34 @@
@@ -4095,7 +4384,7 @@ index 9cd7b81..f6b87cf 100644
  #if __x86_64__
  	_architecture = Architecture::x86_64;
  #elif __i386__
-@@ -109,6 +146,10 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
+@@ -109,6 +146,14 @@ DarlingServer::Process::Process(KernelProcessConstructorTag tag):
  
  DarlingServer::Process::~Process() {
  	processLog.info() << *this << ": process being destroyed" << processLog.endLog;
@@ -4103,10 +4392,14 @@ index 9cd7b81..f6b87cf 100644
 +		close(_mapsFd);
 +		_mapsFd = -1;
 +	}
++	if (_pagemapFd >= 0) {
++		close(_pagemapFd);
++		_pagemapFd = -1;
++	}
  };
  
  DarlingServer::Process::ID DarlingServer::Process::id() const {
-@@ -221,6 +262,20 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -221,6 +266,20 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  		return false;
  	}
  
@@ -4127,7 +4420,7 @@ index 9cd7b81..f6b87cf 100644
  	local.iov_base = localBuffer;
  	local.iov_len = length;
  
-@@ -245,6 +300,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
+@@ -245,6 +304,44 @@ bool DarlingServer::Process::_readOrWriteMemory(bool isWrite, uintptr_t remoteAd
  			<< strerror(code)
  			<< ")"
  			<< processMemoryAccessLog.endLog;
@@ -4172,7 +4465,7 @@ index 9cd7b81..f6b87cf 100644
  		if (errorCode) {
  			*errorCode = code;
  		}
-@@ -278,11 +371,26 @@ bool DarlingServer::Process::writeMemory(uintptr_t remoteAddress, const void* lo
+@@ -278,11 +375,26 @@ bool DarlingServer::Process::writeMemory(uintptr_t remoteAddress, const void* lo
  	return _readOrWriteMemory(true, remoteAddress, const_cast<void*>(localBuffer), length, errorCode);
  };
  
@@ -4199,7 +4492,7 @@ index 9cd7b81..f6b87cf 100644
  	if (didExec) {
  		// exec case
  
-@@ -369,7 +477,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
+@@ -369,7 +481,18 @@ void DarlingServer::Process::notifyCheckin(Architecture architecture) {
  	} else {
  		// notify the parent process (if we have one) that we've arrived
  		if (auto parent = _parentProcess.lock()) {
@@ -4219,7 +4512,7 @@ index 9cd7b81..f6b87cf 100644
  			parent->_notifyListeningKqchannels(NOTE_FORK, nsid());
  		}
  	}
-@@ -465,7 +584,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
+@@ -465,7 +588,106 @@ DarlingServer::Process::MemoryInfo DarlingServer::Process::memoryInfo() const {
  	return info;
  };
  
@@ -4327,7 +4620,7 @@ index 9cd7b81..f6b87cf 100644
  
  DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInfo(uintptr_t address) const {
  	if (isDead()) {
-@@ -473,31 +691,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+@@ -473,31 +695,55 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
  	}
  
  	MemoryRegionInfo info;
@@ -4390,7 +4683,64 @@ index 9cd7b81..f6b87cf 100644
  
  		info.protection = 0;
  
-@@ -607,6 +849,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
+@@ -520,6 +766,56 @@ DarlingServer::Process::MemoryRegionInfo DarlingServer::Process::memoryRegionInf
+ 	throw std::system_error(EFAULT, std::generic_category());
+ };
+ 
++bool DarlingServer::Process::queryPageInfo(uintptr_t pageAddress, uint64_t& pagemapEntry, bool& pagemapValid, bool& csValid) const {
++	pagemapEntry = 0;
++	pagemapValid = false;
++	csValid = false;
++
++	if (isDead()) {
++		return false;
++	}
++
++	{
++		std::shared_lock lock(_csMutex);
++		csValid = (_csState.flags & DC_CS_VALID) != 0;
++	}
++
++	long pageSize = sysconf(_SC_PAGESIZE);
++	if (pageSize <= 0) {
++		pageSize = 4096;
++	}
++	uint64_t vpn = static_cast<uint64_t>(pageAddress) / static_cast<uint64_t>(pageSize);
++	if (vpn > static_cast<uint64_t>(INT64_MAX) / sizeof(uint64_t)) {
++		return true;
++	}
++	off_t offset = static_cast<off_t>(vpn * sizeof(uint64_t));
++
++	std::lock_guard<std::mutex> lock(_mapsMutex);
++	for (int attempt = 0; attempt < 2; ++attempt) {
++		bool fresh = false;
++		if (_pagemapFd < 0) {
++			_pagemapFd = open(("/proc/" + std::to_string(_pid) + "/pagemap").c_str(), O_RDONLY | O_CLOEXEC);
++			if (_pagemapFd < 0) {
++				return true;
++			}
++			fresh = true;
++		}
++		uint64_t entry = 0;
++		ssize_t n = pread(_pagemapFd, &entry, sizeof(entry), offset);
++		if (n == static_cast<ssize_t>(sizeof(entry))) {
++			pagemapEntry = entry;
++			pagemapValid = true;
++			return true;
++		}
++		close(_pagemapFd);
++		_pagemapFd = -1;
++		if (fresh) {
++			return true;
++		}
++	}
++	return true;
++};
++
+ #if DSERVER_EXTENDED_DEBUG
+ 
+ void DarlingServer::Process::_registerName(uint32_t name, uintptr_t pointer) {
+@@ -607,6 +903,126 @@ void DarlingServer::Process::setExecutablePath(std::string path) {
  	_executablePath = std::move(path);
  };
  
@@ -4517,7 +4867,7 @@ index 9cd7b81..f6b87cf 100644
  uintptr_t DarlingServer::Process::allocatePages(size_t pageCount, int protection, uintptr_t addressHint, bool fixed, bool overwrite) {
  	auto thread = _pickS2CThread();
  
-@@ -657,27 +1019,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
+@@ -657,27 +1073,38 @@ void DarlingServer::Process::syncMemory(uintptr_t address, size_t size, int sync
  	return thread->syncMemory(address, size, sync_flags);
  };
  
@@ -4564,7 +4914,7 @@ index 9cd7b81..f6b87cf 100644
  			continue;
  		}
 diff --git a/src/server.cpp b/src/server.cpp
-index e502e28..68368e1 100644
+index e502e28..8cc3b39 100644
 --- a/src/server.cpp
 +++ b/src/server.cpp
 @@ -28,10 +28,14 @@
@@ -4730,7 +5080,30 @@ index e502e28..68368e1 100644
  	};
  
  	static bool dtape_hook_task_get_memory_region_info(void* task_context, uintptr_t address, dtape_memory_region_info_t* memory_region_info) {
-@@ -392,6 +495,7 @@ struct DTapeHooks {
+@@ -305,6 +408,22 @@ struct DTapeHooks {
+ 		return true;
+ 	};
+ 
++	static bool dtape_hook_task_get_page_info(void* task_context, uintptr_t page_address, dtape_page_info_t* page_info) {
++		if (!task_context || !page_info) {
++			return false;
++		}
++		uint64_t entry = 0;
++		bool pagemap_valid = false;
++		bool cs_valid = false;
++		if (!static_cast<DarlingServer::Process*>(task_context)->queryPageInfo(page_address, entry, pagemap_valid, cs_valid)) {
++			return false;
++		}
++		page_info->pagemap_entry = entry;
++		page_info->pagemap_valid = pagemap_valid;
++		page_info->cs_valid = cs_valid;
++		return true;
++	};
++
+ 	static uintptr_t dtape_hook_task_allocate_pages(void* task_context, size_t page_count, int protection, uintptr_t address_hint, dtape_memory_flags_t flags) {
+ 		try {
+ 			return static_cast<DarlingServer::Process*>(task_context)->allocatePages(page_count, protection, address_hint, flags & dtape_memory_flag_fixed, flags & dtape_memory_flag_overwrite);
+@@ -392,6 +511,7 @@ struct DTapeHooks {
  		.timer_arm = dtape_hook_timer_arm,
  
  		.log = dtape_hook_log,
@@ -4738,7 +5111,7 @@ index e502e28..68368e1 100644
  		.get_load_info = dtape_hook_get_load_info,
  
  		.thread_suspend = dtape_hook_thread_suspend,
-@@ -416,6 +520,7 @@ struct DTapeHooks {
+@@ -416,9 +536,11 @@ struct DTapeHooks {
  		.task_read_memory = dtape_hook_task_read_memory,
  		.task_write_memory = dtape_hook_task_write_memory,
  		.task_lookup = dtape_hook_task_lookup,
@@ -4746,7 +5119,11 @@ index e502e28..68368e1 100644
  		.task_lookup_eternal = dtape_hook_task_lookup_eternal,
  		.task_get_memory_info = dtape_hook_task_get_memory_info,
  		.task_get_memory_region_info = dtape_hook_task_get_memory_region_info,
-@@ -440,10 +545,35 @@ struct DTapeHooks {
++		.task_get_page_info = dtape_hook_task_get_page_info,
+ 		.task_allocate_pages = dtape_hook_task_allocate_pages,
+ 		.task_free_pages = dtape_hook_task_free_pages,
+ 		.task_map_file = dtape_hook_task_map_file,
+@@ -440,10 +562,35 @@ struct DTapeHooks {
  
  DarlingServer::Server::Server(std::string prefix):
  	_prefix(prefix),
@@ -4784,7 +5161,7 @@ index e502e28..68368e1 100644
  
  	// remove the old socket (if it exists)
  	unlink(_socketPath.c_str());
-@@ -479,21 +609,32 @@ DarlingServer::Server::Server(std::string prefix):
+@@ -479,21 +626,32 @@ DarlingServer::Server::Server(std::string prefix):
  	}
  
  	struct epoll_event settings;
@@ -4822,7 +5199,7 @@ index e502e28..68368e1 100644
  		// we don't really have to worry about the eventfd overflowing;
  		// if it does, that means the main loop has been waiting a LONG time for the listener socket to become writable again.
  		// in that case, we don't really care if the eventfd is being incremented; we can't send anything anyways.
-@@ -529,9 +670,34 @@ void DarlingServer::Server::start() {
+@@ -529,9 +687,34 @@ void DarlingServer::Server::start() {
  	// force the kernel process to be created now
  	Process::kernelProcess();
  
@@ -4857,7 +5234,7 @@ index e502e28..68368e1 100644
  	while (true) {
  		if (_canRead) {
  			_canRead = _inbox.receiveMany(_listenerSocket);
-@@ -540,25 +706,40 @@ void DarlingServer::Server::start() {
+@@ -540,25 +723,40 @@ void DarlingServer::Server::start() {
  				// TODO: this could be done concurrently
  				auto call = DarlingServer::Call::callFromMessage(std::move(*msg));
  				if (call) {
@@ -4907,7 +5284,7 @@ index e502e28..68368e1 100644
  		}
  
  		struct epoll_event events[16];
-@@ -572,66 +753,7 @@ void DarlingServer::Server::start() {
+@@ -572,66 +770,7 @@ void DarlingServer::Server::start() {
  			throw std::system_error(errno, std::generic_category(), "Failed to wait on epoll context");
  		}
  
@@ -4975,7 +5352,7 @@ index e502e28..68368e1 100644
  
  		// as our final job on this wakeup, clear the list of monitors waiting to be removed.
  		// this will destroy those references, possibly causing the monitors to be deallocated.
-@@ -653,6 +775,91 @@ void DarlingServer::Server::start() {
+@@ -653,6 +792,91 @@ void DarlingServer::Server::start() {
  	dtape_deinit();
  };
  
@@ -5067,7 +5444,7 @@ index e502e28..68368e1 100644
  void DarlingServer::Server::monitorProcess(std::shared_ptr<Process> process) {
  	// the this-capture here is safe because the Server will always out-live everything else
  	std::weak_ptr<Process> weakProcess = process;
-@@ -681,13 +888,287 @@ std::string DarlingServer::Server::prefix() const {
+@@ -681,13 +905,287 @@ std::string DarlingServer::Server::prefix() const {
  };
  
  void DarlingServer::Server::_worker(std::shared_ptr<Thread> thread) {
@@ -5356,7 +5733,7 @@ index e502e28..68368e1 100644
  void DarlingServer::Server::addMonitor(std::shared_ptr<Monitor> monitor) {
  	bool valid = true;
  
-@@ -815,5 +1296,22 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
+@@ -815,5 +1313,22 @@ std::shared_ptr<DarlingServer::FD> DarlingServer::Monitor::fd() const {
  };
  
  void DarlingServer::Server::sendMessage(Message&& message) {
@@ -9849,3 +10226,20 @@ index 0000000..6dd46c4
 +}
 +
 +#endif /* DTAPE_KEXT_INFO_STANDALONE */
+diff --git a/duct-tape/include/darlingserver/duct-tape/types.h b/duct-tape/include/darlingserver/duct-tape/types.h
+index b53134d..d1aad40 100644
+--- a/duct-tape/include/darlingserver/duct-tape/types.h
++++ b/duct-tape/include/darlingserver/duct-tape/types.h
+@@ -51,6 +51,12 @@ typedef struct dtape_memory_region_info {
+ 	bool shared;
+ } dtape_memory_region_info_t;
+ 
++typedef struct dtape_page_info {
++	uint64_t pagemap_entry;
++	bool pagemap_valid;
++	bool cs_valid;
++} dtape_page_info_t;
++
+ typedef enum dtape_memory_flags {
+ 	dtape_memory_flag_none = 0,
+ 	dtape_memory_flag_fixed = 1ULL << 0,
