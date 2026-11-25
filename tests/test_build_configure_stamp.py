@@ -33,6 +33,24 @@ def build_fixture(root):
     cache = base / 'build/CMakeCache.txt'
     cache.parent.mkdir(parents=True)
     cache.write_text('CMAKE_BUILD_TYPE:STRING=\nENABLE_METAL:BOOL=ON\n')
+    # A patched submodule, the way the indium patch leaves one behind: the
+    # superproject records a gitlink and only reports it as dirty.
+    nested = base / 'src/external/demo'
+    nested.mkdir(parents=True)
+    git(nested, 'init', '-q')
+    (nested / 'CMakeLists.txt').write_text('project(nested)\n')
+    (nested / 'src.c').write_text('int demo(void) { return 0; }\n')
+    git(nested, 'add', 'CMakeLists.txt', 'src.c')
+    git(nested, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid',
+        'commit', '-q', '-m', 'nested fixture')
+    commit = subprocess.run(
+        ['git', '-C', str(nested), 'rev-parse', 'HEAD'], check=True,
+        capture_output=True, text=True).stdout.strip()
+    subprocess.run(
+        ['git', '-C', str(base), 'update-index', '--add', '--cacheinfo',
+         '160000,%s,src/external/demo' % commit], check=True, capture_output=True)
+    git(base, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid',
+        'commit', '-q', '-m', 'add the submodule fixture')
     return root
 
 
@@ -83,8 +101,23 @@ class ConfigureStampTests(unittest.TestCase):
         # CMakeLists.txt, so make's own timestamp check cannot see it.
         self.assertEqual(0, self.record())
         added = self.root / 'build/darling-src/src/added.c'
-        added.parent.mkdir(parents=True)
+        added.parent.mkdir(parents=True, exist_ok=True)
         added.write_text('int added(void) { return 0; }\n')
+        self.assertEqual(1, self.check())
+
+    def test_patch_added_file_in_a_submodule_reconfigures(self):
+        # The indium patch adds files inside a submodule; the superproject only
+        # reports the submodule as dirty, so the digest has to descend into it.
+        self.assertEqual(0, self.record())
+        added = self.root / 'build/darling-src/src/external/demo/src/added.c'
+        added.parent.mkdir(parents=True, exist_ok=True)
+        added.write_text('int added(void) { return 0; }\n')
+        self.assertEqual(1, self.check())
+
+    def test_changed_file_in_a_submodule_reconfigures(self):
+        self.assertEqual(0, self.record())
+        changed = self.root / 'build/darling-src/src/external/demo/src.c'
+        changed.write_text('int demo(void) { return 1; }\n')
         self.assertEqual(1, self.check())
 
     def test_missing_cache_cannot_be_recorded(self):
