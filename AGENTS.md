@@ -92,7 +92,6 @@ guest probes; do not run the guest probes on your own.
 | `docs/SETUP.md`, `docs/TROUBLESHOOTING.md`, `scripts/run.sh`, `tools/run-riot-client.sh` | **Setup, launch and flags**: before changing build, install, launch or environment behavior. |
 | `scripts/README.md` | **Scripts overview**: before changing or adding a host entry point. |
 | `docs/TESTING.md`, `tests`, `.github/workflows/source-check.yml` | **Tests and probes**: before writing or running tests. |
-| `docs/AGENT-DIAGNOSTICS.md` | **Live guest diagnostics**: before debugging a guest window, a black game window, a display-mode change or pointer mapping. |
 | `docs/STATUS.md`, `docs/COMPATIBILITY.md` | **Current status**: when you need what works or what was measured. |
 | `docs/NIX.md`, `docs/PACKAGING.md`, `flake.nix`, `scripts/nix-state.py` | **Nix and rootless runtime**: before touching the flake or the namespace lifecycle. |
 | `patches`, `upstream/manifest.json`, `scripts/prepare.py` | **Patches and upstream**: before changing a patch or a pinned revision. |
