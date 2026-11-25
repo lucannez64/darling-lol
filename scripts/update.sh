@@ -2,6 +2,8 @@
 # Bring an existing build and installation up to date after `git pull`: re-apply the patches that changed
 # (prepare.py reverts the earlier version it finds applied), rebuild incrementally, and reinstall the base
 # runtime, and the per-user overrides. Run it after manually closing Riot/League.
+# A Toolbox install re-enters the container recorded at install time and stops it again when this run
+# started or restarted it.
 # Without arguments background steps use a progress spinner and an update log;
 # --verbose streams that output to the terminal instead.
 # Rootless callers must remain in their original namespace; the outer launcher
@@ -13,6 +15,9 @@ cd "$repo"
 VERBOSE=0
 BG_PID=''
 LOG=''
+# Toolbox container this run started (or restarted); the EXIT trap stops it so
+# a one-shot update does not leave a container running behind.
+TOOLBOX_STOP=''
 
 usage() {
 	printf '%s\n' \
@@ -132,6 +137,10 @@ cleanup() {
 		fi
 		wait "$BG_PID" 2>/dev/null || true
 		BG_PID=''
+	fi
+	if [ -n "$TOOLBOX_STOP" ]; then
+		stop_toolbox_container "$TOOLBOX_STOP" || true
+		TOOLBOX_STOP=''
 	fi
 	if [ -t 1 ]; then
 		printf '\033[?25h'
@@ -371,29 +380,10 @@ toolbox_pid_in_container() {
 
 restart_toolbox_container() {
 	container=$1
-	if ! podman stop --time 10 "$container" >/dev/null 2>&1; then
-		# Rootless podman signals the container through its runtime. When that
-		# pidfd signal is refused (`operation not permitted`, seen when a
-		# container's user namespace outlived a suspend) the host can still
-		# signal the recorded init PID, as `podman stop` would, once that PID is
-		# confirmed to still belong to the container.
-		pid=$(podman container inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)
-		case "$pid" in
-		'' | 0 | *[!0-9]*) ;;
-		*)
-			if ! toolbox_pid_in_container "$container" "$pid"; then
-				warning "Podman could not stop Toolbox container '$container', and PID $pid no longer belongs to it; not signaling it."
-				return 1
-			fi
-			warning "Podman could not stop Toolbox container '$container'; signaling PID $pid."
-			kill -TERM "$pid" 2>/dev/null || true
-			attempt=0
-			while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
-				sleep 1
-				attempt=$((attempt + 1))
-			done
-			;;
-		esac
+	status=0
+	stop_toolbox_podman "$container" || status=$?
+	if [ "$status" -eq 1 ]; then
+		return 1
 	fi
 	attempt=0
 	until podman start "$container" >/dev/null 2>&1; do
@@ -404,6 +394,52 @@ restart_toolbox_container() {
 		fi
 		sleep 1
 	done
+}
+
+# Rootless podman signals the container through its runtime. When that pidfd
+# signal is refused (`operation not permitted`, seen when a container's user
+# namespace outlived a suspend) the host can still signal the recorded init
+# PID, as `podman stop` would, once that PID is confirmed to belong to the
+# container. Exit status: 0 when the stop was attempted, 1 when the recorded
+# PID is not the container's, and 2 when `podman stop` failed and no usable PID
+# could be found.
+stop_toolbox_podman() {
+	container=$1
+	podman stop --time 10 "$container" >/dev/null 2>&1 && return 0
+	pid=$(podman container inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)
+	case "$pid" in
+	'' | 0 | *[!0-9]*) return 2 ;;
+	esac
+	if ! toolbox_pid_in_container "$container" "$pid"; then
+		warning "Podman could not stop Toolbox container '$container', and PID $pid no longer belongs to it; not signaling it."
+		return 1
+	fi
+	warning "Podman could not stop Toolbox container '$container'; signaling PID $pid."
+	kill -TERM "$pid" 2>/dev/null || true
+	attempt=0
+	while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	return 0
+}
+
+# A container this update started or restarted is not needed once the update
+# ends, so take it back down instead of leaving conmon and the container init
+# running. A container that was already reachable belongs to a session the
+# user opened, and the caller never asks for it to be stopped.
+stop_toolbox_container() {
+	container=$1
+	command -v podman >/dev/null 2>&1 || return 0
+	info "Stopping Toolbox container '$container'..."
+	status=0
+	stop_toolbox_podman "$container" || status=$?
+	if [ "$status" -eq 0 ]; then
+		success "Stopped Toolbox container '$container'"
+		return 0
+	fi
+	warning "Podman could not stop Toolbox container '$container'; it is still running."
+	return 1
 }
 
 # The install steps shut Darling down and stop leftover Riot processes, so
@@ -537,12 +573,25 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 		name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
 			sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
 	fi
+	# A container this run starts or restarts is stopped again when the update
+	# ends. One that is already reachable stays up: it belongs to a session the
+	# user opened, and stopping it would end that shell.
+	stop_container=0
+	if [ -n "$name" ]; then
+		toolbox_container_running "$name" || stop_container=1
+	fi
 	# No record of any kind: only a legacy checkout can be assumed to live in the
 	# installer's default container. This probe also starts a stopped container,
 	# so it must not decide for checkouts that are already recorded above.
-	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 &&
-		toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
-		name=darling-lol
+	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1; then
+		if toolbox_container_running darling-lol; then
+			stop_container=0
+		else
+			stop_container=1
+		fi
+		if toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+			name=darling-lol
+		fi
 	fi
 	if [ -n "$name" ]; then
 		if ! command -v toolbox >/dev/null 2>&1; then
@@ -621,13 +670,24 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 				fi
 				sleep 1
 			done
+			# This run recovered the container, so it stops it again below.
+			stop_container=1
 		fi
 		info "Toolbox install detected; running the update inside container '$name'..."
-		if [ "$VERBOSE" = 1 ]; then
-			exec toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 \
-				sh "$repo/scripts/update.sh" --verbose
+		if [ "$stop_container" = 1 ]; then
+			TOOLBOX_STOP=$name
 		fi
-		exec toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 sh "$repo/scripts/update.sh"
+		# Keep the inner run's status: a failed update must not look successful
+		# here, and the EXIT trap stops the container either way.
+		rc=0
+		if [ "$VERBOSE" = 1 ]; then
+			toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 \
+				sh "$repo/scripts/update.sh" --verbose || rc=$?
+		else
+			toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 \
+				sh "$repo/scripts/update.sh" || rc=$?
+		fi
+		exit "$rc"
 	fi
 fi
 

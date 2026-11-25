@@ -38,7 +38,9 @@ case "${1:-}" in
       exit 0
     fi
     [ "${FAKE_TOOLBOX_CONTAINER_OK:-0}" = 1 ] || exit 1
+    printf 1 > "${FAKE_TOOLBOX_LOG}.started"
     ;;
+  env) [ "${FAKE_TOOLBOX_REEXEC_FAIL:-0}" != 1 ] || exit 1 ;;
   sh) [ "${FAKE_TOOLBOX_HAS_DARLING:-0}" = 1 ] || exit 1 ;;
 esac
 exit 0
@@ -52,7 +54,14 @@ printf '%s\\n' "$*" >> "${FAKE_PODMAN_LOG:?}"
 case "${1:-}" in container) shift ;; esac
 case "${1:-}" in
   inspect)
-    [ "${FAKE_PODMAN_RUNNING:-0}" = 1 ] || exit 1
+    running="${FAKE_PODMAN_RUNNING:-0}"
+    # FAKE_PODMAN_STARTS=1: the container counts as running only after a
+    # `toolbox run` started it, so a stop can fail after the update.
+    if [ "$running" != 1 ] && [ "${FAKE_PODMAN_STARTS:-0}" = 1 ] &&
+       [ -f "${FAKE_TOOLBOX_LOG}.started" ]; then
+      running=1
+    fi
+    [ "$running" = 1 ] || exit 1
     case "${3:-}" in
       *State.Pid*) printf '%s\\n' "${FAKE_PODMAN_PID:-0}" ;;
       *State.ConmonPid*) printf '%s\\n' "${FAKE_PODMAN_CONMON_PID:-0}" ;;
@@ -353,8 +362,9 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('is not reachable. Start it and continue the update?',
                       result.stdout)
         self.assertIn("Starting Toolbox container 'gone'", result.stdout)
-        self.assertNotIn('stop --time 10 gone', self.podman_lines())
         self.assertNotIn('start gone', self.podman_lines())
+        # The update started it, so it stops it again once the work is done.
+        self.assertEqual(self.podman_lines().count('stop --time 10 gone'), 1)
         self.assert_reexec_into('gone')
 
     def test_running_container_that_never_recovers_hints_a_restart(self):
@@ -577,6 +587,56 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f'{REEXEC_ARGV.format(name="mycont", repo=self.repo)} --verbose',
                       self.argv_lines())
+
+    def test_container_started_for_the_update_is_stopped_afterwards(self):
+        self.write_marker('mycont')
+        result = self.run_update(FAKE_TOOLBOX_CONTAINER_OK='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_reexec_into('mycont')
+        self.assertIn("Stopping Toolbox container 'mycont'", result.stdout)
+        self.assertIn('Stopped Toolbox container', result.stdout)
+        self.assertEqual(self.podman_lines().count('stop --time 10 mycont'), 1)
+
+    def test_container_already_running_is_left_running(self):
+        self.write_marker('mycont')
+        result = self.run_update(FAKE_TOOLBOX_CONTAINER_OK='1',
+                                 FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_reexec_into('mycont')
+        self.assertNotIn('stop --time 10 mycont', self.podman_lines())
+        self.assertNotIn('Stopping Toolbox container', result.stdout)
+
+    def test_failed_update_still_stops_the_container_it_started(self):
+        self.write_marker('mycont')
+        result = self.run_update(FAKE_TOOLBOX_CONTAINER_OK='1',
+                                 FAKE_TOOLBOX_REEXEC_FAIL='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.podman_lines().count('stop --time 10 mycont'), 1)
+        self.assertIn('Stopped Toolbox container', result.stdout)
+
+    def test_stop_failure_warns_without_changing_the_update_status(self):
+        self.write_marker('mycont')
+        result = self.run_update(FAKE_TOOLBOX_CONTAINER_OK='1',
+                                 FAKE_PODMAN_STOP_FAIL='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not stop Toolbox container 'mycont'; it is still running",
+                      result.stderr)
+
+    def test_final_stop_signals_the_init_pid_when_podman_refuses(self):
+        self.write_marker('mycont')
+        # The container is started by the update, so the final stop runs; the
+        # `operation not permitted` refusal is recovered the same way as a
+        # restart, through the recorded init PID.
+        victim, overrides = self.stop_failure_victim(
+            cgroup=f'0::/user.slice/user@1000.service/user.slice/libpod-{self.CONTAINER_ID}.scope/container')
+        overrides.pop('FAKE_PODMAN_RUNNING')
+        overrides.pop('FAKE_TOOLBOX_STOPPED')
+        overrides.update(FAKE_PODMAN_STARTS='1', FAKE_TOOLBOX_CONTAINER_OK='1')
+        result = self.run_update(**overrides)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'signaling PID {victim.pid}', result.stderr)
+        self.assertIn("Stopped Toolbox container 'mycont'", result.stdout)
+        self.assertEqual(victim.wait(timeout=5), -signal.SIGTERM)
 
     def test_help_exits_without_touching_the_container(self):
         result = self.run_update('--help')
