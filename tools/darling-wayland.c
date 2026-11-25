@@ -2113,6 +2113,7 @@ static int dwl_repeat_timeout_ms(void) {
     for (size_t i = 0; i < g.window_count; i++) {
         uint64_t ns = g.windows[i]->feedback ? timing_now_ns() : 0;
         for (struct presentation_pending *p = g.windows[i]->feedback; p; p = p->next) {
+            if (p->failed_swap) continue;
             int64_t d = p->expires_ns > ns ? (int64_t)((p->expires_ns - ns + 999999) / 1000000) : 0;
             if (!have || d < best) best = d;
             have = true;

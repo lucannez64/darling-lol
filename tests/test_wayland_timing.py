@@ -241,6 +241,14 @@ int main(void) {
         dwl_window_invalidate_timing(w->id);
     }
     assert(requests == request_count+8 && w->feedback_count == 8);
+    assert(dwl_repeat_timeout_ms() == -1);
+    token = dwl_presentation_begin(windows[1]->id,windows[1]->surface_generation);
+    dwl_presentation_end(windows[1]->id,token,1);
+    assert(dwl_repeat_timeout_ms() > 0);
+    synthetic_now = windows[1]->feedback->expires_ns;
+    assert(dwl_repeat_timeout_ms() == 0);
+    timing_expire(windows[1],synthetic_now);
+    assert(dwl_repeat_timeout_ms() == -1 && w->feedback_count == 8);
     while (w->feedback) timing_discarded(w->feedback,w->feedback->feedback);
     /* Late delivery from an older generation is ignored. */
     token = dwl_presentation_begin(w->id,w->surface_generation);
