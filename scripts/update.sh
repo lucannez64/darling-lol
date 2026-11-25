@@ -315,17 +315,54 @@ toolbox_container_running() {
 	[ "$(podman container inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]
 }
 
+# The PID podman recorded for a container can be stale after a suspend and
+# reused by an unrelated process of this user. Only accept it while it still
+# runs in the container's cgroup, or while its parent is the container's conmon.
+toolbox_pid_in_container() {
+	container=$1
+	pid=$2
+	proc=${UPDATE_PROC_ROOT:-/proc}
+	id=$(podman container inspect --format '{{.Id}}' "$container" 2>/dev/null || true)
+	case "$id" in
+	'' | *[!0-9a-f]*) ;;
+	*)
+		if [ "${#id}" -eq 64 ] && grep -qF -- "$id" "$proc/$pid/cgroup" 2>/dev/null; then
+			return 0
+		fi
+		;;
+	esac
+	conmon=$(podman container inspect --format '{{.State.ConmonPid}}' "$container" 2>/dev/null || true)
+	case "$conmon" in
+	'' | 0 | *[!0-9]*) return 1 ;;
+	esac
+	# The parent PID is field 4 of stat; the command name before it is in
+	# parentheses and may itself contain spaces or parentheses.
+	stat=$(cat "$proc/$pid/stat" 2>/dev/null) || return 1
+	rest=${stat##*\)}
+	rest=${rest# }
+	rest=${rest#* }
+	ppid=${rest%% *}
+	[ "$ppid" = "$conmon" ] || return 1
+	comm=$(cat "$proc/$conmon/comm" 2>/dev/null) || return 1
+	[ "$comm" = conmon ]
+}
+
 restart_toolbox_container() {
 	container=$1
 	if ! podman stop --time 10 "$container" >/dev/null 2>&1; then
 		# Rootless podman signals the container through its runtime. When that
 		# pidfd signal is refused (`operation not permitted`, seen when a
 		# container's user namespace outlived a suspend) the host can still
-		# signal the recorded init PID, as `podman stop` would.
+		# signal the recorded init PID, as `podman stop` would, once that PID is
+		# confirmed to still belong to the container.
 		pid=$(podman container inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)
 		case "$pid" in
 		'' | 0 | *[!0-9]*) ;;
 		*)
+			if ! toolbox_pid_in_container "$container" "$pid"; then
+				warning "Podman could not stop Toolbox container '$container', and PID $pid no longer belongs to it; not signaling it."
+				return 1
+			fi
 			warning "Podman could not stop Toolbox container '$container'; signaling PID $pid."
 			kill -TERM "$pid" 2>/dev/null || true
 			attempt=0
@@ -540,7 +577,11 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			fi
 			if [ "$action" = Restart ]; then
 				info "Restarting Toolbox container '$name'..."
-				restart_toolbox_container "$name"
+				if ! restart_toolbox_container "$name"; then
+					error "Toolbox container '$name' could not be stopped."
+					printf '  Stop it by hand, then run the update again: podman stop %s\n' "$name" >&2
+					exit 1
+				fi
 			else
 				info "Starting Toolbox container '$name'..."
 			fi

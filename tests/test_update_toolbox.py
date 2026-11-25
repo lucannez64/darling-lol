@@ -55,6 +55,8 @@ case "${1:-}" in
     [ "${FAKE_PODMAN_RUNNING:-0}" = 1 ] || exit 1
     case "${3:-}" in
       *State.Pid*) printf '%s\\n' "${FAKE_PODMAN_PID:-0}" ;;
+      *State.ConmonPid*) printf '%s\\n' "${FAKE_PODMAN_CONMON_PID:-0}" ;;
+      *.Id*) printf '%s\\n' "${FAKE_PODMAN_ID:-}" ;;
       *) printf 'true\\n' ;;
     esac
     ;;
@@ -355,23 +357,95 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('podman restart stuck', result.stderr)
         self.assert_no_reexec()
 
-    def test_stop_failure_falls_back_to_signaling_the_recorded_pid(self):
-        self.write_marker('stuck')
-        # Keep the retry delay out of the test, and give the updater a real
-        # process that its SIGTERM fallback can stop.
+    CONTAINER_ID = 'c0ffee' * 10 + 'beef'
+    CONMON_PID = 4100
+
+    def stop_failure_victim(self, cgroup='0::/user.slice/app.slice/app-browser.scope',
+                            comm='sleep', ppid=1, conmon_comm='conmon'):
+        """Start a real process standing in for the PID podman recorded.
+
+        Its ownership is answered from a fake proc root: the cgroup it runs
+        in, its parent and the parent's command name. Return the victim and
+        the overrides that make podman report it with a failing stop.
+        """
+        # Keep the retry delay out of the test.
         self.stub(self.bindir / 'sleep', 'exit 0')
         victim = subprocess.Popen(['sleep', '30'])
         self.addCleanup(victim.wait)
         self.addCleanup(victim.kill)
-        result = self.run_update_in_terminal(
-            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
-            FAKE_PODMAN_STOP_FAIL='1', FAKE_PODMAN_PID=str(victim.pid))
+        proc = self.folder / 'proc'
+        entry = proc / str(victim.pid)
+        entry.mkdir(parents=True)
+        (entry / 'cgroup').write_text(cgroup + '\n')
+        (entry / 'stat').write_text(f'{victim.pid} ({comm}) S {ppid} {ppid} 1 0 -1\n')
+        conmon = proc / str(self.CONMON_PID)
+        conmon.mkdir()
+        (conmon / 'comm').write_text(conmon_comm + '\n')
+        return victim, dict(
+            FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            FAKE_PODMAN_STOP_FAIL='1', FAKE_PODMAN_PID=str(victim.pid),
+            FAKE_PODMAN_ID=self.CONTAINER_ID,
+            FAKE_PODMAN_CONMON_PID=str(self.CONMON_PID),
+            UPDATE_PROC_ROOT=str(proc))
+
+    def assert_victim_left_alone(self, victim, result):
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f'PID {victim.pid} no longer belongs to it', result.stderr)
+        self.assertNotIn('signaling PID', result.stderr)
+        self.assertIn("Toolbox container 'stuck' could not be stopped", result.stderr)
+        self.assertIn('podman stop stuck', result.stderr)
+        self.assertNotIn('start stuck', self.podman_lines())
+        self.assertIsNone(victim.poll())
+        self.assert_no_reexec()
+
+    def test_stop_failure_signals_the_init_pid_of_the_container_conmon(self):
+        self.write_marker('stuck')
+        # The command name holds spaces and parentheses; the parent PID must
+        # still be read from the field after the last ')'.
+        victim, overrides = self.stop_failure_victim(
+            comm='init) S 1 (x', ppid=self.CONMON_PID)
+        result = self.run_update_in_terminal('\n', **overrides)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"signaling PID {victim.pid}", result.stderr)
         self.assertIn('start stuck', self.podman_lines())
         # The warning alone would pass if the production SIGTERM were removed.
         self.assertEqual(victim.wait(timeout=5), -signal.SIGTERM)
         self.assert_reexec_into('stuck')
+
+    def test_nonterminal_stop_failure_signals_a_pid_in_the_container_cgroup(self):
+        self.write_marker('stuck')
+        # Without a terminal the default answer restarts the container, and
+        # the ownership check alone guards the signal.
+        victim, overrides = self.stop_failure_victim(
+            cgroup=f'0::/user.slice/user@1000.service/user.slice/libpod-{self.CONTAINER_ID}.scope/container')
+        result = self.run_update(input_text='n\n', **overrides)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"signaling PID {victim.pid}", result.stderr)
+        self.assertEqual(victim.wait(timeout=5), -signal.SIGTERM)
+        self.assert_reexec_into('stuck')
+
+    def test_stop_failure_leaves_a_reused_pid_alone(self):
+        self.write_marker('stuck')
+        # After a suspend the recorded PID now belongs to an unrelated process
+        # of this user: another cgroup, another parent.
+        victim, overrides = self.stop_failure_victim(comm='Web Content')
+        result = self.run_update_in_terminal('\n', **overrides)
+        self.assert_victim_left_alone(victim, result)
+
+    def test_nonterminal_stop_failure_leaves_a_reused_pid_alone(self):
+        self.write_marker('stuck')
+        victim, overrides = self.stop_failure_victim()
+        result = self.run_update(input_text='\n', **overrides)
+        self.assert_victim_left_alone(victim, result)
+
+    def test_stop_failure_rejects_a_recorded_conmon_pid_that_is_not_conmon(self):
+        self.write_marker('stuck')
+        # The conmon PID can be stale too: a matching parent only counts while
+        # that parent is still conmon.
+        victim, overrides = self.stop_failure_victim(
+            ppid=self.CONMON_PID, conmon_comm='firefox')
+        result = self.run_update_in_terminal('\n', **overrides)
+        self.assert_victim_left_alone(victim, result)
 
     def test_running_container_is_left_alone_when_the_client_probe_fails(self):
         self.write_marker('stuck')
