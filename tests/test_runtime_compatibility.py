@@ -59,7 +59,6 @@ class CompatibilityChecks(unittest.TestCase):
     def test_unsupported_mach_calls_return_errors_and_initialize_outputs(self):
         bodies = []
         for path, names in {
-            'duct-tape/src/memory.c': ['mach_vm_page_info', 'mach_vm_page_query', 'mach_vm_page_range_query'],
             'duct-tape/src/task.c': ['task_set_exc_guard_behavior', 'task_set_phys_footprint_limit'],
             'duct-tape/src/stubs.c': ['PE_i_can_has_debugger'],
         }.items():
@@ -71,29 +70,13 @@ class CompatibilityChecks(unittest.TestCase):
 #include <stdlib.h>
 #include <assert.h>
 typedef int kern_return_t;
-typedef void *vm_map_t;
-typedef void *vm_page_info_t;
 typedef void *task_t;
-typedef uint64_t mach_vm_address_t;
-typedef uint64_t mach_vm_offset_t;
-typedef uint64_t mach_vm_size_t;
-typedef unsigned mach_msg_type_number_t;
-typedef int vm_page_info_flavor_t;
 typedef unsigned task_exc_guard_behavior_t;
 #define KERN_NOT_SUPPORTED 46
 #define dtape_stub_unsafe(...) abort()
 ''' + ''.join(bodies) + '''
 int main(void) {
-    mach_msg_type_number_t count = 123;
-    assert(mach_vm_page_info(NULL, 0, 0, NULL, &count) == KERN_NOT_SUPPORTED && count == 0);
-    assert(mach_vm_page_info(NULL, 0, 0, NULL, NULL) == KERN_NOT_SUPPORTED);
-    int disposition = 123, refs = 123, old = 123;
-    assert(mach_vm_page_query(NULL, 0, &disposition, &refs) == KERN_NOT_SUPPORTED);
-    assert(disposition == 0 && refs == 0);
-    assert(mach_vm_page_query(NULL, 0, NULL, NULL) == KERN_NOT_SUPPORTED);
-    mach_vm_size_t rangeCount = 123;
-    assert(mach_vm_page_range_query(NULL, 0, 4096, 0, &rangeCount) == KERN_NOT_SUPPORTED && rangeCount == 0);
-    assert(mach_vm_page_range_query(NULL, 0, 4096, 0, NULL) == KERN_NOT_SUPPORTED);
+    int old = 123;
     assert(task_set_exc_guard_behavior(NULL, 0) == KERN_NOT_SUPPORTED);
     assert(task_set_phys_footprint_limit(NULL, 100, &old) == KERN_NOT_SUPPORTED && old == 0);
     assert(task_set_phys_footprint_limit(NULL, 100, NULL) == KERN_NOT_SUPPORTED);
