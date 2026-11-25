@@ -14,11 +14,16 @@ installed SDK are untouched.
 
     python3 tools/build-riot-electron43-frameworks.py
     python3 tools/build-riot-electron43-frameworks.py --install
+    python3 tools/build-riot-electron43-frameworks.py --record-installed
     python3 tools/build-riot-electron43-frameworks.py --check 'path/to/Electron Framework'
 
 --check lists every non-weak import of the given Mach-O against these five
 frameworks and fails if one is not defined by the stubs, so an Electron update
 that needs a new class shows up as a build error instead of a dyld abort.
+
+--record-installed stores the digests of the stub binaries as they are on disk
+after the signing pass rewrote them, so a repeated install keeps a signed copy
+instead of replacing and re-signing an unchanged stub.
 
 Sources are compiled with the AppKit target's own configured flags, which is
 what makes the Cocotron/SDK headers resolve without re-deriving them here.
@@ -67,6 +72,11 @@ FRAMEWORKS = {
         '_AXPrefersNonBlinkingTextInsertionIndicator',
         '_AXPrefersNonBlinkingTextInsertionIndicatorDidChangeNotification']),
 }
+
+# Digests of the installed stub binaries as they are on disk, written after the
+# update signs them. Signing rewrites the bytes, so without this record every
+# install replaces and re-signs an unchanged stub.
+DIGESTS = 'unsigned-digests.json'
 
 
 def configuration():
@@ -192,11 +202,53 @@ def check(binary):
     return 1 if failures else 0
 
 
+def recorded_digests(backup):
+    """The digests of the stubs the previous install left on disk."""
+    try:
+        data = json.loads((Path(backup) / DIGESTS).read_text())
+    except (OSError, ValueError):
+        return {}
+    frameworks = data.get('frameworks') if isinstance(data, dict) else None
+    if not isinstance(frameworks, dict):
+        return {}
+    return {name: value for name, value in frameworks.items()
+            if isinstance(name, str) and isinstance(value, str)}
+
+
+def store_digests(backup, digests):
+    folder = Path(backup)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        part = folder / (DIGESTS + '.part')
+        part.write_text(json.dumps({'version': 1, 'frameworks': digests},
+                                   indent=1, sort_keys=True) + '\n')
+        os.replace(part, folder / DIGESTS)
+    except OSError:
+        # A missing record only costs one redundant copy on the next install.
+        pass
+
+
+def record_installed(backup):
+    """Record what the install (and then signing) left in the guest overlay."""
+    target = guest_home() / 'RuntimeFrameworks'
+    digests = {}
+    for name in FRAMEWORKS:
+        installed = target / f'{name}.framework' / name
+        try:
+            digests[name] = hashlib.sha256(installed.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    store_digests(backup, digests)
+    print('Recorded the installed stub digests: %d of %d framework(s)'
+          % (len(digests), len(FRAMEWORKS)))
+
+
 def install(backup):
     home = guest_home()
     target = home / 'RuntimeFrameworks'
     target.mkdir(parents=True, exist_ok=True)
     backup = Path(backup)
+    recorded = recorded_digests(backup)
     installed = []
     for name in FRAMEWORKS:
         source = OUTPUT / f'{name}.framework' / name
@@ -204,10 +256,15 @@ def install(backup):
         destination.mkdir(parents=True, exist_ok=True)
         final = destination / name
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        if final.exists() and hashlib.sha256(final.read_bytes()).hexdigest() == digest:
-            link_versions(destination, name)
-            installed.append({'framework': name, 'path': str(final), 'already_current': True})
-            continue
+        if final.is_file():
+            current = hashlib.sha256(final.read_bytes()).hexdigest()
+            # The updater signs the copy below, so the installed bytes no longer
+            # match the built stub; the post-signing record identifies it.
+            if current == digest or current == recorded.get(name):
+                link_versions(destination, name)
+                installed.append({'framework': name, 'path': str(final),
+                                  'already_current': True})
+                continue
         kept = None
         if final.exists():
             backup.mkdir(parents=True, exist_ok=True)
@@ -232,7 +289,12 @@ def main():
                         help='where replaced overlay files are kept')
     parser.add_argument('--check', metavar='MACHO',
                         help='list imports the stubs do not cover and exit non-zero')
+    parser.add_argument('--record-installed', action='store_true',
+                        help='record the installed stub digests after signing rewrote them')
     args = parser.parse_args()
+    if args.record_installed:
+        record_installed(args.backup_dir)
+        return
     build()
     if args.check:
         raise SystemExit(check(Path(args.check).expanduser()))

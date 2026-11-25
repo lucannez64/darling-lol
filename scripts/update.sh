@@ -156,6 +156,19 @@ show_log() {
 	fi
 }
 
+# The base install copies about 33 000 files and re-evaluates every rule even
+# when the build tree did not change; the stamp is recorded after a successful
+# install and lets the next update skip both the copy and the sudo prompt.
+install_system_components() {
+	if python3 build/runtime/tools/darling-install-stamp.py --root "$repo" check; then
+		success 'Darling system components are up to date'
+		return 0
+	fi
+	run 'Installing Darling system components' "$@"
+	python3 build/runtime/tools/darling-install-stamp.py --root "$repo" record || \
+		warning 'Install stamp not recorded; the next update reinstalls the system components'
+}
+
 # Run one update step. Privileged steps and steps without a log keep the terminal.
 run() {
 	description=$1
@@ -289,6 +302,13 @@ sign_sdk_runtime() {
 	if [ ! -x "$repo/tools/sign-darling-runtime.sh" ] || [ ! -d "$sdk_dir" ] || [ -w "$sdk_dir" ]; then
 		return 0
 	fi
+	# The stamp records the SDK's stat state and the signer after a successful
+	# pass, so an SDK nobody touched costs neither the password nor the walk over
+	# every binary. Signing rewrites each Mach-O, so an install cannot fake it.
+	if python3 build/runtime/tools/sdk-sign-stamp.py --root "$repo" --sdk "$sdk_dir" check; then
+		success 'Darling system components are signed'
+		return 0
+	fi
 	if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
 		warning 'Base Darling SDK was NOT signed (dc-codesign is not built; install OpenSSL headers and re-run update.sh).'
 		return 0
@@ -301,6 +321,8 @@ sign_sdk_runtime() {
 	printf '\n%s%s Signing Darling system components%s\n' "$BOLD$CYAN" "$ICON_INFO" "$RESET"
 	if sudo env RCODESIGN="$rcodesign_bin" sh "$repo/tools/sign-darling-runtime.sh" --sdk --quiet; then
 		success 'Signing Darling system components'
+		python3 build/runtime/tools/sdk-sign-stamp.py --root "$repo" --sdk "$sdk_dir" record || \
+			warning 'Signing stamp not recorded; the next update signs the system components again'
 	else
 		warning "Base Darling SDK signing failed; re-run: sudo env RCODESIGN=\"$rcodesign_bin\" sh tools/sign-darling-runtime.sh --sdk"
 	fi
@@ -481,9 +503,9 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	run 'Rooting the Nix package closure' \
 		nix-store --realise "$package" --add-root "$repo/build/nix-gcroots/$(basename "$package")" --indirect
 	run 'Marking the base runtime stale' python3 scripts/nix-state.py invalidate-base
-	run 'Building Darling-LoL (this may take a while)' ./scripts/build.sh
+	run 'Building Darling-LoL' ./scripts/build.sh
 	run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
-	run 'Installing Darling system components' cmake --install build/darling-src/build
+	install_system_components cmake --install build/darling-src/build
 	run 'Recording the installed base runtime' python3 scripts/nix-state.py stamp-base
 	run 'Installing the user runtime' ./scripts/install-runtime.sh
 	warn_if_runtime_unsigned
@@ -637,9 +659,9 @@ fi
 prepare_output
 printf '\n%s%sUpdating Darling-LoL%s\n' "$BOLD" "$CYAN" "$RESET"
 
-run 'Building Darling-LoL (this may take a while)' ./scripts/build.sh
+run 'Building Darling-LoL' ./scripts/build.sh
 run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
-run 'Installing Darling system components' sudo cmake --install build/darling-src/build
+install_system_components sudo cmake --install build/darling-src/build
 run 'Installing the user runtime' ./scripts/install-runtime.sh
 warn_if_runtime_unsigned
 sign_sdk_runtime

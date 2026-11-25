@@ -113,6 +113,16 @@ class UpdateToolboxTests(unittest.TestCase):
         self.stub(self.bindir / 'python3',
                   'for arg in "$@"; do\n'
                   '  if [ "$arg" = - ]; then echo none; fi\n'
+                  '  case "$arg" in\n'
+                  '    *darling-install-stamp.py*)\n'
+                  '      case "$*" in\n'
+                  '        *check*) [ "${FAKE_INSTALL_STAMP_CURRENT:-0}" = 1 ] || exit 1 ;;\n'
+                  '      esac ;;\n'
+                  '    *sdk-sign-stamp.py*)\n'
+                  '      case "$*" in\n'
+                  '        *check*) [ "${FAKE_SDK_STAMP_CURRENT:-0}" = 1 ] || exit 1 ;;\n'
+                  '      esac ;;\n'
+                  '  esac\n'
                   'done\nexit 0')
         self.env = dict(os.environ)
         self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
@@ -638,6 +648,17 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('sudo-foreground', result.stdout)
 
+    def test_current_install_stamp_skips_the_privileged_install(self):
+        self.prepare_stub_update()
+        sudo_log = self.home / 'sudo-argv.log'
+        self.stub(self.bindir / 'sudo', f'printf "%s\\n" "$*" >> "{sudo_log}"\n')
+        self.env['FAKE_INSTALL_STAMP_CURRENT'] = '1'
+        result = self.run_update('--verbose')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Darling system components are up to date', result.stdout)
+        self.assertNotIn('Installing Darling system components', result.stdout)
+        self.assertFalse(sudo_log.exists())
+
     def test_quiet_update_surfaces_overlay_signing_warning(self):
         self.prepare_stub_update()
         self.stub(self.repo / 'scripts/install-runtime.sh',
@@ -685,6 +706,26 @@ class UpdateToolboxTests(unittest.TestCase):
                                  FAKE_SUDO_SIGN_FAIL='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Base Darling SDK signing failed', result.stderr)
+
+    def test_current_signing_stamp_skips_the_privileged_signing(self):
+        self.prepare_stub_update()
+        sdk = self.home / 'readonly-sdk'
+        sdk.mkdir()
+        sdk.chmod(0o555)
+        self.addCleanup(sdk.chmod, 0o755)
+        (self.repo / 'tools').mkdir()
+        self.stub(self.repo / 'tools/sign-darling-runtime.sh', 'exit 0')
+        sudo_log = self.home / 'sudo.log'
+        self.stub(self.bindir / 'sudo', f'printf "%s\\n" "$*" >> "{sudo_log}"\n')
+        result = self.run_update(XDG_CACHE_HOME=str(self.home / '.cache'),
+                                 DARLING_SDK_DIR=str(sdk),
+                                 FAKE_INSTALL_STAMP_CURRENT='1',
+                                 FAKE_SDK_STAMP_CURRENT='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Darling system components are signed', result.stdout)
+        self.assertNotIn('Signing Darling system components', result.stdout)
+        calls = sudo_log.read_text().splitlines() if sudo_log.exists() else []
+        self.assertFalse(any('sign-darling-runtime.sh' in line for line in calls), calls)
 
 
 if __name__ == '__main__':
