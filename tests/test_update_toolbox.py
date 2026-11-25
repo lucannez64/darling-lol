@@ -2,6 +2,7 @@
 import os
 import pty
 import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -44,6 +45,29 @@ exit 0
 """
 
 
+FAKE_PODMAN = """#!/bin/sh
+# Fake podman: reports the container state from FAKE_PODMAN_RUNNING, can fail a
+# stop, and records every call so a restart can be asserted.
+printf '%s\\n' "$*" >> "${FAKE_PODMAN_LOG:?}"
+case "${1:-}" in container) shift ;; esac
+case "${1:-}" in
+  inspect)
+    [ "${FAKE_PODMAN_RUNNING:-0}" = 1 ] || exit 1
+    case "${3:-}" in
+      *State.Pid*) printf '%s\\n' "${FAKE_PODMAN_PID:-0}" ;;
+      *State.ConmonPid*) printf '%s\\n' "${FAKE_PODMAN_CONMON_PID:-0}" ;;
+      *.Id*) printf '%s\\n' "${FAKE_PODMAN_ID:-}" ;;
+      *) printf 'true\\n' ;;
+    esac
+    ;;
+  stop)
+    if [ "${FAKE_PODMAN_STOP_FAIL:-0}" = 1 ]; then exit 1; fi
+    ;;
+esac
+exit 0
+"""
+
+
 def tool_sandbox(folder, *names):
     """Return a PATH dir exposing only the given host tools."""
     bindir = Path(folder) / 'tools'
@@ -68,18 +92,31 @@ class UpdateToolboxTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix='update-toolbox ')
         self.addCleanup(tmp.cleanup)
         folder = Path(tmp.name)
+        self.folder = folder
         self.repo = folder / 'repo'
         self.home = folder / 'home'
         self.bindir = folder / 'bin'
         self.log = folder / 'toolbox.log'
+        self.podman_log = folder / 'podman.log'
         (self.repo / 'scripts').mkdir(parents=True)
         self.home.mkdir()
         self.bindir.mkdir()
         shutil.copy2(UPDATE, self.repo / 'scripts' / 'update.sh')
         (self.bindir / 'toolbox').write_text(FAKE_TOOLBOX)
         (self.bindir / 'toolbox').chmod(0o755)
+        (self.bindir / 'podman').write_text(FAKE_PODMAN)
+        (self.bindir / 'podman').chmod(0o755)
+        # The client probe scans the real /proc, so answer it from a stub: the
+        # tests must not depend on a Darling session running on the host. The
+        # probe reads a result token from stdout, so an empty "none" scan is a
+        # completed scan and a stub that says nothing is a failed probe.
+        self.stub(self.bindir / 'python3',
+                  'for arg in "$@"; do\n'
+                  '  if [ "$arg" = - ]; then echo none; fi\n'
+                  'done\nexit 0')
         self.env = dict(os.environ)
-        self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log))
+        self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
+                        FAKE_PODMAN_LOG=str(self.podman_log))
         self.env['PATH'] = f'{self.bindir}:{self.env["PATH"]}'
         self.env.pop('DARLING_WORKSPACE', None)
         self.env.pop('DARLING_LOL_UPDATE_REEXEC', None)
@@ -125,6 +162,11 @@ class UpdateToolboxTests(unittest.TestCase):
             return []
         return self.log.read_text().splitlines()
 
+    def podman_lines(self):
+        if not self.podman_log.exists():
+            return []
+        return self.podman_log.read_text().splitlines()
+
     def write_marker(self, name):
         build = self.repo / 'build'
         build.mkdir(exist_ok=True)
@@ -134,6 +176,30 @@ class UpdateToolboxTests(unittest.TestCase):
         build = self.repo / 'build'
         build.mkdir(exist_ok=True)
         (build / 'native-install').write_text('')
+
+    def use_real_python(self):
+        """Replace the probe stub with the host interpreter for scan tests."""
+        real = shutil.which('python3')
+        if real is None:
+            self.skipTest('python3 is unavailable')
+        (self.bindir / 'python3').unlink()
+        os.symlink(real, self.bindir / 'python3')
+
+    def proc_entry(self, pid, cmdline=None):
+        """Create an UPDATE_PROC_ROOT entry; no cmdline means a vanished process."""
+        entry = self.folder / 'proc' / str(pid)
+        entry.mkdir(parents=True)
+        if cmdline is not None:
+            (entry / 'cmdline').write_bytes(
+                b'\0'.join(part.encode() for part in cmdline) + b'\0')
+        return entry
+
+    def unreadable_proc_entry(self, pid):
+        if os.geteuid() == 0:
+            self.skipTest('root can read a mode-000 cmdline')
+        entry = self.proc_entry(pid, ['/usr/bin/python3', 'player'])
+        (entry / 'cmdline').chmod(0)
+        return entry
 
     def write_desktop_entry(self, container, script_repo=None):
         """Write the launcher entry as tools/desktop-entry.py would for script_repo."""
@@ -238,6 +304,239 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertIn('toolbox enter gone', result.stderr)
         self.assert_no_reexec()
 
+    def test_running_but_unreachable_container_is_restarted_by_default(self):
+        self.write_marker('stuck')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('is running but not reachable', result.stdout)
+        self.assertIn('Restart it and continue the update? [Y/n]', result.stdout)
+        self.assertIn("Restarting Toolbox container 'stuck'", result.stdout)
+        self.assertIn('container inspect --format {{.State.Running}} stuck',
+                      self.podman_lines())
+        self.assertIn('stop --time 10 stuck', self.podman_lines())
+        self.assertIn('start stuck', self.podman_lines())
+        self.assert_reexec_into('stuck')
+
+    def test_running_container_restart_declined_exits_1_with_restart_hint(self):
+        self.write_marker('stuck')
+        result = self.run_update_in_terminal('n\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('unreachable', result.stderr)
+        self.assertIn('podman restart stuck', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_nonterminal_running_container_restarts_it_by_default(self):
+        self.write_marker('stuck')
+        result = self.run_update(input_text='n\n', FAKE_TOOLBOX_STOPPED='1',
+                                 FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Restarting Toolbox container 'stuck'", result.stdout)
+        self.assert_reexec_into('stuck')
+
+    def test_stopped_container_is_started_without_a_restart(self):
+        self.write_marker('gone')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('is not reachable. Start it and continue the update?',
+                      result.stdout)
+        self.assertIn("Starting Toolbox container 'gone'", result.stdout)
+        self.assertNotIn('stop --time 10 gone', self.podman_lines())
+        self.assertNotIn('start gone', self.podman_lines())
+        self.assert_reexec_into('gone')
+
+    def test_running_container_that_never_recovers_hints_a_restart(self):
+        self.write_marker('stuck')
+        self.stub(self.bindir / 'sleep', 'exit 0')
+        result = self.run_update(input_text='\n', FAKE_TOOLBOX_STOPPED='never',
+                                 FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Toolbox container 'stuck' could not be started", result.stderr)
+        self.assertIn('podman restart stuck', result.stderr)
+        self.assert_no_reexec()
+
+    CONTAINER_ID = 'c0ffee' * 10 + 'beef'
+    CONMON_PID = 4100
+
+    def stop_failure_victim(self, cgroup='0::/user.slice/app.slice/app-browser.scope',
+                            comm='sleep', ppid=1, conmon_comm='conmon'):
+        """Start a real process standing in for the PID podman recorded.
+
+        Its ownership is answered from a fake proc root: the cgroup it runs
+        in, its parent and the parent's command name. Return the victim and
+        the overrides that make podman report it with a failing stop.
+        """
+        # Keep the retry delay out of the test.
+        self.stub(self.bindir / 'sleep', 'exit 0')
+        victim = subprocess.Popen(['sleep', '30'])
+        self.addCleanup(victim.wait)
+        self.addCleanup(victim.kill)
+        proc = self.folder / 'proc'
+        entry = proc / str(victim.pid)
+        entry.mkdir(parents=True)
+        (entry / 'cgroup').write_text(cgroup + '\n')
+        (entry / 'stat').write_text(f'{victim.pid} ({comm}) S {ppid} {ppid} 1 0 -1\n')
+        conmon = proc / str(self.CONMON_PID)
+        conmon.mkdir()
+        (conmon / 'comm').write_text(conmon_comm + '\n')
+        return victim, dict(
+            FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            FAKE_PODMAN_STOP_FAIL='1', FAKE_PODMAN_PID=str(victim.pid),
+            FAKE_PODMAN_ID=self.CONTAINER_ID,
+            FAKE_PODMAN_CONMON_PID=str(self.CONMON_PID),
+            UPDATE_PROC_ROOT=str(proc))
+
+    def assert_victim_left_alone(self, victim, result):
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f'PID {victim.pid} no longer belongs to it', result.stderr)
+        self.assertNotIn('signaling PID', result.stderr)
+        self.assertIn("Toolbox container 'stuck' could not be stopped", result.stderr)
+        self.assertIn('podman stop stuck', result.stderr)
+        self.assertNotIn('start stuck', self.podman_lines())
+        self.assertIsNone(victim.poll())
+        self.assert_no_reexec()
+
+    def test_stop_failure_signals_the_init_pid_of_the_container_conmon(self):
+        self.write_marker('stuck')
+        # The command name holds spaces and parentheses; the parent PID must
+        # still be read from the field after the last ')'.
+        victim, overrides = self.stop_failure_victim(
+            comm='init) S 1 (x', ppid=self.CONMON_PID)
+        result = self.run_update_in_terminal('\n', **overrides)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"signaling PID {victim.pid}", result.stderr)
+        self.assertIn('start stuck', self.podman_lines())
+        # The warning alone would pass if the production SIGTERM were removed.
+        self.assertEqual(victim.wait(timeout=5), -signal.SIGTERM)
+        self.assert_reexec_into('stuck')
+
+    def test_nonterminal_stop_failure_signals_a_pid_in_the_container_cgroup(self):
+        self.write_marker('stuck')
+        # Without a terminal the default answer restarts the container, and
+        # the ownership check alone guards the signal.
+        victim, overrides = self.stop_failure_victim(
+            cgroup=f'0::/user.slice/user@1000.service/user.slice/libpod-{self.CONTAINER_ID}.scope/container')
+        result = self.run_update(input_text='n\n', **overrides)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"signaling PID {victim.pid}", result.stderr)
+        self.assertEqual(victim.wait(timeout=5), -signal.SIGTERM)
+        self.assert_reexec_into('stuck')
+
+    def test_stop_failure_leaves_a_reused_pid_alone(self):
+        self.write_marker('stuck')
+        # After a suspend the recorded PID now belongs to an unrelated process
+        # of this user: another cgroup, another parent.
+        victim, overrides = self.stop_failure_victim(comm='Web Content')
+        result = self.run_update_in_terminal('\n', **overrides)
+        self.assert_victim_left_alone(victim, result)
+
+    def test_nonterminal_stop_failure_leaves_a_reused_pid_alone(self):
+        self.write_marker('stuck')
+        victim, overrides = self.stop_failure_victim()
+        result = self.run_update(input_text='\n', **overrides)
+        self.assert_victim_left_alone(victim, result)
+
+    def test_stop_failure_rejects_a_recorded_conmon_pid_that_is_not_conmon(self):
+        self.write_marker('stuck')
+        # The conmon PID can be stale too: a matching parent only counts while
+        # that parent is still conmon.
+        victim, overrides = self.stop_failure_victim(
+            ppid=self.CONMON_PID, conmon_comm='firefox')
+        result = self.run_update_in_terminal('\n', **overrides)
+        self.assert_victim_left_alone(victim, result)
+
+    def test_running_container_is_left_alone_when_the_client_probe_fails(self):
+        self.write_marker('stuck')
+        # An interpreter that fails before the scan prints nothing and exits 1,
+        # the status a completed no-client scan used to share.
+        self.stub(self.bindir / 'python3', 'exit 1')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_failed_client_probe_stops_the_update(self):
+        (self.repo / 'build/darling-src/build').mkdir(parents=True)
+        self.write_native_marker()
+        # The scan itself raised: nonzero status with no result token.
+        self.stub(self.bindir / 'python3', 'exit 2')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('refusing to update', result.stderr)
+
+    def test_running_container_is_left_alone_while_clients_are_open(self):
+        self.write_marker('stuck')
+        # Pretend the Riot Client probe found a live session.
+        self.stub(self.bindir / 'python3', 'echo running')
+        result = self.run_update_in_terminal('\n', FAKE_TOOLBOX_STOPPED='1',
+                                             FAKE_PODMAN_RUNNING='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('A Riot Client or League process is running', result.stderr)
+        self.assertIn('was left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_real_scan_finds_a_running_client_and_refuses_the_restart(self):
+        self.write_marker('stuck')
+        self.use_real_python()
+        self.proc_entry(4242, ['/Applications/Riot Client.app/Contents/MacOS/RiotClientServices'])
+        result = self.run_update_in_terminal(
+            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('A Riot Client or League process is running', result.stderr)
+        self.assertIn('was left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_scan_skips_a_process_that_exited_during_the_scan(self):
+        self.write_marker('stuck')
+        self.use_real_python()
+        # A process gone before its cmdline could be read leaves the empty
+        # directory behind; that is not an unreadable live process.
+        self.proc_entry(4242)
+        result = self.run_update_in_terminal(
+            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Restarting Toolbox container 'stuck'", result.stdout)
+        self.assert_reexec_into('stuck')
+
+    def test_unreadable_owned_process_refuses_the_restart(self):
+        self.write_marker('stuck')
+        self.use_real_python()
+        # An unreadable entry of this user could be the client, so it must not
+        # be read as "no client".
+        self.unreadable_proc_entry(4242)
+        result = self.run_update_in_terminal(
+            '\n', FAKE_TOOLBOX_STOPPED='1', FAKE_PODMAN_RUNNING='1',
+            UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('left untouched', result.stderr)
+        self.assertNotIn('stop --time 10 stuck', self.podman_lines())
+        self.assert_no_reexec()
+
+    def test_unreadable_owned_process_stops_a_native_update(self):
+        (self.repo / 'build/darling-src/build').mkdir(parents=True)
+        self.write_native_marker()
+        self.use_real_python()
+        self.unreadable_proc_entry(4242)
+        result = self.run_update(UPDATE_PROC_ROOT=str(self.folder / 'proc'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Could not check for a running Riot Client or League process',
+                      result.stderr)
+        self.assertIn('refusing to update', result.stderr)
+
     def test_toolbox_missing_gives_distinct_message(self):
         self.write_marker('mycont')
         # PATH must not contain the fake toolbox (nor a real one): only the
@@ -291,7 +590,6 @@ class UpdateToolboxTests(unittest.TestCase):
         self.stub(self.repo / 'scripts/build.sh',
                   f'echo build-diagnostic >&2\nexit {build_exit}')
         self.stub(self.repo / 'scripts/install-runtime.sh', 'echo overlay-ran')
-        self.stub(self.bindir / 'python3', 'exit 0')
         self.stub(self.bindir / 'sudo', 'echo sudo-foreground')
         # A privileged command must never go through the detachment wrapper.
         self.stub(self.bindir / 'setsid',
