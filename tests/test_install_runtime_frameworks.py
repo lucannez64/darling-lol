@@ -99,6 +99,16 @@ class InstallRuntimeFrameworkTests(unittest.TestCase):
         self.assertLess(sign, stubs)
         self.assertLess(stubs, stamp_record)
 
+    def test_overlay_stamp_requires_a_successful_signing_pass(self):
+        # A failed pass must leave the stamp unrecorded so the next update
+        # installs the overlays again instead of keeping a partial signature.
+        self.assertIn('signing_ok=0', self.script)
+        self.assertIn('signing_ok=1', self.script)
+        gate = self.script.index('[ "$signing_ok" = 1 ]')
+        self.assertLess(self.script.index('signing_ok=1'), gate)
+        self.assertLess(gate, self.script.index('--record-installed'))
+        self.assertLess(gate, self.script.rindex('runtime-overlay-stamp.py'))
+
 
 if __name__ == '__main__':
     unittest.main()

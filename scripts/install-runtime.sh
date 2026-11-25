@@ -75,6 +75,7 @@ install_overlay_batch() {
 # flags, the artifacts above and the installed overlays (recorded after signing).
 overlay_state=build/runtime/overlay-stamp.json
 overlay_rebuilt=
+signing_ok=0
 if [ "${RCLOL_FORCE_OVERLAY_REBUILD:-0}" = 1 ] ||
   ! python3 build/runtime/tools/runtime-overlay-stamp.py --root "$repo" check --state "$overlay_state"; then
   install_overlay_batch
@@ -118,11 +119,15 @@ if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
 ==================================================================
 
 EOF
+  else
+    signing_ok=1
   fi
 fi
-# Only a completed install may vouch for the next update's fast path. The stamp
-# is taken after signing, which rewrites the overlay Mach-Os.
-if [ -n "$overlay_rebuilt" ]; then
+# Only a completed install and a successful signing pass may vouch for the next
+# update's fast path. The stamp is taken after signing, which rewrites the
+# overlay Mach-Os, and a failed pass has to leave it unrecorded so the next
+# update installs and signs the overlays again.
+if [ -n "$overlay_rebuilt" ] && [ "$signing_ok" = 1 ]; then
   # The stubs were copied before signing; record what is on disk now so the next
   # batch keeps that signed copy instead of replacing and re-signing it.
   python3 tools/build-riot-electron43-frameworks.py --record-installed || true
