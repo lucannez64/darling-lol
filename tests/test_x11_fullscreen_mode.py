@@ -170,6 +170,101 @@ int main() {
         self.assertLess(source.index(declaration),
                         source.index('X11ScreenFrameForMode(physicalFrame'))
 
+    def test_emulated_mode_frame_matches_the_game_window(self):
+        source = self.source('AppKit/X11.backend/X11Display.m')
+        fits = sources.function(source, 'X11ModeFitsScreen')
+        frame = sources.function(source, 'X11FrameForModeOnScreen')
+        screen = sources.function(source, 'X11ScreenFrameForMode')
+        match = sources.function(source, 'X11RootRectsMatch')
+        self.run_cpp(r'''
+#include <cassert>
+#include <cmath>
+using std::fabs;
+using BOOL=bool;
+struct NSSize { double width,height; };
+struct NSPoint { double x,y; };
+struct NSRect { NSPoint origin; NSSize size; };
+static NSSize NSMakeSize(double w,double h) {return {w,h};}
+static NSRect NSMakeRect(double x,double y,double w,double h) {return {{x,y},{w,h}};}
+static double NSWidth(NSRect r) {return r.size.width;}
+static double NSHeight(NSRect r) {return r.size.height;}
+static double NSMinX(NSRect r) {return r.origin.x;}
+static double NSMinY(NSRect r) {return r.origin.y;}
+static double NSMaxY(NSRect r) {return r.origin.y+r.size.height;}
+''' + fits + frame + screen + match + r'''
+/* -[X11Display rootRectForFrame:] with the primary monitor at the root origin. */
+static NSRect rootRect(NSRect frame,NSRect primary) {
+    return NSMakeRect(frame.origin.x+NSMinX(primary),
+                      NSMaxY(primary)-frame.origin.y-frame.size.height,
+                      frame.size.width,frame.size.height);
+}
+int main() {
+    NSRect primary=NSMakeRect(0,0,1920,1080);
+    /* A 1368x768 mode is the monitor's top-left 1368x768 root rectangle. */
+    NSRect mode=rootRect(X11ScreenFrameForMode(primary,NSMakeSize(1368,768)),primary);
+    assert(X11RootRectsMatch(NSMakeRect(0,0,1368,768),mode));
+    /* Same tolerance as the monitor check: a 1-2 px WM offset still matches. */
+    assert(X11RootRectsMatch(NSMakeRect(2,1,1366,770),mode));
+    assert(!X11RootRectsMatch(NSMakeRect(3,0,1368,768),mode));
+    /* Windowed games, other sizes and the 512x216 splash never match. */
+    assert(!X11RootRectsMatch(NSMakeRect(276,156,1368,768),mode));
+    assert(!X11RootRectsMatch(NSMakeRect(0,0,1024,768),mode));
+    assert(!X11RootRectsMatch(NSMakeRect(704,432,512,216),mode));
+    assert(!X11RootRectsMatch(NSMakeRect(0,0,1920,1080),mode));
+    /* A mode on a second monitor keeps that monitor's top-left. */
+    NSRect right=NSMakeRect(1920,0,2560,1440);
+    NSRect second=rootRect(X11ScreenFrameForMode(right,NSMakeSize(1920,1080)),primary);
+    assert(X11RootRectsMatch(NSMakeRect(1920,-360,1920,1080),second));
+    assert(!X11RootRectsMatch(NSMakeRect(0,0,1920,1080),second));
+}
+''')
+
+    def test_emulated_mode_window_takes_the_pointer_confinement(self):
+        source = self.source('AppKit/X11.backend/X11Display.m')
+        method = body(source, '- (void) updateMouseConfinementForWindow:(X11Window *)window')
+        borderless = method.index('if (!fullscreen && borderless) {')
+        monitor = method.index('X11RootRectCoversMonitor(_display, rootRect)')
+        emulated = method.index('[self rootRectMatchesEmulatedMode: rootRect]')
+        # Only a borderless game window that matches the emulated mode joins the
+        # windows that cover a monitor; titled, windowed and client windows keep
+        # the old rule.
+        self.assertLess(borderless, monitor)
+        self.assertLess(monitor, emulated)
+        self.assertIn('if (!fullscreen && [self rootRectMatchesEmulatedMode: rootRect] &&\n'
+                      '            X11IsLeagueGameWindow(_display, win, [window delegate]))', method)
+        # The same focus and map checks guard it, and a window that stops
+        # matching (mode left, resize, unmap) still releases the grab.
+        self.assertLess(method.index('if (ancestor != win) {'), emulated)
+        release = method.index('if (!fullscreen || attrs.map_state != IsViewable) {')
+        self.assertLess(emulated, release)
+        self.assertIn('XUngrabPointer(_display, CurrentTime);', method[release:])
+        self.assertLess(emulated, method.index('XGrabPointer(_display, win, True, mask'))
+
+    def test_emulated_mode_match_reads_the_recorded_modes(self):
+        source = self.source('AppKit/X11.backend/X11Display.m')
+        method = body(source, '- (BOOL) rootRectMatchesEmulatedMode: (NSRect) rect')
+        self.assertIn('@synchronized (self)', method)
+        self.assertIn('if ([_emulatedModes count] == 0)', method)
+        self.assertIn('[_physicalScreenFrames objectForKey: displayKey]', method)
+        self.assertIn('X11ScreenFrameForMode(', method)
+        # A mode that does not fit leaves the monitor frame: not an emulated window.
+        self.assertIn('if (NSEqualSizes(modeFrame.size, physical.size))', method)
+        self.assertIn('X11RootRectsMatch(rect, [self rootRectForFrame: modeFrame])', method)
+
+    def test_display_mode_change_rechecks_the_confinement(self):
+        source = self.source('AppKit/X11.backend/X11Display.m')
+        method = body(source, '- (BOOL) setMode: (NSDictionary *) mode forScreen: (int) screenIndex')
+        refresh = method.index('[self refreshMouseConfinement]')
+        # After the mode table changes, on the main thread, before the early
+        # return for the native mode (which leaves the window untouched).
+        self.assertLess(method.index('[_emulatedModes removeObjectForKey: displayKey]'), refresh)
+        self.assertLess(method.index('_lastScreens = nil'), refresh)
+        self.assertLess(refresh, method.index('NSEqualSizes(requested, physicalFrame.size))\n        return YES'))
+        self.assertIn('performSelectorOnMainThread: @selector(refreshMouseConfinement)', method)
+        helper = body(source, '- (void) refreshMouseConfinement')
+        self.assertIn('[self windowForID: _confinedWindow]', helper)
+        self.assertIn('[self updateMouseConfinementForWindow: window]', helper)
+
     def test_emulated_primary_keeps_coregraphics_bounds_at_the_origin(self):
         source = self.source('CoreGraphics/CGDirectDisplay.m')
         convert = sources.function(source, 'globalRectForFrameOnPrimary')
