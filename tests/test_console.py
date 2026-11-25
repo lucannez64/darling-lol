@@ -27,6 +27,12 @@ class FakePipe(io.StringIO):
 
 
 class StatusIconTests(unittest.TestCase):
+    def setUp(self):
+        # The color assertions must not depend on the caller's environment.
+        saved = os.environ.pop('NO_COLOR', None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, 'NO_COLOR', saved)
+
     def test_success_is_green_on_a_terminal(self):
         stream = FakeTerminal()
         console.ok('install stamp: up to date', stream)
