@@ -3,6 +3,20 @@
 from pathlib import Path
 import shlex
 import subprocess
+import sys
+
+
+def build_optional_wayland(root):
+    candidates = [root / 'build' / name for name in
+                  ('libdarling-wayland.next.so', 'libDarlingWayland.next.dylib')]
+    for candidate in candidates:
+        candidate.unlink(missing_ok=True)
+    result = subprocess.run(['sh', str(root / 'build/runtime/tools/build-darling-wayland.sh')])
+    if result.returncode:
+        for candidate in candidates:
+            candidate.unlink(missing_ok=True)
+        print('warning: the experimental Wayland transport did not build; continuing with X11',
+              file=sys.stderr)
 
 
 def main():
@@ -61,8 +75,8 @@ def main():
         subprocess.run(link, cwd=folder, check=True)
         paired[(folder / name).resolve()] = candidate
         print('Built paired candidate:', candidate, flush=True)
-    subprocess.run(['sh', str(root / 'build/runtime/tools/build-darling-wayland.sh')], check=True)
-    print('Paired timing frameworks and Wayland bridge built; nothing installed.')
+    build_optional_wayland(root)
+    print('Paired timing frameworks built; nothing installed.')
 
 
 if __name__ == '__main__':

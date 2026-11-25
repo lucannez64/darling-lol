@@ -44,6 +44,7 @@ build/riot-host-message-check
 cc -shared -fPIC -O2 -Wall -Wextra -Wl,-soname,"$project_dir/build/libdarling-xshm.so" tools/m58f299-xshm.c -o build/libdarling-xshm.so.next -pthread $(pkg-config --cflags --libs x11 x11-xcb xcb-shm xext)
 python3 tools/stop-darling-runtime.py
 mkdir -p "$guest_home/RuntimeFrameworks"
+. "$project_dir/tools/install-wayland-candidates.sh"
 # Host fileports own SCM_RIGHTS descriptors and must die with their last sender.
 if sudo -n true 2>/dev/null; then
   sudo make -C "$project_dir/build/darling-src/build/src/external/darlingserver" install -j12

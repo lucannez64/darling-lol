@@ -24,24 +24,13 @@ clang -target x86_64-apple-macosx11.0 -fuse-ld=lld -dynamiclib -nostdlib -O3 -ma
   "-DDARLING_XSHM_HOST_LIBRARY=\"$project_dir/build/libdarling-xshm.so\"" \
   -Wl,-undefined,dynamic_lookup "-Wl,-install_name,@GUEST_HOME@/libDarlingXShm.dylib" \
   "$project_dir/tools/m58f299-native-wrapper.c" -o "$project_dir/build/libDarlingXShm.next.dylib"
-# Experimental native Wayland transport for the game window (used only with RCLOL_WAYLAND=1).
-# Optional: the build skips itself when the Wayland development files are missing, and a
-# failed build leaves the rest of the runtime install alone.
-rm -f "$project_dir/build/libdarling-wayland.next.so" "$project_dir/build/libDarlingWayland.next.dylib"
-sh "$project_dir/tools/build-darling-wayland.sh" ||
-  echo 'warning: the experimental Wayland transport did not build; RCLOL_WAYLAND=1 will stay on X11' >&2
 # Stop before changing the overlay's upper directory, even with atomic writes.
 python3 "$project_dir/tools/stop-darling-runtime.py"
 mkdir -p "$guest_home"
 mv -f "$project_dir/build/libdarling-xshm.next.so" "$project_dir/build/libdarling-xshm.so"
 install -m755 "$project_dir/build/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.next.dylib"
 mv -f "$guest_home/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.dylib"
-if [ -f "$project_dir/build/libdarling-wayland.next.so" ] && [ -f "$project_dir/build/libDarlingWayland.next.dylib" ]; then
-  mv -f "$project_dir/build/libdarling-wayland.next.so" "$project_dir/build/libdarling-wayland.so"
-  install -m755 "$project_dir/build/libDarlingWayland.next.dylib" "$guest_home/libDarlingWayland.next.dylib"
-  mv -f "$guest_home/libDarlingWayland.next.dylib" "$guest_home/libDarlingWayland.dylib"
-  rm -f "$project_dir/build/libDarlingWayland.next.dylib"
-fi
+. "$project_dir/tools/install-wayland-candidates.sh"
 mkdir -p "$guest_home/RuntimeFrameworks"
 for framework in AppKit QuartzCore CoreGraphics OpenGL CoreVideo CoreFoundation SystemConfiguration CFNetwork; do
   if [ ! -d "$guest_home/RuntimeFrameworks/$framework.framework" ]; then
