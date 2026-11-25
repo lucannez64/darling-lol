@@ -112,6 +112,13 @@ class SdkSignStampTests(unittest.TestCase):
              '--root', str(self.root), '--state', str(self.state), 'record'],
             capture_output=True, env=env).returncode)
 
+    def test_cli_derives_the_root_when_it_is_omitted(self):
+        for command in ('record', 'check'):
+            self.assertEqual(0, subprocess.run(
+                [sys.executable, str(ROOT / 'tools/sdk-sign-stamp.py'),
+                 '--sdk', str(self.sdk), '--state', str(self.state), command],
+                capture_output=True).returncode)
+
 
 if __name__ == '__main__':
     unittest.main()

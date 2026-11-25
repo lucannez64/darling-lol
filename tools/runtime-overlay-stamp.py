@@ -271,7 +271,7 @@ def collect(root):
 
 def default_root():
     here = Path(__file__).resolve().parent
-    for candidate in (here,) + here.parents:
+    for candidate in (here, *here.parents):
         if ((candidate / 'scripts/install-runtime.sh').is_file()
                 and (candidate / 'tools/riot_build_cache.py').is_file()):
             return candidate

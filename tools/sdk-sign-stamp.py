@@ -79,7 +79,7 @@ def collect(root, sdk):
 
 def default_root():
     here = Path(__file__).resolve().parent
-    for candidate in (here,) + here.parents:
+    for candidate in (here, *here.parents):
         if ((candidate / 'scripts/update.sh').is_file()
                 and (candidate / SIGNER).is_file()):
             return candidate

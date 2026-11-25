@@ -60,7 +60,7 @@ def collect(root):
 
 def default_root():
     here = Path(__file__).resolve().parent
-    for candidate in (here,) + here.parents:
+    for candidate in (here, *here.parents):
         if ((candidate / 'scripts/build.sh').is_file()
                 and (candidate / 'tools/checkout_digest.py').is_file()):
             return candidate
