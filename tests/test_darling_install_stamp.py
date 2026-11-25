@@ -17,7 +17,21 @@ spec.loader.exec_module(stamp)
 
 def build_fixture(root):
     """A built tree with a manifest that installs into a temporary prefix."""
-    build = root / 'build/darling-src/build'
+    source = root / 'build/darling-src'
+    (source / 'etc').mkdir(parents=True)
+    subprocess.run(['git', '-C', str(source), 'init', '-q'], check=True,
+                   capture_output=True)
+    (source / '.gitignore').write_text('build/\n')
+    (source / 'CMakeLists.txt').write_text('project(demo)\n')
+    # install(FILES ...) reads this straight from the checkout.
+    (source / 'etc/notifyd.plist').write_text('<plist/>\n')
+    subprocess.run(['git', '-C', str(source), 'add', '.gitignore',
+                    'CMakeLists.txt', 'etc/notifyd.plist'], check=True,
+                   capture_output=True)
+    subprocess.run(['git', '-C', str(source), '-c', 'user.name=test',
+                    '-c', 'user.email=test@example.invalid', 'commit', '-q',
+                    '-m', 'fixture'], check=True, capture_output=True)
+    build = source / 'build'
     (build / 'lib').mkdir(parents=True)
     (build / 'lib/libdemo.dylib').write_bytes(b'library')
     (build / 'bin').mkdir()
@@ -74,6 +88,12 @@ class InstallStampTests(unittest.TestCase):
     def test_changed_build_outputs_reinstall(self):
         self.assertEqual(0, self.record())
         (self.root / 'build/darling-src/build/lib/libdemo.dylib').write_bytes(b'relinked')
+        self.assertEqual(1, self.check())
+
+    def test_changed_install_source_reinstalls(self):
+        # install(FILES ...) copies from the checkout, not from the build tree.
+        self.assertEqual(0, self.record())
+        (self.root / 'build/darling-src/etc/notifyd.plist').write_text('<plist>changed</plist>\n')
         self.assertEqual(1, self.check())
 
     def test_intermediate_objects_do_not_reinstall(self):

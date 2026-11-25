@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from checkout_digest import digest as checkout_digest  # noqa: E402
 from console import fail, note, ok  # noqa: E402
 from file_digest import sha256  # noqa: E402
 
@@ -98,6 +99,10 @@ def destinations_digest(paths):
 def collect(root):
     paths = manifest_paths(root)
     return {
+        # install(FILES ...) rules read plists and scripts straight from the
+        # checkout, so a patch that changes one has to reinstall even though the
+        # build outputs and the manifest are identical.
+        'tree': checkout_digest(root),
         'outputs': outputs_digest(root),
         'manifest': manifest_digest(paths),
         'destinations': destinations_digest(paths),
@@ -106,7 +111,7 @@ def collect(root):
 
 def default_root():
     here = Path(__file__).resolve().parent
-    for candidate in (here,) + here.parents:
+    for candidate in (here, *here.parents):
         if ((candidate / 'scripts/update.sh').is_file()
                 and (candidate / 'tools/checkout_digest.py').is_file()):
             return candidate
