@@ -1933,10 +1933,10 @@ index 0000000..0ca2195
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..9131c0d
+index 0000000..e13d1b5
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1294 @@
+@@ -0,0 +1,1295 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2390,8 +2390,8 @@ index 0000000..9131c0d
 +		break;
 +	case 0x00000007u:
 +		/* Structured extended features: Coffee Lake-H has only subleaf 0.
-+		 * Mask host EBX to Coffee Lake's feature set so AVX-512/SHA on newer
-+		 * hosts do not contradict the i7-9750H identity, while never offering
++		 * Mask host EBX to the i7-9750H's feature set so HLE/RTM/AVX-512/SHA
++		 * on other hosts do not contradict the identity, while never offering
 +		 * an instruction the host lacks. */
 +		*eax = 0;
 +		if (subleaf == 0u) {
@@ -2444,12 +2444,13 @@ index 0000000..9131c0d
 +		break;
 +	case 0x80000001u:
 +		/* Intel leaves EAX/EBX reserved (AMD: extended signature and
-+		 * package type). Clear the AMD-only bits; keep NX, 1GB pages, RDTSCP
-+		 * and long mode. */
++		 * package type). Keep only the bits the identity part sets: an AMD
++		 * host also mirrors leaf 1 EDX here and sets FFXSR, TCE, MWAITX and
++		 * its performance-counter bits, which no Intel CPU reports. */
 +		*eax = 0;
 +		*ebx = 0;
-+		*ecx &= ~0x00c03fdeu; /* CMP_LEGACY, SVM, EXTAPIC, CR8_LEGACY, SSE4A, misaligned SSE, 3DNow prefetch, OSVW, IBS, XOP, SKINIT, WDT, TOPOEXT, PerfCtrExtCore */
-+		*edx &= ~0xc0400000u; /* MMX-ext, FXSR-opt, 3DNow, 3DNow-ext */
++		*ecx &= DARLING_COMPAT_EXT1_ECX;
++		*edx &= DARLING_COMPAT_EXT1_EDX;
 +		break;
 +	case 0x80000002u:
 +	case 0x80000003u:
@@ -12014,10 +12015,10 @@ index a26ae39..0fb6d6a 100644
  	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
 new file mode 100644
-index 0000000..d3c0e46
+index 0000000..d9bbb8c
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,72 @@
 +#ifndef DARLING_LOL_CPU_IDENTITY_H
 +#define DARLING_LOL_CPU_IDENTITY_H
 +
@@ -12060,9 +12061,15 @@ index 0000000..d3c0e46
 +	uint32_t max_mhz;     // leaf 0x16 EBX (maximum turbo)
 +};
 +
-+// cpuid leaf 7 subleaf 0 EBX of the compatibility part: the host's bits outside
-+// this mask (AVX-512, SHA) are never reported. ECX and EDX are zero.
-+#define DARLING_COMPAT_LEAF7_EBX 0x029c6fbfu
++// cpuid leaf 7 subleaf 0 EBX of the compatibility part, as a real i7-9750H
++// reports it: the host's bits outside this mask (HLE, RTM, AVX-512, SHA) are
++// never reported. ECX and EDX are zero.
++#define DARLING_COMPAT_LEAF7_EBX 0x029c67afu
++
++// Leaf 0x80000001 of the same part: LAHF, LZCNT and PREFETCHW in ECX; SYSCALL,
++// XD, 1 GiB pages, RDTSCP and long mode in EDX.
++#define DARLING_COMPAT_EXT1_ECX 0x00000121u
++#define DARLING_COMPAT_EXT1_EDX 0x2c100800u
 +
 +// The compatibility identity. Never NULL.
 +const struct darling_cpu_identity* darling_compat_cpu_identity(void);

@@ -227,7 +227,10 @@ leaves decoded from `cpuid` (`signature`, `extmodel`, `feature_bits`,
 `leaf7_features`, `extfeatures`, `logical_per_package`, `cores_per_package`,
 `cache.*`, `address_bits.*`, `tsc_ccc.*`) decode the `cpuid` leaves as the game
 sees them: 16 logical and 8 core IDs per package, a 256 KiB 4-way L2, 39/48
-address bits and a 216/2 TSC ratio, as on a real i7-9750H. `profile=host`
+address bits and a 216/2 TSC ratio, as on a real i7-9750H. The game's `cpuid` leaf 7
+EBX and leaf `0x80000001` keep only the bits a real i7-9750H sets (`0x029c67af`;
+ECX `0x121`, EDX `0x2c100800`), each still only when the host has it: an AMD
+host's own bits in leaf `0x80000001` and a TSX host's HLE/RTM are not passed on. `profile=host`
 reports the real host CPU,
 GPU, VRAM and memory. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
