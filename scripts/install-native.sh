@@ -364,6 +364,12 @@ run() {
 }
 
 keep_sudo_alive() {
+  # Passwordless sudo needs no cached credential. `sudo -v` can still ask for
+  # a password there: distrobox grants NOPASSWD only for the root runas, and
+  # sudo's default verifypw=all wants every matching rule to be passwordless.
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
   sudo -v || fail 'sudo authentication failed.'
   (
     while kill -0 "$$" 2>/dev/null; do
