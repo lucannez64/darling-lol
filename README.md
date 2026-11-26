@@ -1,15 +1,12 @@
-<div align="center">
-  <img width="150" height="150" alt="darling-lol" src="darling-lol.png" />
-  <h3>Darling-LoL</h3>
+# League on Linux via Darling
 
-  <p>
-    Experimental macOS League of Legends client on x86-64 Linux through Darling
-  </p>
-</div>
+An experimental fork of [Darling-LoL](https://github.com/lucannez64/darling-lol) for running the macOS League of Legends client on x86-64 Linux through [Darling](https://github.com/darlinghq/darling).
+
+This fork focuses on reproducible fixes for installation, graphics, input, and macOS runtime behavior. The [testing guide](docs/TESTING.md) covers standalone probes and offline checks. The original project and its contributors provide the runtime patches and setup instructions below.
 
 > [!IMPORTANT]
 >
-> ## Critical Announcement
+> ## Critical Announcement from Darling-LoL
 >
 > **1. Maintenance:** Built mainly as a technical challenge, because everyone kept telling me it was impossible. I do not have the time to maintain it fully. Apart from issues that block you completely, I will only review and merge pull requests.
 >
