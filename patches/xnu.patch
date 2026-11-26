@@ -1625,7 +1625,7 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..b31d6e1 100644
+index 206e92e..715efd3 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 @@ -14,6 +14,7 @@
@@ -1668,7 +1668,7 @@ index 206e92e..b31d6e1 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -267,13 +282,175 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +282,178 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -1769,6 +1769,9 @@ index 206e92e..b31d6e1 100644
 +	 * for our own traps; everything else falls through to normal handling. */
 +	if (linux_signum == LINUX_SIGTRAP && rclol_cpuid_trace_handle(info, ctxt))
 +		return;
++	/* Fault mode: a cpuid refused by CPUID faulting arrives as SIGSEGV. */
++	if (linux_signum == LINUX_SIGSEGV && rclol_cpuid_fault_handle(info, ctxt))
++		return;
 +#endif
 +
  	int status = dserver_rpc_interrupt_enter();
@@ -1845,7 +1848,7 @@ index 206e92e..b31d6e1 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +536,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -359,7 +539,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -1862,10 +1865,10 @@ index 206e92e..b31d6e1 100644
  	}
 diff --git a/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h b/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h
 new file mode 100644
-index 0000000..0ca2195
+index 0000000..20fd3fe
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,76 @@
 +#ifndef _RCLOL_CPUID_TRACE_H
 +#define _RCLOL_CPUID_TRACE_H
 +
@@ -1908,6 +1911,14 @@ index 0000000..0ca2195
 +// without any further processing). Async-signal-safe: raw syscalls only.
 +bool rclol_cpuid_trace_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt);
 +
++// Fault mode (flag token fault=1): CPUID faulting makes every cpuid of the
++// process raise SIGSEGV, which rclol_cpuid_fault_handle() emulates from the top
++// of sigexc_handler. rclol_cpuid_fault_enable() returns 1 when the CPU and the
++// kernel support it and it is now on for this thread and its future children.
++int rclol_cpuid_fault_enable(void);
++int rclol_cpuid_fault_active(void);
++bool rclol_cpuid_fault_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt);
++
 +// Number of times the site with the given cookie has been hit (for the test).
 +unsigned long rclol_cpuid_trace_hits(unsigned long cookie);
 +
@@ -1927,16 +1938,19 @@ index 0000000..0ca2195
 +static inline void rclol_cpuid_trace_setup(void) { }
 +static inline bool rclol_cpuid_trace_handle(struct linux_siginfo* i, struct linux_ucontext* c) { (void) i; (void) c; return false; }
 +static inline void rclol_cpuid_trace_set_fake(int on) { (void) on; }
++static inline int rclol_cpuid_fault_enable(void) { return 0; }
++static inline int rclol_cpuid_fault_active(void) { return 0; }
++static inline bool rclol_cpuid_fault_handle(struct linux_siginfo* i, struct linux_ucontext* c) { (void) i; (void) c; return false; }
 +
 +#endif
 +
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..e13d1b5
+index 0000000..38da01e
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1295 @@
+@@ -0,0 +1,1556 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2045,6 +2059,7 @@ index 0000000..e13d1b5
 +#define RCLOL_IMAGE_TEXT_BASE 0x100000000UL
 +#define RCLOL_MAX_SITES       4
 +#define RCLOL_LOG_FIRST_N     64
++#define RCLOL_FAULT_LOG_FIRST_N 4096  // fault mode sees every site of the process
 +
 +// ---------------------------------------------------------------------------
 +// Static tables: the group -> first-cpuid-site-of-each-function map, verified
@@ -3109,6 +3124,250 @@ index 0000000..e13d1b5
 +	return 1;
 +}
 +
++// ---------------------------------------------------------------------------
++// Fault mode (flag token fault=1, off by default)
++//
++// The breakpoints above cover a handful of sites: every other cpuid in the
++// process still returns the host's words. Where the CPU and kernel support
++// CPUID faulting (Intel, and recent AMD CPUs; `cpuid_fault` in
++// /proc/cpuinfo), arch_prctl(ARCH_SET_CPUID, 0) makes every cpuid of the thread
++// raise SIGSEGV instead, with si_code SI_KERNEL. The handler emulates it like a
++// breakpoint hit. The setting is inherited by new threads and forked children
++// and cleared by exec, so it follows the process the setup ran in.
++//
++// A thread that executes cpuid with SIGSEGV blocked cannot be served: the
++// kernel kills the process. sys_sigprocmask keeps SIGSEGV out of guest masks
++// while the mode is on; host library threads that block every signal remain
++// exposed, which is why this is opt-in.
++
++#define RCLOL_ARCH_GET_CPUID 0x1011
++#define RCLOL_ARCH_SET_CPUID 0x1012
++#define RCLOL_SI_KERNEL      0x80
++
++static int g_fault_mode = 0;
++static unsigned long g_fault_hits = 0;
++
++#define RCLOL_FAULT_SITES 512
++#define RCLOL_FAULT_SITE_HOST (1UL << 63) // above any user address
++
++// One word per cpuid address seen: the address, plus the host bit.
++static unsigned long g_fault_sites[RCLOL_FAULT_SITES];
++
++// 1 for a site that keeps the host's answer, 0 for a guest site, -1 when the
++// address is not recorded.
++static int rclol_fault_site_lookup(unsigned long rip)
++{
++	for (int i = 0; i < RCLOL_FAULT_SITES; ++i) {
++		unsigned long seen = __atomic_load_n(&g_fault_sites[i], __ATOMIC_RELAXED);
++		if (seen == 0)
++			return -1;
++		if ((seen & ~RCLOL_FAULT_SITE_HOST) == rip)
++			return (seen & RCLOL_FAULT_SITE_HOST) != 0;
++	}
++	return -1;
++}
++
++// True when this call recorded the address, so it is described once.
++static int rclol_fault_site_record(unsigned long rip, int host)
++{
++	unsigned long word = rip | (host ? RCLOL_FAULT_SITE_HOST : 0);
++	for (int i = 0; i < RCLOL_FAULT_SITES; ++i) {
++		unsigned long seen = 0;
++		if (__atomic_compare_exchange_n(&g_fault_sites[i], &seen, word, 0,
++				__ATOMIC_RELAXED, __ATOMIC_RELAXED))
++			return 1;
++		if ((seen & ~RCLOL_FAULT_SITE_HOST) == rip)
++			return 0;
++	}
++	return 0; // table full
++}
++
++static unsigned long rclol_parse_hex(const char** s)
++{
++	const char* p = *s;
++	unsigned long v = 0;
++	for (;; ++p) {
++		char c = *p;
++		if (c >= '0' && c <= '9') v = v * 16 + (unsigned long) (c - '0');
++		else if (c >= 'a' && c <= 'f') v = v * 16 + (unsigned long) (c - 'a' + 10);
++		else break;
++	}
++	*s = p;
++	return v;
++}
++
++// The host's own libraries (GPU driver, TLS, codecs) are ELF files; the guest
++// never sees their cpuid results, and they must tune themselves for the real CPU.
++static int rclol_file_is_elf(const char* path)
++{
++	unsigned char magic[4] = { 0, 0, 0, 0 };
++	long fd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) path, 0 /*O_RDONLY*/, 0, 0, 0);
++	if (fd < 0)
++		return 0;
++	long got = rclol_sys(__NR_read, fd, (long) magic, 4, 0, 0, 0);
++	rclol_sys(__NR_close, fd, 0, 0, 0, 0, 0);
++	return got == 4 && magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
++}
++
++// This library reads cpuid for the sysctls and applies the compat view itself.
++static int rclol_is_emulation_layer(const char* name)
++{
++	static const char own[] = "libsystem_kernel.dylib";
++	unsigned long i = 0;
++	while (own[i] && name[i] == own[i])
++		++i;
++	return own[i] == '\0' && name[i] == '\0';
++}
++
++// Find the mapped file that holds a cpuid address. Returns 1 when the site
++// keeps the host's answer. The description names the file without its path:
++// the log is read to learn where the process runs cpuid.
++static int rclol_describe_fault_site(unsigned long rip, char* out, unsigned long out_size)
++{
++	int host = 0;
++	out[0] = '\0';
++	long fd = rclol_sys(__NR_openat, -100 /*AT_FDCWD*/, (long) "/proc/self/maps", 0 /*O_RDONLY*/, 0, 0, 0);
++	if (fd < 0)
++		return 0;
++
++	char buf[2048];
++	char line[384];
++	unsigned int ll = 0;
++	long got;
++	int found = 0;
++	while (!found && (got = rclol_sys(__NR_read, fd, (long) buf, (long) sizeof(buf), 0, 0, 0)) > 0) {
++		for (long i = 0; i < got && !found; ++i) {
++			char ch = buf[i];
++			if (ch != '\n') {
++				if (ll < sizeof(line) - 1)
++					line[ll++] = ch;
++				continue;
++			}
++			line[ll] = '\0';
++			ll = 0;
++			// line: "start-end perms offset dev inode   pathname"
++			const char* p = line;
++			unsigned long start = rclol_parse_hex(&p);
++			if (*p != '-')
++				continue;
++			++p;
++			unsigned long end = rclol_parse_hex(&p);
++			if (rip < start || rip >= end)
++				continue;
++			while (*p == ' ') ++p;
++			while (*p && *p != ' ') ++p; // perms
++			while (*p == ' ') ++p;
++			unsigned long offset = rclol_parse_hex(&p);
++			const char* path = NULL;
++			const char* name = NULL;
++			const char* special = NULL; // "[heap]", "[stack]", ...
++			for (const char* q = p; *q; ++q) {
++				if (*q == '/') {
++					if (!path)
++						path = q;
++					name = q + 1;
++				} else if (*q == '[' && !special) {
++					special = q;
++				}
++			}
++			const char* kind = "guest";
++			if (path && rclol_file_is_elf(path)) {
++				host = 1;
++				kind = "host";
++			} else if (name && rclol_is_emulation_layer(name)) {
++				host = 1;
++				kind = "emulation";
++			}
++			if (!name)
++				name = special ? special : "anon";
++			__simple_snprintf(out, out_size,
++				"cpuid-site rip=0x%lx off=0x%lx %s file=%s\n",
++				rip, rip - start + offset, kind, name);
++			found = 1;
++		}
++	}
++	rclol_sys(__NR_close, fd, 0, 0, 0, 0, 0);
++	return host;
++}
++
++int rclol_cpuid_fault_active(void)
++{
++	return g_fault_mode;
++}
++
++// Turn CPUID faulting on for this thread. Returns 1 when it is on.
++int rclol_cpuid_fault_enable(void)
++{
++	// -ENODEV when the CPU or the kernel lacks CPUID faulting.
++	if (rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0, 0, 0, 0, 0) != 0)
++		return 0;
++	g_fault_mode = 1;
++	return 1;
++}
++
++bool rclol_cpuid_fault_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt)
++{
++	if (!g_fault_mode || !info || !ctxt)
++		return false;
++	if (info->si_code != RCLOL_SI_KERNEL)
++		return false; // a memory fault, not a refused instruction
++
++	struct linux_gregset* r = &ctxt->uc_mcontext.gregs;
++	const unsigned char* ip = (const unsigned char*) r->rip;
++
++	if (ip[0] != 0x0f || ip[1] != 0xa2)
++		return false; // another privileged instruction; let normal handling run
++
++	uint32_t in_eax = (uint32_t) r->rax;
++	uint32_t in_ecx = (uint32_t) r->rcx;
++	uint32_t oa, ob, oc, od;
++
++	unsigned long site = (unsigned long) r->rip;
++	int host = rclol_fault_site_lookup(site);
++	if (host < 0) {
++		char what[256];
++		host = rclol_describe_fault_site(site, what, sizeof(what));
++		if (rclol_fault_site_record(site, host) && g_log_enabled)
++			rclol_write_str(what);
++	}
++
++	// Run the instruction with faulting lifted for this thread only. The
++	// transform runs in the same window: a cpuid of its own must not fault here.
++	rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 1, 0, 0, 0, 0);
++	__asm__ volatile ("cpuid"
++		: "=a"(oa), "=b"(ob), "=c"(oc), "=d"(od)
++		: "a"(in_eax), "c"(in_ecx));
++	// Only guest code gets the compat view here.
++	if (g_fake && !host)
++		rclol_cpuid_trace_spoof(in_eax, in_ecx, &oa, &ob, &oc, &od);
++	rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0, 0, 0, 0, 0);
++
++	r->rax = oa;
++	r->rbx = ob;
++	r->rcx = oc;
++	r->rdx = od;
++	r->rip += 2;
++
++	unsigned long n = __atomic_fetch_add(&g_fault_hits, 1, __ATOMIC_RELAXED);
++	if (g_log_enabled && n < RCLOL_FAULT_LOG_FIRST_N) {
++		char line[192];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-fault t=%llu tid=%ld rip=0x%lx in[eax=0x%x ecx=0x%x] "
++			"out[eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x] n=%lu\n",
++			rclol_monotonic_ns(), rclol_gettid(), site, in_eax, in_ecx,
++			oa, ob, oc, od, n);
++		rclol_write_str(line);
++	}
++	return true;
++}
++
++static int rclol_fault_requested(const char* contents)
++{
++	const char* fault = rclol_flag_value(contents, "fault=");
++
++	return fault && (fault[0] == '1' || fault[0] == 'y' || fault[0] == 'Y');
++}
++
 +void rclol_cpuid_trace_setup(void)
 +{
 +	// Two switches: the launcher's hardware profile (RCLOL_PLATFORM_PROFILE,
@@ -3151,6 +3410,10 @@ index 0000000..e13d1b5
 +		}
 +		if (!g_fake && compat)
 +			g_fake = 1;
++		if (rclol_fault_requested(contents) && rclol_cpuid_fault_enable()) {
++			rclol_write_str("cpuid-trace: fault mode on (mvg process), no breakpoints armed\n");
++			return;
++		}
 +		rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);
 +		{
 +			char line[96];
@@ -3183,6 +3446,18 @@ index 0000000..e13d1b5
 +	// remains for one-off diagnostics (fake=1, group=, sites=).
 +	if (!g_fake && compat)
 +		g_fake = 1;
++
++	// fault=1: trap every cpuid of the process instead of arming sites.
++	if (rclol_fault_requested(contents)) {
++		int on = rclol_cpuid_fault_enable();
++		char line[96];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-trace: fault mode %s fake=%d\n",
++			on ? "on, no breakpoints armed" : "unavailable, arming breakpoints", g_fake);
++		rclol_write_str(line);
++		if (on)
++			return;
++	}
 +
 +	const unsigned long* chosen = rclol_group1; // default group=1
 +	unsigned long explicit_sites[RCLOL_MAX_SITES];
@@ -12682,3 +12957,27 @@ index d1cdd3d..0656874 100644
  			p = strtok_r(line, " ", &saveptr);
  			if (p == NULL)
  				continue;
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c
+index c0acf2b..f003819 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c
+@@ -6,6 +6,7 @@
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/conversion/signal/duct_signals.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/linux_premigration/signal/cpuid_trace.h>
+ 
+ static inline int spchow_bsd_to_linux(int how) { return how-1; }
+ 
+@@ -19,6 +20,11 @@ long sys_sigprocmask(int how, const sigset_t* set, sigset_t* oldset)
+ 	if (set != NULL)
+ 		sigset_bsd_to_linux(set, &in);
+ 
++	// darling-lol: in cpuid fault mode every cpuid arrives as SIGSEGV, and the
++	// kernel kills a process that takes that fault with the signal blocked.
++	if (set != NULL && linux_how != 1 /* LINUX_SIG_UNBLOCK */ && rclol_cpuid_fault_active())
++		in &= ~(1ull << (LINUX_SIGSEGV - 1));
++
+ 	ret = LINUX_SYSCALL(__NR_rt_sigprocmask, linux_how,
+ 			(set != NULL) ? &in : NULL, &out, sizeof(linux_sigset_t));
+ 	if (ret < 0)

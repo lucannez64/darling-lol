@@ -1720,6 +1720,34 @@ lower) and `python3 tools/doctor.py`. Note that lowering
 users; granting `CAP_PERFMON` to the relevant account or loader is a narrower
 alternative if you prefer to keep `perf_event_paranoid` restricted.
 
+### Experimental: fault mode (`fault=1`)
+
+The breakpoints cover a few `cpuid` sites of the game; every other `cpuid`
+instruction in the process still returns the host's words. On a CPU and kernel
+with CPUID faulting (`grep -m1 -o cpuid_fault /proc/cpuinfo` prints the flag:
+Intel CPUs, and recent AMD ones on recent kernels) the tracer can trap every
+`cpuid` of the process instead. It needs neither `perf_event_open` nor per-version site addresses. It
+is off by default. To try it, on a spare account:
+
+```sh
+echo 'fault=1' > /tmp/rclol-cpuid-trace
+```
+
+and remove the file to go back. `/tmp/rclol-cpuid-trace.log` then has
+`cpuid-trace: fault mode on` and one `cpuid-fault ... rip=0x...` line for each
+of the first 4096 `cpuid` instructions. Each distinct address (up to 512) also
+gets one `cpuid-site rip=0x... off=0x... guest file=<name>` line naming the
+mapped file that holds it, which shows where the process runs them. Sites
+marked `host` (the host's own ELF libraries, such as the GPU driver) and
+`emulation` (the sysctl code, which applies the compat view itself) keep the
+host's answer; only `guest` sites get the compat view. Without CPUID faulting the log says `fault mode unavailable` and the
+breakpoints are armed as usual.
+
+Known limit: a thread that runs `cpuid` while it has `SIGSEGV` blocked is killed
+by the kernel, and the process with it. Guest signal masks are kept clear of
+`SIGSEGV` in this mode, but a host library thread that blocks every signal and
+then runs `cpuid` is not protected. That is why the mode is opt-in.
+
 ### A sandbox refuses `perf_event_open`
 
 `perf_event_paranoid` is not the only gate. The default seccomp profiles of
