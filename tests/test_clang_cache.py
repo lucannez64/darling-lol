@@ -94,7 +94,7 @@ class ClangCacheTests(unittest.TestCase):
     def test_install_script_puts_the_shims_first(self):
         script = (ROOT / 'tools/install-riot-gpu-runtime.sh').read_text()
         setup = script.index('clang_cache_bin=')
-        self.assertLess(setup, script.index('python3 tools/build-m58f333-iosurface.py'))
+        self.assertLess(setup, script.index('build-m58f333-iosurface'))
         self.assertIn('tools/clang-cache.py', script)
         self.assertIn('PATH="$clang_cache_bin:$PATH"', script)
         self.assertIn('RCLOL_CLANG_CACHE_SHIMS', script)

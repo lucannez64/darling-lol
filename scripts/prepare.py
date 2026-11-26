@@ -7,7 +7,7 @@ sys.dont_write_bytecode=True
 from common import ROOT,render
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--source',type=Path,default=ROOT/'build/darling-src')
-p.add_argument('--jobs',type=int,default=4,help='parallel submodule fetches')
+p.add_argument('--jobs',type=int,default=4,help='parallel submodule fetches and patch checks')
 p.add_argument('--check-only',action='store_true',help='validate against temporary base indexes, without changing existing source')
 a=p.parse_args();source=a.source.resolve();manifest=json.loads((ROOT/'upstream/manifest.json').read_text())
 def git_environment(index=None):
@@ -171,14 +171,38 @@ def prepare_patch(repo,patch,previous):
 applied=ROOT/'build/applied-patches'
 def record_patch(component,patch):
     applied.mkdir(parents=True,exist_ok=True);(applied/Path(component['patch']).name).write_text(patch)
+
+def history_texts(patch):
+    """Historical versions of one patch, newest first, from one Git process.
+
+    `git show commit:path` costs a process per version, and a no-op prepare ran
+    more than five hundred of them: nearly as much CPU as the patch checks
+    themselves. One `cat-file --batch` process answers all of them. A request and
+    its answer are exchanged one at a time because holding every version at once
+    would cost hundreds of megabytes for the largest patch.
+    """
+    commits=git_run(['git','-C',str(ROOT),'log','--format=%H','--',patch],
+                    text=True,capture_output=True).stdout.split()
+    if not commits:return
+    process=subprocess.Popen(['git','-C',str(ROOT),'cat-file','--batch'],
+                             stdin=subprocess.PIPE,stdout=subprocess.PIPE,env=git_environment())
+    try:
+        for commit in commits:
+            process.stdin.write(f'{commit}:{patch}\n'.encode());process.stdin.flush()
+            header=process.stdout.readline().split()
+            if len(header)!=3:continue
+            size=int(header[2]);body=process.stdout.read(size);process.stdout.read(1)
+            if header[1]==b'blob':yield body.decode()
+    finally:
+        try:process.stdin.close()
+        except OSError:pass
+        process.stdout.close();process.wait()
+
 def previous_patches(component):
     """Earlier applied versions of a component's patch: the recorded copy, then each version in this repository's history."""
     recorded=applied/Path(component['patch']).name
     if recorded.exists():yield recorded.read_text()
-    history=git_run(['git','-C',str(ROOT),'log','--format=%H','--',component['patch']],text=True,capture_output=True).stdout.split()
-    for commit in history:
-        shown=git_run(['git','-C',str(ROOT),'show',f"{commit}:{component['patch']}"],text=True,capture_output=True)
-        if shown.returncode==0:yield render(shown.stdout)
+    for text in history_texts(component['patch']):yield render(text)
 if not (source/'.git').exists():
     if a.check_only:p.error('check-only requires an existing pinned source checkout')
     if source.exists():p.error('refusing non-checkout destination; choose an empty source path')
@@ -235,19 +259,37 @@ else:
             repair(source,repos=touched)
             pending.unlink()
 
-# Never reset someone else's checkout to make a patch apply.
-for component in manifest['components']:
+# Each component owns its own worktree, so the patch checks and applies are
+# independent: `git` locks only the repository it writes, and the earlier-version
+# lookup reads this repository. Workers are capped like repair(): eight already
+# saturates the Git processes, and a wider pool measured no faster.
+def patch_jobs(value,cpu=None):
+    try:value=int(value)
+    except (TypeError,ValueError):return 1
+    cpu=max(1,int(cpu if cpu is not None else (os.cpu_count() or 1)))
+    return max(1,min(8,cpu,value))
+
+def prepare_component(component):
     repo=source/component['path']
-    actual=git_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
-    if actual!=component['revision']:raise SystemExit(f"Wrong revision for {component['path']}: expected {component['revision']}, got {actual}")
     patch=render((ROOT/component['patch']).read_text())
     if a.check_only:
         with tempfile.TemporaryDirectory(prefix='darling-patch-index-') as tmp:
             env=git_environment(Path(tmp)/'index')
             run(['git','-C',str(repo),'read-tree',component['revision']],env=env)
             run(['git','-C',str(repo),'apply','--cached','--check','--whitespace=nowarn','-'],input=patch,text=True,env=env)
-    else:
-        prepare_patch(repo,patch,previous_patches(component))
-        record_patch(component,patch)
-    print(('Checked ' if a.check_only else 'Prepared ')+component['path'],flush=True)
+        return 'Checked '+component['path']
+    prepare_patch(repo,patch,previous_patches(component))
+    record_patch(component,patch)
+    return 'Prepared '+component['path']
+
+# Never reset someone else's checkout to make a patch apply. Check every pinned
+# revision before a worker changes the tree, so a wrong checkout fails first.
+for component in manifest['components']:
+    repo=source/component['path']
+    actual=git_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    if actual!=component['revision']:raise SystemExit(f"Wrong revision for {component['path']}: expected {component['revision']}, got {actual}")
+from concurrent.futures import ThreadPoolExecutor
+with ThreadPoolExecutor(max_workers=patch_jobs(a.jobs)) as pool:
+    for message in pool.map(prepare_component,manifest['components']):
+        print(message,flush=True)
 print('All',len(manifest['components']),'component patches validated' if a.check_only else 'component patches ready')

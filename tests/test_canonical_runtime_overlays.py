@@ -74,6 +74,25 @@ class CanonicalRuntimeOverlayTests(unittest.TestCase):
             # Second pass is a no-op so signing caches stay warm.
             self.assertEqual(mod.sync_prefix(prefix, guest), 0)
 
+    def test_a_signed_copy_is_not_rewritten_from_its_unsigned_source(self):
+        # Signing appends the same signature to the per-user file and to its
+        # canonical copy, so the two stay byte-identical. The mirror must leave
+        # that copy alone: install-runtime.sh's signing stamp treats any rewrite
+        # of the canonical roots as a reason to sign the whole prefix again.
+        mod = load_sync_module()
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder) / 'prefix'
+            guest = prefix / 'Users/tester'
+            libs = guest / 'RuntimeLibraries'
+            libs.mkdir(parents=True)
+            (libs / 'libfoo.dylib').write_bytes(b'binary')
+            self.assertEqual(mod.sync_prefix(prefix, guest), 1)
+            signed = b'binary' + b'\0signature'
+            (libs / 'libfoo.dylib').write_bytes(signed)
+            (prefix / 'usr/lib/libfoo.dylib').write_bytes(signed)
+            self.assertEqual(mod.sync_prefix(prefix, guest), 0)
+            self.assertEqual((prefix / 'usr/lib/libfoo.dylib').read_bytes(), signed)
+
     def test_install_runtime_syncs_before_signing(self):
         script = (ROOT / 'scripts/install-runtime.sh').read_text()
         validate = script.index('validate-riot-runtime.py')
