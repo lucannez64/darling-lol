@@ -456,6 +456,10 @@ fi
 # On affected setups Chromium's default temp directory is unusable. Electron
 # can copy app.asar entries to temporary files for async reads and report a
 # failed copy as "not found". Use a writable guest directory by default.
+# Riot's CheckInstalls agent writes its launchd plist here without creating the
+# folder. Provide the user-owned directory with the permissions macOS uses.
+mkdir -p -m 755 "$prefix_dir$guest_path/Library/LaunchAgents" 2>/dev/null ||
+ echo 'run-riot-client: could not create the LaunchAgents folder' >&2
 # Discord Rich Presence: the client's Discord SDK looks for discord-ipc-N in the guest's
 # $XDG_RUNTIME_DIR (else TMPDIR, which Darling sets to /private/tmp). Those paths resolve
 # inside the prefix, so link them to the host sockets; vchroot follows /Volumes/SystemRoot

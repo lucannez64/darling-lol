@@ -254,6 +254,11 @@ launch command there (`<application id>.json`) and does not create the folder,
 so without it every registration failed with "Discord failed to register launch
 command".
 
+The launcher always creates `~/Library/LaunchAgents` in the guest home, owned
+by the user with mode 755, as on macOS. Riot Client's CheckInstalls agent writes
+`com.riot.riotclient.checkinstalls.plist` there without creating the folder;
+without it the plist cannot be written and `launchctl` cannot load the job.
+
 The guest runs in its own PID namespace, so the process ID a client sends with
 its activity is unknown to the host Discord, which then shows no status. While
 Discord is running at launch, the slots it serves are linked to a small host
