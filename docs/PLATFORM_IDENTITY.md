@@ -222,7 +222,14 @@ x2APIC...) every Coffee Lake reports. The scalar `hw.*` leaves follow the same
 part: `hw.cpufamily` is Kaby Lake's (`0x0f817246`, which XNU also gives Coffee
 Lake), `hw.busfrequency` 100 MHz, `hw.cachelinesize` 64, `hw.l1icachesize` and
 `hw.l1dcachesize` 32 KiB, and `hw.optional.*` reads leaf 7 through the mask the
-`cpuid` leaf uses, so the AVX-512 entries are 0 on any host. `profile=host`
+`cpuid` leaf uses, so the AVX-512 entries are 0 on any host. The `machdep.cpu`
+leaves decoded from `cpuid` (`signature`, `extmodel`, `feature_bits`,
+`leaf7_features`, `extfeatures`, `logical_per_package`, `cores_per_package`,
+`cache.*`, `address_bits.*`, `tsc_ccc.*`) decode the compatibility `cpuid` view,
+the one the trap gives the game's trapped `cpuid` sites: 16 logical and 8 core
+IDs per package, a 256 KiB 4-way L2, 39/48 address bits and a 216/2 TSC ratio,
+as on a real i7-9750H. A `cpuid` instruction at a site the trap does not cover
+still returns the host's words. `profile=host`
 reports the real host CPU,
 GPU, VRAM and memory. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
