@@ -535,6 +535,153 @@ int main(void) {{
             subprocess.run(['cc', '-Wall', '-Wextra', str(src_path), '-o', str(exe_path)], check=True)
             subprocess.run([str(exe_path)], check=True)
 
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_group1_chained_dr_frees_slots_for_mvg_and_isolates_threads(self):
+        src = cpuid_trace_source()
+        self.assertIn('if (mvg_base != 0 && rclol_arm_group1_chained((const void*) base, slide, chosen))', src)
+        self.assertIn('rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);', src)
+        self.assertIn('int max_sites = g_chain_count > 0 ? RCLOL_MAX_SITES - 1 : RCLOL_MAX_SITES;', src)
+
+        attr_start = src.index('struct rclol_perf_event_attr {')
+        attr_end = src.index('#define RCLOL_O_WRONLY')
+        attr_defs = src[attr_start:attr_end]
+
+        bp_start = src.index('static void rclol_init_bp_attr(')
+        bp_end = src.index('int rclol_cpuid_trace_arm(')
+        bp_helper = src[bp_start:bp_end]
+
+        chain_start = src.index('static struct rclol_chain_slot* rclol_chain_slot_find_or_claim(')
+        chain_end = src.index('bool rclol_cpuid_trace_handle(')
+        chain_helpers = src[chain_start:chain_end]
+
+        harness = f"""
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+#define __NR_perf_event_open 298
+#define __NR_ioctl 16
+#define __NR_close 3
+#define RCLOL_MAX_SITES 4
+
+{attr_defs}
+
+struct rclol_site {{
+    unsigned long cookie;
+    unsigned long runtime;
+    unsigned long hits;
+}};
+struct rclol_chain_slot {{
+    long tid;
+    int fd;
+}};
+static struct rclol_site g_chain_sites[RCLOL_MAX_SITES];
+static int g_chain_count = 0;
+static struct rclol_chain_slot g_chain_slots[RCLOL_CHAIN_SLOTS];
+
+static long cur_tid = 101;
+static long rclol_gettid(void) {{ return cur_tid; }}
+
+static int next_fd = 20;
+static int fail_ioctl = 0;
+static int open_count = 0;
+static int ioctl_count = 0;
+static int close_count = 0;
+static unsigned long last_bp_addr = 0;
+static unsigned long last_cookie = 0;
+static int last_inherit = -1;
+static int last_closed_fd = -1;
+
+static long rclol_sys(long nr, long a1, long a2, long a3, long a4, long a5, long a6) {{
+    (void)a4; (void)a5; (void)a6;
+    if (nr == __NR_perf_event_open) {{
+        const struct rclol_perf_event_attr* a = (const struct rclol_perf_event_attr*) a1;
+        open_count++;
+        last_bp_addr = a->bp_addr;
+        last_cookie = a->sig_data;
+        last_inherit = (int) a->inherit;
+        return next_fd++;
+    }}
+    if (nr == __NR_ioctl) {{
+        assert((unsigned long) a2 == RCLOL_PERF_EVENT_IOC_MODIFY_ATTRIBUTES);
+        ioctl_count++;
+        if (fail_ioctl)
+            return -22;
+        const struct rclol_perf_event_attr* a = (const struct rclol_perf_event_attr*) a3;
+        last_bp_addr = a->bp_addr;
+        last_cookie = a->sig_data;
+        last_inherit = (int) a->inherit;
+        return 0;
+    }}
+    if (nr == __NR_close) {{
+        close_count++;
+        last_closed_fd = (int) a1;
+        return 0;
+    }}
+    return -1;
+}}
+
+{bp_helper}
+{chain_helpers}
+
+int main(void) {{
+    g_chain_count = 4;
+    for (int i = 0; i < 4; ++i) {{
+        g_chain_sites[i].cookie = 0x1000UL + (unsigned long) i * 0x34UL;
+        g_chain_sites[i].runtime = 0x2000UL + (unsigned long) i * 0x34UL;
+        g_chain_sites[i].hits = 0;
+    }}
+
+    /* Thread 101 hits site 0 -> opens thread-local (inherit=0) DR1 for site 1. */
+    cur_tid = 101;
+    rclol_chain_advance(0);
+    assert(open_count == 1 && last_inherit == 0);
+    assert(last_bp_addr == g_chain_sites[1].runtime && last_cookie == g_chain_sites[1].cookie);
+    int fd101 = g_chain_slots[0].fd;
+    assert(g_chain_slots[0].tid == 101 && fd101 == 20);
+
+    /* Concurrent thread 202 hits site 0 -> gets its own independent slot and fd. */
+    cur_tid = 202;
+    rclol_chain_advance(0);
+    assert(open_count == 2 && g_chain_slots[1].tid == 202 && g_chain_slots[1].fd == 21);
+
+    /* Thread 101 hits site 1 -> ioctl retargets fd 20 to site 2 without opening a new fd. */
+    cur_tid = 101;
+    rclol_chain_advance(1);
+    assert(ioctl_count == 1 && open_count == 2 && close_count == 0);
+    assert(last_bp_addr == g_chain_sites[2].runtime && last_cookie == g_chain_sites[2].cookie);
+
+    /* Thread 101 hits site 2 with ioctl failing -> closes fd 20 and reopens fd 22 for site 3. */
+    fail_ioctl = 1;
+    rclol_chain_advance(2);
+    assert(close_count == 1 && last_closed_fd == 20 && open_count == 3);
+    assert(g_chain_slots[0].fd == 22 && last_bp_addr == g_chain_sites[3].runtime);
+    fail_ioctl = 0;
+
+    /* Thread 101 hits site 3 -> closes fd 22 and releases slot 0 cleanly. */
+    rclol_chain_advance(3);
+    assert(close_count == 2 && last_closed_fd == 22);
+    assert(g_chain_slots[0].tid == 0 && g_chain_slots[0].fd == -1);
+    /* Thread 202's slot is untouched. */
+    assert(g_chain_slots[1].tid == 202 && g_chain_slots[1].fd == 21);
+
+    /* Thread 202 completes sites 1 -> 2 -> 3 and releases slot 1 cleanly. */
+    cur_tid = 202;
+    rclol_chain_advance(1);
+    rclol_chain_advance(2);
+    rclol_chain_advance(3);
+    assert(g_chain_slots[1].tid == 0 && g_chain_slots[1].fd == -1);
+    return 0;
+}}
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            src_path = Path(folder) / 'cpuid_chain_test.c'
+            exe_path = Path(folder) / 'cpuid_chain_test'
+            src_path.write_text(harness)
+            subprocess.run(['cc', '-Wall', '-Wextra', str(src_path), '-o', str(exe_path)], check=True)
+            subprocess.run([str(exe_path)], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

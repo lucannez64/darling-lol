@@ -1932,10 +1932,10 @@ index 0000000..9901d10
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..1b8d54e
+index 0000000..085c156
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1153 @@
+@@ -0,0 +1,1294 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2025,6 +2025,8 @@ index 0000000..1b8d54e
 +#define RCLOL_PERF_TYPE_BREAKPOINT 5u
 +#define RCLOL_HW_BREAKPOINT_X      4u
 +#define RCLOL_TRAP_PERF            6     // si_code for perf-generated SIGTRAP
++#define RCLOL_PERF_EVENT_IOC_MODIFY_ATTRIBUTES 0x4008240bUL
++#define RCLOL_CHAIN_SLOTS          32
 +
 +#define RCLOL_O_WRONLY  0x001
 +#define RCLOL_O_CREAT   0x040
@@ -2074,6 +2076,18 @@ index 0000000..1b8d54e
 +static int g_site_count = 0;
 +static int g_log_enabled = 0;
 +static int g_log_fd = -1;
++
++// Chained Group 1 state: when mvg.framework is also mapped in LeagueofLegends,
++// Group 1 uses only DR0 permanently (site 0) plus one ephemeral thread-local
++// DR1 breakpoint stepping site 1 -> site 2 -> site 3 -> close, freeing DR2-DR3
++// for mvg.framework's two cpuinfo helpers within the 4-DR hardware budget.
++struct rclol_chain_slot {
++	long tid;
++	int fd;
++};
++static struct rclol_site g_chain_sites[RCLOL_MAX_SITES];
++static int g_chain_count = 0;
++static struct rclol_chain_slot g_chain_slots[RCLOL_CHAIN_SLOTS];
 +
 +// ---------------------------------------------------------------------------
 +// Tiny async-signal-safe helpers (raw syscalls, no libc).
@@ -2126,9 +2140,28 @@ index 0000000..1b8d54e
 +// ---------------------------------------------------------------------------
 +// Arming
 +
++static void rclol_init_bp_attr(struct rclol_perf_event_attr* attr,
++	unsigned long runtime_addr, unsigned long cookie, int inherit)
++{
++	__builtin_memset(attr, 0, sizeof(*attr));
++	attr->type = RCLOL_PERF_TYPE_BREAKPOINT;
++	attr->size = sizeof(*attr);
++	attr->bp_type = RCLOL_HW_BREAKPOINT_X;
++	attr->bp_addr = runtime_addr;
++	attr->bp_len = sizeof(long);           // 8, per the task spec
++	attr->sample_period = 1;
++	attr->exclude_kernel = 1;
++	attr->exclude_hv = 1;
++	attr->inherit = inherit ? 1 : 0;       // later threads inherit when permanent
++	attr->remove_on_exec = 1;              // required with sigtrap + inherit
++	attr->sigtrap = 1;
++	attr->sig_data = cookie;               // delivered as siginfo.si_perf_data
++}
++
 +int rclol_cpuid_trace_arm(unsigned long runtime_addr, unsigned long cookie)
 +{
-+	if (g_site_count >= RCLOL_MAX_SITES)
++	int max_sites = g_chain_count > 0 ? RCLOL_MAX_SITES - 1 : RCLOL_MAX_SITES;
++	if (g_site_count >= max_sites)
 +		return -1;
 +
 +	// Protect against game updates: only arm an actual `cpuid` (0f a2).
@@ -2143,19 +2176,7 @@ index 0000000..1b8d54e
 +	}
 +
 +	struct rclol_perf_event_attr attr;
-+	__builtin_memset(&attr, 0, sizeof(attr));
-+	attr.type = RCLOL_PERF_TYPE_BREAKPOINT;
-+	attr.size = sizeof(attr);
-+	attr.bp_type = RCLOL_HW_BREAKPOINT_X;
-+	attr.bp_addr = runtime_addr;
-+	attr.bp_len = sizeof(long);           // 8, per the task spec
-+	attr.sample_period = 1;
-+	attr.exclude_kernel = 1;
-+	attr.exclude_hv = 1;
-+	attr.inherit = 1;                     // later threads inherit the breakpoint
-+	attr.remove_on_exec = 1;              // required with sigtrap + inherit
-+	attr.sigtrap = 1;
-+	attr.sig_data = cookie;               // delivered as siginfo.si_perf_data
++	rclol_init_bp_attr(&attr, runtime_addr, cookie, 1);
 +
 +	// pid=0 (this process), cpu=-1 (any cpu), group_fd=-1, flags=0.
 +	long fd = rclol_sys(__NR_perf_event_open, (long) &attr, 0, -1, -1, 0, 0);
@@ -2477,6 +2498,77 @@ index 0000000..1b8d54e
 +// ---------------------------------------------------------------------------
 +// Signal-handler fast path
 +
++static struct rclol_chain_slot* rclol_chain_slot_find_or_claim(long tid, int claim)
++{
++	for (int i = 0; i < RCLOL_CHAIN_SLOTS; ++i) {
++		if (__atomic_load_n(&g_chain_slots[i].tid, __ATOMIC_ACQUIRE) == tid)
++			return &g_chain_slots[i];
++	}
++	if (!claim)
++		return NULL;
++	for (int i = 0; i < RCLOL_CHAIN_SLOTS; ++i) {
++		long expected = 0;
++		if (__atomic_compare_exchange_n(&g_chain_slots[i].tid, &expected, tid,
++				0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
++			g_chain_slots[i].fd = -1;
++			return &g_chain_slots[i];
++		}
++	}
++	return NULL;
++}
++
++static int rclol_chain_open_site(const struct rclol_site* next_site)
++{
++	struct rclol_perf_event_attr attr;
++	rclol_init_bp_attr(&attr, next_site->runtime, next_site->cookie, 0);
++	return (int) rclol_sys(__NR_perf_event_open, (long) &attr, 0, -1, -1, 0, 0);
++}
++
++static int rclol_chain_retarget_site(int fd, const struct rclol_site* next_site)
++{
++	struct rclol_perf_event_attr attr;
++	rclol_init_bp_attr(&attr, next_site->runtime, next_site->cookie, 0);
++	if (fd >= 0 && rclol_sys(__NR_ioctl, fd, (long) RCLOL_PERF_EVENT_IOC_MODIFY_ATTRIBUTES,
++			(long) &attr, 0, 0, 0) == 0)
++		return fd;
++	if (fd >= 0)
++		rclol_sys(__NR_close, fd, 0, 0, 0, 0, 0);
++	return rclol_chain_open_site(next_site);
++}
++
++static void rclol_chain_advance(int chain_idx)
++{
++	long tid = rclol_gettid();
++	if (chain_idx == 0) {
++		struct rclol_chain_slot* slot = rclol_chain_slot_find_or_claim(tid, 1);
++		if (!slot)
++			return;
++		if (slot->fd >= 0) {
++			slot->fd = rclol_chain_retarget_site(slot->fd, &g_chain_sites[1]);
++		} else {
++			slot->fd = rclol_chain_open_site(&g_chain_sites[1]);
++		}
++		if (slot->fd < 0)
++			__atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
++	} else if (chain_idx > 0 && chain_idx + 1 < g_chain_count) {
++		struct rclol_chain_slot* slot = rclol_chain_slot_find_or_claim(tid, 0);
++		if (!slot)
++			return;
++		slot->fd = rclol_chain_retarget_site(slot->fd, &g_chain_sites[chain_idx + 1]);
++		if (slot->fd < 0)
++			__atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
++	} else if (chain_idx + 1 == g_chain_count) {
++		struct rclol_chain_slot* slot = rclol_chain_slot_find_or_claim(tid, 0);
++		if (!slot)
++			return;
++		if (slot->fd >= 0) {
++			rclol_sys(__NR_close, slot->fd, 0, 0, 0, 0, 0);
++			slot->fd = -1;
++		}
++		__atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
++	}
++}
++
 +bool rclol_cpuid_trace_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt)
 +{
 +	if (!info || !ctxt)
@@ -2488,8 +2580,18 @@ index 0000000..1b8d54e
 +	unsigned long cookie = (unsigned long) info->si_value;
 +
 +	struct rclol_site* site = NULL;
-+	for (int i = 0; i < g_site_count; ++i) {
-+		if (g_sites[i].cookie == cookie) { site = &g_sites[i]; break; }
++	int chain_idx = -1;
++	for (int i = 0; i < g_chain_count; ++i) {
++		if (g_chain_sites[i].cookie == cookie) {
++			site = &g_chain_sites[i];
++			chain_idx = i;
++			break;
++		}
++	}
++	if (!site) {
++		for (int i = 0; i < g_site_count; ++i) {
++			if (g_sites[i].cookie == cookie) { site = &g_sites[i]; break; }
++		}
 +	}
 +	if (!site)
 +		return false; // a perf SIGTRAP that isn't ours; let normal handling run
@@ -2513,6 +2615,9 @@ index 0000000..1b8d54e
 +	r->rcx = oc;
 +	r->rdx = od;
 +	r->rip += 2;  // skip the two-byte `0f a2`
++
++	if (chain_idx >= 0)
++		rclol_chain_advance(chain_idx);
 +
 +	unsigned long n = site->hits++;
 +	if (g_log_enabled) {
@@ -2539,6 +2644,9 @@ index 0000000..1b8d54e
 +
 +unsigned long rclol_cpuid_trace_hits(unsigned long cookie)
 +{
++	for (int i = 0; i < g_chain_count; ++i)
++		if (g_chain_sites[i].cookie == cookie)
++			return g_chain_sites[i].hits;
 +	for (int i = 0; i < g_site_count; ++i)
 +		if (g_sites[i].cookie == cookie)
 +			return g_sites[i].hits;
@@ -2634,8 +2742,8 @@ index 0000000..1b8d54e
 +}
 +
 +// Scan __TEXT,__text for Group 1's four cpuid sites (+0, +0x34, +0x60, +0x102).
-+static int rclol_arm_group1_scan(unsigned long text_start, unsigned long text_end,
-+	unsigned long slide)
++static int rclol_find_group1_scan(unsigned long text_start, unsigned long text_end,
++	unsigned long slide, unsigned long out_sites[RCLOL_MAX_SITES])
 +{
 +	if (text_end <= text_start || text_end - text_start < 0x104UL)
 +		return 0;
@@ -2647,20 +2755,19 @@ index 0000000..1b8d54e
 +		    p[0x60] == 0x0f && p[0x61] == 0xa2 &&
 +		    p[0x102] == 0x0f && p[0x103] == 0xa2) {
 +			unsigned long found_unslid = (unsigned long) p - slide;
-+			const unsigned long found_sites[RCLOL_MAX_SITES] = {
-+				found_unslid,
-+				found_unslid + 0x34UL,
-+				found_unslid + 0x60UL,
-+				found_unslid + 0x102UL,
-+			};
-+			return rclol_arm_group1_sites(found_sites, slide);
++			out_sites[0] = found_unslid;
++			out_sites[1] = found_unslid + 0x34UL;
++			out_sites[2] = found_unslid + 0x60UL;
++			out_sites[3] = found_unslid + 0x102UL;
++			return 1;
 +		}
 +	}
 +	return 0;
 +}
 +
-+static int rclol_arm_group1_select(const void* base, unsigned long slide,
-+	const unsigned long static_sites[RCLOL_MAX_SITES])
++static int rclol_find_group1_sites(const void* base, unsigned long slide,
++	const unsigned long static_sites[RCLOL_MAX_SITES],
++	unsigned long out_sites[RCLOL_MAX_SITES])
 +{
 +	unsigned long text_start = 0, text_end = 0;
 +	int has_text = rclol_find_text_section(base, slide, &text_start, &text_end);
@@ -2674,9 +2781,21 @@ index 0000000..1b8d54e
 +			break;
 +		}
 +	}
-+	if (static_ok)
-+		return rclol_arm_group1_sites(static_sites, slide);
-+	return rclol_arm_group1_scan(text_start, text_end, slide);
++	if (static_ok) {
++		for (int i = 0; i < RCLOL_MAX_SITES; ++i)
++			out_sites[i] = static_sites[i];
++		return 1;
++	}
++	return rclol_find_group1_scan(text_start, text_end, slide, out_sites);
++}
++
++static int rclol_arm_group1_select(const void* base, unsigned long slide,
++	const unsigned long static_sites[RCLOL_MAX_SITES])
++{
++	unsigned long sites[RCLOL_MAX_SITES];
++	if (!rclol_find_group1_sites(base, slide, static_sites, sites))
++		return 0;
++	return rclol_arm_group1_sites(sites, slide);
 +}
 +
 +// Scan mvg.framework's __TEXT,__text for cpuinfo's two generic cpuid/cpuidex
@@ -2971,6 +3090,23 @@ index 0000000..1b8d54e
 +	return NULL;
 +}
 +
++static int rclol_arm_group1_chained(const void* base, unsigned long slide,
++	const unsigned long static_sites[RCLOL_MAX_SITES])
++{
++	unsigned long sites[RCLOL_MAX_SITES];
++	if (!rclol_find_group1_sites(base, slide, static_sites, sites))
++		return 0;
++	if (rclol_cpuid_trace_arm(sites[0] + slide, sites[0]) < 0)
++		return 0;
++	for (int i = 0; i < RCLOL_MAX_SITES; ++i) {
++		g_chain_sites[i].cookie = sites[i];
++		g_chain_sites[i].runtime = sites[i] + slide;
++		g_chain_sites[i].hits = 0;
++	}
++	g_chain_count = RCLOL_MAX_SITES;
++	return 1;
++}
++
 +void rclol_cpuid_trace_setup(void)
 +{
 +	// Two switches: the launcher's hardware profile (RCLOL_PLATFORM_PROFILE,
@@ -3071,7 +3207,12 @@ index 0000000..1b8d54e
 +
 +	if (chosen) {
 +		if (chosen == rclol_group1) {
-+			rclol_arm_group1_select((const void*) base, slide, chosen);
++			unsigned long mvg_base = rclol_find_mvg_base();
++			if (mvg_base != 0 && rclol_arm_group1_chained((const void*) base, slide, chosen)) {
++				rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);
++			} else {
++				rclol_arm_group1_select((const void*) base, slide, chosen);
++			}
 +		} else {
 +			for (int i = 0; i < RCLOL_MAX_SITES; ++i)
 +				rclol_cpuid_trace_arm(chosen[i] + slide, chosen[i]);
