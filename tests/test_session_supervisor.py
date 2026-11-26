@@ -1232,3 +1232,79 @@ class LeagueExitTests(unittest.TestCase):
         self.assertEqual(signals, [(21, signal.SIGTERM)])
 if __name__ == '__main__':
     unittest.main()
+
+
+class GamePinningTests(unittest.TestCase):
+    """RCLOL_GAME_PCORE_AFFINITY: the game, and only the game, on the performance cores."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def cpus_file(self, text):
+        path = self.root / 'cpus'
+        path.write_text(text)
+        return path
+
+    def test_performance_cores_parses_the_kernel_list(self):
+        self.assertEqual(supervisor.performance_cores(self.cpus_file('0-15\n')), set(range(16)))
+        self.assertEqual(supervisor.performance_cores(self.cpus_file('0-3,8,10-11\n')),
+                         {0, 1, 2, 3, 8, 10, 11})
+        for bad in ('', 'x', '5-2', '-1'):
+            self.assertIsNone(supervisor.performance_cores(self.cpus_file(bad)), bad)
+        self.assertIsNone(supervisor.performance_cores(self.root / 'missing'))
+        self.assertEqual(supervisor.cpu_list({0, 1, 2, 3, 8, 10, 11}), '0-3,8,10-11')
+
+    def game(self, pid, tids, start_ticks=100, name=b'/Applications/League of Legends.app/'
+             b'Contents/LoL/Game/LeagueOfLegends.app/Contents/MacOS/LeagueofLegends'):
+        proc = fake_process(self.root, pid, start_ticks=start_ticks)
+        (proc / 'cmdline').write_bytes(name + b'\0')
+        for tid in tids:
+            (proc / 'task' / str(tid)).mkdir(parents=True)
+        return proc
+
+    def test_pins_every_game_thread_once_and_catches_new_ones(self):
+        calls = []
+        out = io.StringIO()
+        pinner = supervisor.GamePinner({0, 1, 2, 3}, setaffinity=lambda tid, cpus: calls.append((tid, set(cpus))),
+                                       out=out)
+        game = self.game(40, [40, 41, 42])
+        client = fake_process(self.root, 50)
+        (client / 'cmdline').write_bytes(b'/Applications/League of Legends.app/Contents/LoL/'
+                                         b'LeagueClient.app/Contents/MacOS/LeagueClientUx\0')
+        (client / 'task' / '50').mkdir(parents=True)
+        members = [(40, game), (50, client)]
+        pinner.poll(members)
+        self.assertEqual(sorted(tid for tid, _ in calls), [40, 41, 42])
+        self.assertTrue(all(cpus == {0, 1, 2, 3} for _, cpus in calls))
+        self.assertIn('pinned the League game (3 threads) to performance cores 0-3', out.getvalue())
+        calls.clear()
+        (game / 'task' / '43').mkdir()
+        pinner.poll(members)
+        self.assertEqual(calls, [(43, {0, 1, 2, 3})])
+        self.assertEqual(out.getvalue().count('pinned the League game'), 1)
+
+    def test_a_vanished_thread_is_skipped_and_a_reused_pid_is_pinned_again(self):
+        calls = []
+
+        def setaffinity(tid, cpus):
+            if tid == 41:
+                raise ProcessLookupError
+            calls.append(tid)
+
+        pinner = supervisor.GamePinner({0}, setaffinity=setaffinity, out=io.StringIO())
+        game = self.game(40, [40, 41])
+        pinner.poll([(40, game)])
+        self.assertEqual(calls, [40])
+        shutil.rmtree(game)
+        game = self.game(40, [40], start_ticks=999)
+        calls.clear()
+        pinner.poll([(40, game)])
+        self.assertEqual(calls, [40])
+
+    def test_supervised_session_pins_only_when_asked_and_reports_a_non_hybrid_cpu(self):
+        source = (ROOT / 'tools/session-supervisor.py').read_text()
+        self.assertIn("os.environ.get('RCLOL_GAME_PCORE_AFFINITY', '0') == '1'", source)
+        self.assertIn('pinner.poll(session_members(prefix, namespace, proc_root, own_namespace))', source)
+        self.assertIn("RCLOL_GAME_PCORE_AFFINITY=1, but this CPU reports no performance cores; '", source)
