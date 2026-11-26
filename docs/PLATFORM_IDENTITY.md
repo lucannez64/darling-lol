@@ -218,7 +218,10 @@ leaves report the i7-9750H's 6 cores / 12 threads and its 32 KiB / 256 KiB /
 12 MiB caches, whatever the host CPU. Leaf 1 and `machdep.cpu.features` report
 the i7-9750H's feature words: its EDX, and its ECX with each instruction-set bit
 kept only when the host has it, plus the ring-0-only bits (VMX, EST, PCID,
-x2APIC...) every Coffee Lake reports. `profile=host` reports the real host CPU,
+x2APIC...) every Coffee Lake reports. The commpage, which every guest process
+reads without a system call, carries the same part's CPU family (`0x0f817246`)
+and 64-byte cache line size, and its capability word has neither HLE nor RTM.
+`profile=host` reports the real host CPU,
 GPU, VRAM and memory. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
 file for diagnostics.

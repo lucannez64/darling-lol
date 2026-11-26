@@ -133,7 +133,7 @@ int main(void)
         self.assertIn('strcmp(profile, "compat") == 0', added)
         self.assertIn('ecx1 &= 0x7ffafbbfu;', added)
         self.assertIn('edx1 &= 0xbfebfbffu;', added)
-        self.assertIn('ebx7 &= 0x000c4b3cu;', added)
+        self.assertIn('ebx7 &= 0x000c432cu;', added)
 
     @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
     def test_gethostuuid_parses_provisioned_platform_plist_uuid(self):
