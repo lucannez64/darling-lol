@@ -151,6 +151,24 @@ kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo
     return 0;
 }
 
+// The raw HOST_VM_INFO64 reply hw.usermem reads: 1 GiB wired.
+kern_return_t _kernelrpc_host_statistics64(mach_port_name_t host, int flavor, void* info, mach_msg_type_number_t* count) {
+    (void)host; (void)flavor; (void)count;
+    if (rpc_fail)
+        return 5; // KERN_FAILURE
+    ((struct vm_statistics64*)info)->wire_count = 262144;
+    return 0;
+}
+
+// The cpuid trap's transform, which the cpuid-decoded machdep.cpu leaves call
+// under the compat profile. cpuid_trace.c needs the guest signal headers, so
+// the check links this pass-through; tests/test_machdep_cpu_leaves.py runs
+// those leaves through the real transform.
+void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
+    uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx) {
+    (void)leaf; (void)subleaf; (void)eax; (void)ebx; (void)ecx; (void)edx;
+}
+
 // sysctl_hw.c: what libsyscall's host_info wrapper writes into a reply.
 void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count);
 
@@ -528,8 +546,31 @@ static int machdep_mode(int compat) {
     return 0;
 }
 
+// The compiled table, child nodes included: two entries of one node must not
+// share an OID or a name. This sees the whole file, where the patch tests only
+// see the hunks.
+static int table_is_unique(const struct known_sysctl* table, const char* node) {
+    int unique = 1;
+
+    for (const struct known_sysctl* a = table; a->oid != -1; ++a) {
+        for (const struct known_sysctl* b = a + 1; b->oid != -1; ++b) {
+            if (a->oid == b->oid || strcmp(a->name, b->name) == 0) {
+                fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=duplicate in %s: %s (%d) and %s (%d)\n",
+                    node, a->name, a->oid, b->name, b->oid);
+                unique = 0;
+            }
+        }
+        if (a->type == CTLTYPE_NODE && !table_is_unique(a->subctls, a->name))
+            unique = 0;
+    }
+    return unique;
+}
+
 int main(int argc, char** argv) {
     const char* mode = argc > 1 ? argv[1] : "normal";
+
+    if (!table_is_unique(sysctls_hw, "hw"))
+        return 1;
 
     if (strcmp(mode, "machdep") == 0)
         return machdep_mode(0);

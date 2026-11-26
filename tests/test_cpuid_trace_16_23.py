@@ -220,10 +220,16 @@ int main(void) {{
         self.assertIn('static int g_log_enabled = 0;', src)
         self.assertIn('if (ffd >= 0) {\n\t\tg_log_enabled = 1;', src)
 
+        # The leaf 7 mask is shared with hw.optional.* through the identity header.
+        patch = (ROOT / 'patches/xnu.patch').read_text()
+        leaf7_mask = '\n'.join(line[1:] for line in patch.splitlines()
+                               if line.startswith('+#define DARLING_COMPAT_'))
+
         harness = f"""
 #include <assert.h>
 #include <stdint.h>
 
+{leaf7_mask}
 #define RCLOL_CPUID_LOG_PATH "/tmp/should-not-open"
 #define RCLOL_O_WRONLY 0x001
 #define RCLOL_O_CREAT  0x040
@@ -385,11 +391,12 @@ int main(void) {{
     rclol_cpuid_trace_spoof(0xdu, 0u, &a, &b, &c, &d);
     assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
 
-    // Leaf 7: subleaf 0 masks host EBX to Coffee Lake-H (drops AVX-512/SHA)
-    // and clears EAX/ECX/EDX; subleaf > 0 zeroes all registers.
+    // Leaf 7: subleaf 0 masks host EBX to the word a real i7-9750H reports
+    // (drops HLE/RTM/AVX-512/SHA) and clears EAX/ECX/EDX; subleaf > 0 zeroes
+    // all registers.
     a = 2u; b = 0xffffffffu; c = 0xffffffffu; d = 0xffffffffu;
     rclol_cpuid_trace_spoof(7u, 0u, &a, &b, &c, &d);
-    assert(a == 0u && b == 0x029c6fbfu && c == 0u && d == 0u);
+    assert(a == 0u && b == 0x029c67afu && c == 0u && d == 0u);
     // Bits the host lacks are not synthesized.
     a = 1u; b = (1u << 5) | (1u << 16) | (1u << 29); c = 0x1234u; d = 0x5678u;
     rclol_cpuid_trace_spoof(7u, 0u, &a, &b, &c, &d);
@@ -398,11 +405,21 @@ int main(void) {{
     rclol_cpuid_trace_spoof(7u, 1u, &a, &b, &c, &d);
     assert(a == 0u && b == 0u && c == 0u && d == 0u);
 
-    // Leaf 0x80000001: AMD extended signature and package type cleared;
-    // 0x80000005 (AMD L1 caches) is reserved on Intel.
+    // Leaf 0x80000001: AMD extended signature and package type cleared, and
+    // only the i7-9750H's own bits kept (a real one reports ECX 0x121, EDX
+    // 0x2c100800); 0x80000005 (AMD L1 caches) is reserved on Intel.
     a = 0x00a20f12u; b = 0x40000000u; c = 0xffffffffu; d = 0xffffffffu;
     rclol_cpuid_trace_spoof(0x80000001u, 0u, &a, &b, &c, &d);
-    assert(a == 0u && b == 0u && (c & 0x00c03fdeu) == 0u && (d & 0xc0400000u) == 0u);
+    assert(a == 0u && b == 0u && c == 0x00000121u && d == 0x2c100800u);
+    // A Zen 3 host's words: the mirrored leaf 1 bits, FFXSR, TCE, MWAITX and
+    // the performance-counter bits are not passed on.
+    a = 0x00a20f12u; b = 0x20000000u; c = 0x75c237ffu; d = 0x2fd3fbffu;
+    rclol_cpuid_trace_spoof(0x80000001u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0x00000121u && d == 0x2c100800u);
+    // Bits the host lacks are not synthesized.
+    a = 0u; b = 0u; c = 0x00000001u; d = 0x20100800u;
+    rclol_cpuid_trace_spoof(0x80000001u, 0u, &a, &b, &c, &d);
+    assert(c == 0x00000001u && d == 0x20100800u);
     a = b = c = d = 0xdeadbeefu;
     rclol_cpuid_trace_spoof(0x80000005u, 0u, &a, &b, &c, &d);
     assert(a == 0u && b == 0u && c == 0u && d == 0u);
