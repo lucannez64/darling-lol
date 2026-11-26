@@ -51,6 +51,11 @@ class FSEventsMonitorTests(unittest.TestCase):
         self.assertIn('XPC_EVENT_ROUTINE_KEY_STREAM', code)
         self.assertIn('XPC_EVENT_ROUTINE_KEY_EVENTS', code)
 
+    def test_provider_uses_direct_bootstrap_pipe_without_connection_handshake(self):
+        code = additions(SOURCE)
+        main = function_body(code, 'main')
+        self.assertRegex(main, r'xpc_pipe_create_from_port\(bootstrap_port,\s*XPC_PIPE_USE_SYNC_IPC_OVERRIDE\)')
+
     def test_state_updates_use_the_event_token_and_boolean_state(self):
         code = additions(SOURCE)
         self.assertIn('XPC_EVENT_PROVIDER_SET_STATE', code)

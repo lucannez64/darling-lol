@@ -13664,7 +13664,7 @@ index 1e9ec25..0114e25 100644
  				break;
  			}
 diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
-index a68739ff..5c8eb836 100644
+index a68739ff..40c49e0b 100644
 --- a/src/launchd/src/core.c
 +++ b/src/launchd/src/core.c
 @@ -463,6 +463,9 @@ static job_t job_mig_intran2(jobmgr_t jm, mach_port_t mport, pid_t upid);
@@ -15124,7 +15124,7 @@ index 00000000..b025847a
 +</plist>
 diff --git a/src/UserEventAgent/main.c b/src/UserEventAgent/main.c
 new file mode 100644
-index 00000000..9f94194c
+index 00000000..d114160c
 --- /dev/null
 +++ b/src/UserEventAgent/main.c
 @@ -0,0 +1,474 @@
@@ -15565,7 +15565,7 @@ index 00000000..9f94194c
 +	if (kevent(queue, &change, 1, NULL, 0, NULL) < 0) {
 +		perror("UserEventAgent: SIGUSR1 registration"); return 1;
 +	}
-+	launchd_pipe = xpc_pipe_create_from_port(bootstrap_port, 0);
++	launchd_pipe = xpc_pipe_create_from_port(bootstrap_port, XPC_PIPE_USE_SYNC_IPC_OVERRIDE);
 +	if (!launchd_pipe) return 1;
 +	provider_check_in();
 +	for (;;) {
@@ -15602,3 +15602,81 @@ index 00000000..9f94194c
 +		if (recheck) provider_check_in();
 +	}
 +}
+diff --git a/src/launchd/CMakeLists.txt b/src/launchd/CMakeLists.txt
+index 2fa56277..202636dd 100644
+--- a/src/launchd/CMakeLists.txt
++++ b/src/launchd/CMakeLists.txt
+@@ -13,3 +13,10 @@ install(FILES man/launchd.8 DESTINATION libexec/darling/usr/share/man/man8)
+ 
+ install(DIRECTORY DESTINATION libexec/darling/Library/LaunchDaemons)
+ install(DIRECTORY DESTINATION libexec/darling/Library/LaunchAgents)
++
++# The Xcode postflight creates these as root:wheel. Include them in Darling's
++# runtime image as well; startup keeps writable state in each prefix.
++install(DIRECTORY DESTINATION libexec/darling/private/var/db/launchd.db
++	DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
++install(DIRECTORY DESTINATION libexec/darling/private/var/db/launchd.db/com.apple.launchd
++	DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+diff --git a/src/startup/darling.c b/src/startup/darling.c
+index a3f27fbf..5927ea0c 100644
+--- a/src/startup/darling.c
++++ b/src/startup/darling.c
+@@ -51,6 +51,8 @@ uid_t g_originalUid, g_originalGid;
+ bool g_fixPermissions = false;
+ char g_workingDirectory[4096];
+ 
++static void setupLaunchdState(void);
++
+ int main(int argc, char ** argv)
+ {
+ 	pid_t pidInit;
+@@ -167,6 +169,8 @@ int main(int argc, char ** argv)
+ 	// If prefix's init is not running, start it up
+ 	if (pidInit == 0)
+ 	{
++		setupLaunchdState();
++
+ 		char socketPath[4096];
+ 		
+ 		snprintf(socketPath, sizeof(socketPath), "%s"  SHELLSPAWN_SOCKPATH, prefix);
+@@ -938,6 +942,40 @@ void createDir(const char* path)
+ 	}
+ }
+ 
++static void setupLaunchdState(void)
++{
++	char path[4096];
++	const uid_t saved_euid = geteuid();
++	const gid_t saved_egid = getegid();
++	const char* dirs[] = {
++		"/private/var/db/launchd.db",
++		"/private/var/db/launchd.db/com.apple.launchd"
++	};
++
++	// Persistent state belongs in the writable prefix, not the root-owned
++	// runtime image. Repair old prefixes as well as initializing new ones.
++	if (setegid(g_originalGid) != 0 || seteuid(g_originalUid) != 0)
++	{
++		fprintf(stderr, "Cannot select prefix owner for launchd state: %s\n", strerror(errno));
++		exit(1);
++	}
++
++	const mode_t saved_mask = umask(0022);
++	for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); i++)
++	{
++		snprintf(path, sizeof(path), "%s%s", prefix, dirs[i]);
++		createDir(path);
++	}
++
++	umask(saved_mask);
++
++	if (seteuid(saved_euid) != 0 || setegid(saved_egid) != 0)
++	{
++		fprintf(stderr, "Cannot restore credentials after launchd state setup: %s\n", strerror(errno));
++		exit(1);
++	}
++}
++
+ void setupWorkdir()
+ {
+ 	char* workdir;
