@@ -1,8 +1,48 @@
-# League on Linux via Darling
+<p align="center">
+  <img src="docs/assets/league-on-linux.png" alt="League on Linux icon: a penguin inside a gold hexagonal ring" width="160">
+</p>
 
-An experimental fork of [Darling-LoL](https://github.com/lucannez64/darling-lol) for running the macOS League of Legends client on x86-64 Linux through [Darling](https://github.com/darlinghq/darling).
+<h1 align="center">League on Linux</h1>
 
-This fork focuses on reproducible fixes for installation, graphics, input, and macOS runtime behavior. The [testing guide](docs/TESTING.md) covers standalone probes and offline checks. The original project and its contributors provide the runtime patches and setup instructions below.
+<p align="center">Run the official macOS League of Legends and Riot Client on x86-64 Linux through <a href="https://github.com/darlinghq/darling">Darling</a>, the way Wine runs Windows programs.</p>
+
+This repository ([PiotrWarzachowski/league-on-linux](https://github.com/PiotrWarzachowski/league-on-linux)) is a fork of [Darling-LoL](https://github.com/lucannez64/darling-lol). It ships source patches for Darling and original integration tooling; it never ships Riot or game files.
+
+## Why this fork
+
+Darling-LoL proved the macOS client can run on Linux, but its author built it as a technical challenge and does not have time to maintain it (see the upstream announcement below). This fork exists to keep the project moving:
+
+- **1:1 parity with a real Mac.** The guest presents itself the way macOS 15.5 (24F74) does, and every change is checked against real Macs over SSH: the same system values, files, tools and log lines a macOS program sees. Like Wine, nothing is hidden from the client; the goal is that it finds the system it was written for.
+- **Continued maintenance.** I have several Macs available as references and intend to keep working on the project: following new macOS and client releases, comparing them with the Linux guest and turning every difference into a tested patch.
+- **Open to contributions.** Pull requests are welcome, from small fixes to new compatibility patches. Read [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md) first.
+
+## Where it stands
+
+- **Played:** about 7 matches (bots, Swiftplay) on the current runtime, with the client and game stable throughout. In those matches we saw no client errors that a Mac does not also log, no crashes and no descriptor or memory leaks. That is a small sample: it says nothing about how Riot will treat this setup, so read the upstream warning below.
+- **macOS 15.5 parity patches:** process view (descriptor list and limits, `RLIMIT_NOFILE`/`RLIMIT_NPROC`, `sysctl` values), framework `Info.plist` metadata, global language preferences, the launchd environment, `WatchPaths` jobs, a macOS-style `/dev`, Apple's `lsof`, `mount` and `umount`, an Apple-compatible `defaults`, and the `NSURLCache`/`HTTPStorages` databases. See [platform identity](docs/PLATFORM_IDENTITY.md).
+- **Pull requests:** open work is tracked in [pull requests](https://github.com/PiotrWarzachowski/league-on-linux/pulls).
+
+### Measured
+
+| Machine | Setup | Result |
+|---|---|---|
+| Intel i9-12900KF, NVIDIA RTX 3070, 32 GB, Ubuntu 26.04 in a distrobox, X11 | 3440×1440, graphics on Low, Swiftplay, 2026-11-26 | 119.5 FPS average over 20 minutes (10-second averages 78–159, median 118); game process steady at about 1.45 GB and 200 descriptors |
+| Ryzen 5 5500, RX 6600 (upstream) | ARAM | about 118–135 FPS ([status](docs/STATUS.md)) |
+| Same Swiftplay match, comparison with a MacBook Air M1 on macOS 15.5 | game, client and system logs | only expected differences: presented hardware, the x86-64 game slice, champions and match outcome |
+
+For comparison, the same 3440×1440 machine reported 200–240 FPS on Windows. The game's main thread is the limit (GPU about 70% busy); on hybrid Intel CPUs `RCLOL_GAME_PCORE_AFFINITY=1` keeps the game on the performance cores ([troubleshooting](docs/TROUBLESHOOTING.md#lower-fight-fps-than-windows)).
+
+### Requirements at a glance
+
+- x86-64 Linux 5.14+, X11 or Xwayland; a working Vulkan driver (NVIDIA proprietary and AMD RADV have been used).
+- Ubuntu 26.04, Fedora 44+, Arch or Debian 14+ natively, or any distribution through a Toolbox/distrobox container.
+- About 50 GiB of disk for Darling sources, build and the game. Full list below under [Requirements](#requirements).
+
+---
+
+## Upstream announcement (Darling-LoL)
+
+The announcement below is from the original project and is kept unchanged.
 
 > [!IMPORTANT]
 >
@@ -65,8 +105,8 @@ Installs dependencies, configures the build environment and compiles Darling-LoL
 Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+. Hosts outside this list (for example Ubuntu 24.04 and its derivatives) can still install through a Fedora Toolbox container with `--toolbox`.
 
 ```bash
-git clone https://github.com/lucannez64/darling-lol
-cd darling-lol
+git clone https://github.com/PiotrWarzachowski/league-on-linux
+cd league-on-linux
 bash scripts/install-native.sh
 ```
 
@@ -89,10 +129,10 @@ Options can be combined: `bash scripts/install-native.sh --toolbox --verbose`
 Nix supplies the launcher and dependencies, **not** a prebuilt Darling or the game. First setup is interactive and builds into the writable per-user workspace.
 
 ```bash
-nix run github:lucannez64/darling-lol#installer
-nix run github:lucannez64/darling-lol#default -- --update
-nix run github:lucannez64/darling-lol#default
-nix run github:lucannez64/darling-lol#shell
+nix run github:PiotrWarzachowski/league-on-linux#installer
+nix run github:PiotrWarzachowski/league-on-linux#default -- --update
+nix run github:PiotrWarzachowski/league-on-linux#default
+nix run github:PiotrWarzachowski/league-on-linux#shell
 ```
 
 From a local checkout:
@@ -109,8 +149,8 @@ Limits: run updates only after manually closing the clients and shutting Darling
 Ensure no Riot/League session is running before installing the runtime.
 
 ```bash
-git clone https://github.com/lucannez64/darling-lol.git
-cd darling-lol
+git clone https://github.com/PiotrWarzachowski/league-on-linux.git
+cd league-on-linux
 python3 -m venv build/venv
 build/venv/bin/pip install -r requirements.txt
 python3 scripts/configure.py --guest-user "$USER"
@@ -155,7 +195,7 @@ These window-management helpers are opt-in, off by default, and do not patch cli
 
 Exit the game and both clients first.
 
-**Nix users:** use `nix run --refresh github:lucannez64/darling-lol#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`.
+**Nix users:** use `nix run --refresh github:PiotrWarzachowski/league-on-linux#default -- --update` when running through Nix. For an installed profile or system package, [upgrade the package first](docs/NIX.md), then run `darling-lol --update`.
 
 **Native, manual, and Toolbox builds**:
 
@@ -204,4 +244,4 @@ Darling/upstream components keep their licenses ([NOTICE.md](NOTICE.md)). Origin
 
 _League of Legends and Riot Games are trademarks or registered trademarks of Riot Games, Inc. This project is not affiliated with, endorsed by, or sponsored by Riot Games._
 
-**Donations:** [Support on Ko-Fi](https://ko-fi.com/lucannez64)
+**Donations to the original author:** [Support on Ko-Fi](https://ko-fi.com/lucannez64)

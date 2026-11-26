@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="League on Linux">
+  <title>League on Linux</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b1c33"/>
+      <stop offset="1" stop-color="#030a14"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f0d895"/>
+      <stop offset="0.5" stop-color="#c8aa6e"/>
+      <stop offset="1" stop-color="#7a5c29"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.55" r="0.5">
+      <stop offset="0" stop-color="#0ac8b9" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#0ac8b9" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="belly" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9e3ea"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="104" fill="url(#bg)"/>
+  <circle cx="256" cy="276" r="190" fill="url(#glow)"/>
+  <!-- hextech ring -->
+  <polygon points="256,52 432,154 432,358 256,460 80,358 80,154" fill="none" stroke="url(#gold)" stroke-width="18" stroke-linejoin="round"/>
+  <polygon points="256,86 402,171 402,341 256,426 110,341 110,171" fill="none" stroke="#c8aa6e" stroke-opacity="0.45" stroke-width="4" stroke-linejoin="round"/>
+  <!-- penguin -->
+  <g>
+    <ellipse cx="256" cy="300" rx="104" ry="128" fill="#11161c"/>
+    <circle cx="256" cy="186" r="74" fill="#11161c"/>
+    <path d="M160 300 C130 330 136 372 168 380 C176 350 178 320 176 296 Z" fill="#11161c"/>
+    <path d="M352 300 C382 330 376 372 344 380 C336 350 334 320 336 296 Z" fill="#11161c"/>
+    <ellipse cx="256" cy="318" rx="70" ry="98" fill="url(#belly)"/>
+    <ellipse cx="226" cy="180" rx="20" ry="25" fill="#ffffff"/>
+    <ellipse cx="286" cy="180" rx="20" ry="25" fill="#ffffff"/>
+    <circle cx="231" cy="186" r="9" fill="#11161c"/>
+    <circle cx="281" cy="186" r="9" fill="#11161c"/>
+    <circle cx="234" cy="182" r="3" fill="#ffffff"/>
+    <circle cx="284" cy="182" r="3" fill="#ffffff"/>
+    <path d="M226 214 Q256 200 286 214 Q256 246 226 214 Z" fill="#f2a33a"/>
+    <path d="M196 420 Q216 400 244 418 Q228 438 196 432 Z" fill="#f2a33a"/>
+    <path d="M316 420 Q296 400 268 418 Q284 438 316 432 Z" fill="#f2a33a"/>
+  </g>
+  <!-- gold crest -->
+  <path d="M256 236 L272 262 L256 290 L240 262 Z" fill="url(#gold)" stroke="#7a5c29" stroke-width="2"/>
+</svg>
