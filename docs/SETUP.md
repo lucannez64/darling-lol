@@ -247,6 +247,13 @@ found when running at launch; otherwise native is assumed. Discord must be
 running on the host. `RCLOL_DISCORD_RPC=0` skips the links and removes ones
 left by an earlier launch.
 
+With the links enabled the launcher also creates
+`~/Library/Application Support/discord/games` in the guest home, as a Discord
+install leaves it on macOS. The client's Discord SDK writes each product's
+launch command there (`<application id>.json`) and does not create the folder,
+so without it every registration failed with "Discord failed to register launch
+command".
+
 The guest runs in its own PID namespace, so the process ID a client sends with
 its activity is unknown to the host Discord, which then shows no status. While
 Discord is running at launch, the slots it serves are linked to a small host

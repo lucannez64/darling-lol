@@ -144,6 +144,9 @@ with open({str(log)!r}, "a") as output:
         # Discord Rich Presence: the guest's XDG_RUNTIME_DIR must lead out to the host socket.
         assert os.readlink(prefix / "run/user/offline-check/discord-ipc-0") == \
             "/Volumes/SystemRoot/run/user/offline-check/discord-ipc-0", "Discord IPC link missing"
+        # The Discord SDK writes launch commands into this folder, which it does not create.
+        assert (prefix / "Users/offline-check/Library/Application Support/discord/games").is_dir(), \
+            "Discord games folder missing"
         # Opting out removes the links an earlier launch left behind, including the TMPDIR
         # fallback (/private/tmp) left by a launch without XDG_RUNTIME_DIR.
         (prefix / "private/tmp").mkdir(parents=True)
