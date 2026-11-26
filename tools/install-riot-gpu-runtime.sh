@@ -19,30 +19,36 @@ done
 RCLOL_CLANG_CACHE_SHIMS=$clang_cache_bin
 PATH="$clang_cache_bin:$PATH"
 export RCLOL_CLANG_CACHE_SHIMS PATH
-python3 tools/build-m58f333-iosurface.py
 # Rebuild the native wrapper with floating-point-safe symbol resolvers.
 make -C build/darling-src/build/src/native GL -j4
 make -C build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices LaunchServices -j4
 # WebAudio gain, mixing, filters and FFTs need real vDSP kernels, not stubs.
 make -C build/darling-src/build/src/frameworks/Accelerate/vecLib/vDSP vDSP -j4
-python3 tools/build-m58f327-opengl.py
-python3 tools/build-m58f336-quartzcore.py
-python3 tools/build-m58f341-corevideo.py
-python3 tools/build-riot-x11-runtime.py
-python3 tools/build-riot-appkit-runtime.py
-python3 tools/build-riot-coregraphics-runtime.py
-python3 tools/build-riot-coretext-runtime.py
-python3 tools/build-riot-carboncore-runtime.py
-python3 tools/build-riot-corefoundation-runtime.py
-python3 tools/build-riot-kqueue-runtime.py
-python3 tools/build-riot-malloc-runtime.py
-python3 tools/build-riot-pthread-runtime.py
-python3 tools/build-riot-audio-runtime.py
-python3 tools/build-riot-objc-runtime.py
-python3 tools/build-riot-cxxabi-runtime.py
-python3 tools/build-riot-indium-runtime.py
+# The overlay builders are independent: each one has its own object prefix,
+# folder and output. build-riot-metal-runtime.py links its sampler probe against
+# build/riot-libindium.dylib, so Metal runs after this pool has finished indium.
+# RCLOL_PARALLEL_JOBS caps the concurrent builders (default: the CPU count).
+printf '%s\n' \
+	'python3 tools/build-m58f333-iosurface.py' \
+	'python3 tools/build-m58f327-opengl.py' \
+	'python3 tools/build-m58f336-quartzcore.py' \
+	'python3 tools/build-m58f341-corevideo.py' \
+	'python3 tools/build-riot-x11-runtime.py' \
+	'python3 tools/build-riot-appkit-runtime.py' \
+	'python3 tools/build-riot-coregraphics-runtime.py' \
+	'python3 tools/build-riot-coretext-runtime.py' \
+	'python3 tools/build-riot-carboncore-runtime.py' \
+	'python3 tools/build-riot-corefoundation-runtime.py' \
+	'python3 tools/build-riot-kqueue-runtime.py' \
+	'python3 tools/build-riot-malloc-runtime.py' \
+	'python3 tools/build-riot-pthread-runtime.py' \
+	'python3 tools/build-riot-audio-runtime.py' \
+	'python3 tools/build-riot-objc-runtime.py' \
+	'python3 tools/build-riot-cxxabi-runtime.py' \
+	'python3 tools/build-riot-indium-runtime.py' \
+	'python3 tools/build-riot-server-runtime.py' |
+	sh tools/run-parallel.sh
 python3 tools/build-riot-metal-runtime.py
-python3 tools/build-riot-server-runtime.py
 build/riot-host-message-check
 cc -shared -fPIC -O2 -Wall -Wextra -Wl,-soname,"$project_dir/build/libdarling-xshm.so" tools/m58f299-xshm.c -o build/libdarling-xshm.so.next -pthread $(pkg-config --cflags --libs x11 x11-xcb xcb-shm xext)
 python3 tools/stop-darling-runtime.py
