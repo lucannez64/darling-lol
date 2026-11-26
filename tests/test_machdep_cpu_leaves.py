@@ -101,6 +101,9 @@ static void copyout_string(const char* str, char* out, unsigned long* out_len)
 struct cpuid_regs {{ unsigned int eax, ebx, ecx, edx; }};
 static int g_compat = 1;
 static int g_amd = 1;
+static int g_old_host = 0;      /* maximum basic leaf 4 */
+static int g_invariant_tsc = 1;
+static int g_topoext = 1;       /* AMD leaf 0x8000001E */
 
 /* The raw cpuid of the host: a Zen 3 (leaf 7 EBX set to the bits it shares
  * with the i7-9750H plus AVX-512 and SHA, to exercise the mask), or the
@@ -109,7 +112,7 @@ static struct cpuid_regs host_cpuid(unsigned int leaf, unsigned int subleaf)
 {{
     struct cpuid_regs r = {{ 0, 0, 0, 0 }};
     switch (leaf) {{
-    case 0: r.eax = g_amd ? 0x10 : 0x16; break;
+    case 0: r.eax = g_old_host ? 4 : g_amd ? 0x10 : 0x16; break;
     case 1:
         r.eax = g_amd ? 0x00a20f12 : 0x000906ea;
         r.ebx = g_amd ? 0x050c0800 : 0x05100800;
@@ -124,25 +127,31 @@ static struct cpuid_regs host_cpuid(unsigned int leaf, unsigned int subleaf)
         }}
         break;
     case 7:
-        if (subleaf == 0) {{
+        if (g_old_host) {{
+            /* above the maximum leaf: the data of leaf 4, EBX bit 5 set */
+            r.eax = 0x1c004121; r.ebx = 0x01c0003f; r.ecx = 0x3f;
+        }} else if (subleaf == 0) {{
             r.ebx = g_amd ? 0x219c07a9 | (1u << 16) | (1u << 29) : 0x029c67af;
             r.ecx = g_amd ? 0x0040069c : 0x40000000;
             r.edx = g_amd ? 0x00000010 : 0x9c002e00;
         }}
         break;
     case 0x15: if (!g_amd) {{ r.eax = 2; r.ebx = 216; }} break;
-    case 0x80000000: r.eax = g_amd ? 0x80000023 : 0x80000008; break;
+    case 0x80000000: r.eax = (g_amd && g_topoext) ? 0x80000023 : 0x80000008; break;
     case 0x80000001:
         r.eax = g_amd ? 0x00a20f12 : 0;
         r.ecx = g_amd ? 0x75c237ff : 0x00000121;
         r.edx = g_amd ? 0x2fd3fbff : 0x2c100800;
         break;
     case 0x80000006: r.ecx = g_amd ? 0x02006140 : 0x01004040; break;
-    case 0x80000007: r.edx = g_amd ? 0x00006799 : 0x00000100; break;
+    case 0x80000007: r.edx = (g_amd ? 0x00006799 : 0x00000100) & (g_invariant_tsc ? ~0u : ~0x100u); break;
+    case 0x8000001e: if (g_amd && g_topoext) r.ebx = 0x00000100; break; /* 2 threads per core */
     case 0x80000008: r.eax = g_amd ? 0x00003030 : 0x00003027; r.ecx = g_amd ? 0x0000400b : 0; break;
     }}
     return r;
 }}
+
+static unsigned int host_max_basic_leaf(void) {{ return host_cpuid(0, 0).eax; }}
 
 static struct cpuid_regs presented_cpuid(unsigned int leaf, unsigned int subleaf)
 {{
@@ -252,11 +261,35 @@ int main(void)
     assert(integer(handle_signature) == 0x00a20f12);
     assert(integer(handle_extmodel) == 2 && integer(handle_extfamily) == 0xa);
     assert(integer(handle_logical_per_package) == 12);
-    assert(integer(handle_cores_per_package) == 12); /* leaf 0x80000008 ECX + 1 */
+    assert(integer(handle_cores_per_package) == 6);  /* 12 logical / 2 threads per core */
+    g_topoext = 0;
+    assert(integer(handle_max_ext) == 0x80000008u);
+    assert(integer(handle_cores_per_package) == 12); /* no leaf 0x8000001E: one thread per core */
+    g_topoext = 1;
+    /* AMD mirrors CX8 at bit 8 of leaf 0x80000001 EDX: TSCI only from leaf 0x80000007 */
+    assert(strstr(string(handle_extfeatures), "TSCI") != 0);
+    g_invariant_tsc = 0;
+    assert((quad(handle_extfeature_bits) & 0x100) == 0);
+    assert(strstr(string(handle_extfeatures), "TSCI") == 0);
+    g_invariant_tsc = 1;
     assert(integer(handle_cache_size) == 512);
     assert(integer(handle_cache_l2_associativity) == 8); /* encoded 6 */
     assert(integer(handle_address_bits_physical) == 48);
     assert(integer(handle_tsc_ccc_numerator) == 0); /* no leaf 0x15 */
+
+    /* a host whose maximum leaf is below 7 has no leaf 7, whatever the compat
+     * view's maximum: cpuid(7) returns leaf 4's data there */
+    g_compat = 1; g_old_host = 1;
+    len = 8; old = &leaf7;
+    assert(CALL(handle_leaf7_feature_bits) == -ENOENT);
+    len = sizeof(word); old = &word;
+    assert(CALL(handle_leaf7_feature_bits_edx) == -ENOENT);
+    {{
+        char names[64];
+        len = sizeof(names); old = names;
+        assert(CALL(handle_leaf7_features) == -ENOENT);
+    }}
+    g_compat = 0; g_old_host = 0;
 
     /* size queries and short buffers */
     len = 0; old = 0;
@@ -266,6 +299,9 @@ int main(void)
     len = 4; old = &word;
     word = 0x55555555;
     assert(CALL(handle_feature_bits) == -ENOMEM && len == 0 && word == 0x55555555);
+    len = 2;
+    assert(CALL(handle_signature) == -ENOMEM && len == 0 && word == 0x55555555);
+    len = 4;
     /* the name strings too: a size query, then a short buffer is not truncated into */
     len = 0; old = 0;
     assert(CALL(handle_extfeatures) == 0 && len > 4);
