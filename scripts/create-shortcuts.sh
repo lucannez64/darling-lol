@@ -469,6 +469,8 @@ show_flag_reference() {
   printf '  RCLOL_PLATFORM_PROFILE=host       Override the platform identity profile (host|compat)\n'
   printf '  RCLOL_REGION=CODE                 Server region for the launch, for example BR\n'
   printf '  RCLOL_LOCALE=CODE                 Client language for the launch, for example pt_BR\n'
+  printf '  RCLOL_GAME_PCORE_AFFINITY=1       Keep the League game threads on the performance cores of a hybrid Intel CPU%s\n' \
+    "$pcore_recommended"
   printf '  DSERVER_PCORE_AFFINITY=1          Keep the server threads on the performance cores of a hybrid Intel CPU%s\n' \
     "$pcore_recommended"
   printf '\n'
