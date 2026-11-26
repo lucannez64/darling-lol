@@ -32,6 +32,8 @@ class CpuidFaultModeTests(unittest.TestCase):
         requested = trace[trace.index('static int rclol_fault_requested('):]
         requested = requested[:requested.index('\n}\n')]
         self.assertIn('rclol_flag_value(contents, "fault=")', requested)
+        self.assertIn('got = rclol_whole_tokens(contents, got, (long) sizeof(contents) - 1);\n'
+                      '\t\tcontents[got] = \'\\0\';', trace)
         setup = trace[trace.index('void rclol_cpuid_trace_setup(void)'):]
         # the League branch: fault mode, then the breakpoint groups as fallback
         fault = setup.rindex('if (rclol_fault_requested(contents)) {')
@@ -226,6 +228,24 @@ int main(int argc, char** argv)
     assert(!rclol_fault_requested("") && !rclol_fault_requested("fault=0"));
     assert(!rclol_fault_requested("fault=10") && !rclol_fault_requested("fault=1x"));
     assert(!rclol_fault_requested("fault=yes") && !rclol_fault_requested("nofault=1"));
+    /* a 127-byte read of 120 spaces and "fault=10" ends in "fault=1": the cut token is dropped */
+    {{
+        char cut[128];
+        memset(cut, ' ', 120);
+        memcpy(cut + 120, "fault=1", 7);
+        long kept = rclol_whole_tokens(cut, 127, 127);
+        assert(kept == 120);
+        cut[kept] = 0;
+        assert(!rclol_fault_requested(cut));
+        /* a shorter read is whole, and so is a full one that ends on a delimiter */
+        memcpy(cut, "fault=1", 8);
+        assert(rclol_whole_tokens(cut, 7, 127) == 7 && rclol_fault_requested(cut));
+        memset(cut, ' ', 127);
+        memcpy(cut + 119, "fault=1", 7);
+        assert(rclol_whole_tokens(cut, 127, 127) == 127);
+        cut[127] = 0;
+        assert(rclol_fault_requested(cut));
+    }}
 
     /* ARCH_GET_CPUID, as the clock probe asks it: 1 while cpuid runs freely */
     long free_before = syscall(SYS_arch_prctl, RCLOL_ARCH_GET_CPUID, 0UL);

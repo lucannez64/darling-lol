@@ -1953,10 +1953,10 @@ index 0000000..20fd3fe
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..00012e4
+index 0000000..381ef90
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1569 @@
+@@ -0,0 +1,1585 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -3373,6 +3373,21 @@ index 0000000..00012e4
 +	return true;
 +}
 +
++// A read that fills the buffer may stop inside a token ("fault=10" cut to
++// "fault=1"): keep whole tokens only. Returns the new length.
++static long rclol_whole_tokens(const char* contents, long got, long capacity)
++{
++	if (got < capacity)
++		return got;
++	while (got > 0) {
++		char last = contents[got - 1];
++		if (last == ' ' || last == '\t' || last == '\n' || last == '\r' || last == ',')
++			break;
++		--got;
++	}
++	return got;
++}
++
 +static int rclol_fault_requested(const char* contents)
 +{
 +	const char* fault = rclol_flag_value(contents, "fault=");
@@ -3401,6 +3416,7 @@ index 0000000..00012e4
 +		rclol_sys(__NR_close, ffd, 0, 0, 0, 0, 0);
 +		if (got < 0)
 +			got = 0;
++		got = rclol_whole_tokens(contents, got, (long) sizeof(contents) - 1);
 +		contents[got] = '\0';
 +	}
 +
