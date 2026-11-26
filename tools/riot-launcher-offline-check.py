@@ -66,7 +66,11 @@ with open({str(log)!r}, "a") as output:
         env.pop("RCLOL_LAUNCH_PRODUCT", None)
         env["PATH"] = str(binary_folder) + os.pathsep + env.get("PATH", "")
         prefix = folder / "prefix"
-        (prefix / "Applications/Riot Client.app").mkdir(parents=True)
+        shared_client = prefix / "Users/Shared/Riot Games/Riot Client.app"
+        (shared_client / "Contents/MacOS").mkdir(parents=True)
+        # A link an earlier launcher made in /Applications is removed, as macOS has none.
+        (prefix / "Applications").mkdir(parents=True)
+        (prefix / "Applications/Riot Client.app").symlink_to("../Users/Shared/Riot Games/Riot Client.app")
         env["DPREFIX"] = str(prefix)
         env.pop("RIOT_GUEST_HOME", None)
         (folder / "runtime-paths.sh").write_text(
@@ -131,7 +135,11 @@ with open({str(log)!r}, "a") as output:
             "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DARLING_XSHM_LIBRARY"
         )), "Darling runtime overrides lost"
         assert "--launch-product=league_of_legends" in launch["args"], "product launch lost"
-        assert "--app-root=/Applications/Riot Client.app" in launch["args"], "application root lost"
+        # Started where macOS runs it, without --app-root.
+        assert launch["args"][0] == str(shared_client / "Contents/MacOS/RiotClientServices"), \
+            f"client not started from /Users/Shared: {launch['args'][0]}"
+        assert not any(arg.startswith("--app-root=") for arg in launch["args"]), "--app-root passed"
+        assert not os.path.lexists(prefix / "Applications/Riot Client.app"), "legacy /Applications link kept"
         assert "--log-dir=/Users/offline-check/Library/Logs/Riot Games/Riot Client" in launch["args"], "absolute log directory lost"
         # Discord Rich Presence: the guest's XDG_RUNTIME_DIR must lead out to the host socket.
         assert os.readlink(prefix / "run/user/offline-check/discord-ipc-0") == \

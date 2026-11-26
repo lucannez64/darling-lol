@@ -39,8 +39,11 @@ class StopRuntimeTests(unittest.TestCase):
         (folder / 'stat').write_text(f'{pid} (test process) ' + ' '.join(
             [state, str(parent)] + ['0'] * 17 + ['12345']))
         (folder / 'comm').write_text('darlingserver' if pid == 100 else 'helper')
-        (folder / 'maps').write_text(
-            str(self.prefix / 'Applications/Riot Client.app/helper') if riot else '')
+        # riot=True maps the legacy /Applications link; riot='shared' the
+        # /Users/Shared location the client runs from, as on macOS.
+        location = ('Users/Shared/Riot Games/Riot Client.app/helper' if riot == 'shared'
+                    else 'Applications/Riot Client.app/helper')
+        (folder / 'maps').write_text(str(self.prefix / location) if riot else '')
         task = folder / 'task' / str(pid)
         task.mkdir(parents=True)
         (task / 'children').write_text(' '.join(map(str, children)))
@@ -203,6 +206,22 @@ class StopRuntimeTests(unittest.TestCase):
             self.status(pid, 'Z') if sig == signal.SIGKILL else None)
         self.run_script()
         self.assertEqual(self.signals, [(101, signal.SIGTERM), (101, signal.SIGKILL)])
+        self.assert_finished()
+
+    def test_orphan_at_the_shared_client_path_is_stopped(self):
+        self.process(101, riot='shared')
+        self.on_signal = lambda pid, sig: (
+            self.status(pid, 'Z') if sig == signal.SIGKILL else None)
+        self.run_script()
+        self.assertEqual(self.signals, [(101, signal.SIGTERM), (101, signal.SIGKILL)])
+        self.assert_finished()
+
+    def test_descendant_at_the_shared_client_path_gets_sigterm(self):
+        self.server(children=(101,))
+        self.process(101, parent=100, riot='shared')
+        self.shutdown = lambda: self.status(100, 'Z')
+        self.run_script()
+        self.assertEqual(self.signals, [(101, signal.SIGTERM)])
         self.assert_finished()
 
     def test_surviving_helper_blocks_runtime_changes(self):

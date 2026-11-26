@@ -338,23 +338,22 @@ if [ -n "${RCLOL_LOCALE:-}" ]; then
   *) echo "RCLOL_LOCALE must look like pt_BR; ignoring '$RCLOL_LOCALE'" >&2; unset RCLOL_LOCALE ;;
  esac
 fi
-# The first-time installer puts the client in /Users/Shared/Riot Games and then
-# hands off through LaunchServices, which does not start it under Darling. Link
-# the installed client where the normal launch expects it.
-client="$prefix/Applications/Riot Client.app"
-shared="$prefix/Users/Shared/Riot Games/Riot Client.app"
-if [ -z "${RIOT_LAUNCHER_HOST:-}" ] && [ ! -e "$client" ]; then
- if [ ! -d "$shared/Contents/MacOS" ]; then
-  echo "Riot Client is not installed in $prefix; run scripts/installer.sh first" >&2
-  exit 1
- fi
- if [ -L "$client" ]; then
-  # An absolute link (/Users/Shared/...) resolves only inside the guest; the
-  # guest still uses it for --app-root, but start the client by its real path.
-  client=$shared
- else
-  ln -s "../Users/Shared/Riot Games/Riot Client.app" "$client"
- fi
+# Start the client where Riot's installer puts it and where macOS runs it from:
+# /Users/Shared/Riot Games/Riot Client.app (RiotClientInstalls.json rc_live).
+# Earlier versions of this launcher linked it into /Applications and passed
+# --app-root for that link; macOS has neither, and the client then registered
+# and reported a path no Mac uses. Remove that link when it is ours.
+client="$prefix/Users/Shared/Riot Games/Riot Client.app"
+legacy_link="$prefix/Applications/Riot Client.app"
+if [ -L "$legacy_link" ]; then
+ case $(readlink "$legacy_link") in
+  "../Users/Shared/Riot Games/Riot Client.app"|"/Users/Shared/Riot Games/Riot Client.app")
+   rm -f "$legacy_link" ;;
+ esac
+fi
+if [ -z "${RIOT_LAUNCHER_HOST:-}" ] && [ ! -d "$client/Contents/MacOS" ]; then
+ echo "Riot Client is not installed in $prefix; run scripts/installer.sh first" >&2
+ exit 1
 fi
 # Opt-in automatic client-in-game handling. Start the watcher only after the
 # installed-client check above: a failed installer launch must not leave a
@@ -397,14 +396,14 @@ A=${RIOT_LAUNCHER_HOST:-"$client/Contents/MacOS/RiotClientServices"}
 # Use Xlib's local input method; allow explicit testing of another modifier.
 # Linux C.UTF-8 is not a supported codecvt locale in the macOS client.
 # Keep this scoped to the guest; product region/locale arguments remain explicit.
-# The first-time installer (RIOT_LAUNCHER_HOST) exits immediately when given --app-root for a
-# Riot Client that is not installed yet; only pass it for the installed client.
-# Its native intro screen renders image layers with a blue cover and does not take clicks
+# Like macOS, start the installed client without --app-root: the first-time installer
+# (RIOT_LAUNCHER_HOST) exits immediately when given one, and the installed client finds
+# its own bundle. The installer's native intro screen renders image layers with a blue cover and does not take clicks
 # under Darling, so start the install directly (the Riot Client UI that follows works).
 if [ -n "${RIOT_LAUNCHER_HOST:-}" ]; then
  set -- --skip-to-install --launch-product=league_of_legends --launch-patchline=live
 else
- set -- --app-root="/Applications/Riot Client.app"
+ set --
  # The League login theme (video background, Install/Play button) is only shown when the client
  # is started for a product. RCLOL_LAUNCH_PRODUCT= (empty) starts the bare client instead.
  if [ -n "${RCLOL_LAUNCH_PRODUCT-league_of_legends}" ]; then

@@ -50,6 +50,7 @@ def riot_descendants(server_pid):
                 pending.extend(int(child) for child in children.read_text().split())
             mappings = (Path('/proc') / str(pid) / 'maps').read_text()
             if ('Electron Framework.framework/Versions/A/Electron Framework' in mappings or
+                    '/Users/Shared/Riot Games/Riot Client.app/' in mappings or
                     '/Applications/Riot Client.app/' in mappings):
                 result[pid] = process_identity(pid)
         except (OSError, ValueError):
@@ -60,7 +61,10 @@ def orphaned_riot():
     # A dead server marker cannot enumerate its former descendants. Recover
     # only same-user Riot mappings in this prefix with no live server ancestor.
     result = {}
-    riot_path = str(prefix / 'Applications/Riot Client.app') + '/'
+    # The client runs from /Users/Shared, as on macOS; older launches used an
+    # /Applications link, whose mappings resolve to the same files.
+    riot_paths = (str(prefix / 'Users/Shared/Riot Games/Riot Client.app') + '/',
+                  str(prefix / 'Applications/Riot Client.app') + '/')
     league_path = str(prefix / 'Applications/League of Legends.app') + '/'
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():
@@ -69,7 +73,7 @@ def orphaned_riot():
             if entry.stat().st_uid != os.getuid():
                 continue
             mappings = (entry / 'maps').read_text()
-            if riot_path not in mappings and league_path not in mappings:
+            if not any(path in mappings for path in riot_paths) and league_path not in mappings:
                 continue
             pid = int(entry.name)
             ancestor = pid
