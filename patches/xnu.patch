@@ -5272,7 +5272,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..136171b 100644
+index c2f70fb..3aa1409 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -7,6 +7,7 @@
@@ -5431,7 +5431,197 @@ index c2f70fb..136171b 100644
  static bool parse_smaps_firstline(
  	const char* line,
  	uint64_t* pri_address,
-@@ -328,6 +454,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -112,11 +238,16 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_taskallinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize);
++static long _proc_pidinfo_listfds(int32_t pid, void* buffer, int32_t bufsize);
+ 
+ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize)
+ {
+ 	switch (flavor)
+ 	{
++		case PROC_PIDLISTFDS:
++		{
++			return _proc_pidinfo_listfds(pid, buffer, bufsize);
++		}
+ 		// arg is a memory location we want to know about
+ 		// We return information on the mapping where the address belongs or any following mapping
+ 		// Then we return -ESRCH.
+@@ -170,7 +301,112 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
+ 	}
+ }
+ 
+-static char fakeuuid[16];
++static uint32_t proc_info_bswap32(uint32_t v)
++{
++	return ((v & 0x000000ffu) << 24)
++		| ((v & 0x0000ff00u) << 8)
++		| ((v & 0x00ff0000u) >> 8)
++		| ((v & 0xff000000u) >> 24);
++}
++
++/* Parse LC_UUID from a Mach-O header buffer. For a universal (FAT) binary,
++ * writes the x86_64 slice file offset into *fat_slice_offset and returns false
++ * so the caller can read the slice header and re-parse. */
++static bool parse_macho_uuid_bytes(const uint8_t* data, __SIZE_TYPE__ len,
++		uint8_t out_uuid[16], uint64_t* fat_slice_offset)
++{
++	uint32_t magic, ncmds, sizeofcmds, hdr_size, i;
++	__SIZE_TYPE__ pos, end;
++
++	if (fat_slice_offset)
++		*fat_slice_offset = 0;
++	if (!data || len < 32)
++		return false;
++
++	memcpy(&magic, data, sizeof(magic));
++	if (magic == 0xbebafecau /* FAT_CIGAM */) {
++		uint32_t nfat = 0;
++		memcpy(&nfat, data + 4, sizeof(nfat));
++		nfat = proc_info_bswap32(nfat);
++		if (nfat > 16)
++			nfat = 16;
++		for (i = 0; i < nfat; i++) {
++			__SIZE_TYPE__ off = 8 + (__SIZE_TYPE__) i * 20;
++			uint32_t cputype = 0, slice_off = 0;
++			if (off + 20 > len)
++				break;
++			memcpy(&cputype, data + off, sizeof(cputype));
++			memcpy(&slice_off, data + off + 8, sizeof(slice_off));
++			if (proc_info_bswap32(cputype) == 0x01000007u /* CPU_TYPE_X86_64 */) {
++				if (fat_slice_offset)
++					*fat_slice_offset = proc_info_bswap32(slice_off);
++				return false;
++			}
++		}
++		return false;
++	}
++
++	if (magic == 0xfeedfacfu /* MH_MAGIC_64 */) {
++		hdr_size = 32;
++	} else if (magic == 0xfeedfaceu /* MH_MAGIC */) {
++		hdr_size = 28;
++	} else {
++		return false;
++	}
++
++	memcpy(&ncmds, data + 16, sizeof(ncmds));
++	memcpy(&sizeofcmds, data + 20, sizeof(sizeofcmds));
++	pos = hdr_size;
++	end = (__SIZE_TYPE__) hdr_size + (__SIZE_TYPE__) sizeofcmds;
++	if (end > len || end < pos)
++		end = len;
++
++	for (i = 0; i < ncmds && pos + 8 <= end; i++) {
++		uint32_t cmd = 0, cmdsize = 0;
++		memcpy(&cmd, data + pos, sizeof(cmd));
++		memcpy(&cmdsize, data + pos + 4, sizeof(cmdsize));
++		if (cmdsize < 8 || cmdsize > end - pos)
++			break;
++		if (cmd == 0x1bu /* LC_UUID */ && cmdsize >= 24) {
++			memcpy(out_uuid, data + pos + 8, 16);
++			return true;
++		}
++		pos += cmdsize;
++	}
++	return false;
++}
++
++#ifndef VARIANT_DYLD
++static void read_process_executable_uuid(int32_t pid, uint8_t out_uuid[16])
++{
++	char exec_path[4096];
++	uint8_t hdr[8192];
++	uint64_t fullLength = 0;
++	uint64_t slice_offset = 0;
++	long fd, got;
++
++	if (dserver_rpc_get_executable_path(pid, exec_path, sizeof(exec_path), &fullLength) != 0)
++		return;
++	if (exec_path[0] == '\0')
++		return;
++
++	fd = LINUX_SYSCALL(__NR_openat, -100 /* AT_FDCWD */, exec_path, LINUX_O_RDONLY, 0);
++	if (fd < 0)
++		return;
++
++	got = LINUX_SYSCALL(__NR_read, fd, hdr, sizeof(hdr));
++	if (got >= 32) {
++		if (!parse_macho_uuid_bytes(hdr, (__SIZE_TYPE__) got, out_uuid, &slice_offset) && slice_offset > 0) {
++			if (LINUX_SYSCALL(__NR_lseek, fd, slice_offset, 0 /* SEEK_SET */) >= 0) {
++				got = LINUX_SYSCALL(__NR_read, fd, hdr, sizeof(hdr));
++				if (got >= 32)
++					parse_macho_uuid_bytes(hdr, (__SIZE_TYPE__) got, out_uuid, NULL);
++			}
++		}
++	}
++	LINUX_SYSCALL(__NR_close, fd);
++}
++#endif
+ 
+ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+ {
+@@ -183,13 +419,14 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 
+ 	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
+ 
+-	if (bufsize < sizeof(*info))
++	if (!buffer)
++		return -EFAULT;
++	if (bufsize < (int32_t) sizeof(*info))
+ 		return -ENOSPC;
+ 
+-	memset(buffer, 0, bufsize);
++	memset(buffer, 0, sizeof(*info));
+ 
+-#warning Get UUID from kernel
+-	memcpy(info->p_uuid, fakeuuid, sizeof(info->p_uuid));
++	read_process_executable_uuid(pid, info->p_uuid);
+ 
+ 	//////////////////////////
+ 	// Read info for pid    //
+@@ -222,23 +459,24 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 	// Read info for ppid   //
+ 	//////////////////////////
+ 
+-	__simple_sprintf(path, "/proc/%d/stat", ppid);
+-	if (!read_string(path, stat, sizeof(stat)))
+-		return -ESRCH;
+-
+-	statptr = stat;
+-	skip_stat_elems(&statptr, 21); // skip until starttime
+-	elem = next_stat_elem(&statptr);
+-
+-	if (!elem)
+-		return -EINVAL;
+-
+-	starttime = __simple_atoi(elem, NULL);
+-	info->p_puniqueid = starttime << 16;
+-	info->p_puniqueid |= (ppid & 0xffff);
++	if (ppid > 0) {
++		__simple_sprintf(path, "/proc/%d/stat", ppid);
++		if (read_string(path, stat, sizeof(stat))) {
++			statptr = stat;
++			skip_stat_elems(&statptr, 21); // skip until starttime
++			elem = next_stat_elem(&statptr);
++			if (elem) {
++				starttime = __simple_atoi(elem, NULL);
++				info->p_puniqueid = starttime << 16;
++				info->p_puniqueid |= (ppid & 0xffff);
++			}
++		}
++	}
+ 
++	return sizeof(*info);
++#else
++	return -ENOTSUP;
+ #endif
+-	return 1;
+ }
+ 
+ // glibc bits/confname.h
+@@ -328,6 +566,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
  	info->pbi_start_tvusec = starttime_usecs;
  
  	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
@@ -5440,7 +5630,31 @@ index c2f70fb..136171b 100644
  
  	return sizeof(struct proc_bsdinfo);
  reterr:
-@@ -390,7 +518,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -342,10 +582,12 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
+ 	// __simple_printf("Asking for pid/tid %d/%d\n", pid, tid);
+ 
+ 	struct proc_threadinfo* info = (struct proc_threadinfo*) buffer;
+-	if (bufsize < sizeof(*info))
++	if (!buffer)
++		return -EFAULT;
++	if (bufsize < (int32_t) sizeof(*info))
+ 		return -ENOSPC;
+ 
+-	memset(buffer, 0, bufsize);
++	memset(buffer, 0, sizeof(*info));
+ 
+ 	__simple_sprintf(path, "/proc/%d/task/%d/comm", pid, tid);
+ 	// __simple_printf("Reading thread name from %s\n", path);
+@@ -360,7 +602,7 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
+ 	}
+ 
+ 	// TODO: Other proc_threadinfo fields
+-	return 1;
++	return sizeof(*info);
+ }
+ 
+ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -390,7 +632,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  
  	// comm
  	READELEM();
@@ -5451,7 +5665,7 @@ index c2f70fb..136171b 100644
  
  	// process state
  	READELEM();
-@@ -437,7 +567,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -437,7 +681,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  	if (is_64_bit)
  		info->pbsi_flags |= P_LP64;
  
@@ -5461,6 +5675,263 @@ index c2f70fb..136171b 100644
  reterr:
  	return -EINVAL;
  }
+@@ -455,6 +700,32 @@ static long _proc_pidinfo_regionpath_setup(int32_t pid, struct rdline_buffer* bu
+ 	return fd;
+ };
+ 
++static void unexpand_smaps_path(char* path, __SIZE_TYPE__ path_size)
++{
++	struct vchroot_unexpand_args uargs;
++	__SIZE_TYPE__ len;
++
++	if (!path || path_size == 0)
++		return;
++	if (path[0] != '/') {
++		path[0] = '\0';
++		return;
++	}
++
++	len = strlen(path);
++	if (len >= sizeof(uargs.path))
++		len = sizeof(uargs.path) - 1;
++	memcpy(uargs.path, path, len);
++	uargs.path[len] = '\0';
++
++	if (vchroot_unexpand(&uargs) == 0) {
++		strncpy(path, uargs.path, path_size - 1);
++		path[path_size - 1] = '\0';
++	} else {
++		path[0] = '\0';
++	}
++}
++
+ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize)
+ {
+ 	struct rdline_buffer buf;
+@@ -465,51 +736,44 @@ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer
+ 
+ 	if (!buffer)
+ 		return -EFAULT;
+-	if (bufsize < sizeof(my_rpi))
++	if (bufsize < (int32_t) sizeof(my_rpi))
+ 		return -ENOSPC;
+ 
++	memset(&my_rpi, 0, sizeof(my_rpi));
++
+ 	fd = _proc_pidinfo_regionpath_setup(pid, &buf);
+ 	if (fd < 0)
+ 		return fd;
+ 
+ 	while ((line = _readline(fd, &buf)) != NULL)
+ 	{
+-		if (!foundRegion)
++		if (parse_smaps_firstline(
++			line,
++			&my_rpi.prp_prinfo.pri_address,
++			&my_rpi.prp_prinfo.pri_size,
++			&my_rpi.prp_prinfo.pri_protection,
++			&my_rpi.prp_prinfo.pri_share_mode,
++			&my_rpi.prp_prinfo.pri_offset,
++			&my_rpi.prp_vip.vip_vi.vi_stat.vst_dev,
++			&my_rpi.prp_vip.vip_vi.vi_stat.vst_ino,
++			my_rpi.prp_vip.vip_path
++		))
+ 		{
+-			// Searching for matching memory region.
+-			// This call returns true if we see the start of another mapping.
+-			if (parse_smaps_firstline(
+-				line,
+-				&my_rpi.prp_prinfo.pri_address,
+-				&my_rpi.prp_prinfo.pri_size,
+-				&my_rpi.prp_prinfo.pri_protection,
+-				&my_rpi.prp_prinfo.pri_share_mode,
+-				&my_rpi.prp_prinfo.pri_offset,
+-				&my_rpi.prp_vip.vip_vi.vi_stat.vst_dev,
+-				&my_rpi.prp_vip.vip_vi.vi_stat.vst_ino,
+-				my_rpi.prp_vip.vip_path
+-			))
++			if ((my_rpi.prp_prinfo.pri_address + my_rpi.prp_prinfo.pri_size) > arg)
+ 			{
+-				if (arg >= my_rpi.prp_prinfo.pri_address && arg < (my_rpi.prp_prinfo.pri_address + my_rpi.prp_prinfo.pri_size))
+-				{
+-					foundRegion = true;
+-				}
++				foundRegion = true;
++				break;
+ 			}
+ 		}
+-		else
+-		{
+-			// TODO: Parse additional information (e.g. RSS)
+-		}
+ 	}
+ 	close_internal(fd);
+ 
+-	if (my_rpi.prp_vip.vip_path[0])
+-	{
+-		// TODO: Provide information in struct vinfo_stat
+-	}
++	if (!foundRegion)
++		return -ESRCH;
+ 
++	unexpand_smaps_path(my_rpi.prp_vip.vip_path, sizeof(my_rpi.prp_vip.vip_path));
+ 	memcpy(buffer, &my_rpi, sizeof(my_rpi));
+-	return foundRegion ? 1 : -ESRCH;
++	return sizeof(my_rpi);
+ }
+ 
+ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, int32_t buffer_size) {
+@@ -526,9 +790,11 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ 
+ 	if (!buffer)
+ 		return -EFAULT;
+-	if (buffer_size < sizeof(my_rp))
++	if (buffer_size < (int32_t) sizeof(my_rp))
+ 		return -ENOSPC;
+ 
++	memset(&my_rp, 0, sizeof(my_rp));
++
+ 	fd = _proc_pidinfo_regionpath_setup(pid, &readline_buffer);
+ 	if (fd < 0)
+ 		return fd;
+@@ -545,7 +811,7 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ 			NULL,
+ 			my_rp.prpo_path
+ 		)) {
+-			if (arg >= my_rp.prpo_addr && arg < (my_rp.prpo_addr + my_rp.prpo_regionlength)) {
++			if ((my_rp.prpo_addr + my_rp.prpo_regionlength) > arg) {
+ 				found = true;
+ 				break;
+ 			}
+@@ -554,8 +820,12 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ 
+ 	close_internal(fd);
+ 
++	if (!found)
++		return -ESRCH;
++
++	unexpand_smaps_path(my_rp.prpo_path, sizeof(my_rp.prpo_path));
+ 	memcpy(buffer, &my_rp, sizeof(my_rp));
+-	return found ? strlen(my_rp.prpo_path) : -EINVAL;
++	return sizeof(my_rp);
+ };
+ 
+ // Parses line such as:
+@@ -643,8 +913,14 @@ static bool parse_smaps_firstline(
+ 	// Read file name (may be empty)
+ 	while (*p == ' ')
+ 		p++;
+-	if (*p && vip_path) // Is file name present? (and the caller wants it)
+-		strcpy(vip_path, p);
++	if (vip_path) {
++		if (*p) {
++			strncpy(vip_path, p, MAXPATHLEN - 1);
++			vip_path[MAXPATHLEN - 1] = '\0';
++		} else {
++			vip_path[0] = '\0';
++		}
++	}
+ 
+ 	return true;
+ }
+@@ -727,7 +1003,7 @@ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 	uint64_t rss = __simple_atoi(elem, NULL);
+ 
+ 	ti->pti_virtual_size = vsize;
+-	ti->pti_resident_size = rss;
++	ti->pti_resident_size = rss * 4096ULL;
+ 	ti->pti_total_user = utime;
+ 	ti->pti_total_system = stime;
+ 	// ti->pti_threads_user
+@@ -827,3 +1103,88 @@ bail:
+ 	close_internal(fd);
+ 	return count * sizeof(uint64_t);
+ }
++
++static uint32_t proc_fdtype_from_link(const char* target)
++{
++	if (!target || target[0] == '\0')
++		return PROX_FDTYPE_VNODE;
++	if (strncmp(target, "socket:[", 8) == 0)
++		return PROX_FDTYPE_SOCKET;
++	if (strncmp(target, "pipe:[", 6) == 0)
++		return PROX_FDTYPE_PIPE;
++	if (strncmp(target, "anon_inode:[eventpoll]", 22) == 0
++		|| strncmp(target, "anon_inode:[signalfd]", 21) == 0
++		|| strncmp(target, "anon_inode:[timerfd]", 20) == 0)
++		return PROX_FDTYPE_KQUEUE;
++	return PROX_FDTYPE_VNODE;
++}
++
++static long _proc_pidinfo_listfds(int32_t pid, void* buffer, int32_t bufsize)
++{
++	struct proc_fdinfo* fds = (struct proc_fdinfo*) buffer;
++	int32_t maxCount = 0;
++	int32_t count = 0;
++	int fd, ret;
++	long basep = 0;
++	char dents[512];
++	char path[64];
++	int32_t self_pid;
++
++	if (buffer != NULL && bufsize < 0)
++		return -EINVAL;
++	if (buffer != NULL)
++		maxCount = bufsize / (int32_t) sizeof(struct proc_fdinfo);
++
++	__simple_sprintf(path, "/proc/%d/fd", pid);
++	fd = sys_open_nocancel(path, BSD_O_RDONLY | BSD_O_DIRECTORY, 0);
++	if (fd < 0)
++		return -ESRCH;
++
++	self_pid = (int32_t) LINUX_SYSCALL(__NR_getpid);
++
++	while ((ret = sys_getdirentries(fd, dents, sizeof(dents), &basep)) > 0)
++	{
++		int pos = 0;
++		while (pos < ret)
++		{
++			struct bsd_dirent* dent = (struct bsd_dirent*) &dents[pos];
++			int32_t fdnum;
++
++			if (dent->d_reclen == 0)
++				break;
++			pos += dent->d_reclen;
++			if (!isdigit(dent->d_name[0]))
++				continue;
++
++			fdnum = (int32_t) __simple_atoi(dent->d_name, NULL);
++			if (pid == self_pid && fdnum == fd)
++				continue;
++
++			if (buffer != NULL) {
++				char fdpath_buf[64];
++				char target[64];
++				long tlen;
++
++				if (count >= maxCount)
++					goto done;
++
++				__simple_sprintf(fdpath_buf, "/proc/%d/fd/%d", pid, fdnum);
++				tlen = sys_readlink(fdpath_buf, target, sizeof(target) - 1);
++				if (tlen < 0)
++					target[0] = '\0';
++				else
++					target[tlen] = '\0';
++
++				fds[count].proc_fd = fdnum;
++				fds[count].proc_fdtype = proc_fdtype_from_link(target);
++			}
++			++count;
++		}
++	}
++
++done:
++	close_internal(fd);
++	if (buffer == NULL)
++		return (count + 8) * (long) sizeof(struct proc_fdinfo);
++	return count * (long) sizeof(struct proc_fdinfo);
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 index 0a8f1e4..9651453 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
