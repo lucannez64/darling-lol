@@ -351,3 +351,40 @@ does (measured on the reference Mac, 2026-11-26):
   into every application's own preferences.
 - The launcher passes the environment launchd gives an application (see
   `RCLOL_FILTER_HOST_ENV` in `docs/SETUP.md`).
+
+## Guest system view: /dev, mounts, tools and caches
+
+These describe the system to guest programs the way macOS 15.5 does; they add
+no devices, volumes or data.
+
+- `/dev` in the guest lists the macOS names `null`, `zero`, `random`,
+  `urandom`, `tty`, `ptmx`, `console`, `fd/`, `stdin`, `stdout` and `stderr`.
+  Each reaches the real host device; `pts/` and `shm/` stay reachable for
+  Darling's terminals and shared memory. Linux-only nodes (GPU, input, disks,
+  `kvm`) have no guest path. Host ELF libraries, including the GPU driver,
+  open their devices directly and are unaffected. Darling's base install
+  replaces the old `dev -> /Volumes/SystemRoot/dev` link; a
+  `DARLING_NOOVERLAYFS` prefix keeps its own link until `<prefix>/dev` is
+  removed once.
+- `/usr/sbin/lsof` is Apple's lsof-76 and `/sbin/mount` and `/sbin/umount`
+  come from Apple's diskdev_cmds-751.80.2. The xnu patch fills the
+  `proc_pidfdinfo` flavors lsof reads (vnode, pipe, socket, kqueue, current
+  directory, mapped files) from Linux `/proc`, following the descriptor view
+  above. Guest processes live in their own PID namespace, so these flavors read
+  `/proc/<pid>` from the namespace's procfs darlingserver mounts at
+  `<prefix>/proc`, never the outer `/proc` a raw Linux call reaches. Darling has
+  no dyld shared cache, so `lsof` lists each mapped library as `txt` where macOS
+  shows the cache. `getfsstat` lists the guest root `/` first and the host root
+  `/Volumes/SystemRoot`, not the container and host mounts stacked below them,
+  and converts mount flags to their `MNT_*` meaning, which also corrects
+  `statfs`/`fstatfs` flags.
+- `ulimit -u` (`RLIMIT_NPROC`) is bounded by `kern.maxprocperuid` (soft) and
+  `kern.maxproc` (hard) as in XNU; the Linux limit is left alone.
+- `defaults` behaves like macOS `/usr/bin/defaults`: it uses CFPreferences,
+  accepts the same domains, commands and value flags, and prints the same
+  old-style plist text, messages and exit codes.
+- `NSURLCache` keeps its disk cache in `~/Library/Caches/<bundle id>/Cache.db`
+  with the macOS schema (`user_version` 203, WAL), 4 MB memory and 20 MB disk
+  by default; bodies over 4096 bytes go to `fsCachedData/`. The first
+  `NSURLSession` creates `HTTPStorages/<bundle id>/httpstorages.sqlite` with
+  the `alt_services` table, which stays empty.

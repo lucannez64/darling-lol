@@ -1142,3 +1142,2277 @@ index 5a9ffc7..56aead1 100644
      }
      pthread_mutex_unlock(&defaultsLock);
      return standardDefaults;
+diff --git a/tools/defaults.m b/tools/defaults.m
+index a25174d..94b3f29 100644
+--- a/tools/defaults.m
++++ b/tools/defaults.m
+@@ -4,6 +4,10 @@
+    Written by:  Richard Frith-Macdonald <richard@brainstorm.co.uk>
+    Created: January 1998
+ 
++   Reworked for Darling: the commands, output format, messages and exit
++   codes follow the macOS 15.5 /usr/bin/defaults, and the values are read
++   and written through CFPreferences.
++
+    This file is part of the GNUstep Project
+ 
+    This program is free software; you can redistribute it and/or
+@@ -11,877 +15,1444 @@
+    as published by the Free Software Foundation; either
+    version 3 of the License, or (at your option) any later version.
+ 
+-   You should have received a copy of the GNU General Public
+-   License along with this program; see the file COPYINGv3.
++   You should have received a copy of the GNU General Public License
++   along with this program; see the file COPYINGv3.
+    If not, write to the Free Software Foundation,
+    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ 
+    */
+ 
+-#include <string.h>
+-
+ #include <ctype.h>
++#include <errno.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdint.h>
+ #include <stdio.h>
+-
+-#import	"Foundation/NSArray.h"
+-#import	"Foundation/NSDictionary.h"
+-#import	"Foundation/NSEnumerator.h"
+-#import	"Foundation/NSException.h"
+-#import	"Foundation/NSProcessInfo.h"
+-#import	"Foundation/NSUserDefaults.h"
+-#import	"Foundation/NSAutoreleasePool.h"
+-#import	"Foundation/NSPathUtilities.h"
+-
+-#define GSEXIT_SUCCESS EXIT_SUCCESS
+-#define GSEXIT_FAILURE EXIT_FAILURE
+-#define GSEXIT_NOTFOUND 2
+-
+-static NSString *input(char **ptr)
+-{
+-  NSString	*result = nil;
+-  char		*tmp = *ptr;
+-  char		*start;
+-
+-  while (*tmp != '\0' && isspace(*tmp))
+-    {
+-      tmp++;
+-    }
+-  start = tmp;
+-  if (*start == '\'')
+-    {
+-      start = ++tmp;
+-      while (*tmp != '\0')
+-	{
+-	  if (*tmp++ == '\'')
+-	    {
+-	      if (*tmp == '\'')
+-		{
+-		  memmove(&tmp[-1], tmp, strlen(tmp) + 1);
+-		}
+-	      else
+-		{
+-		  tmp[-1] = '\0';
+-		  *ptr = tmp;
+-		  result = [NSString stringWithUTF8String: start];
+-		  break;
+-		}
+-	    }
+-	}
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++#include <sys/time.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <CoreFoundation/CoreFoundation.h>
++
++/* BEGIN defaults-format
++ *
++ * Plain C, no CoreFoundation: tests/test_defaults_tool.py compiles this
++ * section on the host and compares its output with text measured on macOS.
++ *
++ * macOS prints a value as the Foundation description of the property list
++ * (old-style plist, 4 spaces per level) encoded as NSNonLossyASCII: a
++ * backslash becomes two, other non-ASCII characters become \uXXXX.  That is
++ * why a quote inside a quoted string reads \\" and a curly quote \\U201c.
++ */
++
++struct dbuf {
++  char *p;
++  size_t len, cap;
++};
++
++static void db_putc(struct dbuf *b, char c)
++{
++  if (b->len + 2 > b->cap)
++    {
++      b->cap = b->cap ? b->cap * 2 : 256;
++      b->p = realloc(b->p, b->cap);
++      if (b->p == NULL)
++        abort();
+     }
++  b->p[b->len++] = c;
++  b->p[b->len] = '\0';
++}
++
++static void db_puts(struct dbuf *b, const char *s)
++{
++  while (*s)
++    db_putc(b, *s++);
++}
++
++static void db_printf(struct dbuf *b, const char *fmt, ...)
++{
++  char tmp[128];
++  va_list ap;
++
++  va_start(ap, fmt);
++  vsnprintf(tmp, sizeof tmp, fmt, ap);
++  va_end(ap);
++  db_puts(b, tmp);
++}
++
++enum dv_kind {
++  DV_STRING, DV_INTEGER, DV_REAL, DV_FLOAT32, DV_BOOL, DV_DATE, DV_DATA,
++  DV_ARRAY, DV_DICT
++};
++
++/* One property list value.  DV_DICT keeps count key/value pairs in items:
++ * items[2*i] is the key and items[2*i+1] its value. */
++struct dv {
++  enum dv_kind kind;
++  const uint16_t *chars;        /* DV_STRING */
++  const unsigned char *bytes;   /* DV_DATA */
++  size_t length;                /* DV_STRING code units, DV_DATA bytes */
++  long long integer;            /* DV_INTEGER, DV_BOOL */
++  double real;                  /* DV_REAL, DV_FLOAT32, DV_DATE (seconds since 2001-01-01 UTC) */
++  struct dv *items;             /* DV_ARRAY, DV_DICT */
++  size_t count;
++};
++
++/* NSNonLossyASCIIStringEncoding of one UTF-16 code unit. */
++static void out_unit(struct dbuf *b, unsigned unit)
++{
++  if (unit == '\\')
++    db_puts(b, "\\\\");
++  else if (unit < 0x80 && (unit >= 0x20 || unit == '\n' || unit == '\r' || unit == '\t'))
++    db_putc(b, (char)unit);
++  else if (unit < 0x80)
++    db_printf(b, "\\%03o", unit);
+   else
++    db_printf(b, "\\u%04x", unit);
++}
++
++static void out_ascii(struct dbuf *b, const char *s)
++{
++  while (*s)
++    out_unit(b, (unsigned char)*s++);
++}
++
++static void out_indent(struct dbuf *b, int level)
++{
++  int i;
++
++  for (i = 0; i < level * 4; i++)
++    db_putc(b, ' ');
++}
++
++static int needs_quotes(const uint16_t *chars, size_t n)
++{
++  size_t i;
++
++  if (n == 0)
++    return 1;
++  for (i = 0; i < n; i++)
+     {
+-      while (*tmp != '\0' && !isspace(*tmp))
+-	{
+-	  tmp++;
+-	}
+-      *tmp++ = '\0';
+-      *ptr = tmp;
+-      result = [NSString stringWithUTF8String: start];
++      uint16_t c = chars[i];
++      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
++        return 1;
+     }
+-  return result;
++  return 0;
+ }
+ 
++/* A string as an element of a description: bare when alphanumeric,
++ * otherwise quoted with old-style plist escapes. */
++static void out_quoted(struct dbuf *b, const uint16_t *chars, size_t n)
++{
++  size_t i;
++  char esc[16];
++
++  if (!needs_quotes(chars, n))
++    {
++      for (i = 0; i < n; i++)
++        out_unit(b, chars[i]);
++      return;
++    }
++  out_unit(b, '"');
++  for (i = 0; i < n; i++)
++    {
++      uint16_t c = chars[i];
++      const char *named = NULL;
++
++      switch (c)
++        {
++          case '"': named = "\\\""; break;
++          case '\\': named = "\\\\"; break;
++          case '\a': named = "\\a"; break;
++          case '\b': named = "\\b"; break;
++          case '\f': named = "\\f"; break;
++          case '\n': named = "\\n"; break;
++          case '\r': named = "\\r"; break;
++          case '\t': named = "\\t"; break;
++          case '\v': named = "\\v"; break;
++        }
++      if (named)
++        out_ascii(b, named);
++      else if (c < 0x20 || c >= 0x7f)
++        {
++          snprintf(esc, sizeof esc, "\\U%04x", c);
++          out_ascii(b, esc);
++        }
++      else
++        out_unit(b, c);
++    }
++  out_unit(b, '"');
++}
+ 
+-static void output(const char *ptr)
++static void out_quoted_ascii(struct dbuf *b, const char *s)
+ {
+-  const char	*tmp;
++  uint16_t units[128];
++  size_t n = 0;
+ 
+-  for (tmp = ptr; *tmp; tmp++)
++  while (s[n] && n < sizeof units / sizeof units[0])
+     {
+-      if (isspace(*tmp))
+-	{
+-	  break;
+-	}
++      units[n] = (unsigned char)s[n];
++      n++;
+     }
+-  if (tmp == ptr || *tmp != '\0')
++  out_quoted(b, units, n);
++}
++
++/* Foundation's NSNumber description: %0.16g for doubles, %0.7g for floats. */
++static void format_number(char *out, size_t size, const struct dv *v)
++{
++  if (v->kind == DV_REAL)
++    snprintf(out, size, "%0.16g", v->real);
++  else if (v->kind == DV_FLOAT32)
++    snprintf(out, size, "%0.7g", v->real);
++  else
++    snprintf(out, size, "%lld", v->integer);
++}
++
++/* NSDate description: "2026-11-25 23:59:02 +0000". */
++static void format_date(char *out, size_t size, double since2001)
++{
++  double unix_time = since2001 + 978307200.0;
++  time_t t = (time_t)unix_time;
++  struct tm tm;
++
++  if ((double)t > unix_time)
++    t--;
++  gmtime_r(&t, &tm);
++  strftime(out, size, "%Y-%m-%d %H:%M:%S +0000", &tm);
++}
++
++/* NSData description: all bytes up to 24, otherwise the first 16 and the
++ * last 8 in groups of four. */
++static void out_data(struct dbuf *b, const unsigned char *bytes, size_t n)
++{
++  size_t i;
++
++  db_printf(b, "{length = %zu, bytes = 0x", n);
++  if (n > 24)
+     {
+-      putchar('\'');
+-      while (*ptr)
+-	{
+-	  if (*ptr == '\'')
+-	    {
+-	      putchar('\'');
+-	    }
+-	  putchar(*ptr);
+-	  ptr++;
+-	}
+-      putchar('\'');
++      for (i = 0; i < 16; i++)
++        {
++          db_printf(b, "%02x", bytes[i]);
++          if (i % 4 == 3)
++            db_putc(b, ' ');
++        }
++      db_puts(b, "... ");
++      for (i = n - 8; i < n; i++)
++        {
++          db_printf(b, "%02x", bytes[i]);
++          if ((i - (n - 8)) % 4 == 3)
++            db_putc(b, ' ');
++        }
+     }
+   else
+     {
+-      fputs(ptr, stdout);
++      for (i = 0; i < n; i++)
++        db_printf(b, "%02x", bytes[i]);
++    }
++  db_putc(b, '}');
++}
++
++static int compare_units(const struct dv *a, const struct dv *b)
++{
++  size_t i, n = a->length < b->length ? a->length : b->length;
++
++  for (i = 0; i < n; i++)
++    if (a->chars[i] != b->chars[i])
++      return a->chars[i] < b->chars[i] ? -1 : 1;
++  if (a->length == b->length)
++    return 0;
++  return a->length < b->length ? -1 : 1;
++}
++
++static int compare_pairs(const void *x, const void *y)
++{
++  return compare_units((const struct dv *)x, (const struct dv *)y);
++}
++
++/* Sort the pairs of a dictionary by key, as NSDictionary's description
++ * does when every key is a string. */
++static void dv_sort_dict(struct dv *v)
++{
++  size_t i;
++
++  for (i = 0; i < v->count; i++)
++    if (v->items[2 * i].kind != DV_STRING)
++      return;
++  qsort(v->items, v->count, 2 * sizeof(struct dv), compare_pairs);
++}
++
++static void dv_describe_at(struct dbuf *b, struct dv *v, int level);
++
++/* A value nested in a container: collections start on their own indent. */
++static void dv_describe_element(struct dbuf *b, struct dv *v, int level)
++{
++  char tmp[64];
++
++  switch (v->kind)
++    {
++      case DV_ARRAY:
++      case DV_DICT:
++        out_indent(b, level);
++        dv_describe_at(b, v, level);
++        break;
++      case DV_STRING:
++        out_quoted(b, v->chars, v->length);
++        break;
++      case DV_DATE:
++        format_date(tmp, sizeof tmp, v->real);
++        out_quoted_ascii(b, tmp);
++        break;
++      default:
++        dv_describe_at(b, v, level);
++        break;
++    }
++}
++
++static void dv_describe_at(struct dbuf *b, struct dv *v, int level)
++{
++  char tmp[64];
++  size_t i;
++
++  switch (v->kind)
++    {
++      case DV_STRING:
++        for (i = 0; i < v->length; i++)
++          out_unit(b, v->chars[i]);
++        break;
++      case DV_INTEGER:
++      case DV_REAL:
++      case DV_FLOAT32:
++        format_number(tmp, sizeof tmp, v);
++        if (level > 0)
++          out_quoted_ascii(b, tmp);
++        else
++          out_ascii(b, tmp);
++        break;
++      case DV_BOOL:
++        out_ascii(b, v->integer ? "1" : "0");
++        break;
++      case DV_DATE:
++        format_date(tmp, sizeof tmp, v->real);
++        out_ascii(b, tmp);
++        break;
++      case DV_DATA:
++        out_data(b, v->bytes, v->length);
++        break;
++      case DV_ARRAY:
++        db_puts(b, "(\n");
++        for (i = 0; i < v->count; i++)
++          {
++            out_indent(b, level + 1);
++            dv_describe_element(b, &v->items[i], level + 1);
++            db_puts(b, i + 1 < v->count ? ",\n" : "\n");
++          }
++        out_indent(b, level);
++        db_putc(b, ')');
++        break;
++      case DV_DICT:
++        dv_sort_dict(v);
++        db_puts(b, "{\n");
++        for (i = 0; i < v->count; i++)
++          {
++            out_indent(b, level + 1);
++            dv_describe_element(b, &v->items[2 * i], level + 1);
++            db_puts(b, " = ");
++            dv_describe_element(b, &v->items[2 * i + 1], level + 1);
++            db_puts(b, ";\n");
++          }
++        out_indent(b, level);
++        db_putc(b, '}');
++        break;
++    }
++}
++
++/* What `defaults read` prints for a value, without the final newline. */
++static void dv_describe(struct dbuf *b, struct dv *v)
++{
++  dv_describe_at(b, v, 0);
++}
++
++static const char *dv_type_name(const struct dv *v)
++{
++  switch (v->kind)
++    {
++      case DV_STRING: return "string";
++      case DV_INTEGER: return "integer";
++      case DV_REAL:
++      case DV_FLOAT32: return "float";
++      case DV_BOOL: return "boolean";
++      case DV_DATE: return "date";
++      case DV_DATA: return "data";
++      case DV_ARRAY: return "array";
++      case DV_DICT: return "dictionary";
++    }
++  return "unknown";
++}
++
++/* -bool[ean] accepts true/false/yes/no in any case, and 1/0.
++ * Returns 1, 0, or -1 when the word is not a boolean. */
++static int parse_bool_word(const char *s)
++{
++  if (!strcasecmp(s, "true") || !strcasecmp(s, "yes") || !strcmp(s, "1"))
++    return 1;
++  if (!strcasecmp(s, "false") || !strcasecmp(s, "no") || !strcmp(s, "0"))
++    return 0;
++  return -1;
++}
++
++/* -data takes hex digits; spaces and enclosing <> are ignored.  Returns the
++ * byte count, or -1 for an odd digit count or a non-hex character. */
++static long parse_hex_bytes(const char *s, unsigned char *out)
++{
++  long n = 0;
++  int half = -1;
++
++  for (; *s; s++)
++    {
++      int d;
++
++      if (isspace((unsigned char)*s) || *s == '<' || *s == '>')
++        continue;
++      if (*s >= '0' && *s <= '9')
++        d = *s - '0';
++      else if (*s >= 'a' && *s <= 'f')
++        d = *s - 'a' + 10;
++      else if (*s >= 'A' && *s <= 'F')
++        d = *s - 'A' + 10;
++      else
++        return -1;
++      if (half < 0)
++        half = d;
++      else
++        {
++          if (out)
++            out[n] = (unsigned char)(half << 4 | d);
++          n++;
++          half = -1;
++        }
+     }
++  return half < 0 ? n : -1;
++}
++
++/* END defaults-format */
++
++static const char usage_text[] =
++  "Command line interface to a user's defaults.\n"
++  "Syntax:\n"
++  "\n"
++  "'defaults' [-currentHost | -host <hostname>] followed by one of the following:\n"
++  "\n"
++  "  read                                 shows all defaults\n"
++  "  read <domain>                        shows defaults for given domain\n"
++  "  read <domain> <key>                  shows defaults for given domain, key\n"
++  "\n"
++  "  read-type <domain> <key>             shows the type for the given domain, key\n"
++  "\n"
++  "  write <domain> <domain_rep>          writes domain (overwrites existing)\n"
++  "  write <domain> <key> <value>         writes key for domain\n"
++  "\n"
++  "  rename <domain> <old_key> <new_key>  renames old_key to new_key\n"
++  "\n"
++  "  delete <domain>                      deletes domain\n"
++  "  delete <domain> <key>                deletes key in domain\n"
++  "  delete-all <domain>                  deletes the domain from all containers\n"
++  "  delete-all <domain> Key>             deletes key in domain from all containers\n"
++  "\n"
++  "  import <domain> <path to plist>      writes the plist at path to domain\n"
++  "  import <domain> -                    writes a plist from stdin to domain\n"
++  "  export <domain> <path to plist>      saves domain as a binary plist to path\n"
++  "  export <domain> -                    writes domain as an xml plist to stdout\n"
++  "  domains                              lists all domains\n"
++  "  find <word>                          lists all entries containing word\n"
++  "  help                                 print this help\n"
++  "\n"
++  "<domain> is ( <domain_name> | -app <application_name> | -globalDomain )\n"
++  "         or a path to a file omitting the '.plist' extension\n"
++  "\n"
++  "<value> is one of:\n"
++  "  <value_rep>\n"
++  "  -string <string_value>\n"
++  "  -data <hex_digits>\n"
++  "  -int[eger] <integer_value>\n"
++  "  -float  <floating-point_value>\n"
++  "  -bool[ean] (true | false | yes | no)\n"
++  "  -date <date_rep>\n"
++  "  -array <value1> <value2> ...\n"
++  "  -array-add <value1> <value2> ...\n"
++  "  -dict <key1> <value1> <key2> <value2> ...\n"
++  "  -dict-add <key1> <value1> ...\n";
++
++static CFStringRef user_name;
++static CFStringRef host_name;
++
++static void log_message(const char *fmt, ...)
++{
++  struct timeval tv;
++  struct tm tm;
++  char stamp[64];
++  uint64_t tid = 0;
++  time_t now;
++  va_list ap;
++
++  gettimeofday(&tv, NULL);
++  now = tv.tv_sec;
++  localtime_r(&now, &tm);
++  strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm);
++  pthread_threadid_np(NULL, &tid);
++  fprintf(stderr, "%s.%03d defaults[%d:%llu] ", stamp, (int)(tv.tv_usec / 1000),
++          (int)getpid(), (unsigned long long)tid);
++  va_start(ap, fmt);
++  vfprintf(stderr, fmt, ap);
++  va_end(ap);
++  fputc('\n', stderr);
++}
++
++static int usage(void)
++{
++  fputs(usage_text, stdout);
++  return 255;
++}
++
++static CFStringRef cf_string(const char *s)
++{
++  CFStringRef r = CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8);
++
++  if (r == NULL)
++    r = CFStringCreateWithCString(NULL, s, kCFStringEncodingISOLatin1);
++  return r;
++}
++
++static char *c_string(CFStringRef s)
++{
++  CFIndex size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(s), kCFStringEncodingUTF8) + 1;
++  char *r = malloc(size);
++
++  if (!CFStringGetCString(s, r, size, kCFStringEncodingUTF8))
++    r[0] = '\0';
++  return r;
+ }
+ 
+-static const char *objectDescriptionCStr(id object, id locale, NSUInteger indent) {
+-  NSString *res;
++/* CoreFoundation -> struct dv.  The tree only lives until the tool exits. */
++static void dv_from_cf(struct dv *out, CFTypeRef cf)
++{
++  CFTypeID type = CFGetTypeID(cf);
+ 
+-  if ([object isKindOfClass: [NSString class]])
++  memset(out, 0, sizeof *out);
++  if (type == CFStringGetTypeID())
++    {
++      CFIndex n = CFStringGetLength(cf);
++      uint16_t *chars = malloc((n + 1) * sizeof(uint16_t));
++
++      CFStringGetCharacters(cf, CFRangeMake(0, n), (UniChar *)chars);
++      out->kind = DV_STRING;
++      out->chars = chars;
++      out->length = n;
++    }
++  else if (type == CFBooleanGetTypeID())
+     {
+-        res = object;
++      out->kind = DV_BOOL;
++      out->integer = CFBooleanGetValue(cf) ? 1 : 0;
++    }
++  else if (type == CFNumberGetTypeID())
++    {
++      if (CFNumberIsFloatType(cf))
++        {
++          CFNumberType nt = CFNumberGetType(cf);
++
++          out->kind = (nt == kCFNumberFloat32Type || nt == kCFNumberFloatType) ? DV_FLOAT32 : DV_REAL;
++          CFNumberGetValue(cf, kCFNumberDoubleType, &out->real);
++        }
++      else
++        {
++          out->kind = DV_INTEGER;
++          CFNumberGetValue(cf, kCFNumberLongLongType, &out->integer);
++        }
+     }
+-  else if ([object respondsToSelector: @selector(descriptionWithLocale:indent:)])
++  else if (type == CFDateGetTypeID())
+     {
+-      res = [object descriptionWithLocale: locale indent: indent];
++      out->kind = DV_DATE;
++      out->real = CFDateGetAbsoluteTime(cf);
+     }
+-  else if ([object respondsToSelector: @selector(descriptionWithLocale:)])
++  else if (type == CFDataGetTypeID())
+     {
+-      res = [object descriptionWithLocale: locale];
++      out->kind = DV_DATA;
++      out->bytes = CFDataGetBytePtr(cf);
++      out->length = CFDataGetLength(cf);
++    }
++  else if (type == CFArrayGetTypeID())
++    {
++      CFIndex i, n = CFArrayGetCount(cf);
++
++      out->kind = DV_ARRAY;
++      out->count = n;
++      out->items = calloc(n + 1, sizeof(struct dv));
++      for (i = 0; i < n; i++)
++        dv_from_cf(&out->items[i], CFArrayGetValueAtIndex(cf, i));
++    }
++  else if (type == CFDictionaryGetTypeID())
++    {
++      CFIndex i, n = CFDictionaryGetCount(cf);
++      const void **keys = calloc(n + 1, sizeof(void *));
++      const void **values = calloc(n + 1, sizeof(void *));
++
++      CFDictionaryGetKeysAndValues(cf, keys, values);
++      out->kind = DV_DICT;
++      out->count = n;
++      out->items = calloc(2 * n + 1, sizeof(struct dv));
++      for (i = 0; i < n; i++)
++        {
++          dv_from_cf(&out->items[2 * i], keys[i]);
++          dv_from_cf(&out->items[2 * i + 1], values[i]);
++        }
++      free(keys);
++      free(values);
+     }
+   else
+     {
+-      res = [object description];
++      CFStringRef d = CFCopyDescription(cf);
++
++      dv_from_cf(out, d);
++      CFRelease(d);
+     }
++}
++
++static void print_value(CFTypeRef value)
++{
++  struct dbuf b = { 0 };
++  struct dv v;
++
++  dv_from_cf(&v, value);
++  dv_describe(&b, &v);
++  db_putc(&b, '\n');
++  fwrite(b.p, 1, b.len, stdout);
++  free(b.p);
++}
++
++/* ---- domains ---- */
+ 
+-  return [res UTF8String];
++struct domain {
++  CFStringRef app;      /* CFPreferences application ID */
++  char *display;        /* name used in messages */
++};
++
++static CFTypeRef copy_plist_file(const char *path)
++{
++  CFTypeRef plist = NULL;
++  FILE *f = fopen(path, "rb");
++  CFMutableDataRef data;
++  unsigned char chunk[65536];
++  size_t n;
++
++  if (f == NULL)
++    return NULL;
++  data = CFDataCreateMutable(NULL, 0);
++  while ((n = fread(chunk, 1, sizeof chunk, f)) > 0)
++    CFDataAppendBytes(data, chunk, n);
++  fclose(f);
++  plist = CFPropertyListCreateWithData(NULL, data, kCFPropertyListMutableContainersAndLeaves, NULL, NULL);
++  CFRelease(data);
++  return plist;
+ }
+ 
+-/** <p>This tool mimics the OPENSTEP command line tool for handling defaults.
+-       Please see the man page for more information.
+- </p>*/
+-int
+-main(int argc, char** argv, char **env)
+-{
+-  NSAutoreleasePool	*pool;
+-  NSUserDefaults	*defs;
+-  NSProcessInfo		*proc;
+-  NSArray		*args;
+-  NSArray		*domains;
+-  NSMutableDictionary	*domain;
+-  NSString		*owner = nil;
+-  NSString		*name = nil;
+-  NSString		*value;
+-  NSString		*user = nil;
+-  BOOL			found = NO;
+-  unsigned int		i;
+-  int derror = 0;
+-
+-#ifdef GS_PASS_ARGUMENTS
+-  GSInitializeProcess(argc, argv, env);
+-#endif
+-//[NSObject enableDoubleReleaseCheck: YES];
+-  pool = [NSAutoreleasePool new];
+-  proc = [NSProcessInfo processInfo];
+-  if (proc == nil)
+-    {
+-      fprintf(stderr, "defaults: unable to get process information!\n");
+-      [pool release];
+-      exit(GSEXIT_FAILURE);
+-    }
+-
+-  args = [proc arguments];
+-
+-  for (i = 1; i < [args count]; i++)
+-    {
+-      if ([[args objectAtIndex: i] isEqual: @"--help"] ||
+-	    [[args objectAtIndex: i] isEqual: @"help"])
+-	{
+-	  printf(
+-"The 'defaults' command lets you to read and modify a user's defaults.\n\n"
+-"This program replaces the old NeXTstep style dread, dwrite, and dremove\n"
+-"programs.\n\n"
+-"If you have access to another user's defaults database, you may include\n"
+-"'-u username' before any other options to use that user's database rather\n"
+-"than your own.\n\n");
+-	  printf(
+-"defaults read [ domain [ key] ]\n"
+-"    read the named default from the specified domain.\n"
+-"    If no 'key' is given - read all defaults from the domain.\n"
+-"    If no 'domain' is given - read all defaults from all domains.\n\n");
+-	  printf(
+-"defaults readkey key\n"
+-"    read the named default from all domains.\n\n");
+-	  printf(
+-"defaults write domain key value\n"
+-"    write 'value' as default 'key' in the specified domain.\n"
+-"    'value' must be a property list in single quotes.\n\n");
+-	  printf(
+-"defaults write domain dictionary\n"
+-"    write 'dictionary' as a replacement for the specified domain.\n"
+-"    'dictionary' must be a property list in single quotes.\n\n");
+-	  printf(
+-"defaults write\n"
+-"    reads standard input for defaults in the format produced by\n"
+-"    'defaults read' and writes them to the database.\n\n");
+-	  printf(
+-"defaults delete [ domain [ key] ]\n"
+-"    remove the specified default(s) from the domain.\n"
+-"    If no 'key' is given - delete the entire domain.\n\n");
+-	  printf(
+-"defaults delete\n"
+-"    read standard input for a series of lines containing pairs of domains\n"
+-"    and keys for defaults to be deleted.\n\n");
+-	  printf(
+-"defaults domains\n"
+-"    lists the domains in the database (one per line)\n\n");
+-	  printf(
+-"defaults find word\n"
+-"    searches domain names, default names, and default value strings for\n"
+-"    those equal to the specified word and lists them on standard output.\n\n");
+-	  printf(
+-"defaults plist\n"
+-"    output some information about property lists\n\n");
+-	  printf(
+-"defaults help\n"
+-"    list options for the defaults command.\n\n");
+-	  [pool release];
+-	  exit(GSEXIT_SUCCESS);
+-	}
+-      else if ([[args objectAtIndex: i] isEqual: @"plist"])
+-	{
+-	  printf(
+-"A property list is a method of providing structured information consisting\n"
+-"of strings, arrays, dictionaries, and binary data.\n\n"
+-"The defaults system allows you to work with a human-readable form of a\n"
+-"property list which is set as the value of a default.\n\n");
+-	  printf(
+-"In a property list, strings appear as plain text (as long as they contain\n"
+-"no special characters), and inside quotation marks otherwise.\n"
+-"Special characters inside a quoted string are 'escaped' by a backslash.\n"
+-"This escape mechanism is used to permit the double quote mark to appear\n"
+-"inside a quoted string.\n"
+-"Unicode characters are represented as four digit hexadecimal numbers\n"
+-"prefixed by \\U\n"
+-"Arrays appear as a comma separated list of items delimited by brackets.\n"
+-"Dictionaries appear as a series of key-value pairs, each pair is followed\n"
+-"by a semicolon and the whole dictionary is delimited by curly brackets.\n"
+-"Data is encoded as hexadecimal digits delimited by angle brackets.\n\n");
+-	  printf(
+-"In output from 'defaults read' the defaults values are represented as\n"
+-"property lists enclosed in single quotes.  If a value actually contains\n"
+-"a string with a single quite mark in it, that quote is repeated.\n"
+-"Similarly, if 'defaults write' is reading a defaults value from stdin\n"
+-"it expects to receive the value in single quotes with any internal\n"
+-"single quote marks repeated.\n\n");
+-	  printf(
+-"Here is an example of a dictionary encoded as a text property list -\n\n");
+-	  printf(
+-"{\n"
+-"    Name = \"My Application\";\n"
+-"    Author = \"Just me and \\\"my other half\\\"\";\n"
+-"    Modules = (\n"
+-"	Main,\n"
+-"	\"'Input output'\",\n"
+-"	Computation\n"
+-"    );\n"
+-"    Checksum = <01014b5b 123a8b20>\n"
+-"}\n\n");
+-	  printf(
+-"And as output from the command 'defaults read foo bar' -\n\n");
+-	  printf(
+-"foo bar '{\n"
+-"    Name = \"My Application\";\n"
+-"    Author = \"Just me and \\\"my other half\\\"\";\n"
+-"    Modules = (\n"
+-"	Main,\n"
+-"	\"''Input output''\",\n"
+-"	Computation\n"
+-"    );\n"
+-"    Checksum = <01014b5b 123a8b20>\n"
+-"}'\n\n");
+-	  [pool release];
+-	  exit(GSEXIT_SUCCESS);
+-	}
+-    }
+-
+-  i = 1;
+-  if ([args count] <= i)
+-    {
+-      fprintf(stderr, "defaults: too few arguments supplied!\n");
+-      [pool release];
+-      exit(GSEXIT_FAILURE);
+-    }
+-  if ([[args objectAtIndex: i] isEqual: @"-u"])
+-    {
+-      if ([args count] > ++i)
+-	{
+-	  user = [args objectAtIndex: i++];
+-	}
++static CFStringRef bundle_id_for_app(const char *name)
++{
++  const char *home = getenv("HOME");
++  const char *dirs[] = { "/Applications", "/Applications/Utilities", "/System/Applications",
++                         "/System/Applications/Utilities", NULL, NULL };
++  char path[4096];
++  char homeapps[4096];
++  int i;
++  size_t len = strlen(name);
++  int has_suffix = len > 4 && !strcmp(name + len - 4, ".app");
++
++  if (home)
++    {
++      snprintf(homeapps, sizeof homeapps, "%s/Applications", home);
++      dirs[4] = homeapps;
++    }
++  for (i = -1; i < 5; i++)
++    {
++      CFTypeRef info;
++      CFStringRef ident = NULL;
++
++      if (i < 0)
++        {
++          if (strchr(name, '/') == NULL)
++            continue;
++          snprintf(path, sizeof path, "%s%s/Contents/Info.plist", name, has_suffix ? "" : ".app");
++        }
+       else
+-	{
+-	  fprintf(stderr, "defaults: no name supplied for -u option!\n");
+-	  [pool release];
+-	  exit(GSEXIT_FAILURE);
+-	}
++        {
++          if (dirs[i] == NULL)
++            continue;
++          snprintf(path, sizeof path, "%s/%s%s/Contents/Info.plist", dirs[i], name,
++                   has_suffix ? "" : ".app");
++        }
++      info = copy_plist_file(path);
++      if (info && CFGetTypeID(info) == CFDictionaryGetTypeID())
++        {
++          ident = CFDictionaryGetValue(info, CFSTR("CFBundleIdentifier"));
++          if (ident && CFGetTypeID(ident) == CFStringGetTypeID())
++            CFRetain(ident);
++          else
++            ident = NULL;
++        }
++      if (info)
++        CFRelease(info);
++      if (ident)
++        return ident;
++    }
++  return NULL;
++}
++
++/* Resolve the domain argument at argv[*i]; -app consumes a second word.
++ * Returns 0 on success, otherwise the exit code. */
++static int resolve_domain(int argc, char **argv, int *i, struct domain *d)
++{
++  const char *arg = argv[*i];
++
++  if (!strcmp(arg, "-g") || !strcmp(arg, "-globalDomain") || !strcmp(arg, "NSGlobalDomain")
++      || !strcmp(arg, "Apple Global Domain"))
++    {
++      d->app = kCFPreferencesAnyApplication;
++      d->display = "kCFPreferencesAnyApplication";
+     }
+-  if (user)
++  else if (!strcmp(arg, "-app"))
+     {
+-      // GSSetUserName(user);
+-      defs = [[NSUserDefaults alloc] initWithUser: user];
++      if (*i + 1 >= argc)
++        return usage();
++      (*i)++;
++      d->app = bundle_id_for_app(argv[*i]);
++      if (d->app == NULL)
++        {
++          log_message("Couldn't find an application named \"%s\"; defaults unchanged", argv[*i]);
++          return 1;
++        }
++      d->display = c_string(d->app);
++    }
++  else if (arg[0] == '/')
++    {
++      /* A path names a plist file, with or without its .plist extension;
++       * CFPreferences appends the extension to an absolute ID itself. */
++      size_t len = strlen(arg);
++      char *path = strdup(arg);
++
++      if (len > 6 && !strcmp(path + len - 6, ".plist"))
++        path[len - 6] = '\0';
++      d->app = cf_string(path);
++      d->display = strdup(arg);
++      free(path);
+     }
+   else
+     {
+-      defs = [NSUserDefaults standardUserDefaults];
++      d->app = cf_string(arg);
++      d->display = strdup(arg);
+     }
+-  if (defs == nil)
++  (*i)++;
++  return 0;
++}
++
++static CFDictionaryRef copy_domain(const struct domain *d)
++{
++  CFDictionaryRef dict = CFPreferencesCopyMultiple(NULL, d->app, user_name, host_name);
++
++  if (dict == NULL)
++    dict = CFDictionaryCreate(NULL, NULL, NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++                              &kCFTypeDictionaryValueCallBacks);
++  return dict;
++}
++
++static CFArrayRef copy_domain_names(void)
++{
++  CFArrayRef list = CFPreferencesCopyApplicationList(user_name, host_name);
++  CFMutableArrayRef names = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
++  CFIndex i, n = list ? CFArrayGetCount(list) : 0;
++
++  for (i = 0; i < n; i++)
+     {
+-      fprintf(stderr, "defaults: unable to access defaults database!\n");
+-      [pool release];
+-      exit(GSEXIT_FAILURE);
++      CFStringRef name = CFArrayGetValueAtIndex(list, i);
++
++      if (CFGetTypeID(name) != CFStringGetTypeID() || CFEqual(name, kCFPreferencesAnyApplication)
++          || CFStringGetLength(name) == 0)
++        continue;
++      if (!CFArrayContainsValue(names, CFRangeMake(0, CFArrayGetCount(names)), name))
++        CFArrayAppendValue(names, name);
+     }
+-  /* We don't want this tool in the defaults database - so remove it. */
+-  [defs removePersistentDomainForName: [proc processName]];
++  if (list)
++    CFRelease(list);
++  CFArraySortValues(names, CFRangeMake(0, CFArrayGetCount(names)),
++                    (CFComparatorFunction)CFStringCompare, NULL);
++  return names;
++}
+ 
+-  if ([args count] <= i)
++static int synchronize(const struct domain *d)
++{
++  if (!CFPreferencesSynchronize(d->app, user_name, host_name))
+     {
+-      fprintf(stderr, "defaults: too few arguments supplied!\n");
+-      [pool release];
+-      exit(GSEXIT_FAILURE);
++      log_message("Could not write domain %s; exiting", d->display);
++      return 1;
+     }
++  return 0;
++}
++
++static void report_missing_pair(const struct domain *d, const char *key)
++{
++  log_message("\nThe domain/default pair of (%s, %s) does not exist", d->display, key);
++}
++
++/* ---- value parsing ---- */
+ 
+-  if ([[args objectAtIndex: i] isEqual: @"read"] ||
+-      [[args objectAtIndex: i] isEqual: @"readkey"])
++static int is_type_flag(const char *s)
++{
++  static const char *flags[] = { "-string", "-data", "-int", "-integer", "-float", "-bool",
++                                 "-boolean", "-date", NULL };
++  int i;
++
++  for (i = 0; flags[i]; i++)
++    if (!strcmp(s, flags[i]))
++      return 1;
++  return 0;
++}
++
++/* <value_rep>: an XML or old-style property list, else the word itself. */
++static CFTypeRef parse_value_rep(const char *s)
++{
++  CFDataRef data = CFDataCreate(NULL, (const UInt8 *)s, strlen(s));
++  CFTypeRef plist = CFPropertyListCreateWithData(NULL, data, kCFPropertyListMutableContainersAndLeaves,
++                                                 NULL, NULL);
++
++  CFRelease(data);
++  if (plist)
++    return plist;
++  return cf_string(s);
++}
++
++static CFDateRef parse_date(const char *s)
++{
++  static const char *formats[] = { "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", NULL };
++  int i;
++
++  for (i = 0; formats[i]; i++)
+     {
+-      NSDictionary	*locale = [defs dictionaryRepresentation];
++      struct tm tm;
++      const char *rest;
++      long offset = 0;
++
++      memset(&tm, 0, sizeof tm);
++      rest = strptime(s, formats[i], &tm);
++      if (rest == NULL)
++        continue;
++      while (*rest == ' ')
++        rest++;
++      if (*rest == 'Z')
++        rest++;
++      else if ((*rest == '+' || *rest == '-') && isdigit((unsigned char)rest[1]))
++        {
++          int sign = *rest == '-' ? -1 : 1;
++          int digits = 0, value = 0;
++
++          for (rest++; isdigit((unsigned char)*rest) || *rest == ':'; rest++)
++            if (*rest != ':')
++              {
++                value = value * 10 + (*rest - '0');
++                digits++;
++              }
++          if (digits != 4)
++            continue;
++          offset = sign * ((value / 100) * 3600L + (value % 100) * 60L);
++        }
++      if (*rest != '\0')
++        continue;
++      return CFDateCreate(NULL, (double)(timegm(&tm) - offset) - 978307200.0);
++    }
++  return NULL;
++}
+ 
+-      if ([[args objectAtIndex: i] isEqual: @"read"])
+-	{
+-	  if ([args count] == ++i)
+-	    {
+-	      name = nil;
+-	      owner = nil;
+-	    }
+-	  else
+-	    {
+-	      owner = [args objectAtIndex: i++];
+-	      if ([args count] > i)
+-		{
+-		  name = [args objectAtIndex: i];
+-		}
+-	    }
+-	}
+-      else
+-	{
+-	  if ([args count] == ++i)
+-	    {
+-	      fprintf(stderr, "defaults: too few arguments supplied!\n");
+-	      [pool release];
+-	      exit(GSEXIT_FAILURE);
+-	    }
+-	  owner = nil;
+-	  name = [args objectAtIndex: i];
+-	}
+-
+-      domains = [defs persistentDomainNames];
+-      for (i = 0; i < [domains count]; i++)
+-	{
+-	  NSString	*domainName = [domains objectAtIndex: i];
+-
+-	  if (owner == nil || [owner isEqual: domainName])
+-	    {
+-	      NSDictionary	*dom;
+-
+-	      dom = [defs persistentDomainForName: domainName];
+-	      if (dom)
+-		{
+-		  if (name == nil)
+-		    {
+-		      NSEnumerator	*enumerator;
+-		      NSString		*key;
+-
+-		      enumerator = [dom keyEnumerator];
+-		      while ((key = [enumerator nextObject]) != nil)
+-			{
+-			  id		obj = [dom objectForKey: key];
+-			  const char	*ptr;
+-
+-			  ptr = [domainName UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-
+-			  ptr = [key UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-
+-			  ptr = objectDescriptionCStr(obj, locale, 0);
+-			  output(ptr);
+-			  putchar('\n');
+-			}
+-		    }
+-		  else
+-		    {
+-		      id	obj = [dom objectForKey: name];
+-
+-		      if (obj)
+-			{
+-			  const char      *ptr;
+-
+-			  ptr = [domainName UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-			  ptr = [name UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-			  ptr = objectDescriptionCStr(obj, locale, 0);
+-			  output(ptr);
+-			  putchar('\n');
+-			  found = YES;
+-			}
+-		    }
+-		}
+-	    }
+-	}
+-
+-      domains = [defs volatileDomainNames];
+-      for (i = 0; i < [domains count]; i++)
+-	{
+-	  NSString	*domainName = [domains objectAtIndex: i];
+-
+-#if 0
+-	  if (owner == nil || [owner isEqual: domainName])
+-#else	
+-	  if ([owner isEqual: domainName])
+-#endif
+-	    {
+-	      NSDictionary	*dom;
+-
+-	      dom = [defs volatileDomainForName: domainName];
+-	      if (dom)
+-		{
+-		  if (name == nil)
+-		    {
+-		      NSEnumerator	*enumerator;
+-		      NSString		*key;
+-
+-		      enumerator = [dom keyEnumerator];
+-		      while ((key = [enumerator nextObject]) != nil)
+-			{
+-			  id		obj = [dom objectForKey: key];
+-			  const char	*ptr;
+-
+-			  ptr = [domainName UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-
+-			  ptr = [key UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-
+-			  ptr = objectDescriptionCStr(obj, locale, 0);
+-			  output(ptr);
+-			  putchar('\n');
+-			}
+-		    }
+-		  else
+-		    {
+-		      id	obj = [dom objectForKey: name];
+-
+-		      if (obj)
+-			{
+-			  const char      *ptr;
+-
+-			  ptr = [domainName UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-			  ptr = [name UTF8String];
+-			  output(ptr);
+-			  putchar(' ');
+-			  ptr = objectDescriptionCStr(obj, locale, 0);
+-			  output(ptr);
+-			  putchar('\n');
+-			  found = YES;
+-			}
+-		    }
+-		}
+-	    }
+-	}
+-
+-      if (found == NO && name != nil)
+-	{
+-	  fprintf(stderr, "defaults read: couldn't read default\n");
+-	  derror = GSEXIT_NOTFOUND;
+-	}
+-    }
+-  else if ([[args objectAtIndex: i] isEqual: @"write"])
+-    {
+-      id	obj;
+-
+-      if ([args count] == ++i)
+-	{
+-	  int	size = BUFSIZ;
+-	  int	got;
+-	  int	off = 0;
+-	  char	*buf = malloc(size);
+-	  char	*ptr;
+-
+-	  /*
+-	   *	Read from stdin - grow buffer as necessary since defaults
+-	   *	values are quoted property lists which may be huge.
+-	   */
+-	  while ((got = fread(buf + off, 1, BUFSIZ, stdin)) == BUFSIZ)
+-	    {
+-	      off += BUFSIZ;
+-	      size += BUFSIZ;
+-	      buf = realloc(buf, size);
+-	      if (buf == 0)
+-		{
+-		  fprintf(stderr,
+-		    "defaults write: out of memory loading defaults\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-	    }
+-	  buf[off + got] = '\0';
+-
+-	  ptr = buf;
+-
+-	  for (;;)
+-	    {
+-	      unichar	c;
+-
+-	      /*
+-	       *	Expect domain name as a space delimited string.
+-	       */
+-	      while (isspace(*ptr))
+-		{
+-		  ptr++;
+-		}
+-	      if (*ptr == '\0')
+-		{
+-		  break;	/* At end ... quit. */
+-		}
+-
+-	      owner = input(&ptr);
+-	      if ([owner length] == 0)
+-		{
+-		  fprintf(stderr,
+-		    "defaults write: invalid input - nul domain name\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-
+-	      name = input(&ptr);
+-	      if ([name length] == 0)
+-		{
+-		  fprintf(stderr,
+-		    "defaults write: invalid input - nul default name.\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-
+-	      /*
+-	       * Expect defaults value as a quoted property list which
+-	       * may cover multiple lines.
+-	       */
+-	      obj = input(&ptr);
+-	      if (obj == nil)
+-		{
+-		  fprintf(stderr,
+-		    "defaults write: invalid input - "
+-		    "empty property list\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-
+-	      c = 0;
+-	      if ([obj length] > 0)
+-		{
+-		  c = [obj characterAtIndex: 0];
+-		}
+-	      if (c == '(' || c == '{' || c == '<' || c == '"')
+-		{
+-		  id	tmp;
+-
+-		  NS_DURING
+-		    tmp = [obj propertyList];
+-		  NS_HANDLER
+-		    NSLog(@"Failed to parse '%@' ... '%@'",
+-		      obj, localException);
+-		    tmp = nil;
+-		  NS_ENDHANDLER
+-		  if (tmp == nil)
+-		    {
+-		      fprintf(stderr,
+-		        "defaults write: invalid input - "
+-			"bad property list\n");
+-		      [pool release];
+-		      exit(GSEXIT_FAILURE);
+-		    }
+-		  else
+-		    {
+-		      obj = tmp;
+-		    }
+-		}
+-
+-	      domain = [[defs persistentDomainForName: owner] mutableCopy];
+-	      if (domain == nil)
+-		{
+-		  domain = [NSMutableDictionary dictionaryWithCapacity:1];
+-		}
+-	      [domain setObject: obj forKey: name];
+-	      [defs setPersistentDomain: domain forName: owner];
+-	    }
+-	}
+-      else
+-	{
+-	  owner = [args objectAtIndex: i++];
+-	  if ([args count] <= i)
+-	    {
+-	      fprintf(stderr, "defaults: no dictionary or key for write!\n");
+-	      [pool release];
+-	      exit(GSEXIT_FAILURE);
+-	    }
+-	  name = [args objectAtIndex: i++];
+-	  if ([args count] > i)
+-	    {
+-	      const char	*ptr;
+-
+-	      value = [args objectAtIndex: i];
+-	      ptr = [value UTF8String];
+-
+-	      if (*ptr == '(' || *ptr == '{' || *ptr == '<' || *ptr == '"')
+-		{
+-		  NS_DURING
+-		    obj = [value propertyList];
+-		  NS_HANDLER
+-		    NSLog(@"Failed to parse '%@' ... '%@'",
+-		      value, localException);
+-		    obj = nil;
+-		  NS_ENDHANDLER
+-
+-		  if (obj == nil)
+-		    {
+-		      fprintf(stderr, "defaults write: invalid input - "
+-			"bad property list\n");
+-		      [pool release];
+-		      exit(GSEXIT_FAILURE);
+-		    }
+-		}
+-	      else
+-		{
+-		  obj = value;
+-		}
+-
+-	      domain = [[defs persistentDomainForName: owner] mutableCopy];
+-	      if (domain == nil)
+-		{
+-		  domain = [NSMutableDictionary dictionaryWithCapacity:1];
+-		}
+-	      [domain setObject: obj forKey: name];
+-	      [defs setPersistentDomain: domain forName: owner];
+-	    }
+-	  else
+-	    {
+-	      domain = [name propertyList];
+-	      if (domain == nil ||
+-			[domain isKindOfClass: [NSDictionary class]] == NO)
+-		{
+-		  fprintf(stderr,
+-		    "defaults write: domain is not a dictionary!\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-	    }
+-	}
+-
+-      if ([defs synchronize] == NO)
+-	{
+-	  fprintf(stderr,
+-	    "defaults: unable to write to defaults database\n");
+-	}
+-    }
+-  else if ([[args objectAtIndex: i] isEqual: @"delete"])
+-    {
+-      if ([args count] == ++i)
+-	{
+-	  int	size = BUFSIZ;
+-	  int	got;
+-	  int	off = 0;
+-	  char	*buf = malloc(size);
+-	  char	*ptr;
+-
+-	  while ((got = fread(buf + off, 1, BUFSIZ, stdin)) == BUFSIZ)
+-	    {
+-	      off += BUFSIZ;
+-	      size += BUFSIZ;
+-	      buf = realloc(buf, size);
+-	      if (buf == 0)
+-		{
+-		  fprintf(stderr,
+-		    "defaults write: out of memory reading domains\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-	    }
+-	  buf[off + got] = '\0';
+-
+-	  ptr = buf;
+-
+-	  for (;;)
+-	    {
+-	      while (*ptr && isspace(*ptr))
+-		{
+-		  ptr++;
+-		}
+-	      if (*ptr == '\0')
+-		{
+-		  break;	// Read all
+-		}
+-	      owner = input(&ptr);
+-	      if ([owner length] == 0)
+-		{
+-		  fprintf(stderr,
+-		    "defaults delete: invalid input - empty domain name\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-	      name = input(&ptr);
+-	      if ([name length] == 0)
+-		{
+-		  fprintf(stderr,
+-		    "defaults delete: invalid input - empty key\n");
+-		  [pool release];
+-		  exit(GSEXIT_FAILURE);
+-		}
+-	      domain = [[defs persistentDomainForName: owner] mutableCopy];
+-	      if (domain == nil)
+-	        {
+-		  fprintf(stderr, "defaults delete: couldn't remove "
+-		    "value from non-existent domain %s\n", [owner UTF8String]);
+-		}
+-	      else if ([domain objectForKey: name] == nil)
+-		{
+-		  fprintf(stderr,
+-		    "defaults delete: couldn't remove non-existent value %s "
+-		    "from domain %s\n",
+-		    [name UTF8String], [owner UTF8String]);
+-		}
+-	      else
+-		{
+-		  [domain removeObjectForKey: name];
+-		  [defs setPersistentDomain: domain forName: owner];
+-		}
+-	    }
+-	}
+-      else
+-	{
+-	  owner = [args objectAtIndex: i++];
+-	  if ([args count] > i)
+-	    {
+-	      name = [args objectAtIndex: i];
+-	    }
+-	  else
+-	    {
+-	      name = nil;
+-	    }
+-	  if (name)
+-	    {
+-	      domain = [[defs persistentDomainForName: owner] mutableCopy];
+-	      if (domain == nil)
+-	        {
+-		  fprintf(stderr, "defaults delete: couldn't remove "
+-		    "value from non-existent domain %s\n", [owner UTF8String]);
+-		}
+-	      else if ([domain objectForKey: name] == nil)
+-		{
+-		  fprintf(stderr,
+-		    "defaults delete: couldn't remove non-existent value %s "
+-		    "from domain %s\n",
+-		    [name UTF8String], [owner UTF8String]);
+-		}
+-	      else
+-		{
+-		  [domain removeObjectForKey: name];
+-		  [defs setPersistentDomain: domain forName: owner];
+-		}
+-	    }
+-	  else
+-	    {
+-	      if ([defs persistentDomainForName: owner]  == nil)
+-	        {
+-		  fprintf(stderr, "defaults delete: couldn't remove "
+-		    "non-existent domain %s\n", [owner UTF8String]);
+-		}
+-	      else
+-	        {
+-	          [defs removePersistentDomainForName: owner];
+-		}
+-	    }
+-	}
+-      if ([defs synchronize] == NO)
+-	{
+-	  fprintf(stderr,
+-	    "defaults: unable to write to defaults database\n");
+-	}
+-    }
+-  else if ([[args objectAtIndex: i] isEqual: @"domains"])
+-    {
+-      domains = [defs persistentDomainNames];
+-      for (i = 0; i < [domains count]; i++)
+-	{
+-	  NSString	*domainName = [domains objectAtIndex: i];
+-
+-	  output([domainName UTF8String]);
+-	  putchar('\n');
+-	}
+-    }
+-  else if ([[args objectAtIndex: i] isEqual: @"find"])
+-    {
+-      if ([args count] == ++i)
+-	{
+-	  fprintf(stderr, "defaults: no arguments for find!\n");
+-	  [pool release];
+-	  exit(GSEXIT_FAILURE);
+-	}
+-      name = [args objectAtIndex: i];
+-
+-      domains = [defs persistentDomainNames];
+-      for (i = 0; i < [domains count]; i++)
+-	{
+-	  NSString	*domainName = [domains objectAtIndex: i];
+-	  NSDictionary	*dom;
+-
+-	  if ([domainName isEqual: name])
+-	    {
+-	      fprintf(stderr, "%s\n", [domainName UTF8String]);
+-	      found = YES;
+-	    }
+-
+-	  dom = [defs persistentDomainForName: domainName];
+-	  if (dom)
+-	    {
+-	      NSEnumerator	*enumerator;
+-	      NSString		*key;
+-
+-	      enumerator = [dom keyEnumerator];
+-	      while ((key = [enumerator nextObject]) != nil)
+-		{
+-		  id	obj = [dom objectForKey: key];
+-
+-		  if ([key isEqual: name])
+-		    {
+-		      fprintf(stderr, "%s %s\n",
+-		        [domainName UTF8String], [key UTF8String]);
+-		      found = YES;
+-		    }
+-		  if ([obj isKindOfClass: [NSString class]])
+-		    {
+-		      if ([obj isEqual: name])
+-			{
+-			  fprintf(stderr, "%s %s %s\n",
+-			    [domainName UTF8String],
+-			    [key UTF8String],
+-			    [obj UTF8String]);
+-			  found = YES;
+-			}
+-		    }
+-		}
+-	    }
+-	}
+-
+-      if (found == NO)
+-	{
+-	  fprintf(stderr, "defaults find: couldn't find value\n");
+-	  derror = GSEXIT_NOTFOUND;
+-	}
++/* Parse one typed value (or a <value_rep>) at argv[*i]; advances *i.
++ * Returns NULL after printing a message. */
++static CFTypeRef parse_scalar(int argc, char **argv, int *i)
++{
++  const char *flag = argv[*i];
++  const char *arg;
++  char *end;
++
++  if (!is_type_flag(flag))
++    {
++      (*i)++;
++      return parse_value_rep(flag);
++    }
++  if (*i + 1 >= argc)
++    {
++      usage();
++      return NULL;
++    }
++  arg = argv[*i + 1];
++  *i += 2;
++  if (!strcmp(flag, "-string"))
++    return cf_string(arg);
++  if (!strcmp(flag, "-int") || !strcmp(flag, "-integer"))
++    {
++      long long v;
++
++      errno = 0;
++      v = strtoll(arg, &end, 10);
++      if (end == arg || *end != '\0' || errno)
++        {
++          log_message("\nCannot parse '%s' as an integer", arg);
++          return NULL;
++        }
++      return CFNumberCreate(NULL, kCFNumberLongLongType, &v);
++    }
++  if (!strcmp(flag, "-float"))
++    {
++      double v = strtod(arg, &end);
++
++      if (end == arg || *end != '\0')
++        {
++          log_message("\nCannot parse '%s' as a float", arg);
++          return NULL;
++        }
++      return CFNumberCreate(NULL, kCFNumberDoubleType, &v);
++    }
++  if (!strcmp(flag, "-bool") || !strcmp(flag, "-boolean"))
++    {
++      int v = parse_bool_word(arg);
++
++      if (v < 0)
++        {
++          usage();
++          return NULL;
++        }
++      return CFRetain(v ? kCFBooleanTrue : kCFBooleanFalse);
++    }
++  if (!strcmp(flag, "-data"))
++    {
++      long n = parse_hex_bytes(arg, NULL);
++      unsigned char *bytes;
++      CFDataRef data;
++
++      if (n < 0)
++        {
++          log_message("\nCannot parse '%s' as hexadecimal data", arg);
++          return NULL;
++        }
++      bytes = malloc(n + 1);
++      parse_hex_bytes(arg, bytes);
++      data = CFDataCreate(NULL, bytes, n);
++      free(bytes);
++      return data;
++    }
++  if (!strcmp(flag, "-date"))
++    {
++      CFDateRef date = parse_date(arg);
++
++      if (date == NULL)
++        log_message("\nCannot parse '%s' as a date", arg);
++      return date;
++    }
++  return NULL;
++}
++
++/* ---- commands ---- */
++
++static int cmd_read(int argc, char **argv, int i)
++{
++  struct domain d;
++  int rc;
++
++  if (i >= argc)
++    {
++      /* Every domain, the global one under "Apple Global Domain". */
++      CFMutableDictionaryRef all = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++                                                             &kCFTypeDictionaryValueCallBacks);
++      CFArrayRef names = copy_domain_names();
++      CFIndex k;
++
++      d.app = kCFPreferencesAnyApplication;
++      CFDictionarySetValue(all, CFSTR("Apple Global Domain"), copy_domain(&d));
++      for (k = 0; k < CFArrayGetCount(names); k++)
++        {
++          d.app = CFArrayGetValueAtIndex(names, k);
++          CFDictionarySetValue(all, d.app, copy_domain(&d));
++        }
++      print_value(all);
++      return 0;
++    }
++  if ((rc = resolve_domain(argc, argv, &i, &d)) != 0)
++    return rc;
++  if (i >= argc)
++    {
++      CFDictionaryRef dict = copy_domain(&d);
++
++      if (CFDictionaryGetCount(dict) == 0)
++        {
++          log_message("\nDomain %s does not exist", d.display);
++          return 1;
++        }
++      print_value(dict);
++      return 0;
+     }
+   else
+     {
+-      fprintf(stderr, "defaults: unknown option supplied!\n");
+-      derror = GSEXIT_FAILURE;
++      CFStringRef key = cf_string(argv[i]);
++      CFTypeRef value = CFPreferencesCopyValue(key, d.app, user_name, host_name);
++
++      if (value == NULL)
++        {
++          report_missing_pair(&d, argv[i]);
++          return 1;
++        }
++      print_value(value);
++      return 0;
+     }
++}
+ 
+-  [pool release];
+-  exit(derror);
++static int cmd_read_type(int argc, char **argv, int i)
++{
++  struct domain d;
++  CFTypeRef value;
++  struct dv v;
++  int rc;
++
++  if (i >= argc)
++    return usage();
++  if ((rc = resolve_domain(argc, argv, &i, &d)) != 0)
++    return rc;
++  if (i >= argc)
++    return usage();
++  value = CFPreferencesCopyValue(cf_string(argv[i]), d.app, user_name, host_name);
++  if (value == NULL)
++    {
++      report_missing_pair(&d, argv[i]);
++      return 1;
++    }
++  dv_from_cf(&v, value);
++  printf("Type is %s\n", dv_type_name(&v));
++  return 0;
+ }
+ 
++/* Replace the whole domain with dict. */
++static int replace_domain(const struct domain *d, CFDictionaryRef dict)
++{
++  CFDictionaryRef old = copy_domain(d);
++  CFMutableArrayRef removed = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
++  CFIndex k, n = CFDictionaryGetCount(old);
++  const void **keys = calloc(n + 1, sizeof(void *));
++
++  CFDictionaryGetKeysAndValues(old, keys, NULL);
++  for (k = 0; k < n; k++)
++    if (!CFDictionaryContainsKey(dict, keys[k]))
++      CFArrayAppendValue(removed, keys[k]);
++  free(keys);
++  CFPreferencesSetMultiple(dict, removed, d->app, user_name, host_name);
++  return synchronize(d);
++}
++
++static int cmd_write(int argc, char **argv, int i)
++{
++  struct domain d;
++  CFStringRef key;
++  CFTypeRef value = NULL;
++  const char *keyname;
++  int rc;
++
++  if (i >= argc)
++    return usage();
++  if ((rc = resolve_domain(argc, argv, &i, &d)) != 0)
++    return rc;
++  if (i >= argc)
++    return usage();
++  if (i + 1 == argc)
++    {
++      CFTypeRef rep = parse_value_rep(argv[i]);
++
++      if (CFGetTypeID(rep) != CFDictionaryGetTypeID())
++        {
++          log_message("\nRep argument is not a dictionary\nDefaults have not been changed.");
++          return 1;
++        }
++      return replace_domain(&d, rep);
++    }
++  keyname = argv[i++];
++  key = cf_string(keyname);
++  if (!strcmp(argv[i], "-array") || !strcmp(argv[i], "-array-add"))
++    {
++      CFMutableArrayRef array = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
++
++      if (!strcmp(argv[i], "-array-add"))
++        {
++          CFTypeRef old = CFPreferencesCopyValue(key, d.app, user_name, host_name);
++
++          if (old && CFGetTypeID(old) != CFArrayGetTypeID())
++            {
++              log_message("Value for key %s is not an array; cannot append.  Leaving defaults unchanged.",
++                          keyname);
++              return 1;
++            }
++          if (old)
++            CFArrayAppendArray(array, old, CFRangeMake(0, CFArrayGetCount(old)));
++        }
++      for (i++; i < argc;)
++        {
++          CFTypeRef item = parse_scalar(argc, argv, &i);
++
++          if (item == NULL)
++            return 1;
++          CFArrayAppendValue(array, item);
++          CFRelease(item);
++        }
++      value = array;
++    }
++  else if (!strcmp(argv[i], "-dict") || !strcmp(argv[i], "-dict-add"))
++    {
++      CFMutableDictionaryRef dict = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++                                                              &kCFTypeDictionaryValueCallBacks);
++
++      if (!strcmp(argv[i], "-dict-add"))
++        {
++          CFTypeRef old = CFPreferencesCopyValue(key, d.app, user_name, host_name);
++
++          if (old && CFGetTypeID(old) != CFDictionaryGetTypeID())
++            {
++              log_message("Value for key %s is not a dictionary; cannot append.  Leaving defaults unchanged.",
++                          keyname);
++              return 1;
++            }
++          if (old)
++            {
++              CFIndex k, n = CFDictionaryGetCount(old);
++              const void **ks = calloc(n + 1, sizeof(void *));
++              const void **vs = calloc(n + 1, sizeof(void *));
++
++              CFDictionaryGetKeysAndValues(old, ks, vs);
++              for (k = 0; k < n; k++)
++                CFDictionarySetValue(dict, ks[k], vs[k]);
++              free(ks);
++              free(vs);
++            }
++        }
++      for (i++; i < argc;)
++        {
++          CFStringRef k;
++          CFTypeRef item;
++
++          if (i + 1 >= argc)
++            {
++              log_message("Key %s lacks a corresponding value", argv[i]);
++              return 1;
++            }
++          k = cf_string(argv[i++]);
++          item = parse_scalar(argc, argv, &i);
++          if (item == NULL)
++            return 1;
++          CFDictionarySetValue(dict, k, item);
++          CFRelease(item);
++          CFRelease(k);
++        }
++      value = dict;
++    }
++  else
++    {
++      value = parse_scalar(argc, argv, &i);
++      if (value == NULL)
++        return 1;
++    }
++  CFPreferencesSetValue(key, value, d.app, user_name, host_name);
++  return synchronize(&d);
++}
++
++static int cmd_delete(int argc, char **argv, int i)
++{
++  struct domain d;
++  int rc;
++
++  if (i >= argc)
++    return usage();
++  if ((rc = resolve_domain(argc, argv, &i, &d)) != 0)
++    return rc;
++  if (i >= argc)
++    {
++      CFDictionaryRef dict = copy_domain(&d);
++      CFIndex n = CFDictionaryGetCount(dict);
++      const void **keys;
++      CFArrayRef removed;
++
++      if (n == 0)
++        {
++          log_message("\nDomain (%s) not found.\nDefaults have not been changed.", d.display);
++          return 1;
++        }
++      keys = calloc(n, sizeof(void *));
++      CFDictionaryGetKeysAndValues(dict, keys, NULL);
++      removed = CFArrayCreate(NULL, keys, n, &kCFTypeArrayCallBacks);
++      free(keys);
++      CFPreferencesSetMultiple(NULL, removed, d.app, user_name, host_name);
++      return synchronize(&d);
++    }
++  else
++    {
++      CFStringRef key = cf_string(argv[i]);
++      CFTypeRef value = CFPreferencesCopyValue(key, d.app, user_name, host_name);
++
++      if (value == NULL)
++        {
++          report_missing_pair(&d, argv[i]);
++          return 1;
++        }
++      CFPreferencesSetValue(key, NULL, d.app, user_name, host_name);
++      return synchronize(&d);
++    }
++}
++
++static int cmd_rename(int argc, char **argv, int i)
++{
++  struct domain d;
++  CFStringRef old_key, new_key;
++  CFTypeRef value;
++  int rc;
++
++  if (i >= argc)
++    return usage();
++  if ((rc = resolve_domain(argc, argv, &i, &d)) != 0)
++    return rc;
++  if (i + 2 > argc)
++    return usage();
++  old_key = cf_string(argv[i]);
++  new_key = cf_string(argv[i + 1]);
++  value = CFPreferencesCopyValue(old_key, d.app, user_name, host_name);
++  if (value == NULL)
++    {
++      log_message("Key %s does not exist in domain %s; leaving defaults unchanged", argv[i], d.display);
++      return 1;
++    }
++  CFPreferencesSetValue(old_key, NULL, d.app, user_name, host_name);
++  CFPreferencesSetValue(new_key, value, d.app, user_name, host_name);
++  return synchronize(&d);
++}
++
++static int cmd_import(int argc, char **argv, int i)
++{
++  struct domain d;
++  CFTypeRef plist = NULL;
++  int rc;
++
++  if (i >= argc)
++    return usage();
++  if ((rc = resolve_domain(argc, argv, &i, &d)) != 0)
++    return rc;
++  if (i >= argc)
++    return usage();
++  if (!strcmp(argv[i], "-"))
++    {
++      CFMutableDataRef data = CFDataCreateMutable(NULL, 0);
++      unsigned char chunk[65536];
++      size_t n;
++
++      while ((n = fread(chunk, 1, sizeof chunk, stdin)) > 0)
++        CFDataAppendBytes(data, chunk, n);
++      plist = CFPropertyListCreateWithData(NULL, data, kCFPropertyListMutableContainersAndLeaves, NULL, NULL);
++      CFRelease(data);
++    }
++  else
++    plist = copy_plist_file(argv[i]);
++  if (plist == NULL || CFGetTypeID(plist) != CFDictionaryGetTypeID())
++    {
++      log_message("\nCould not read a property list dictionary from %s\nDefaults have not been changed.",
++                  argv[i]);
++      return 1;
++    }
++  return replace_domain(&d, plist);
++}
++
++static int cmd_export(int argc, char **argv, int i)
++{
++  struct domain d;
++  CFDictionaryRef dict;
++  CFDataRef data;
++  int to_stdout;
++  int rc;
++
++  if (i >= argc)
++    return usage();
++  if ((rc = resolve_domain(argc, argv, &i, &d)) != 0)
++    return rc;
++  if (i >= argc)
++    return usage();
++  dict = copy_domain(&d);
++  to_stdout = !strcmp(argv[i], "-");
++  data = CFPropertyListCreateData(NULL, dict, to_stdout ? kCFPropertyListXMLFormat_v1_0
++                                  : kCFPropertyListBinaryFormat_v1_0, 0, NULL);
++  if (data == NULL)
++    return 1;
++  if (to_stdout)
++    fwrite(CFDataGetBytePtr(data), 1, CFDataGetLength(data), stdout);
++  else
++    {
++      FILE *f = fopen(argv[i], "wb");
++
++      if (f == NULL || fwrite(CFDataGetBytePtr(data), 1, CFDataGetLength(data), f)
++          != (size_t)CFDataGetLength(data))
++        {
++          log_message("\nCould not write domain %s to %s", d.display, argv[i]);
++          if (f)
++            fclose(f);
++          return 1;
++        }
++      fclose(f);
++    }
++  return 0;
++}
++
++static int cmd_domains(void)
++{
++  CFArrayRef names = copy_domain_names();
++  CFIndex k, n = CFArrayGetCount(names);
++
++  for (k = 0; k < n; k++)
++    {
++      char *s = c_string(CFArrayGetValueAtIndex(names, k));
++
++      printf("%s%s", k ? ", " : "", s);
++      free(s);
++    }
++  putchar('\n');
++  return 0;
++}
++
++static Boolean value_contains(CFTypeRef value, CFStringRef word)
++{
++  CFTypeID type = CFGetTypeID(value);
++
++  if (type == CFStringGetTypeID())
++    return CFStringFind(value, word, kCFCompareCaseInsensitive).location != kCFNotFound;
++  if (type == CFArrayGetTypeID())
++    {
++      CFIndex k, n = CFArrayGetCount(value);
++
++      for (k = 0; k < n; k++)
++        if (value_contains(CFArrayGetValueAtIndex(value, k), word))
++          return true;
++    }
++  else if (type == CFDictionaryGetTypeID())
++    {
++      CFIndex k, n = CFDictionaryGetCount(value);
++      const void **keys = calloc(n + 1, sizeof(void *));
++      const void **values = calloc(n + 1, sizeof(void *));
++      Boolean found = false;
++
++      CFDictionaryGetKeysAndValues(value, keys, values);
++      for (k = 0; k < n && !found; k++)
++        found = value_contains(keys[k], word) || value_contains(values[k], word);
++      free(keys);
++      free(values);
++      return found;
++    }
++  return false;
++}
++
++static int find_in_domain(CFStringRef app, CFStringRef label, CFStringRef word)
++{
++  struct domain d = { app, NULL };
++  CFDictionaryRef dict = copy_domain(&d);
++  CFMutableDictionaryRef found = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++                                                           &kCFTypeDictionaryValueCallBacks);
++  Boolean whole = CFStringFind(label, word, kCFCompareCaseInsensitive).location != kCFNotFound;
++  CFIndex k, n = CFDictionaryGetCount(dict);
++  const void **keys = calloc(n + 1, sizeof(void *));
++  const void **values = calloc(n + 1, sizeof(void *));
++  char *name;
++
++  CFDictionaryGetKeysAndValues(dict, keys, values);
++  for (k = 0; k < n; k++)
++    if (whole || value_contains(keys[k], word) || value_contains(values[k], word))
++      CFDictionarySetValue(found, keys[k], values[k]);
++  free(keys);
++  free(values);
++  if (CFDictionaryGetCount(found) == 0)
++    return 0;
++  name = c_string(label);
++  printf("Found %ld keys in domain '%s': ", (long)CFDictionaryGetCount(found), name);
++  free(name);
++  print_value(found);
++  return 1;
++}
++
++static int cmd_find(int argc, char **argv, int i)
++{
++  CFStringRef word;
++  CFArrayRef names;
++  CFIndex k;
++  int hits = 0;
++
++  if (i >= argc)
++    return usage();
++  word = cf_string(argv[i]);
++  hits += find_in_domain(kCFPreferencesAnyApplication, CFSTR("Apple Global Domain"), word);
++  names = copy_domain_names();
++  for (k = 0; k < CFArrayGetCount(names); k++)
++    {
++      CFStringRef name = CFArrayGetValueAtIndex(names, k);
++
++      hits += find_in_domain(name, name, word);
++    }
++  if (hits == 0)
++    log_message("No domain, key, nor value containing '%s'", argv[i]);
++  return 0;
++}
++
++int
++main(int argc, char **argv)
++{
++  int i = 1;
++  const char *cmd;
++
++  user_name = kCFPreferencesCurrentUser;
++  host_name = kCFPreferencesAnyHost;
++  while (i < argc)
++    {
++      if (!strcmp(argv[i], "-currentHost"))
++        {
++          host_name = kCFPreferencesCurrentHost;
++          i++;
++        }
++      else if (!strcmp(argv[i], "-host"))
++        {
++          if (i + 1 >= argc)
++            return usage();
++          host_name = cf_string(argv[i + 1]);
++          i += 2;
++        }
++      else
++        break;
++    }
++  if (i >= argc)
++    return usage();
++  cmd = argv[i++];
++  if (!strcmp(cmd, "read"))
++    return cmd_read(argc, argv, i);
++  if (!strcmp(cmd, "read-type"))
++    return cmd_read_type(argc, argv, i);
++  if (!strcmp(cmd, "write"))
++    return cmd_write(argc, argv, i);
++  if (!strcmp(cmd, "delete") || !strcmp(cmd, "delete-all"))
++    return cmd_delete(argc, argv, i);
++  if (!strcmp(cmd, "rename"))
++    return cmd_rename(argc, argv, i);
++  if (!strcmp(cmd, "import"))
++    return cmd_import(argc, argv, i);
++  if (!strcmp(cmd, "export"))
++    return cmd_export(argc, argv, i);
++  if (!strcmp(cmd, "domains"))
++    return cmd_domains();
++  if (!strcmp(cmd, "find"))
++    return cmd_find(argc, argv, i);
++  if (!strcmp(cmd, "help"))
++    {
++      fputs(usage_text, stdout);
++      return 0;
++    }
++  return usage();
++}
