@@ -82,3 +82,18 @@ Reports are welcome, but treat them as unknown rather than supported:
 Known driver caveats live in the
 [troubleshooting guide](TROUBLESHOOTING.md#nvidia) and
 [hybrid graphics notes](TROUBLESHOOTING.md#hybrid-graphics-laptops-amdintel-igpu--nvidia).
+
+## Filesystem launch events
+
+Darling's `UserEventAgent` is installed as a system LaunchDaemon with
+`EventMonitor = true`. It provides launchd's `com.apple.fsevents.matching`
+stream for `WatchPaths`, `QueueDirectories` and `KeepAlive.PathState`, including
+paths that do not exist when a job is loaded. `WatchPaths` changes are coalesced
+for about one second and delivered as a pulse; queue-directory and path-state
+conditions stay asserted while their condition holds. This supplies the
+filesystem notifications used by the Riot Client's install-check LaunchAgent.
+Ordinary user jobs launched through shellspawn inherit the system bootstrap and
+are covered by this monitor; a separate per-user launchd process requires its
+own monitor. Host tests inspect the distributed patch and compile its state and
+path-handling code against filesystem fixtures; delivery to a loaded job still
+requires guest verification after installing the updated runtime.

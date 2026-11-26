@@ -35,7 +35,10 @@
         "src/startup/mldr/include/dc_image_snapshot.h",
         "src/startup/mldr/include/dc_macho_slice.h",
         "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm",
-        "src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m"
+        "src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m",
+        "src/UserEventAgent/CMakeLists.txt",
+        "src/UserEventAgent/com.apple.UserEventAgent-System.plist",
+        "src/UserEventAgent/main.c"
       ]
     },
     {

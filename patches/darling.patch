@@ -10832,7 +10832,7 @@ new file mode 100644
 +}
 +#endif
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 5c924b34d..14db90612 100644
+index 5c924b34..8bf5b3d4 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -119,6 +119,13 @@ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_
@@ -10849,7 +10849,15 @@ index 5c924b34d..14db90612 100644
  add_definitions(-target ${APPLE_TARGET_TRIPLET_PRIMARY})
  include(darling_lib)
  include(darling_static_lib)
-@@ -237,6 +244,12 @@ if (COMPONENT_system)
+@@ -174,6 +181,7 @@ add_subdirectory(launchd)
+ add_subdirectory(libm)
+ add_subdirectory(external/dyld)
+ add_subdirectory(external/libxpc)
++add_subdirectory(UserEventAgent)
+ add_subdirectory(libgcc)
+ add_subdirectory(external/copyfile)
+ add_subdirectory(external/Libinfo)
+@@ -237,6 +245,12 @@ if (COMPONENT_system)
  	add_subdirectory(external/swift)
  endif()
  
@@ -10862,7 +10870,7 @@ index 5c924b34d..14db90612 100644
  if (COMPONENT_cli)
  	set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "cli")
  
-@@ -244,7 +257,6 @@ if (COMPONENT_cli)
+@@ -244,7 +258,6 @@ if (COMPONENT_cli)
  	add_subdirectory(external/libutil)
  	add_subdirectory(xtrace)
  	add_subdirectory(external/libxslt)
@@ -15073,3 +15081,524 @@ index 24c2ee29..72018cbd 100644
  		} else {
  			launchctl_log(LOG_ERR, "%s %s returned unknown response", getprogname(), argv[0]);
  			r = 1;
+diff --git a/src/UserEventAgent/CMakeLists.txt b/src/UserEventAgent/CMakeLists.txt
+new file mode 100644
+index 00000000..56a4389b
+--- /dev/null
++++ b/src/UserEventAgent/CMakeLists.txt
+@@ -0,0 +1,13 @@
++project(UserEventAgent)
++
++add_darling_executable(UserEventAgent main.c)
++target_compile_options(UserEventAgent PRIVATE -nostdinc -fblocks)
++target_include_directories(UserEventAgent PRIVATE
++	${CMAKE_SOURCE_DIR}/src/external/libxpc/include
++	${CMAKE_SOURCE_DIR}/src/external/xnu/darling/src/libsystem_kernel/emulation/include/linux_premigration/ext
++)
++target_link_libraries(UserEventAgent xpc)
++
++install(TARGETS UserEventAgent DESTINATION libexec/darling/usr/libexec)
++install(FILES com.apple.UserEventAgent-System.plist
++	DESTINATION libexec/darling/System/Library/LaunchDaemons)
+diff --git a/src/UserEventAgent/com.apple.UserEventAgent-System.plist b/src/UserEventAgent/com.apple.UserEventAgent-System.plist
+new file mode 100644
+index 00000000..b025847a
+--- /dev/null
++++ b/src/UserEventAgent/com.apple.UserEventAgent-System.plist
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>Label</key>
++	<string>com.apple.UserEventAgent-System</string>
++	<key>ProgramArguments</key>
++	<array>
++		<string>/usr/libexec/UserEventAgent</string>
++	</array>
++	<key>KeepAlive</key>
++	<true/>
++	<key>EventMonitor</key>
++	<true/>
++</dict>
++</plist>
+diff --git a/src/UserEventAgent/main.c b/src/UserEventAgent/main.c
+new file mode 100644
+index 00000000..9f94194c
+--- /dev/null
++++ b/src/UserEventAgent/main.c
+@@ -0,0 +1,474 @@
++/* SPDX-License-Identifier: GPL-3.0-only
++ * Copyright (C) 2026 darling-lol contributors
++ * Filesystem LaunchEvents provider for Darling's launchd-842.
++ */
++#include <sys/event.h>
++#include <sys/stat.h>
++#include <sys/inotify.h>
++#include <mach/mach_time.h>
++#include <servers/bootstrap.h>
++#include <xpc/xpc.h>
++#include <xpc/launchd_defs.h>
++#include <xpc/private/pipe.h>
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++static const char *stream = "com.apple.fsevents.matching";
++static int queue;
++static xpc_pipe_t launchd_pipe;
++static bool registrations_changed;
++
++struct path_watch {
++	char *path;
++	char *parent;
++	int fd, parent_fd;
++	struct stat previous, parent_info;
++	bool existed, initialized, changed;
++	struct path_watch *next;
++};
++
++struct event {
++	uint64_t token;
++	xpc_object_t description;
++	struct path_watch *paths;
++	bool watchpaths, state, state_known;
++	double pending; /* First change plus the one-second coalescing latency. */
++	struct event *next;
++};
++static struct event *events;
++
++static void *allocate(size_t size)
++{
++	void *value = calloc(1, size);
++	if (!value) { perror("UserEventAgent: calloc"); exit(1); }
++	return value;
++}
++
++static char *copy_string(const char *value)
++{
++	char *copy = strdup(value);
++	if (!copy) { perror("UserEventAgent: strdup"); exit(1); }
++	return copy;
++}
++
++static double now(void)
++{
++	mach_timebase_info_data_t scale;
++	mach_timebase_info(&scale);
++	return (double)mach_absolute_time() * scale.numer / scale.denom / 1e9;
++}
++
++static xpc_object_t request(uint64_t operation)
++{
++	xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
++	xpc_dictionary_set_uint64(message, XPC_EVENT_ROUTINE_KEY_OP, operation);
++	xpc_dictionary_set_string(message, XPC_EVENT_ROUTINE_KEY_STREAM, stream);
++	return message;
++}
++
++static xpc_object_t routine(xpc_object_t message)
++{
++	xpc_object_t reply = NULL;
++	int error = xpc_pipe_routine(launchd_pipe, message, &reply);
++	xpc_release(message);
++	if (!error && xpc_get_type(reply) == XPC_TYPE_DICTIONARY) {
++		int provider_error = (int)xpc_dictionary_get_uint64(reply, XPC_EVENT_ROUTINE_KEY_ERROR);
++		/* An unload may race a state update. Keep other tokens' pending pulses. */
++		if (provider_error == ESRCH) return reply;
++		error = provider_error;
++	}
++	if (error || xpc_get_type(reply) != XPC_TYPE_DICTIONARY) {
++		fprintf(stderr, "UserEventAgent: launchd event routine failed: %d\n", error);
++		if (reply) xpc_release(reply);
++		/* launchd restarts this KeepAlive provider; never cache an unsent state. */
++		exit(1);
++	}
++	return reply;
++}
++
++static bool set_state(uint64_t token, bool state)
++{
++	xpc_object_t message = request(XPC_EVENT_PROVIDER_SET_STATE);
++	xpc_dictionary_set_uint64(message, XPC_EVENT_ROUTINE_KEY_TOKEN, token);
++	xpc_dictionary_set_bool(message, XPC_EVENT_ROUTINE_KEY_STATE, state);
++	xpc_object_t reply = routine(message);
++	bool removed = xpc_dictionary_get_uint64(reply, XPC_EVENT_ROUTINE_KEY_ERROR) == ESRCH;
++	if (removed) registrations_changed = true;
++	xpc_release(reply);
++	return !removed;
++}
++
++static void pulse_watchpaths(struct event *event)
++{
++	set_state(event->token, true);
++	set_state(event->token, false);
++	event->pending = 0;
++}
++
++static bool directory_nonempty(const char *path)
++{
++	DIR *directory = opendir(path);
++	if (!directory) return false;
++	bool nonempty = false;
++	struct dirent *entry;
++	while ((entry = readdir(directory))) {
++		if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
++			nonempty = true;
++			break;
++		}
++	}
++	closedir(directory);
++	return nonempty;
++}
++
++static bool pathstate_matches(const char *path, xpc_object_t wanted)
++{
++	struct stat info;
++	if (xpc_get_type(wanted) != XPC_TYPE_BOOL) return false;
++	bool exists = stat(path, &info) == 0;
++	/* EACCES and other failures do not establish that the path is absent. */
++	if (!exists && errno != ENOENT && errno != ENOTDIR) return false;
++	return exists == xpc_bool_get_value(wanted);
++}
++
++static int watch_path(const char *path, struct path_watch *watch)
++{
++	int fd = open(path, O_EVTONLY | O_CLOEXEC);
++	if (fd < 0) return -1;
++	struct kevent change;
++	EV_SET(&change, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
++		NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK |
++		NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE, 0, watch);
++	if (kevent(queue, &change, 1, NULL, 0, NULL) == -1) {
++		close(fd);
++		return -1;
++	}
++	return fd;
++}
++
++/* Darling libkqueue does not automatically remove vnode filters on close.
++ * Delete the knote before releasing its fd or the udata owner.
++ */
++static void close_watch(int fd)
++{
++	if (fd < 0) return;
++	struct kevent change;
++	EV_SET(&change, fd, EVFILT_VNODE, EV_DELETE, 0, 0, NULL);
++	(void)kevent(queue, &change, 1, NULL, 0, NULL);
++	close(fd);
++}
++
++/* libkqueue's vnode backend omits named directory-entry events. Use Darling's
++ * path-translating inotify wrappers for parents, retaining vnode target watches.
++ */
++static int watch_parent(const char *path, struct path_watch *watch)
++{
++	int fd = inotify_init1(IN_NONBLOCK);
++	if (fd < 0) return -1;
++	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
++		inotify_add_watch(fd, path, IN_CREATE | IN_DELETE | IN_MOVED_FROM |
++			IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR) < 0) {
++		close(fd);
++		return -1;
++	}
++	struct kevent change;
++	EV_SET(&change, fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, watch);
++	if (kevent(queue, &change, 1, NULL, 0, NULL) < 0) {
++		close(fd);
++		return -1;
++	}
++	return fd;
++}
++
++static void close_parent_watch(int fd)
++{
++	struct kevent change;
++	EV_SET(&change, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
++	(void)kevent(queue, &change, 1, NULL, 0, NULL);
++	close(fd);
++}
++
++static bool parent_affects_path(struct path_watch *watch, const char *name)
++{
++	const char *relative = watch->path;
++	if (strcmp(watch->parent, ".")) relative += strlen(watch->parent);
++	else if (!strncmp(relative, "./", 2)) relative += 2;
++	while (*relative == '/') ++relative;
++	size_t length = strcspn(relative, "/");
++	return length && strlen(name) == length && !strncmp(relative, name, length);
++}
++
++static void drain_parent(struct path_watch *watch)
++{
++	union { struct inotify_event alignment; char bytes[8192]; } buffer;
++	for (;;) {
++		ssize_t count = read(watch->parent_fd, buffer.bytes, sizeof(buffer.bytes));
++		if (count < 0 && errno == EINTR) continue;
++		if (count <= 0) break;
++		for (size_t offset = 0; offset + sizeof(struct inotify_event) <= (size_t)count;) {
++			struct inotify_event *entry = (void *)(buffer.bytes + offset);
++			size_t size = sizeof(*entry) + entry->len;
++			if (size > (size_t)count - offset) break;
++			if ((entry->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF)) ||
++				(entry->len && parent_affects_path(watch, entry->name)))
++				watch->changed = true;
++			offset += size;
++		}
++	}
++}
++
++static char *parent_path(const char *path)
++{
++	char *parent = copy_string(path);
++	size_t length = strlen(parent);
++	while (length > 1 && parent[length - 1] == '/') parent[--length] = 0;
++	char *slash = strrchr(parent, '/');
++	if (slash == parent) parent[1] = 0;
++	else if (slash) *slash = 0;
++	else { free(parent); parent = copy_string("."); }
++	return parent;
++}
++
++static bool same_node(const struct stat *a, const struct stat *b)
++{
++	return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
++}
++
++static bool same_snapshot(const struct stat *a, const struct stat *b)
++{
++	return same_node(a, b) && a->st_mode == b->st_mode &&
++		a->st_size == b->st_size && a->st_nlink == b->st_nlink &&
++		a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
++		a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
++		a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
++		a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
++}
++
++static bool refresh_path(struct path_watch *watch)
++{
++	struct stat info;
++	bool exists = stat(watch->path, &info) == 0;
++	bool changed = watch->changed || (watch->initialized &&
++		(exists != watch->existed || (exists && !same_snapshot(&info, &watch->previous))));
++	watch->changed = false;
++	if (watch->fd >= 0 && (!exists || !same_node(&info, &watch->previous))) {
++		close_watch(watch->fd);
++		watch->fd = -1;
++	}
++	if (exists && watch->fd < 0) watch->fd = watch_path(watch->path, watch);
++	if (exists) watch->previous = info;
++	watch->existed = exists;
++	watch->initialized = true;
++
++	/* Follow the nearest existing directory, including missing ancestors.
++	 * Preserve unchanged parent watches so queued directory entries survive
++	 * periodic scans and notification batches larger than the kevent buffer.
++	 */
++	char *parent = parent_path(watch->path);
++	struct stat parent_info;
++	bool found;
++	for (;;) {
++		found = stat(parent, &parent_info) == 0 && S_ISDIR(parent_info.st_mode);
++		if (found || !strcmp(parent, "/") || !strcmp(parent, ".")) break;
++		char *next = parent_path(parent);
++		free(parent);
++		parent = next;
++	}
++	if (watch->parent_fd >= 0 && (!found || !watch->parent ||
++		strcmp(parent, watch->parent) || !same_node(&parent_info, &watch->parent_info))) {
++		close_parent_watch(watch->parent_fd);
++		watch->parent_fd = -1;
++	}
++	free(watch->parent);
++	watch->parent = parent;
++	if (found && watch->parent_fd < 0) {
++		watch->parent_fd = watch_parent(parent, watch);
++		watch->parent_info = parent_info;
++	}
++	return changed;
++}
++
++static void add_path(struct event *event, const char *path)
++{
++	if (!path || !*path) return;
++	struct path_watch *watch = allocate(sizeof(*watch));
++	watch->path = copy_string(path);
++	watch->fd = watch->parent_fd = -1;
++	watch->next = event->paths;
++	event->paths = watch;
++	refresh_path(watch); /* Establish baseline without pulsing newly loaded jobs. */
++}
++
++static struct event *new_event(uint64_t token, xpc_object_t description)
++{
++	struct event *event = allocate(sizeof(*event));
++	event->token = token;
++	event->description = xpc_retain(description);
++	xpc_object_t paths = xpc_dictionary_get_value(description, "WatchPaths");
++	event->watchpaths = xpc_get_type(paths) == XPC_TYPE_ARRAY;
++	if (!event->watchpaths) paths = xpc_dictionary_get_value(description, "QueueDirectories");
++	if (xpc_get_type(paths) == XPC_TYPE_ARRAY) {
++		for (size_t i = 0; i < xpc_array_get_count(paths); ++i)
++			add_path(event, xpc_array_get_string(paths, i));
++	}
++	xpc_object_t states = xpc_dictionary_get_value(description, "PathState");
++	if (xpc_get_type(states) == XPC_TYPE_DICTIONARY) {
++		xpc_dictionary_apply(states, ^bool(const char *path, xpc_object_t value) {
++			if (xpc_get_type(value) == XPC_TYPE_BOOL) add_path(event, path);
++			return true;
++		});
++	}
++	return event;
++}
++
++static void free_event(struct event *event)
++{
++	while (event->paths) {
++		struct path_watch *watch = event->paths;
++		event->paths = watch->next;
++		if (watch->fd >= 0) close_watch(watch->fd);
++		if (watch->parent_fd >= 0) close_parent_watch(watch->parent_fd);
++		free(watch->path);
++		free(watch->parent);
++		free(watch);
++	}
++	xpc_release(event->description);
++	free(event);
++}
++
++static void reconcile_events(xpc_object_t registrations)
++{
++	struct event *old = events;
++	events = NULL;
++	/* CHECK_IN supplies a flat [token, dictionary, token, dictionary, ...]. */
++	for (size_t i = 0; i + 1 < xpc_array_get_count(registrations); i += 2) {
++		uint64_t token = xpc_array_get_uint64(registrations, i);
++		xpc_object_t description = xpc_array_get_value(registrations, i + 1);
++		if (!token || xpc_get_type(description) != XPC_TYPE_DICTIONARY) continue;
++		struct event **slot = &old;
++		while (*slot && (*slot)->token != token) slot = &(*slot)->next;
++		struct event *event = *slot;
++		if (event) {
++			*slot = event->next;
++			if (!xpc_equal(event->description, description)) {
++				free_event(event);
++				event = NULL;
++			}
++		}
++		if (!event) event = new_event(token, description);
++		event->next = events;
++		events = event;
++	}
++	while (old) {
++		struct event *next = old->next;
++		free_event(old); /* Closing fds removes watches for unloaded tokens. */
++		old = next;
++	}
++}
++
++static void provider_check_in(void)
++{
++	xpc_object_t reply = routine(request(XPC_EVENT_PROVIDER_CHECK_IN));
++	xpc_object_t registrations = xpc_dictionary_get_value(reply, XPC_EVENT_ROUTINE_KEY_EVENTS);
++	if (xpc_get_type(registrations) != XPC_TYPE_ARRAY || xpc_array_get_count(registrations) % 2) {
++		fprintf(stderr, "UserEventAgent: malformed event registration reply\n");
++		exit(1);
++	}
++	reconcile_events(registrations);
++	xpc_release(reply);
++}
++
++static void evaluate_events(void)
++{
++	double time = now();
++	for (struct event *event = events; event; event = event->next) {
++		bool changed = false, state = false;
++		for (struct path_watch *watch = event->paths; watch; watch = watch->next)
++			changed |= refresh_path(watch);
++		if (event->watchpaths) {
++			if (!event->state_known) {
++				event->state_known = set_state(event->token, false);
++			}
++			if (changed && !event->pending) event->pending = time + 1.0;
++			if (event->pending && time >= event->pending) pulse_watchpaths(event);
++			continue;
++		}
++		xpc_object_t paths = xpc_dictionary_get_value(event->description, "QueueDirectories");
++		if (xpc_get_type(paths) == XPC_TYPE_ARRAY) {
++			for (size_t i = 0; i < xpc_array_get_count(paths); ++i) {
++				const char *path = xpc_array_get_string(paths, i);
++				if (path) state |= directory_nonempty(path);
++			}
++		}
++		xpc_object_t states = xpc_dictionary_get_value(event->description, "PathState");
++		if (xpc_get_type(states) == XPC_TYPE_DICTIONARY) {
++			__block bool matches = false;
++			xpc_dictionary_apply(states, ^bool(const char *path, xpc_object_t wanted) {
++				matches |= pathstate_matches(path, wanted);
++				return true;
++			});
++			state |= matches;
++		}
++		if (!event->state_known || state != event->state) {
++			event->state_known = set_state(event->token, state);
++			event->state = state;
++		}
++	}
++}
++
++int main(void)
++{
++	queue = kqueue();
++	if (queue < 0) { perror("UserEventAgent: kqueue"); return 1; }
++	/* Install before CHECK_IN: launchd may send SIGUSR1 as soon as it replies. */
++	signal(SIGUSR1, SIG_IGN);
++	struct kevent change;
++	EV_SET(&change, SIGUSR1, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
++	if (kevent(queue, &change, 1, NULL, 0, NULL) < 0) {
++		perror("UserEventAgent: SIGUSR1 registration"); return 1;
++	}
++	launchd_pipe = xpc_pipe_create_from_port(bootstrap_port, 0);
++	if (!launchd_pipe) return 1;
++	provider_check_in();
++	for (;;) {
++		evaluate_events();
++		if (registrations_changed) {
++			registrations_changed = false;
++			provider_check_in();
++			continue;
++		}
++		/* Periodic reconciliation also recovers watch-limit/open errors, missed
++		 * vnode notifications, and creation beneath initially missing parents.
++		 */
++		struct timespec timeout = { 1, 0 };
++		struct kevent notifications[64];
++		int count = kevent(queue, NULL, 0, notifications, 64, &timeout);
++		if (count < 0) {
++			if (errno == EINTR) continue;
++			perror("UserEventAgent: kevent"); return 1;
++		}
++		bool recheck = false;
++		for (int i = 0; i < count; ++i) {
++			struct kevent *notification = &notifications[i];
++			if (notification->filter == EVFILT_SIGNAL && notification->ident == SIGUSR1)
++				recheck = true;
++			else if (notification->filter == EVFILT_READ && !(notification->flags & EV_ERROR)) {
++				struct path_watch *watch = notification->udata;
++				if (watch) drain_parent(watch);
++			} else if (notification->filter == EVFILT_VNODE && !(notification->flags & EV_ERROR)) {
++				struct path_watch *watch = notification->udata;
++				if (watch && notification->ident == (uintptr_t)watch->fd) watch->changed = true;
++			}
++		}
++		/* Process all udata before reconciliation can remove old registrations. */
++		if (recheck) provider_check_in();
++	}
++}
