@@ -1161,10 +1161,10 @@ index d077d04..3dcafea 100644
  void _start()
  {
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c
-index f27a888..1bbfc73 100644
+index f27a888..15a0d83 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/ext/clock_gettime.c
-@@ -3,13 +3,334 @@
+@@ -3,13 +3,340 @@
  #include <darling/emulation/common/base.h>
  #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
  
@@ -1315,6 +1315,12 @@ index f27a888..1bbfc73 100644
 +{
 +	unsigned int a, b, c, d;
 +	int usable = 0;
++	/* With CPUID faulting on (the cpuid tracer's fault mode) cpuid raises
++	 * SIGSEGV, and callers may have it blocked: do without the fast clock. */
++	if (LINUX_SYSCALL(__NR_arch_prctl, 0x1011 /* ARCH_GET_CPUID */, 0) == 0) {
++		fc_state = -1;
++		return fc_state;
++	}
 +	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000000u), "c"(0));
 +	if (a >= 0x80000007u) {
 +		__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000001u), "c"(0));

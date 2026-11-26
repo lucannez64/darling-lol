@@ -55,6 +55,17 @@ class CpuidFaultModeTests(unittest.TestCase):
                       '\t\tin &= ~(1ull << (LINUX_SIGSEGV - 1));', mask)
         self.assertLess(mask.index('rclol_cpuid_fault_active()'), mask.index('__NR_rt_sigprocmask'))
 
+    def test_clock_probe_runs_no_cpuid_once_faulting_is_on(self):
+        # The probe is lazy and its callers may have SIGSEGV blocked (the RPC
+        # guard masks it without going through sys_sigprocmask).
+        clock = patched_lines(f'{EMULATION}/src/linux_premigration/ext/clock_gettime.c')
+        probe = clock[clock.index('static int fc_probe(void)'):]
+        probe = probe[:probe.index('\n}\n')]
+        check = 'if (LINUX_SYSCALL(__NR_arch_prctl, 0x1011 /* ARCH_GET_CPUID */, 0) == 0) {'
+        self.assertIn(check, probe)
+        self.assertLess(probe.index(check), probe.index('"cpuid"'))
+        self.assertIn('fc_state = -1;', probe[probe.index(check):probe.index('"cpuid"')])
+
     @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
     def test_handler_emulates_every_cpuid_of_the_process(self):
         trace = patched_lines(TRACE)
@@ -216,6 +227,8 @@ int main(int argc, char** argv)
     assert(!rclol_fault_requested("fault=10") && !rclol_fault_requested("fault=1x"));
     assert(!rclol_fault_requested("fault=yes") && !rclol_fault_requested("nofault=1"));
 
+    /* ARCH_GET_CPUID, as the clock probe asks it: 1 while cpuid runs freely */
+    long free_before = syscall(SYS_arch_prctl, RCLOL_ARCH_GET_CPUID, 0UL);
     int on = rclol_cpuid_fault_enable();
     /* the identity is filled before any handler can run */
     assert(g_identity_filled);
@@ -228,6 +241,7 @@ int main(int argc, char** argv)
         return 0;
     }}
     assert(rclol_cpuid_fault_active());
+    assert(free_before == 1 && syscall(SYS_arch_prctl, RCLOL_ARCH_GET_CPUID, 0UL) == 0);
 
     /* every cpuid now goes through the handler; guest code gets the transform */
     vendor_from(g_guest, seen);
