@@ -14883,3 +14883,253 @@ index 24c2ee29..72018cbd 100644
  		} else {
  			launchctl_log(LOG_ERR, "%s %s returned unknown response", getprogname(), argv[0]);
  			r = 1;
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/CMakeLists.txt b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/CMakeLists.txt
+index 7a3a2a1c..e99104fb 100644
+--- a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/CMakeLists.txt
++++ b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/CMakeLists.txt
+@@ -10,3 +10,13 @@ add_darling_executable(launchservicesd ${sources})
+ target_link_libraries(launchservicesd system Foundation CoreFoundation CoreServices FMDB sqlite3 z)
+ install(TARGETS launchservicesd DESTINATION libexec/darling/System/Library/CoreServices)
+ install(FILES schema.sql RENAME launchservicesd-schema.sql DESTINATION libexec/darling/System/Library/Frameworks/CoreServices.framework/Versions/A/Resources)
++
++# lsregister lives where macOS has it, so tools that run it by its full path
++# (/System/Library/Frameworks/CoreServices.framework/Frameworks/
++# LaunchServices.framework/Support/lsregister) find it. It writes the same
++# database as launchservicesd through LSBundle.
++add_darling_executable(lsregister lsregister.m LSBundle.m)
++target_link_libraries(lsregister system Foundation CoreFoundation CoreServices FMDB sqlite3 z)
++set(lsregister_framework "libexec/darling/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework")
++install(TARGETS lsregister DESTINATION "${lsregister_framework}/Versions/A/Support")
++InstallSymlink("Versions/Current/Support" "${CMAKE_INSTALL_PREFIX}/${lsregister_framework}/Support")
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h
+index 61b58e14..ed0675b3 100644
+--- a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h
++++ b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h
+@@ -35,6 +35,12 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ +(void)scanForBundles;
+ +(void)watchForBundles;
++
++// Used by lsregister as well as launchservicesd.
+++(BOOL)databaseIsOpen;
+++(BOOL)registerBundleAtPath:(NSString*)path;
+++(void)scanForBundles:(NSString*)dir;
+++(void)deleteBundleAtPath:(NSString*)path;
+ @end
+ 
+ #endif
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m
+index 38eec3a1..932b7109 100644
+--- a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m
++++ b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m
+@@ -468,11 +468,39 @@ static FSEventStreamRef g_eventStream;
+ 	FSEventStreamStart(g_eventStream);
+ }
+ 
+++(BOOL)databaseIsOpen
++{
++	return g_database != nil;
++}
++
+++(BOOL)registerBundleAtPath:(NSString*)path
++{
++	BOOL registered = NO;
++	@autoreleasepool
++	{
++		NSURL* url = [NSURL fileURLWithPath:path];
++		CFBundleRef bundle = CFBundleCreate(NULL, (CFURLRef) url);
++		if (bundle == NULL)
++			return NO;
++
++		// CFBundle also accepts plain directories; only real bundles carry an identifier.
++		if (CFBundleGetIdentifier(bundle) != NULL)
++		{
++			LSBundle* b = [[[LSBundle alloc] initWithBundle: bundle] autorelease];
++			[b process];
++			registered = YES;
++		}
++		CFRelease(bundle);
++	}
++	return registered;
++}
++
+ +(void)deleteBundleAtPath:(NSString*) path
+ {
+ 	// Delete DB entries referring to path
+ 	[g_database beginTransaction];
+-	[g_database executeQuery: @"delete from bundle where path = ?", path];
++	// executeQuery: only prepares the statement; the delete needs executeUpdate:.
++	[g_database executeUpdate: @"delete from bundle where path = ?", path];
+ 	[g_database commit];
+ }
+ 
+diff --git a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m
+new file mode 100644
+index 00000000..5007a03c
+--- /dev/null
++++ b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m
+@@ -0,0 +1,164 @@
++/*
++ This file is part of Darling.
++
++ Copyright (C) 2026 Darling developers
++
++ Darling is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++
++ Darling is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++
++ You should have received a copy of the GNU General Public License
++ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++// lsregister registers bundles in the LaunchServices database, as
++// CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
++// does on macOS. It writes the same database launchservicesd keeps, so a URL
++// scheme or document type an app declares is known at once, without waiting
++// for launchservicesd's directory watch (which only covers /Applications,
++// /System/Applications and /System/Library/Frameworks).
++
++#import <Foundation/Foundation.h>
++#include <CoreFoundation/CoreFoundation.h>
++#include <dispatch/dispatch.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/stat.h>
++#include "LSBundle.h"
++
++// LSBundle.m starts its FSEvents stream on launchservicesd's queue. lsregister
++// never watches directories, but the symbol must exist to link LSBundle.m.
++dispatch_queue_t g_serverQueue;
++
++static void usage(FILE* out)
++{
++	fprintf(out,
++		"usage: lsregister [-f] [-r] [-R] [-v] [-u] [-domain {system|local|user|network}]... path...\n"
++		"  -f       force the bundle to be registered again\n"
++		"  -R       also register the bundles inside each path\n"
++		"  -r       same as -R\n"
++		"  -u       unregister each path instead\n"
++		"  -v       print every bundle that is registered\n"
++		"Options macOS accepts for database maintenance (-lint, -gc, -seed, -lazy n,\n"
++		"-apps, -libs, -all, -domain) are accepted and have no further effect.\n");
++}
++
++static BOOL registerTree(NSString* path, BOOL recursive, BOOL verbose)
++{
++	BOOL any = NO;
++
++	if ([LSBundle registerBundleAtPath:path])
++	{
++		any = YES;
++		if (verbose)
++			printf("lsregister: registered %s\n", [path fileSystemRepresentation]);
++	}
++
++	if (!recursive)
++		return any;
++
++	NSDirectoryEnumerator* walk = [[NSFileManager defaultManager] enumeratorAtPath:path];
++	for (NSString* relative in walk)
++	{
++		NSString* ext = [relative pathExtension];
++		if (![ext isEqualToString:@"app"] && ![ext isEqualToString:@"framework"])
++			continue;
++
++		NSString* nested = [path stringByAppendingPathComponent:relative];
++		if ([LSBundle registerBundleAtPath:nested])
++		{
++			any = YES;
++			if (verbose)
++				printf("lsregister: registered %s\n", [nested fileSystemRepresentation]);
++		}
++	}
++	return any;
++}
++
++int main(int argc, const char** argv)
++{
++	@autoreleasepool
++	{
++		BOOL recursive = NO, unregister = NO, verbose = NO;
++		NSMutableArray<NSString*>* paths = [NSMutableArray array];
++
++		for (int i = 1; i < argc; i++)
++		{
++			const char* arg = argv[i];
++			if (strcmp(arg, "-h") == 0 || strcmp(arg, "-help") == 0 || strcmp(arg, "--help") == 0)
++			{
++				usage(stdout);
++				return 0;
++			}
++			else if (strcmp(arg, "-R") == 0 || strcmp(arg, "-r") == 0)
++				recursive = YES;
++			else if (strcmp(arg, "-u") == 0)
++				unregister = YES;
++			else if (strcmp(arg, "-v") == 0)
++				verbose = YES;
++			else if (strcmp(arg, "-f") == 0 || strcmp(arg, "-lint") == 0 || strcmp(arg, "-gc") == 0
++				|| strcmp(arg, "-seed") == 0)
++				; // registration always reads the bundle again
++			else if (strcmp(arg, "-lazy") == 0 || strcmp(arg, "-domain") == 0 || strcmp(arg, "-apps") == 0
++				|| strcmp(arg, "-libs") == 0 || strcmp(arg, "-all") == 0)
++			{
++				if (i + 1 < argc)
++					i++; // the option's value
++			}
++			else if (arg[0] == '-' && arg[1] != '\0')
++			{
++				// macOS prints its usage and exits 255 for an unknown option.
++				usage(stderr);
++				return 255;
++			}
++			else
++				[paths addObject:[NSString stringWithUTF8String:arg]];
++		}
++
++		if ([paths count] == 0)
++		{
++			usage(stderr);
++			return 1;
++		}
++
++		if (![LSBundle databaseIsOpen])
++		{
++			fprintf(stderr, "lsregister: cannot open the LaunchServices database\n");
++			return 1;
++		}
++
++		int status = 0;
++		for (NSString* path in paths)
++		{
++			struct stat st;
++			if (stat([path fileSystemRepresentation], &st) != 0)
++			{
++				// fnfErr (-43) when registering, kLSDataUnavailableErr (-10814) when unregistering,
++				// as macOS's lsregister reports them.
++				fprintf(stderr, "failed to scan %s: %d\n", [path fileSystemRepresentation], unregister ? -10814 : -43);
++				status = 1;
++				continue;
++			}
++
++			if (unregister)
++			{
++				[LSBundle deleteBundleAtPath:path];
++				continue;
++			}
++
++			if (!registerTree(path, recursive, verbose))
++			{
++				// kLSNotAnApplicationErr (-10811), as macOS reports a path without a bundle.
++				fprintf(stderr, "failed to scan %s: %d\n", [path fileSystemRepresentation], -10811);
++				status = 1;
++			}
++		}
++		return status;
++	}
++}
