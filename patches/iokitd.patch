@@ -1093,10 +1093,10 @@ index 0000000..38ad635
 +#endif
 diff --git a/src/IOPlatformExpertDevice.mm b/src/IOPlatformExpertDevice.mm
 new file mode 100644
-index 0000000..71b9f4d
+index 0000000..a7c8d95
 --- /dev/null
 +++ b/src/IOPlatformExpertDevice.mm
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,149 @@
 +#include "IOPlatformExpertDevice.h"
 +#include "PlatformIdentity.h"
 +#import <Foundation/NSString.h>
@@ -1244,6 +1244,7 @@ index 0000000..71b9f4d
 +
 +	targetServiceRegistry->registerService(device);
 +	device->registerInPlane(kIOServicePlane, "Platform", IORegistryEntry::root());
++	device->registerInPlane(kIODeviceTreePlane, "Platform", IORegistryEntry::root());
 +}
 diff --git a/src/IOInterestNotification.h b/src/IOInterestNotification.h
 new file mode 100644
