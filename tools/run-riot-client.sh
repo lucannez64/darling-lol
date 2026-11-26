@@ -464,6 +464,13 @@ fi
 # RCLOL_DISCORD_RPC=0 removes links left by an earlier launch instead.
 guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
 if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
+ # The Discord SDK registers each Riot product's launch command by writing
+ # ~/Library/Application Support/discord/games/<application id>.json. That folder
+ # exists on a Mac where Discord was installed and the SDK does not create it, so
+ # in a fresh prefix every registration failed ("Discord failed to register launch
+ # command"). With the host Discord linked in, keep it as Discord would leave it.
+ mkdir -p "$prefix_dir$guest_path/Library/Application Support/discord/games" 2>/dev/null ||
+  echo 'discord-rpc: could not create the Discord games folder' >&2
  host_ipc=${XDG_RUNTIME_DIR:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}}
  discord_found=0
  for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do
