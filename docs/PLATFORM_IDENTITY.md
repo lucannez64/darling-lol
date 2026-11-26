@@ -178,7 +178,9 @@ as the client's WebView check (WebKit's `CFBundleVersion`) found no version.
 `tools/provision-framework-info.py` writes the factual bundle fields measured
 on macOS 15.5 (24F74) for every framework that both that release and the
 installed runtime have (`tools/data/macos-15.5-framework-info.json`); WebKit
-reports `20621.2.5.11.8`. It writes XML plists only into the prefix overlay,
+reports `20621.2.5.11.8`. It merges those fields into the bundle's existing
+plist (the prefix copy, else the runtime one, up to 1 MiB), so keys such as
+`NSPrincipalClass` stay. It writes XML plists only into the prefix overlay,
 never the runtime root, follows each bundle's versioned or shallow layout, and
 adds a missing `Resources` alias for versioned bundles. `install-runtime.sh`
 and identity-regenerating `clean-prefix.sh` runs call it; writes need a stopped

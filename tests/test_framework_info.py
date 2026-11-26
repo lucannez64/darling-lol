@@ -230,11 +230,48 @@ class FrameworkInfoTests(unittest.TestCase):
         self.bundle()
         target = self.prefix / WEBKIT / 'Versions/A/Resources/Info.plist'
         target.parent.mkdir(parents=True)
-        target.write_bytes(b'x' * 65537)
+        size = 1024 * 1024 + 1
+        target.write_bytes(b'x' * size)
         result = self.run_tool('--write')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('64 KiB', result.stderr)
-        self.assertEqual(target.stat().st_size, 65537)
+        self.assertIn('1 MiB', result.stderr)
+        self.assertEqual(target.stat().st_size, size)
+
+    def test_write_keeps_keys_of_existing_prefix_plist(self):
+        self.bundle()
+        target = self.prefix / WEBKIT / 'Versions/A/Resources/Info.plist'
+        target.parent.mkdir(parents=True)
+        target.write_bytes(plistlib.dumps({'NSPrincipalClass': 'NSApplication',
+                                           'CFBundleVersion': 'old'}))
+        self.assert_success(self.run_tool('--write'))
+        written = plistlib.loads(target.read_bytes())
+        self.assertEqual(written['NSPrincipalClass'], 'NSApplication')
+        self.assertEqual(written['CFBundleVersion'], '20621.2.5.11.8')
+        self.assert_success(self.run_tool('--check'))
+
+    def test_write_uses_runtime_plist_as_base(self):
+        bundle = self.bundle()
+        resources = bundle / 'Versions/A/Resources'
+        resources.mkdir()
+        (resources / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIconFile': 'Icon',
+                                                               'CFBundleVersion': 'old'}))
+        self.assert_success(self.run_tool('--write'))
+        target = self.prefix / WEBKIT / 'Versions/A/Resources/Info.plist'
+        written = plistlib.loads(target.read_bytes())
+        self.assertEqual(written['CFBundleIconFile'], 'Icon')
+        self.assertEqual(written['CFBundleVersion'], '20621.2.5.11.8')
+
+    def test_runtime_plist_with_trailing_line_keeps_its_keys(self):
+        bundle = self.bundle()
+        resources = bundle / 'Versions/A/Resources'
+        resources.mkdir()
+        (resources / 'Info.plist').write_bytes(
+            plistlib.dumps({'UTExportedTypeDeclarations': ['public.data']}) + b'Command: \n')
+        self.assert_success(self.run_tool('--write'))
+        target = self.prefix / WEBKIT / 'Versions/A/Resources/Info.plist'
+        written = plistlib.loads(target.read_bytes())
+        self.assertEqual(written['UTExportedTypeDeclarations'], ['public.data'])
+        self.assertNotIn(b'Command:', target.read_bytes())
 
     def test_running_or_invalid_prefix_marker_prevents_writes(self):
         self.bundle()

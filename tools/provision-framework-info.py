@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
+from xml.parsers.expat import ExpatError
 
 # Reuse the platform provisioner's prefix containment, stopped-prefix check and
 # atomic publication without creating identity backups for reproducible metadata.
@@ -24,6 +25,8 @@ ensure_stopped = _platform.ensure_stopped
 atomic_write = _platform.atomic_write
 MAX_SIZE = _platform.MAX_SIZE
 MAX_DATA_SIZE = 1024 * 1024
+# macOS 15.5's CoreServices.framework Info.plist alone is ~270 KiB (UTI declarations).
+MAX_EXISTING_SIZE = 1024 * 1024
 DATA_NAME = 'macos-15.5-framework-info.json'
 DATA_FILE = Path(__file__).resolve().parent / 'data' / DATA_NAME
 if not DATA_FILE.is_file():
@@ -38,6 +41,22 @@ METADATA_KEYS = {
     'DTPlatformBuild', 'DTSDKName', 'DTSDKBuild', 'DTXcode', 'DTXcodeBuild',
     'DTCompiler', 'BuildMachineOSBuild', 'LSMinimumSystemVersion',
 }
+
+
+def existing_plist(raw):
+    """The dictionary in raw plist bytes, or None when absent or unreadable."""
+    if not raw:
+        return None
+    # Darling's CoreServices Info.plist carries a stray line after </plist>; parse the document
+    # itself so that bundle's other keys are kept.
+    end = raw.rfind(b'</plist>')
+    if end >= 0 and raw.startswith(b'<?xml'):
+        raw = raw[:end + len(b'</plist>')]
+    try:
+        data = plistlib.loads(raw)
+    except (plistlib.InvalidFileException, ExpatError, ValueError, TypeError, OverflowError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_metadata(source=DATA_FILE):
@@ -119,15 +138,25 @@ def provisioning_changes(prefix, runtime_root, frameworks):
         path = checked_path(prefix, target)
         if path.resolve().is_relative_to(runtime_root):
             raise ValueError('Framework destination must be outside the read-only runtime root')
-        encoded = plistlib.dumps(metadata, fmt=plistlib.FMT_XML, sort_keys=True)
-        if len(encoded) > MAX_SIZE:
-            raise ValueError('Framework Info.plist exceeds 64 KiB: ' + relative)
+        # A framework's Info.plist carries more than version metadata (CoreServices declares its
+        # UTIs there, AppKit its NSPrincipalClass): keep every other key of the plist the prefix
+        # or the runtime ships and replace only the measured metadata keys.
         previous = None
         if path.exists():
             with path.open('rb') as stream:
-                previous = stream.read(MAX_SIZE + 1)
-            if len(previous) > MAX_SIZE:
-                raise ValueError('Existing framework Info.plist exceeds 64 KiB: ' + relative)
+                previous = stream.read(MAX_EXISTING_SIZE + 1)
+            if len(previous) > MAX_EXISTING_SIZE:
+                raise ValueError('Existing framework Info.plist exceeds 1 MiB: ' + relative)
+        base = existing_plist(previous)
+        if base is None:
+            runtime_plist = bundle / target.relative_to(relative)
+            if runtime_plist.is_file() and runtime_plist.stat().st_size <= MAX_EXISTING_SIZE:
+                base = existing_plist(runtime_plist.read_bytes())
+        merged = dict(base or {})
+        merged.update(metadata)
+        encoded = plistlib.dumps(merged, fmt=plistlib.FMT_XML, sort_keys=True)
+        if len(encoded) > MAX_EXISTING_SIZE:
+            raise ValueError('Framework Info.plist exceeds 1 MiB: ' + relative)
         if previous != encoded:
             files[path] = encoded
     return files, links

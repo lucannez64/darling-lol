@@ -16066,3 +16066,12 @@ index 97a43cdc..1b38dca9 100644
 -	return 0;
 +	return status ? 1 : 0;
  }
+diff --git a/src/frameworks/CoreServices/Info.plist b/src/frameworks/CoreServices/Info.plist
+index 7850cdb8..fa4008b0 100644
+--- a/src/frameworks/CoreServices/Info.plist
++++ b/src/frameworks/CoreServices/Info.plist
+@@ -10190,4 +10190,3 @@
+ 	</array>
+ </dict>
+ </plist>
+-Command: 
