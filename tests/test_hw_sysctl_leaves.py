@@ -87,22 +87,43 @@ HW_OIDS = {'HW_MACHINE': 1, 'HW_MODEL': 2, 'HW_NCPU': 3, 'HW_BYTEORDER': 4, 'HW_
 
 
 def private_oids():
-    """Values of the file's own _HW_* enumerators, as the compiler assigns them."""
+    """Values of the file's own _HW_* enumerators that the patch lets us compute.
+
+    The patch holds hunks, not the whole file: an enumerator without an explicit
+    value is numbered only when the one before it is in the same hunk. The
+    others are left out, since the lines between hunks are not in this
+    repository; the host check (tools/riot-host-sysctl-cpu-check.c) walks the
+    complete compiled table for duplicates.
+    """
+    patch = (ROOT / 'patches/xnu.patch').read_text()
+    section = patch.split(f'diff --git a/{SYSCTL_HW} b/{SYSCTL_HW}\n', 1)[1].split('\ndiff --git ', 1)[0]
     values = {}
     previous = None
-    for line in patched_lines(SYSCTL_HW).splitlines():
-        match = re.match(r'\t(_HW_\w+)(?: = (\d+))?,', line)
+    for line in section.splitlines():
+        if line.startswith('@@'):
+            previous = None  # a gap: the next implicit value is unknown
+            continue
+        if line.startswith('-') or line.startswith(('+++', '---')):
+            continue
+        match = re.match(r'[+ ]\t(_HW_\w+)(?: = (\d+))?,', line)
         if not match:
-            if line.startswith('};'):
+            if line[1:].startswith('};'):
                 previous = None
             continue
         name, value = match.groups()
-        if value is None:
-            if previous is None:
-                raise AssertionError(f'{name}: the enumerator before it is outside the patch context')
-            value = previous + 1
-        values[name] = previous = int(value)
+        if value is not None:
+            previous = int(value)
+        elif previous is not None:
+            previous += 1
+        else:
+            continue
+        values[name] = previous
     return values
+
+
+def added_private_oids():
+    """The _HW_* enumerators this patch adds."""
+    return set(re.findall(r'^\t(_HW_\w+)(?: = \d+)?,', added_lines(SYSCTL_HW), flags=re.M))
 
 
 def entries(optional):
@@ -126,12 +147,28 @@ class HwSysctlLeavesTests(unittest.TestCase):
         for optional in (False, True):
             found = entries(optional)
             self.assertGreater(len(found), 25)
-            # the numbers the compiler sees, so a private enumerator cannot
-            # land on a fixed HW_* OID unnoticed
-            oids = [int(oid) if optional else numbers[oid] for oid, _ in found]
             names = [leaf for _, leaf in found]
-            self.assertEqual(len(oids), len(set(oids)), sorted(oids))
             self.assertEqual(len(names), len(set(names)))
+            spellings = [oid for oid, _ in found]
+            self.assertEqual(len(spellings), len(set(spellings)))
+            # the numbers the compiler sees, where the patch shows them, so a
+            # private enumerator cannot land on a fixed HW_* OID unnoticed
+            oids = [int(oid) if optional else numbers[oid] for oid, _ in found
+                    if optional or oid in numbers]
+            self.assertEqual(len(oids), len(set(oids)), sorted(oids))
+
+    def test_every_added_private_oid_has_a_known_unique_number(self):
+        private = private_oids()
+        added = added_private_oids()
+        self.assertIn('_HW_CPUFAMILY', added)
+        self.assertIn('_HW_TARGETTYPE', added)
+        self.assertLessEqual(added, set(private), added - set(private))
+        # numbering stops at a hunk boundary instead of guessing
+        self.assertEqual(private['_HW_PHYSICAL_CPU'], 1000)
+        self.assertEqual(private['_HW_LOGICAL_CPU'], 1002)
+        self.assertNotIn('_HW_CPUTHREADTYPE', private)
+        values = [private[name] for name in added] + list(HW_OIDS.values())
+        self.assertEqual(len(values), len(set(values)), sorted(values))
 
     def test_private_oids_stay_clear_of_the_fixed_range(self):
         private = private_oids()

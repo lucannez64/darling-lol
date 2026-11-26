@@ -546,8 +546,31 @@ static int machdep_mode(int compat) {
     return 0;
 }
 
+// The compiled table, child nodes included: two entries of one node must not
+// share an OID or a name. This sees the whole file, where the patch tests only
+// see the hunks.
+static int table_is_unique(const struct known_sysctl* table, const char* node) {
+    int unique = 1;
+
+    for (const struct known_sysctl* a = table; a->oid != -1; ++a) {
+        for (const struct known_sysctl* b = a + 1; b->oid != -1; ++b) {
+            if (a->oid == b->oid || strcmp(a->name, b->name) == 0) {
+                fprintf(stderr, "HOST_SYSCTL_CPU pass=0 error=duplicate in %s: %s (%d) and %s (%d)\n",
+                    node, a->name, a->oid, b->name, b->oid);
+                unique = 0;
+            }
+        }
+        if (a->type == CTLTYPE_NODE && !table_is_unique(a->subctls, a->name))
+            unique = 0;
+    }
+    return unique;
+}
+
 int main(int argc, char** argv) {
     const char* mode = argc > 1 ? argv[1] : "normal";
+
+    if (!table_is_unique(sysctls_hw, "hw"))
+        return 1;
 
     if (strcmp(mode, "machdep") == 0)
         return machdep_mode(0);
