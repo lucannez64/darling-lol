@@ -15,19 +15,30 @@ for arg in "$@"; do
   esac
 done
 python3 scripts/configure.py >/dev/null
-# Match the install mode: an entry created inside Toolbox must re-enter the
-# container, because the host has no Darling build dependencies.
+# Match the install mode even when recreating shortcuts from the host.
+recorded_toolbox=
+if [ -r build/toolbox-container ]; then
+  IFS= read -r recorded_toolbox < build/toolbox-container || true
+fi
+set --
 if [ -f /run/.toolboxenv ] || [ "${DARLING_LOL_TOOLBOX:-0}" = 1 ]; then
-  name=${DARLING_LOL_TOOLBOX_NAME:-}
+  name=${DARLING_LOL_TOOLBOX_NAME:-$recorded_toolbox}
   if [ -z "$name" ]; then
-    # Retain the container recorded by a previously installed entry; fall back
-    # to the installer default only when no entry exists yet.
+    # Keep the previous entry as a fallback for manually entered containers
+    # and checkouts created before the installer wrote a marker.
     name=$(sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' \
       "${HOME:-}/.local/share/applications/darling-launcher.desktop" 2>/dev/null | head -n 1)
   fi
   set -- --toolbox "${name:-darling-lol}"
-else
-  set --
+elif [ -n "$recorded_toolbox" ] && [ ! -f build/native-install ]; then
+  # Checking Podman storage recognizes stopped containers without starting one.
+  if command -v toolbox >/dev/null 2>&1 &&
+     podman container exists -- "$recorded_toolbox" >/dev/null 2>&1; then
+    set -- --toolbox "$recorded_toolbox"
+  else
+    printf 'Recorded Toolbox container %s is unavailable. Creating a host shortcut.\n' \
+      "$recorded_toolbox" >&2
+  fi
 fi
 if [ -n "$window_entries" ]; then
   set -- "$@" "$window_entries"
