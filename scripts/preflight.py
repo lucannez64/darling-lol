@@ -224,8 +224,9 @@ def vulkan_devices():
         values = [value == 'true'
                   for value in re.findall(r'timelineSemaphore\s*=\s*(true|false)',
                                           '\n'.join(found))]
+        # vulkaninfo can print the dotted API version after the packed integer.
         devices.append({'name': first_match(r'deviceName\s*=\s*(.+)', lines),
-                        'api': version(first_match(r'apiVersion\s*=\s*(\d+\.\d+)', lines)),
+                        'api': version(first_match(r'^\s*apiVersion\s*=\s*(.+)', lines)),
                         'timeline': any(values) if values else None})
     return devices
 
