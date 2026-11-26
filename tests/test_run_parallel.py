@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,33 @@ class RunParallelTests(unittest.TestCase):
         result = self.run_pool(['true', 'exit 3', 'touch after'], jobs=3)
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.root / 'after').is_file())
+        self.assertIn('exit 3: exit 3', result.stderr)
+
+    def test_a_cancelled_pool_stops_the_job_trees(self):
+        # The job's own child records its pid and would write `survived` later.
+        job = 'sh -c "echo \\$\\$ > child.pid; sleep 3; touch survived"; true'
+        env = dict(os.environ, RCLOL_PARALLEL_JOBS='2')
+        pool = subprocess.Popen(['sh', str(SCRIPT)], stdin=subprocess.PIPE,
+                                cwd=self.root, env=env, text=True)
+        pool.stdin.write(job + '\n')
+        pool.stdin.close()
+        pid_file = self.root / 'child.pid'
+        deadline = time.monotonic() + 10
+        while not pid_file.is_file() or not pid_file.read_text().strip():
+            self.assertLess(time.monotonic(), deadline, 'job never started')
+            time.sleep(0.01)
+        pool.terminate()
+        self.assertEqual(pool.wait(timeout=10), 143)
+        child = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            self.assertLess(time.monotonic(), deadline, 'grandchild still running')
+            time.sleep(0.01)
+        self.assertFalse((self.root / 'survived').exists())
 
     def test_invalid_job_count_falls_back(self):
         for jobs in ('0', 'nope', ''):

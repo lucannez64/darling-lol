@@ -23,6 +23,7 @@ def build_fixture(root):
     (root / 'tools/sign-darling-runtime.sh').write_text('#!/bin/sh\n')
     store = root / 'store'
     store.write_bytes(b'trust store')
+    (root / 'store.pub').write_bytes(b'trust store key')
     (root / 'tools/dc-trustcache.py').write_text(
         'import sys\nsys.stdout.write(%r + "\\n")\n' % str(store))
     prefix = root / 'prefix'
@@ -145,6 +146,16 @@ class RuntimeSignStampTests(unittest.TestCase):
         self.assertEqual(0, self.record(sdk=self.sdk))
         self.store.unlink()
         self.assertEqual(1, self.check(sdk=self.sdk))
+
+    def test_a_removed_or_replaced_trust_store_key_signs_again(self):
+        key = self.root / 'store.pub'
+        self.assertEqual(0, self.record(sdk=self.sdk))
+        key.write_bytes(b'another key')
+        self.assertEqual(1, self.check(sdk=self.sdk))
+        self.assertEqual(0, self.record(sdk=self.sdk))
+        key.unlink()
+        self.assertEqual(1, self.check(sdk=self.sdk))
+        self.assertEqual(1, self.record(sdk=self.sdk))
 
     def test_a_prefix_only_stamp_ignores_the_sdk_and_the_store(self):
         self.assertEqual(0, self.record())

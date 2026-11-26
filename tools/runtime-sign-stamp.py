@@ -128,13 +128,17 @@ def collect(root, prefix, sdk=None):
     if sdk is not None:
         sections['root:' + str(sdk)] = root_digest(sdk)
         store = trust_store(root)
-        if store is None:
-            sections['trust-store'] = None
-        else:
-            try:
-                sections['trust-store'] = '%s %s' % (store, sha256(store))
-            except OSError:
-                sections['trust-store'] = None
+        sections['trust-store'] = None
+        sections['trust-store-key'] = None
+        if store is not None:
+            # dc-trustcache verifies the store with the public key beside it
+            # (<store>.pub) and only a signing pass recreates a removed key.
+            key = Path(store).with_suffix(Path(store).suffix + '.pub')
+            for name, path in (('trust-store', store), ('trust-store-key', key)):
+                try:
+                    sections[name] = '%s %s' % (path, sha256(path))
+                except OSError:
+                    pass
     return sections
 
 

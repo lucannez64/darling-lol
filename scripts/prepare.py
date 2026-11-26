@@ -288,7 +288,6 @@ for component in manifest['components']:
     repo=source/component['path']
     actual=git_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     if actual!=component['revision']:raise SystemExit(f"Wrong revision for {component['path']}: expected {component['revision']}, got {actual}")
-applied.mkdir(parents=True,exist_ok=True)
 from concurrent.futures import ThreadPoolExecutor
 with ThreadPoolExecutor(max_workers=patch_jobs(a.jobs)) as pool:
     for message in pool.map(prepare_component,manifest['components']):

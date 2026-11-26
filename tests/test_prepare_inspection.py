@@ -106,6 +106,21 @@ class PatchJobsTests(unittest.TestCase):
             self.assertEqual(self.jobs(value, cpu=14), 1)
 
 
+class CheckOnlyStateTests(unittest.TestCase):
+    def test_only_record_patch_creates_the_recording_folder(self):
+        # --check-only must work on a read-only build/: the folder is created
+        # only when a patch is recorded, never by the top-level flow.
+        tree = ast.parse((Path(__file__).resolve().parents[1] / 'scripts/prepare.py').read_text())
+        owners = set()
+        for node in tree.body:
+            for call in ast.walk(node):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and call.func.attr == 'mkdir'
+                        and getattr(call.func.value, 'id', '') == 'applied'):
+                    owners.add(getattr(node, 'name', type(node).__name__))
+        self.assertEqual(owners, {'record_patch'})
+
+
 @unittest.skipUnless(shutil.which('git'), 'Git required')
 class HistoricalPatchesTests(unittest.TestCase):
     def setUp(self):
