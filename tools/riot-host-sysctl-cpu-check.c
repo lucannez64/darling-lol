@@ -151,6 +151,24 @@ kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo
     return 0;
 }
 
+// The raw HOST_VM_INFO64 reply hw.usermem reads: 1 GiB wired.
+kern_return_t _kernelrpc_host_statistics64(mach_port_name_t host, int flavor, void* info, mach_msg_type_number_t* count) {
+    (void)host; (void)flavor; (void)count;
+    if (rpc_fail)
+        return 5; // KERN_FAILURE
+    ((struct vm_statistics64*)info)->wire_count = 262144;
+    return 0;
+}
+
+// The cpuid trap's transform, which the cpuid-decoded machdep.cpu leaves call
+// under the compat profile. cpuid_trace.c needs the guest signal headers, so
+// the check links this pass-through; tests/test_machdep_cpu_leaves.py runs
+// those leaves through the real transform.
+void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
+    uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx) {
+    (void)leaf; (void)subleaf; (void)eax; (void)ebx; (void)ecx; (void)edx;
+}
+
 // sysctl_hw.c: what libsyscall's host_info wrapper writes into a reply.
 void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count);
 

@@ -77,9 +77,37 @@ def patched_lines(path):
                      if line.startswith(('+', ' ')) and not line.startswith('+++'))
 
 
+# sys/sysctl.h numbers of the fixed hw OIDs the table uses
+HW_OIDS = {'HW_MACHINE': 1, 'HW_MODEL': 2, 'HW_NCPU': 3, 'HW_BYTEORDER': 4, 'HW_PHYSMEM': 5,
+           'HW_USERMEM': 6, 'HW_PAGESIZE': 7, 'HW_EPOCH': 10, 'HW_VECTORUNIT': 13,
+           'HW_BUS_FREQ': 14, 'HW_CACHELINE': 16, 'HW_L1ICACHESIZE': 17,
+           'HW_L1DCACHESIZE': 18, 'HW_L2SETTINGS': 19, 'HW_L2CACHESIZE': 20,
+           'HW_L3SETTINGS': 21, 'HW_L3CACHESIZE': 22, 'HW_TB_FREQ': 23, 'HW_MEMSIZE': 24,
+           'HW_AVAILCPU': 25}
+
+
+def private_oids():
+    """Values of the file's own _HW_* enumerators, as the compiler assigns them."""
+    values = {}
+    previous = None
+    for line in patched_lines(SYSCTL_HW).splitlines():
+        match = re.match(r'\t(_HW_\w+)(?: = (\d+))?,', line)
+        if not match:
+            if line.startswith('};'):
+                previous = None
+            continue
+        name, value = match.groups()
+        if value is None:
+            if previous is None:
+                raise AssertionError(f'{name}: the enumerator before it is outside the patch context')
+            value = previous + 1
+        values[name] = previous = int(value)
+    return values
+
+
 def entries(optional):
     """(oid, name) of every hw.optional entry (numeric OIDs) or hw entry (named OIDs)."""
-    found = re.findall(r'\{ \.oid = (\w+), \.type = \w+, \.exttype = "\w*", \.name = "(\w+)", \.handler',
+    found = re.findall(r'\{ \.oid = (\w+), \.type = \w+, \.exttype = "\w*", \.name = "(\w+)", \.(?:handler|subctls)',
                        patched_lines(SYSCTL_HW))
     return [(oid, name) for oid, name in found if oid.isdigit() == optional]
 
@@ -94,25 +122,39 @@ class HwSysctlLeavesTests(unittest.TestCase):
                 name)
 
     def test_table_oids_and_names_are_unique(self):
+        numbers = {**HW_OIDS, **private_oids()}
         for optional in (False, True):
             found = entries(optional)
             self.assertGreater(len(found), 25)
-            oids = [oid for oid, _ in found]
+            # the numbers the compiler sees, so a private enumerator cannot
+            # land on a fixed HW_* OID unnoticed
+            oids = [int(oid) if optional else numbers[oid] for oid, _ in found]
             names = [leaf for _, leaf in found]
-            self.assertEqual(len(oids), len(set(oids)))
+            self.assertEqual(len(oids), len(set(oids)), sorted(oids))
             self.assertEqual(len(names), len(set(names)))
 
-    def test_legacy_oids_do_not_reuse_a_number_taken_by_the_table(self):
-        # sys/sysctl.h numbers of the legacy OIDs added here; 1, 2, 3, 7, 15,
-        # 24, 25 and 26 were already in the table (26 as hw.activecpu).
-        legacy = {'HW_BYTEORDER': 4, 'HW_PHYSMEM': 5, 'HW_USERMEM': 6, 'HW_EPOCH': 10, 'HW_VECTORUNIT': 13, 'HW_BUS_FREQ': 14,
-                  'HW_CACHELINE': 16, 'HW_L1ICACHESIZE': 17, 'HW_L1DCACHESIZE': 18,
-                  'HW_L2SETTINGS': 19, 'HW_L2CACHESIZE': 20, 'HW_L3SETTINGS': 21,
-                  'HW_L3CACHESIZE': 22, 'HW_TB_FREQ': 23}
-        used = {oid for oid, _ in entries(False)}
-        self.assertLessEqual(set(legacy), used)
-        self.assertEqual(len(set(legacy.values())), len(legacy))
-        self.assertFalse(set(legacy.values()) & {1, 2, 3, 7, 15, 24, 25, 26})
+    def test_private_oids_stay_clear_of_the_fixed_range(self):
+        private = private_oids()
+        self.assertIn('_HW_CPUFAMILY', private)
+        self.assertIn('_HW_TARGETTYPE', private)
+        # HW_MAXID is 28; _HW_CPUFREQUENCY_COMPAT is XNU's HW_CPU_FREQ (15)
+        for name, value in private.items():
+            if name != '_HW_CPUFREQUENCY_COMPAT':
+                self.assertGreaterEqual(value, 1000, name)
+        self.assertEqual(private['_HW_CPUFREQUENCY_COMPAT'], 15)
+        self.assertNotIn(15, HW_OIDS.values())
+
+    def test_activecpu_has_xnu_numeric_oid(self):
+        hw = patched_lines(SYSCTL_HW)
+        self.assertIn('{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", ', hw)
+        self.assertIn('{ .oid = _HW_AVAILCPU_NAME, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", ', hw)
+        self.assertNotIn('_HW_ACTIVECPU', '\n'.join(
+            line for line in hw.splitlines() if 'unused in this table before' not in line))
+
+    def test_optional_features_check_the_host_maximum_leaf(self):
+        body = function(patched_lines(SYSCTL_HW), 'static long optional_feature(')
+        self.assertLess(body.index(': "0" (0), "2" (0));'), body.index(': "0" (leaf), "2" (0));'))
+        self.assertIn('if (regs[0] < leaf)', body)
 
     def test_optional_features_use_the_right_cpuid_bits(self):
         hw = added_lines(SYSCTL_HW)
@@ -272,6 +314,19 @@ int main(void)
         assert(CALL(handle_usermem) == -EINVAL);
     }}
     g_statistics_result = KERN_SUCCESS;
+    /* a size query answers without the statistics RPC */
+    g_statistics_result = 5;
+    len = 0; old = 0;
+    assert(CALL(handle_usermem) == 0 && len == 4);
+    g_statistics_result = KERN_SUCCESS;
+    /* an unknown memory size is an error, not a negative value */
+    g_memory = 0;
+    {{
+        int value = -1;
+        len = sizeof(value); old = &value;
+        assert(CALL(handle_usermem) == -EINVAL && value == -1);
+    }}
+    g_memory = 16ULL << 30;
 
     /* a profile memory below 2 GiB is reported as it is */
     g_memory = 1ULL << 30;
