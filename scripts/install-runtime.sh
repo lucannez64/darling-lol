@@ -55,18 +55,37 @@ else
   python3 tools/configure-darling-platform.py --prefix "$prefix_dir" --normalize-system-version --write || \
     echo 'SystemVersion.plist not normalized; run tools/configure-darling-platform.py --normalize-system-version --write' >&2
 fi
-sh build/runtime/tools/install-riot-presentation-runtime.sh
-sh build/runtime/tools/install-riot-gpu-runtime.sh
-# darling-lol perf: build and install optimized libc/libc++/libplatform.
-if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
-  sh build/runtime/tools/build-riot-libs-runtime.sh
-  python3 build/runtime/tools/install-riot-libs-runtime.py
+# Rebuild and install every per-user overlay. This is the expensive half of an
+# update: the CMake targets and overlay builders relink unconditionally, so a
+# pull that changes nothing they consume would still spend about a minute here.
+install_overlay_batch() {
+  sh build/runtime/tools/install-riot-presentation-runtime.sh
+  sh build/runtime/tools/install-riot-gpu-runtime.sh
+  # darling-lol perf: build and install optimized libc/libc++/libplatform.
+  if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
+    sh build/runtime/tools/build-riot-libs-runtime.sh
+    python3 build/runtime/tools/install-riot-libs-runtime.py
+  fi
+  python3 build/runtime/tools/install-darling-system-profiler.py
+  # Riot Client 142 (Electron 43) hard-links QuickLookUI, MediaPlayer, CoreML, CoreHaptics and
+  # Accessibility; without these stubs in RuntimeFrameworks dyld aborts before the first window.
+  python3 tools/build-riot-electron43-frameworks.py --install
+}
+# The stamp covers the patched checkout, the builder sources, the configured
+# flags, the artifacts above and the installed overlays (recorded after signing).
+overlay_state=build/runtime/overlay-stamp.json
+overlay_rebuilt=
+signing_ok=0
+if [ "${RCLOL_FORCE_OVERLAY_REBUILD:-0}" = 1 ] ||
+  ! python3 build/runtime/tools/runtime-overlay-stamp.py --root "$repo" check --state "$overlay_state"; then
+  install_overlay_batch
+  overlay_rebuilt=1
+else
+  echo 'Runtime overlays are up to date; skipping the overlay rebuild.'
 fi
-python3 build/runtime/tools/install-darling-system-profiler.py
-# Riot Client 142 (Electron 43) hard-links QuickLookUI, MediaPlayer, CoreML, CoreHaptics and
-# Accessibility; without these stubs in RuntimeFrameworks dyld aborts before the first window.
-python3 tools/build-riot-electron43-frameworks.py --install
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
+# Validation, the canonical mirror and signing always run: they also repair a
+# prefix whose overlays were removed or left unsigned.
 python3 build/runtime/tools/validate-riot-runtime.py
 # Mirror per-user overlays to canonical prefix paths (/System/Library/Frameworks,
 # /usr/lib) so the launcher can run without DYLD_LIBRARY_PATH/DYLD_FRAMEWORK_PATH.
@@ -100,7 +119,20 @@ if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
 ==================================================================
 
 EOF
+  else
+    signing_ok=1
   fi
+fi
+# Only a completed install and a successful signing pass may vouch for the next
+# update's fast path. The stamp is taken after signing, which rewrites the
+# overlay Mach-Os, and a failed pass has to leave it unrecorded so the next
+# update installs and signs the overlays again.
+if [ -n "$overlay_rebuilt" ] && [ "$signing_ok" = 1 ]; then
+  # The stubs were copied before signing; record what is on disk now so the next
+  # batch keeps that signed copy instead of replacing and re-signing it.
+  python3 tools/build-riot-electron43-frameworks.py --record-installed || true
+  python3 build/runtime/tools/runtime-overlay-stamp.py --root "$repo" record --state "$overlay_state" || \
+    echo 'Runtime overlay stamp not recorded; the next update rebuilds the overlays' >&2
 fi
 # Mark this canonical prefix and configured guest ready only after validation.
 if [ -n "${DARLING_WORKSPACE:-}" ]; then

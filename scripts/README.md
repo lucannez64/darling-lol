@@ -11,7 +11,7 @@ sources in `tools/` and `scripts/`, never the generated copies.
 | `install-native.sh` | Full native or `--toolbox` install: dependencies, build, runtime and optional desktop entries. Main installer and option reference. |
 | `build.sh` | Preflight, configure, fetch/apply the pinned patches and build incrementally. |
 | `install-runtime.sh` | Install the paired per-user runtime overlays; never copies game files. |
-| `update.sh` | After `git pull`: re-apply changed patches, rebuild and reinstall the runtime. |
+| `update.sh` | After `git pull`: re-apply changed patches, rebuild and reinstall the runtime; stops a Toolbox container it started. |
 | `installer.sh` | Run Riot's installer inside the prefix for one region code. |
 | `uninstall.sh` | Remove Riot software from the prefix so the installer can start clean; destructive, keeps the Darling runtime. |
 | `clean-prefix.sh` | Back up and clean local Riot/League logs, `machine.cfg` and client session data/caches, and regenerate synthetic platform identity; keeps runtime and game. |

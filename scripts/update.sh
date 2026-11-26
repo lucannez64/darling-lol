@@ -2,6 +2,8 @@
 # Bring an existing build and installation up to date after `git pull`: re-apply the patches that changed
 # (prepare.py reverts the earlier version it finds applied), rebuild incrementally, and reinstall the base
 # runtime, and the per-user overrides. Run it after manually closing Riot/League.
+# A Toolbox install re-enters the container recorded at install time and stops it again when this run
+# started or restarted it.
 # Without arguments background steps use a progress spinner and an update log;
 # --verbose streams that output to the terminal instead.
 # Rootless callers must remain in their original namespace; the outer launcher
@@ -13,6 +15,9 @@ cd "$repo"
 VERBOSE=0
 BG_PID=''
 LOG=''
+# Toolbox container this run started (or restarted); the EXIT trap stops it so
+# a one-shot update does not leave a container running behind.
+TOOLBOX_STOP=''
 
 usage() {
 	printf '%s\n' \
@@ -133,6 +138,10 @@ cleanup() {
 		wait "$BG_PID" 2>/dev/null || true
 		BG_PID=''
 	fi
+	if [ -n "$TOOLBOX_STOP" ]; then
+		stop_toolbox_container "$TOOLBOX_STOP" || true
+		TOOLBOX_STOP=''
+	fi
 	if [ -t 1 ]; then
 		printf '\033[?25h'
 	fi
@@ -154,6 +163,19 @@ show_log() {
 	if [ -n "$LOG" ]; then
 		printf '\n%sLog: %s%s\n' "$DIM" "$LOG" "$RESET"
 	fi
+}
+
+# The base install copies about 33 000 files and re-evaluates every rule even
+# when the build tree did not change; the stamp is recorded after a successful
+# install and lets the next update skip both the copy and the sudo prompt.
+install_system_components() {
+	if python3 build/runtime/tools/darling-install-stamp.py --root "$repo" check; then
+		success 'Darling system components are up to date'
+		return 0
+	fi
+	run 'Installing Darling system components' "$@"
+	python3 build/runtime/tools/darling-install-stamp.py --root "$repo" record || \
+		warning 'Install stamp not recorded; the next update reinstalls the system components'
 }
 
 # Run one update step. Privileged steps and steps without a log keep the terminal.
@@ -289,6 +311,13 @@ sign_sdk_runtime() {
 	if [ ! -x "$repo/tools/sign-darling-runtime.sh" ] || [ ! -d "$sdk_dir" ] || [ -w "$sdk_dir" ]; then
 		return 0
 	fi
+	# The stamp records the SDK's stat state and the signer after a successful
+	# pass, so an SDK nobody touched costs neither the password nor the walk over
+	# every binary. Signing rewrites each Mach-O, so an install cannot fake it.
+	if python3 build/runtime/tools/sdk-sign-stamp.py --root "$repo" --sdk "$sdk_dir" check; then
+		success 'Darling system components are signed'
+		return 0
+	fi
 	if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
 		warning 'Base Darling SDK was NOT signed (dc-codesign is not built; install OpenSSL headers and re-run update.sh).'
 		return 0
@@ -301,6 +330,8 @@ sign_sdk_runtime() {
 	printf '\n%s%s Signing Darling system components%s\n' "$BOLD$CYAN" "$ICON_INFO" "$RESET"
 	if sudo env RCODESIGN="$rcodesign_bin" sh "$repo/tools/sign-darling-runtime.sh" --sdk --quiet; then
 		success 'Signing Darling system components'
+		python3 build/runtime/tools/sdk-sign-stamp.py --root "$repo" --sdk "$sdk_dir" record || \
+			warning 'Signing stamp not recorded; the next update signs the system components again'
 	else
 		warning "Base Darling SDK signing failed; re-run: sudo env RCODESIGN=\"$rcodesign_bin\" sh tools/sign-darling-runtime.sh --sdk"
 	fi
@@ -349,29 +380,10 @@ toolbox_pid_in_container() {
 
 restart_toolbox_container() {
 	container=$1
-	if ! podman stop --time 10 "$container" >/dev/null 2>&1; then
-		# Rootless podman signals the container through its runtime. When that
-		# pidfd signal is refused (`operation not permitted`, seen when a
-		# container's user namespace outlived a suspend) the host can still
-		# signal the recorded init PID, as `podman stop` would, once that PID is
-		# confirmed to still belong to the container.
-		pid=$(podman container inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)
-		case "$pid" in
-		'' | 0 | *[!0-9]*) ;;
-		*)
-			if ! toolbox_pid_in_container "$container" "$pid"; then
-				warning "Podman could not stop Toolbox container '$container', and PID $pid no longer belongs to it; not signaling it."
-				return 1
-			fi
-			warning "Podman could not stop Toolbox container '$container'; signaling PID $pid."
-			kill -TERM "$pid" 2>/dev/null || true
-			attempt=0
-			while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
-				sleep 1
-				attempt=$((attempt + 1))
-			done
-			;;
-		esac
+	status=0
+	stop_toolbox_podman "$container" || status=$?
+	if [ "$status" -eq 1 ]; then
+		return 1
 	fi
 	attempt=0
 	until podman start "$container" >/dev/null 2>&1; do
@@ -382,6 +394,52 @@ restart_toolbox_container() {
 		fi
 		sleep 1
 	done
+}
+
+# Rootless podman signals the container through its runtime. When that pidfd
+# signal is refused (`operation not permitted`, seen when a container's user
+# namespace outlived a suspend) the host can still signal the recorded init
+# PID, as `podman stop` would, once that PID is confirmed to belong to the
+# container. Exit status: 0 when the stop was attempted, 1 when the recorded
+# PID is not the container's, and 2 when `podman stop` failed and no usable PID
+# could be found.
+stop_toolbox_podman() {
+	container=$1
+	podman stop --time 10 "$container" >/dev/null 2>&1 && return 0
+	pid=$(podman container inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)
+	case "$pid" in
+	'' | 0 | *[!0-9]*) return 2 ;;
+	esac
+	if ! toolbox_pid_in_container "$container" "$pid"; then
+		warning "Podman could not stop Toolbox container '$container', and PID $pid no longer belongs to it; not signaling it."
+		return 1
+	fi
+	warning "Podman could not stop Toolbox container '$container'; signaling PID $pid."
+	kill -TERM "$pid" 2>/dev/null || true
+	attempt=0
+	while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	return 0
+}
+
+# A container this update started or restarted is not needed once the update
+# ends, so take it back down instead of leaving conmon and the container init
+# running. A container that was already reachable belongs to a session the
+# user opened, and the caller never asks for it to be stopped.
+stop_toolbox_container() {
+	container=$1
+	command -v podman >/dev/null 2>&1 || return 0
+	info "Stopping Toolbox container '$container'..."
+	status=0
+	stop_toolbox_podman "$container" || status=$?
+	if [ "$status" -eq 0 ]; then
+		success "Stopped Toolbox container '$container'"
+		return 0
+	fi
+	warning "Podman could not stop Toolbox container '$container'; it is still running."
+	return 1
 }
 
 # The install steps shut Darling down and stop leftover Riot processes, so
@@ -481,9 +539,9 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	run 'Rooting the Nix package closure' \
 		nix-store --realise "$package" --add-root "$repo/build/nix-gcroots/$(basename "$package")" --indirect
 	run 'Marking the base runtime stale' python3 scripts/nix-state.py invalidate-base
-	run 'Building Darling-LoL (this may take a while)' ./scripts/build.sh
+	run 'Building Darling-LoL' ./scripts/build.sh
 	run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
-	run 'Installing Darling system components' cmake --install build/darling-src/build
+	install_system_components cmake --install build/darling-src/build
 	run 'Recording the installed base runtime' python3 scripts/nix-state.py stamp-base
 	run 'Installing the user runtime' ./scripts/install-runtime.sh
 	warn_if_runtime_unsigned
@@ -515,12 +573,25 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 		name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
 			sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
 	fi
+	# A container this run starts or restarts is stopped again when the update
+	# ends. One that is already reachable stays up: it belongs to a session the
+	# user opened, and stopping it would end that shell.
+	stop_container=0
+	if [ -n "$name" ]; then
+		toolbox_container_running "$name" || stop_container=1
+	fi
 	# No record of any kind: only a legacy checkout can be assumed to live in the
 	# installer's default container. This probe also starts a stopped container,
 	# so it must not decide for checkouts that are already recorded above.
-	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 &&
-		toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
-		name=darling-lol
+	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1; then
+		if toolbox_container_running darling-lol; then
+			stop_container=0
+		else
+			stop_container=1
+		fi
+		if toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+			name=darling-lol
+		fi
 	fi
 	if [ -n "$name" ]; then
 		if ! command -v toolbox >/dev/null 2>&1; then
@@ -599,13 +670,24 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 				fi
 				sleep 1
 			done
+			# This run recovered the container, so it stops it again below.
+			stop_container=1
 		fi
 		info "Toolbox install detected; running the update inside container '$name'..."
-		if [ "$VERBOSE" = 1 ]; then
-			exec toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 \
-				sh "$repo/scripts/update.sh" --verbose
+		if [ "$stop_container" = 1 ]; then
+			TOOLBOX_STOP=$name
 		fi
-		exec toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 sh "$repo/scripts/update.sh"
+		# Keep the inner run's status: a failed update must not look successful
+		# here, and the EXIT trap stops the container either way.
+		rc=0
+		if [ "$VERBOSE" = 1 ]; then
+			toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 \
+				sh "$repo/scripts/update.sh" --verbose || rc=$?
+		else
+			toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 \
+				sh "$repo/scripts/update.sh" || rc=$?
+		fi
+		exit "$rc"
 	fi
 fi
 
@@ -637,9 +719,9 @@ fi
 prepare_output
 printf '\n%s%sUpdating Darling-LoL%s\n' "$BOLD" "$CYAN" "$RESET"
 
-run 'Building Darling-LoL (this may take a while)' ./scripts/build.sh
+run 'Building Darling-LoL' ./scripts/build.sh
 run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
-run 'Installing Darling system components' sudo cmake --install build/darling-src/build
+install_system_components sudo cmake --install build/darling-src/build
 run 'Installing the user runtime' ./scripts/install-runtime.sh
 warn_if_runtime_unsigned
 sign_sdk_runtime

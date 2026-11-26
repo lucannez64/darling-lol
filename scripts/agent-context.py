@@ -57,7 +57,7 @@ SCRIPTS = (
     ("scripts/patchkit.py", "Patch-stack status, hunk/manifest verification, single-file resplice and overlay ledger"),
     ("scripts/configure.py", "Render local paths, region and locale into `build/config.json` and `build/runtime/tools/*`"),
     ("scripts/install-runtime.sh", "Install the paired per-user runtime overlays; never copies game files"),
-    ("scripts/update.sh", "After `git pull`: re-apply changed patches, rebuild and reinstall the runtime"),
+    ("scripts/update.sh", "After `git pull`: re-apply changed patches, rebuild and reinstall the runtime; stops a Toolbox container it started"),
     ("scripts/run.sh", "Thin launcher: no arguments, optional `gamemoderun`, delegates to `run-riot-client.sh`"),
     ("scripts/installer.sh", "Run Riot's installer inside the prefix for one region code"),
     ("scripts/uninstall.sh", "Remove Riot software from the prefix; destructive; keeps the Darling runtime"),

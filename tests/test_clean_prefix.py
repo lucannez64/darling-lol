@@ -22,7 +22,8 @@ class CleanPrefixTests(unittest.TestCase):
         (self.repo / 'tools').mkdir()
         for name in ('clean-prefix.sh', 'configure.py', 'common.py'):
             shutil.copy2(ROOT / 'scripts' / name, self.repo / 'scripts' / name)
-        for name in ('runtime-paths.sh', 'runtime_paths.py', 'configure-darling-platform.py'):
+        for name in ('runtime-paths.sh', 'runtime_paths.py',
+                     'configure-darling-platform.py', 'console.py'):
             shutil.copy2(ROOT / 'tools' / name, self.repo / 'tools' / name)
         self.stop_log = self.root / 'stop.log'
         (self.repo / 'tools/stop-darling-runtime.py').write_text(

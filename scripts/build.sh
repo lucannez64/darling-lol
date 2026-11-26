@@ -49,10 +49,21 @@ fi
 # -mtune=generic, not native: clang 23 tuning for AMD Zen (znver*) passes the thread-local
 # variable descriptor in the wrong register on Darwin targets, so every __thread access
 # returns NULL (launchd crashed in libkqueue's epoll_event_dump).
-cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' \
-  -DCMAKE_BUILD_TYPE= -DTARGET_i386=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_METAL=ON \
-  -DCMAKE_C_FLAGS="-O3 -march=native -mtune=generic -pipe" \
-  -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=generic -pipe"
+# The explicit configure costs about seven seconds on this tree. Make re-runs CMake by
+# itself when a CMakeLists.txt changes, but not when a patch adds a file a file(GLOB)
+# would pick up, so the stamp covers the prepared checkout, this script's flags and the
+# cache; anything it cannot read reconfigures instead of skipping.
+if [ "${RCLOL_FORCE_RECONFIGURE:-0}" = 1 ] ||
+  ! python3 build/runtime/tools/build-configure-stamp.py --root "$repo" check; then
+  cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' \
+    -DCMAKE_BUILD_TYPE= -DTARGET_i386=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_METAL=ON \
+    -DCMAKE_C_FLAGS="-O3 -march=native -mtune=generic -pipe" \
+    -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=generic -pipe"
+  python3 build/runtime/tools/build-configure-stamp.py --root "$repo" record || \
+    echo 'warning: CMake configure stamp not recorded; the next build reconfigures' >&2
+else
+  echo 'CMake configuration is up to date; skipping the configure step.'
+fi
 cmake --build build/darling-src/build --parallel "${JOBS:-$(nproc)}"
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
   echo 'Build complete. Install the base runtime with: cmake --install build/darling-src/build'

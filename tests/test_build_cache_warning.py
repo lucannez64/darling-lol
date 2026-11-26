@@ -17,6 +17,10 @@ SH = shutil.which('sh')
 STUB = '''#!/bin/sh
 printf '%s\\n' "$*" >> "${BUILD_STUB_LOG:?}"
 printf '%s\\n' "$PWD" >> "${BUILD_STUB_LOG:?}.pwd"
+case "$*" in
+  *build-configure-stamp.py*check*) [ "${BUILD_STUB_STAMP_CURRENT:-0}" = 1 ] || exit 1 ;;
+esac
+exit 0
 '''
 
 
@@ -117,6 +121,27 @@ class BuildCacheWarningTests(unittest.TestCase):
         argv = self.log.read_text().splitlines()
         self.assertTrue(any(line.startswith('-S ') for line in argv), argv)
         self.assertTrue(any(line.startswith('--build ') for line in argv), argv)
+
+    def test_skips_configure_when_the_stamp_is_current(self):
+        self.write_cache('GOOD_LIB:FILEPATH=/tmp/lib.so')
+        self.env['BUILD_STUB_STAMP_CURRENT'] = '1'
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('skipping the configure step', result.stdout)
+        argv = self.log.read_text().splitlines()
+        self.assertFalse(any(line.startswith('-S ') for line in argv), argv)
+        self.assertTrue(any(line.startswith('--build ') for line in argv), argv)
+
+    def test_forced_reconfigure_ignores_a_current_stamp(self):
+        self.write_cache('GOOD_LIB:FILEPATH=/tmp/lib.so')
+        self.env['BUILD_STUB_STAMP_CURRENT'] = '1'
+        self.env['RCLOL_FORCE_RECONFIGURE'] = '1'
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.log.read_text().splitlines()
+        self.assertTrue(any(line.startswith('-S ') for line in argv), argv)
+        self.assertTrue(any('build-configure-stamp.py' in line and 'record' in line
+                            for line in argv), argv)
 
 
 if __name__ == '__main__':

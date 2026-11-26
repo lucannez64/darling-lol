@@ -75,6 +75,40 @@ class InstallRuntimeFrameworkTests(unittest.TestCase):
         normalize = self.script.index('configure-darling-platform.py --prefix "$prefix_dir" --normalize-system-version --write')
         self.assertLess(stop, normalize)
 
+    def batch_body(self):
+        start = self.script.index('install_overlay_batch() {\n')
+        return self.script[start:self.script.index('\n}\n', start)]
+
+    def test_overlay_batch_runs_only_when_the_stamp_is_stale(self):
+        check = self.script.index('runtime-overlay-stamp.py --root "$repo" check')
+        call = self.script.index('\n  install_overlay_batch\n')
+        self.assertLess(check, call)
+        self.assertIn('RCLOL_FORCE_OVERLAY_REBUILD', self.script)
+
+    def test_validation_mirror_and_signing_run_on_every_update(self):
+        body = self.batch_body()
+        for every_run in ('validate-riot-runtime.py',
+                          'sync-canonical-runtime-overlays.py',
+                          'sign-darling-runtime.sh'):
+            self.assertNotIn(every_run, body)
+
+    def test_installed_stub_digests_and_stamp_follow_signing(self):
+        sign = self.script.index('sign-darling-runtime.sh" $sign_args')
+        stubs = self.script.index('--record-installed')
+        stamp_record = self.script.rindex('runtime-overlay-stamp.py')
+        self.assertLess(sign, stubs)
+        self.assertLess(stubs, stamp_record)
+
+    def test_overlay_stamp_requires_a_successful_signing_pass(self):
+        # A failed pass must leave the stamp unrecorded so the next update
+        # installs the overlays again instead of keeping a partial signature.
+        self.assertIn('signing_ok=0', self.script)
+        self.assertIn('signing_ok=1', self.script)
+        gate = self.script.index('[ "$signing_ok" = 1 ]')
+        self.assertLess(self.script.index('signing_ok=1'), gate)
+        self.assertLess(gate, self.script.index('--record-installed'))
+        self.assertLess(gate, self.script.rindex('runtime-overlay-stamp.py'))
+
 
 if __name__ == '__main__':
     unittest.main()

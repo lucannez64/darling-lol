@@ -61,6 +61,81 @@ class FrameworkStubTests(unittest.TestCase):
                                  b'framework fixture')
                 self.assertTrue((bundle / 'Resources/Info.plist').is_file())
 
+    def test_install_keeps_a_signed_stub_and_restores_a_replaced_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / 'output'
+            home = root / 'home'
+            backup = root / 'backups'
+            for name in frameworks.FRAMEWORKS:
+                bundle = output / (name + '.framework')
+                bundle.mkdir(parents=True)
+                (bundle / name).write_bytes(b'framework fixture')
+            with patch.object(frameworks, 'OUTPUT', output), patch.object(
+                    frameworks, 'guest_home', return_value=home):
+                frameworks.install(backup)
+                # Signing rewrites every installed stub after the copy.
+                for name in frameworks.FRAMEWORKS:
+                    installed = home / 'RuntimeFrameworks' / (name + '.framework') / name
+                    installed.write_bytes(installed.read_bytes() + b'signature')
+                frameworks.record_installed(backup)
+                frameworks.install(backup)
+                for name in frameworks.FRAMEWORKS:
+                    installed = home / 'RuntimeFrameworks' / (name + '.framework') / name
+                    self.assertTrue(installed.read_bytes().endswith(b'signature'),
+                                    name + ' was replaced although it was unchanged')
+            # A stub replaced by something else no longer matches the record.
+            with patch.object(frameworks, 'OUTPUT', output), patch.object(
+                    frameworks, 'guest_home', return_value=home):
+                for name in frameworks.FRAMEWORKS:
+                    installed = home / 'RuntimeFrameworks' / (name + '.framework') / name
+                    installed.write_bytes(b'foreign binary')
+                frameworks.install(backup)
+            for name in frameworks.FRAMEWORKS:
+                installed = home / 'RuntimeFrameworks' / (name + '.framework') / name
+                self.assertEqual(b'framework fixture', installed.read_bytes())
+
+    def test_recorded_digests_survive_a_corrupt_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backup = Path(tmp)
+            (backup / frameworks.DIGESTS).write_text('{not json')
+            self.assertEqual({}, frameworks.recorded_digests(backup))
+            frameworks.store_digests(
+                backup, {'CoreML': {'source': 'src', 'signed': 'signed'}})
+            self.assertEqual({'CoreML': {'source': 'src', 'signed': 'signed'}},
+                             frameworks.recorded_digests(backup))
+            # A version 1 record only named the signed copy, so it cannot vouch
+            # for any particular source stub.
+            frameworks.store_digests(backup, {'CoreML': 'legacy'})
+            self.assertEqual({'CoreML': {'source': None, 'signed': 'legacy'}},
+                             frameworks.recorded_digests(backup))
+
+    def test_a_rebuilt_stub_replaces_the_older_signed_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / 'output'
+            home = root / 'home'
+            backup = root / 'backups'
+            for name in frameworks.FRAMEWORKS:
+                bundle = output / (name + '.framework')
+                bundle.mkdir(parents=True)
+                (bundle / name).write_bytes(b'first build')
+            with patch.object(frameworks, 'OUTPUT', output), patch.object(
+                    frameworks, 'guest_home', return_value=home):
+                frameworks.install(backup)
+                for name in frameworks.FRAMEWORKS:
+                    installed = home / 'RuntimeFrameworks' / (name + '.framework') / name
+                    installed.write_bytes(installed.read_bytes() + b'signature')
+                frameworks.record_installed(backup)
+                # The next build produces different stubs under the same names;
+                # the old signed copy must not vouch for them.
+                for name in frameworks.FRAMEWORKS:
+                    (output / (name + '.framework') / name).write_bytes(b'second build')
+                frameworks.install(backup)
+            for name in frameworks.FRAMEWORKS:
+                installed = home / 'RuntimeFrameworks' / (name + '.framework') / name
+                self.assertEqual(b'second build', installed.read_bytes(), name)
+
     @unittest.skipUnless(shutil.which('c++'), 'C++ compiler required')
     def test_number_comparison_handles_mixed_integer_signedness(self):
         # Compile the shipped comparison helper with host accessor stand-ins.
