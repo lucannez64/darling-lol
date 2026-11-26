@@ -121,6 +121,44 @@ int main() {
 	const MTLDeviceInfo::Heap huge[] = {{UINT64_MAX, true}, {UINT64_MAX, true}};
 	expectBytes("saturating sum", MTLDeviceInfo::workingSetBytes(huge, 2, false), UINT64_MAX);
 
+	// -[MTLDevice supportsFamily:]: x86-64 Mac GPU families only (never Apple Silicon).
+	{
+		bool ok = MTLDeviceInfo::supportsFamily(2001)  // Mac1
+		       && MTLDeviceInfo::supportsFamily(2002)  // Mac2
+		       && MTLDeviceInfo::supportsFamily(3001)  // Common1
+		       && MTLDeviceInfo::supportsFamily(3002)  // Common2
+		       && MTLDeviceInfo::supportsFamily(3003)  // Common3
+		       && MTLDeviceInfo::supportsFamily(4001)  // MacCatalyst1
+		       && MTLDeviceInfo::supportsFamily(4002)  // MacCatalyst2
+		       && MTLDeviceInfo::supportsFamily(5001)  // Metal3
+		       && !MTLDeviceInfo::supportsFamily(0)
+		       && !MTLDeviceInfo::supportsFamily(5002) // Metal4
+		       && !MTLDeviceInfo::supportsFamily(9999);
+		for (uint64_t apple = 1001; apple <= 1010; ++apple) {
+			ok = ok && !MTLDeviceInfo::supportsFamily(apple);
+		}
+		failures += !ok;
+		std::printf("%s GPU family queries\n", ok ? "PASS" : "FAIL");
+	}
+
+	// -[MTLDevice supportsFeatureSet:]: macOS feature sets only (never iOS or tvOS).
+	{
+		bool ok = true;
+		for (uint64_t mac = 10000; mac <= 10005; ++mac) {
+			ok = ok && MTLDeviceInfo::supportsFeatureSet(mac);
+		}
+		for (uint64_t ios = 0; ios <= 15; ++ios) {
+			ok = ok && !MTLDeviceInfo::supportsFeatureSet(ios);
+		}
+		for (uint64_t tvos = 30000; tvos <= 30005; ++tvos) {
+			ok = ok && !MTLDeviceInfo::supportsFeatureSet(tvos);
+		}
+		ok = ok && !MTLDeviceInfo::supportsFeatureSet(10006)
+		        && !MTLDeviceInfo::supportsFeatureSet(99999);
+		failures += !ok;
+		std::printf("%s feature set queries\n", ok ? "PASS" : "FAIL");
+	}
+
 	std::printf("METAL_DEVICE_INFO failures=%d pass=%d\n", failures, failures == 0);
 	return failures == 0 ? 0 : 1;
 }

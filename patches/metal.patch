@@ -1211,7 +1211,7 @@ index 2a57796..0cbedf2 100644
 -
  @end
 diff --git a/src/Metal/MTLDevice.mm b/src/Metal/MTLDevice.mm
-index f58184a..477759c 100644
+index f58184a..5391eb0 100644
 --- a/src/Metal/MTLDevice.mm
 +++ b/src/Metal/MTLDevice.mm
 @@ -2,14 +2,34 @@
@@ -1411,8 +1411,8 @@ index f58184a..477759c 100644
 +- (BOOL)isHeadless { return NO; }
 +- (NSString*)name { return _name; }
 +- (uint64_t)registryID { return _registryID; }
-+- (BOOL)supportsFamily: (NSUInteger)family { return YES; }
-+- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }
++- (BOOL)supportsFamily: (NSUInteger)family { return MTLDeviceInfo::supportsFamily(family) ? YES : NO; }
++- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return MTLDeviceInfo::supportsFeatureSet(featureSet) ? YES : NO; }
 +- (BOOL)supportsTextureSampleCount: (NSUInteger)sampleCount { return sampleCount <= 4; }
 +/* darling-lol: further feature queries of the current Riot Client's ANGLE.
 + * Float filtering and BC sampling are what the Vulkan device reports for the
@@ -3779,10 +3779,10 @@ new file mode 100644
 +#endif
 diff --git a/private-include/Metal/MTLDeviceInfo.h b/private-include/Metal/MTLDeviceInfo.h
 new file mode 100644
-index 0000000..cc3c993
+index 0000000..447c186
 --- /dev/null
 +++ b/private-include/Metal/MTLDeviceInfo.h
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,334 @@
 +// SPDX-FileCopyrightText: 2026 Darling Developers
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -4075,6 +4075,43 @@ index 0000000..cc3c993
 +		total = heaps[i].size > UINT64_MAX - total ? UINT64_MAX : total + heaps[i].size;
 +	}
 +	return total;
++}
++
++// Apple's MTLGPUFamily values (from macOS <Metal/MTLDevice.h>).
++// An x86-64 Mac GPU (e.g. MacBookPro16,1 Radeon Pro 5500M on macOS 14) supports
++// the Mac, Common, Mac Catalyst and Metal 3 families, and never supports Apple
++// Silicon families (Apple1..Apple10) or newer Metal 4 / unknown families.
++static inline bool supportsFamily(uint64_t family) {
++	switch (family) {
++	case 2001: // MTLGPUFamilyMac1
++	case 2002: // MTLGPUFamilyMac2
++	case 3001: // MTLGPUFamilyCommon1
++	case 3002: // MTLGPUFamilyCommon2
++	case 3003: // MTLGPUFamilyCommon3
++	case 4001: // MTLGPUFamilyMacCatalyst1
++	case 4002: // MTLGPUFamilyMacCatalyst2
++	case 5001: // MTLGPUFamilyMetal3
++		return true;
++	default:
++		return false;
++	}
++}
++
++// Apple's deprecated MTLFeatureSet values (from macOS <Metal/MTLDevice.h>).
++// Only macOS feature sets are supported on a Mac; iOS (0..15) and tvOS
++// (30000..30005) feature sets return false.
++static inline bool supportsFeatureSet(uint64_t featureSet) {
++	switch (featureSet) {
++	case 10000: // MTLFeatureSet_macOS_GPUFamily1_v1
++	case 10001: // MTLFeatureSet_macOS_GPUFamily1_v2
++	case 10002: // MTLFeatureSet_macOS_ReadWriteTextureTier2
++	case 10003: // MTLFeatureSet_macOS_GPUFamily1_v3
++	case 10004: // MTLFeatureSet_macOS_GPUFamily1_v4
++	case 10005: // MTLFeatureSet_macOS_GPUFamily2_v1
++		return true;
++	default:
++		return false;
++	}
 +}
 +
 +} // namespace MTLDeviceInfo
