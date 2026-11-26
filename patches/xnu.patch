@@ -3334,7 +3334,7 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..15f6325 100644
+index f273989..4456ee7 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,13 +9,20 @@
@@ -3770,7 +3770,7 @@ index f273989..15f6325 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +517,458 @@ sysctl_handler(handle_machine)
+@@ -193,3 +517,457 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -4226,8 +4226,7 @@ index f273989..15f6325 100644
 +
 +sysctl_handler(handle_targettype)
 +{
-+	copyout_string("Mac", (char*) old, oldlen);
-+	return 0;
++	return hw_out("Mac", sizeof("Mac"), old, oldlen);
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 index bd9cdc2..cffcbe2 100644
@@ -4346,7 +4345,7 @@ index bd9cdc2..cffcbe2 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..debcda6 100644
+index 4319355..af38c31 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -2,8 +2,13 @@
@@ -4608,7 +4607,7 @@ index 4319355..debcda6 100644
  	v.name[12] = 0;
  	copyout_string(v.name, (char*) old, oldlen);
  
-@@ -103,219 +281,533 @@ sysctl_handler(handle_vendor)
+@@ -103,219 +281,541 @@ sysctl_handler(handle_vendor)
  
  sysctl_handler(handle_max_basic)
  {
@@ -4647,8 +4646,7 @@ index 4319355..debcda6 100644
 -    setup(1);
 +	unsigned int eax, ebx, ecx, edx;
 +	unsigned int signature;
- 
--    __cpuid(level, eax, ebx, ecx, edx);
++
 +	if (darling_compat_profile_enabled())
 +		signature = darling_compat_cpu_identity()->signature;
 +	else
@@ -4657,18 +4655,18 @@ index 4319355..debcda6 100644
 +		signature = eax;
 +	}
  
--    eax = eax >> 7;
--    eax &= 15;
+-    __cpuid(level, eax, ebx, ecx, edx);
 +	return copyout_int32(signature_model(signature), old, oldlen);
 +}
  
--    copyout_int(eax, old, oldlen);
+-    eax = eax >> 7;
+-    eax &= 15;
 +sysctl_handler(handle_stepping)
 +{
 +	unsigned int eax, ebx, ecx, edx;
 +	unsigned int signature;
  
--    return 0;
+-    copyout_int(eax, old, oldlen);
 +	if (darling_compat_profile_enabled())
 +		signature = darling_compat_cpu_identity()->signature;
 +	else
@@ -4676,7 +4674,8 @@ index 4319355..debcda6 100644
 +		cpuid_leaf(1, &eax, &ebx, &ecx, &edx);
 +		signature = eax;
 +	}
-+
+ 
+-    return 0;
 +	return copyout_int32(signature & 0xfu, old, oldlen);
  }
  
@@ -4864,8 +4863,7 @@ index 4319355..debcda6 100644
 +		*oldlen = sizeof(uint32_t);
 +	return 0;
 +}
- 
--    return 0;
++
 +// The host's online logical CPU count (machdep.cpu.thread_count on macOS).
 +sysctl_handler(handle_thread_count) {
 +	const struct darling_cpu_topology* topo = darling_host_cpu_topology();
@@ -4876,7 +4874,8 @@ index 4319355..debcda6 100644
 +		// fixed value the hw.* handlers use.
 +		thread_count = DARLING_CPU_FIXED_COUNT;
 +	}
-+
+ 
+-    return 0;
 +	if (old != NULL && oldlen && *oldlen >= sizeof(uint32_t))
 +		*(uint32_t*)old = thread_count;
 +	if (oldlen)
@@ -4894,10 +4893,9 @@ index 4319355..debcda6 100644
 +// cpuid as guest code sees it: under the compat profile the cpuid trap's view,
 +// so these leaves and a cpuid instruction cannot disagree.
 +static struct cpuid_regs presented_cpuid(unsigned int leaf, unsigned int subleaf)
- {
++{
 +	struct cpuid_regs r = { 0, 0, 0, 0 };
- 
--    setup(1);
++
 +#if defined(__x86_64__)
 +	__asm__("cpuid" : "=a" (r.eax), "=b" (r.ebx), "=c" (r.ecx), "=d" (r.edx) : "0" (leaf), "2" (subleaf));
 +	if (darling_compat_profile_enabled())
@@ -4905,24 +4903,21 @@ index 4319355..debcda6 100644
 +#endif
 +	return r;
 +}
- 
--    static const char features[][7] = {"FPU","VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "","SEP","MTRR","PGE",
--                        "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS",
--                        "HTT", "TM","IA64","PBE"};
++
 +static unsigned int max_basic_leaf(void)
-+{
+ {
 +	return presented_cpuid(0, 0).eax;
 +}
  
--    __cpuid(0,eax,ebx,ecx,edx);
--    int current_length = 0;
+-    setup(1);
 +static unsigned int max_ext_leaf(void)
 +{
 +	return presented_cpuid(0x80000000u, 0).eax;
 +}
  
--    if (old != NULL)
--    {
+-    static const char features[][7] = {"FPU","VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "","SEP","MTRR","PGE",
+-                        "MCA", "CMOV", "PAT", "PSE-36", "PSN", "CLFSH", "", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS",
+-                        "HTT", "TM","IA64","PBE"};
 +static long copyout_bytes(const void* value, unsigned long size, void* out, unsigned long* out_len)
 +{
 +	if (out == NULL)
@@ -4941,47 +4936,39 @@ index 4319355..debcda6 100644
 +	return 0;
 +}
  
--        char *outsr = (char*)old;
+-    __cpuid(0,eax,ebx,ecx,edx);
+-    int current_length = 0;
 +static long copyout_quad(unsigned long long value, void* out, unsigned long* out_len)
 +{
 +	return copyout_bytes(&value, sizeof(value), out, out_len);
 +}
  
--        for (int i = 0; i < 32; i++)
--        {
--            if (i == 10 || i == 20)
--                continue;
+-    if (old != NULL)
+-    {
 +struct feature_name { unsigned char bit; const char* name; };
  
--            if ( (edx & (1<<i)) && current_length < *oldlen)
--            {
--                if (current_length)
--                {
--                    outsr[current_length] = ' ';
+-        char *outsr = (char*)old;
 +// cpuid_get_names(): the names of the set bits, in table order.
 +static void feature_names(const struct feature_name* map, unsigned int count,
 +		unsigned long long bits, char* buffer, unsigned int size)
 +{
 +	unsigned int length = 0;
  
--                    current_length++;
--                }
--                if (current_length < *oldlen)
--                {
--                    int len = __simple_strlen(features[i]);
--                    
--                    strncpy(outsr + current_length, features[i],
--                    *oldlen - current_length);
+-        for (int i = 0; i < 32; i++)
+-        {
+-            if (i == 10 || i == 20)
+-                continue;
 +	while (buffer[length])
 +		length++;
 +	for (unsigned int i = 0; i < count; i++)
 +	{
 +		const char* name = map[i].name;
  
--                    current_length += len;
--                }
--            }
--        }
+-            if ( (edx & (1<<i)) && current_length < *oldlen)
+-            {
+-                if (current_length)
+-                {
+-                    outsr[current_length] = ' ';
 +		if (!((bits >> map[i].bit) & 1))
 +			continue;
 +		if (length != 0 && length < size - 1)
@@ -4992,12 +4979,37 @@ index 4319355..debcda6 100644
 +	buffer[length] = '\0';
 +}
  
+-                    current_length++;
+-                }
+-                if (current_length < *oldlen)
+-                {
+-                    int len = __simple_strlen(features[i]);
+-                    
+-                    strncpy(outsr + current_length, features[i],
+-                    *oldlen - current_length);
++#define NAMES(map) map, sizeof(map) / sizeof(map[0])
+ 
+-                    current_length += len;
+-                }
+-            }
+-        }
++// SYSCTL_OUT of a string with its NUL: a short buffer is not truncated into.
++static long copyout_names(const char* names, void* out, unsigned long* out_len)
++{
++	unsigned long size = 1;
+ 
 -        if (current_length < *oldlen)
 -        {
 -            outsr[current_length] = '\0';
 -        }
-+#define NAMES(map) map, sizeof(map) / sizeof(map[0])
-+
++	while (names[size - 1])
++		size++;
++	return copyout_bytes(names, size, out, out_len);
++}
+ 
+-    }
+-    else
+-    {
 +// leaf 7 EBX in bits 0..31, ECX in 32..63
 +static const struct feature_name leaf7_feature_map[] = {
 +	{0, "RDWRFSGS"}, {1, "TSC_THREAD_OFFSET"}, {2, "SGX"}, {3, "BMI1"}, {4, "HLE"},
@@ -5012,9 +5024,8 @@ index 4319355..debcda6 100644
 +	{59, "MOVDIRI"}, {60, "MOVDIRI64B"}, {62, "SGXLC"},
 +};
  
--    }
--    else
--    {
+-        for (int i = 0; i < 32; i++)
+-        {
 +// leaf 7 EDX
 +static const struct feature_name leaf7_extfeature_map[] = {
 +	{2, "AVX5124VNNIW"}, {3, "AVX5124FMAPS"}, {4, "FSREPMOV"}, {10, "MDCLEAR"},
@@ -5022,19 +5033,13 @@ index 4319355..debcda6 100644
 +	{30, "CCAPMSR"}, {31, "SSBD"},
 +};
  
--        for (int i = 0; i < 32; i++)
--        {
+-            if (i == 10 || i == 20)
+-                continue;
 +// leaf 0x80000001 EDX in bits 0..31, ECX in 32..63; TSCI is leaf 0x80000007 EDX bit 8
 +static const struct feature_name extfeature_map[] = {
 +	{11, "SYSCALL"}, {20, "XD"}, {26, "1GBPAGE"}, {29, "EM64T"}, {32, "LAHF"},
 +	{37, "LZCNT"}, {40, "PREFETCHW"}, {27, "RDTSCP"}, {8, "TSCI"},
 +};
- 
--            if (i == 10 || i == 20)
--                continue;
-+static unsigned long long leaf7_features(void)
-+{
-+	struct cpuid_regs r;
  
 -            if (edx & (1<<i)) 
 -            {
@@ -5043,28 +5048,32 @@ index 4319355..debcda6 100644
 -                
 -                current_length += __simple_strlen(features[i]);
 -            }
++static unsigned long long leaf7_features(void)
++{
++	struct cpuid_regs r;
+ 
+-        }
 +	if (max_basic_leaf() < 7)
 +		return 0;
 +	r = presented_cpuid(7, 0);
 +	return ((unsigned long long) r.ecx << 32) | r.ebx;
 +}
  
--        }
+-        if (oldlen)
+-            *oldlen = current_length;
 +static unsigned int leaf7_extfeatures(void)
 +{
 +	return max_basic_leaf() < 7 ? 0 : presented_cpuid(7, 0).edx;
 +}
  
--        if (oldlen)
--            *oldlen = current_length;
+-    }
+-        
 +static unsigned long long extfeatures(void)
 +{
 +	unsigned int max_ext = max_ext_leaf();
 +	unsigned long long bits = 0;
 +	struct cpuid_regs r;
  
--    }
--        
 +	if (max_ext >= 0x80000001u)
 +	{
 +		r = presented_cpuid(0x80000001u, 0);
@@ -5075,25 +5084,20 @@ index 4319355..debcda6 100644
 +	return bits;
 +}
  
+-    return 0;
 +sysctl_handler(handle_max_ext)
 +{
 +	return copyout_int32(max_ext_leaf(), old, oldlen);
 +}
  
--    return 0;
 +sysctl_handler(handle_signature)
 +{
 +	return copyout_int32(presented_cpuid(1, 0).eax, old, oldlen);
-+}
+ }
  
 +sysctl_handler(handle_extmodel)
 +{
 +	return copyout_int32((presented_cpuid(1, 0).eax >> 16) & 0xfu, old, oldlen);
- }
- 
-+sysctl_handler(handle_extfamily)
-+{
-+	return copyout_int32((presented_cpuid(1, 0).eax >> 20) & 0xffu, old, oldlen);
 +}
  
 -// TODO: i doubt core count is ever going to change.
@@ -5101,50 +5105,58 @@ index 4319355..debcda6 100644
 -sysctl_handler(handle_core_count) {
 -	// it's easier to use /proc/cpuinfo for this.
 -	// using cpuid directly is more difficult because AMD processors don't use the same method as Intel processors.
-+sysctl_handler(handle_brand)
++sysctl_handler(handle_extfamily)
 +{
-+	return copyout_int32(presented_cpuid(1, 0).ebx & 0xffu, old, oldlen);
++	return copyout_int32((presented_cpuid(1, 0).eax >> 20) & 0xffu, old, oldlen);
 +}
  
 -	int infofd = sys_open_nocancel("/proc/cpuinfo", BSD_O_RDONLY, 0);
 -	struct rdline_buffer rbuf;
 -	const char* line;
++sysctl_handler(handle_brand)
++{
++	return copyout_int32(presented_cpuid(1, 0).ebx & 0xffu, old, oldlen);
++}
+ 
+-	// a reasonable default
+-	size_t core_count = 1;
 +sysctl_handler(handle_feature_bits)
 +{
 +	struct cpuid_regs r = presented_cpuid(1, 0);
  
--	// a reasonable default
--	size_t core_count = 1;
+-	if (infofd < 0)
+-		goto out;
 +	return copyout_quad(((unsigned long long) r.ecx << 32) | r.edx, old, oldlen);
 +}
  
--	if (infofd < 0)
--		goto out;
+-	_readline_init(&rbuf);
 +// XNU answers ENOENT for the leaf 7 words when their low 32 bits are zero.
 +sysctl_handler(handle_leaf7_feature_bits)
 +{
 +	unsigned long long bits = leaf7_features();
  
--	_readline_init(&rbuf);
-+	return (unsigned int) bits ? copyout_quad(bits, old, oldlen) : -ENOENT;
-+}
- 
 -	while ((line = _readline(infofd, &rbuf)) != NULL) {
 -		if (strncmp(line, "cpu cores", 9) != 0) {
 -			continue;
 -		}
-+sysctl_handler(handle_leaf7_feature_bits_edx)
-+{
-+	unsigned int bits = leaf7_extfeatures();
++	return (unsigned int) bits ? copyout_quad(bits, old, oldlen) : -ENOENT;
++}
  
 -		// great, we've got "cpu cores"
 -		// now find the actual number
 -		while (*line != ':' && *line != '\0')
 -			++line;
++sysctl_handler(handle_leaf7_feature_bits_edx)
++{
++	unsigned int bits = leaf7_extfeatures();
+ 
+-		// shouldn't happen, but just in case
+-		if (*line == '\0')
+-			continue;
 +	return bits ? copyout_int32(bits, old, oldlen) : -ENOENT;
 +}
  
--		// shouldn't happen, but just in case
+-		++line; // skip the colon
 -		if (*line == '\0')
 -			continue;
 +sysctl_handler(handle_extfeature_bits)
@@ -5152,7 +5164,7 @@ index 4319355..debcda6 100644
 +	return copyout_quad(extfeatures(), old, oldlen);
 +}
  
--		++line; // skip the colon
+-		++line; // skip the space
 -		if (*line == '\0')
 -			continue;
 +sysctl_handler(handle_leaf7_features)
@@ -5166,21 +5178,16 @@ index 4319355..debcda6 100644
 +	buffer[0] = '\0';
 +	feature_names(NAMES(leaf7_feature_map), bits, buffer, sizeof(buffer));
 +	feature_names(NAMES(leaf7_extfeature_map), extbits, buffer, sizeof(buffer));
-+	copyout_string(buffer, (char*) old, oldlen);
-+	return 0;
++	return copyout_names(buffer, old, oldlen);
 +}
- 
--		++line; // skip the space
--		if (*line == '\0')
--			continue;
++
 +sysctl_handler(handle_extfeatures)
 +{
 +	char buffer[512];
 +
 +	buffer[0] = '\0';
 +	feature_names(NAMES(extfeature_map), extfeatures(), buffer, sizeof(buffer));
-+	copyout_string(buffer, (char*) old, oldlen);
-+	return 0;
++	return copyout_names(buffer, old, oldlen);
 +}
 +
 +// Leaf 1 EBX[23:16]; XNU has no such leaf without HTT.
@@ -5220,7 +5227,9 @@ index 4319355..debcda6 100644
 +sysctl_handler(handle_cache_l2_associativity)
 +{
 +	unsigned int assoc = (l2_leaf() >> 12) & 0xfu;
-+
+ 
+-		core_count = __simple_atoi(line, NULL);
+-		break;
 +	if (assoc == 6)
 +		assoc = 8;
 +	else if (assoc == 8)
@@ -5233,9 +5242,7 @@ index 4319355..debcda6 100644
 +		for (unsigned int index = 0; index < 8; index++)
 +		{
 +			struct cpuid_regs r = presented_cpuid(4, index);
- 
--		core_count = __simple_atoi(line, NULL);
--		break;
++
 +			if ((r.eax & 0x1fu) == 0)
 +				break;
 +			if (((r.eax >> 5) & 0x7u) == 2)
