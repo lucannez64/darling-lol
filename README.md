@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/league-on-linux.png" alt="League on Linux icon: a penguin inside a gold hexagonal ring" width="160">
+  <img src="docs/assets/league-on-linux.png" alt="A black-and-white penguin nestled in a circular gold L emblem" width="160">
 </p>
 
 <h1 align="center">League on Linux</h1>

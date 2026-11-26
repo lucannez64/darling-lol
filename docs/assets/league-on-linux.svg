@@ -1,46 +1,118 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="League on Linux">
-  <title>League on Linux</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">League on Linux — a penguin in a circular gold L emblem</title>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#0b1c33"/>
-      <stop offset="1" stop-color="#030a14"/>
+    <linearGradient id="rim-edge" gradientUnits="userSpaceOnUse" x1="112" y1="52" x2="390" y2="473">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".38" stop-color="#b98342"/>
+      <stop offset=".72" stop-color="#59371f"/>
+      <stop offset="1" stop-color="#c99753"/>
     </linearGradient>
-    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f0d895"/>
-      <stop offset="0.5" stop-color="#c8aa6e"/>
-      <stop offset="1" stop-color="#7a5c29"/>
+    <linearGradient id="gold" gradientUnits="userSpaceOnUse" x1="134" y1="51" x2="365" y2="453">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".32" stop-color="#d4a55c"/>
+      <stop offset=".61" stop-color="#a46c34"/>
+      <stop offset=".83" stop-color="#d6aa64"/>
+      <stop offset="1" stop-color="#8c592d"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.55" r="0.5">
-      <stop offset="0" stop-color="#0ac8b9" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#0ac8b9" stop-opacity="0"/>
+    <linearGradient id="rim-inner" gradientUnits="userSpaceOnUse" x1="171" y1="63" x2="294" y2="450">
+      <stop offset="0" stop-color="#694327"/>
+      <stop offset=".53" stop-color="#aa783e"/>
+      <stop offset="1" stop-color="#f3cd84"/>
+    </linearGradient>
+    <radialGradient id="enamel" gradientUnits="userSpaceOnUse" cx="277" cy="198" r="260" gradientTransform="matrix(1 0 0 .89 0 22)">
+      <stop offset="0" stop-color="#225052"/>
+      <stop offset=".55" stop-color="#142c40"/>
+      <stop offset="1" stop-color="#090f20"/>
     </radialGradient>
-    <linearGradient id="belly" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#d9e3ea"/>
+    <linearGradient id="letter" gradientUnits="userSpaceOnUse" x1="166" y1="142" x2="258" y2="393">
+      <stop offset="0" stop-color="#f9d588"/>
+      <stop offset=".43" stop-color="#c6914b"/>
+      <stop offset=".78" stop-color="#ae743a"/>
+      <stop offset="1" stop-color="#e2b772"/>
+    </linearGradient>
+    <linearGradient id="letter-bevel" gradientUnits="userSpaceOnUse" x1="124" y1="142" x2="293" y2="397">
+      <stop offset="0" stop-color="#fff0bd"/>
+      <stop offset=".50" stop-color="#d29e58"/>
+      <stop offset="1" stop-color="#78502e"/>
+    </linearGradient>
+    <linearGradient id="feathers" gradientUnits="userSpaceOnUse" x1="230" y1="114" x2="335" y2="347">
+      <stop offset="0" stop-color="#293745"/>
+      <stop offset=".42" stop-color="#121b27"/>
+      <stop offset="1" stop-color="#0a1019"/>
+    </linearGradient>
+    <linearGradient id="feather-rim" gradientUnits="userSpaceOnUse" x1="236" y1="103" x2="322" y2="345">
+      <stop offset="0" stop-color="#527779"/>
+      <stop offset=".54" stop-color="#294751"/>
+      <stop offset="1" stop-color="#131d29"/>
+    </linearGradient>
+    <linearGradient id="belly" gradientUnits="userSpaceOnUse" x1="253" y1="175" x2="303" y2="344">
+      <stop offset="0" stop-color="#fffaf0"/>
+      <stop offset=".51" stop-color="#f0eee6"/>
+      <stop offset="1" stop-color="#b5c9cd"/>
+    </linearGradient>
+    <linearGradient id="amber" x2=".24" y2="1">
+      <stop offset="0" stop-color="#ffd181"/>
+      <stop offset=".46" stop-color="#efa34a"/>
+      <stop offset="1" stop-color="#b9662b"/>
     </linearGradient>
   </defs>
-  <rect x="16" y="16" width="480" height="480" rx="104" fill="url(#bg)"/>
-  <circle cx="256" cy="276" r="190" fill="url(#glow)"/>
-  <!-- hextech ring -->
-  <polygon points="256,52 432,154 432,358 256,460 80,358 80,154" fill="none" stroke="url(#gold)" stroke-width="18" stroke-linejoin="round"/>
-  <polygon points="256,86 402,171 402,341 256,426 110,341 110,171" fill="none" stroke="#c8aa6e" stroke-opacity="0.45" stroke-width="4" stroke-linejoin="round"/>
-  <!-- penguin -->
-  <g>
-    <ellipse cx="256" cy="300" rx="104" ry="128" fill="#11161c"/>
-    <circle cx="256" cy="186" r="74" fill="#11161c"/>
-    <path d="M160 300 C130 330 136 372 168 380 C176 350 178 320 176 296 Z" fill="#11161c"/>
-    <path d="M352 300 C382 330 376 372 344 380 C336 350 334 320 336 296 Z" fill="#11161c"/>
-    <ellipse cx="256" cy="318" rx="70" ry="98" fill="url(#belly)"/>
-    <ellipse cx="226" cy="180" rx="20" ry="25" fill="#ffffff"/>
-    <ellipse cx="286" cy="180" rx="20" ry="25" fill="#ffffff"/>
-    <circle cx="231" cy="186" r="9" fill="#11161c"/>
-    <circle cx="281" cy="186" r="9" fill="#11161c"/>
-    <circle cx="234" cy="182" r="3" fill="#ffffff"/>
-    <circle cx="284" cy="182" r="3" fill="#ffffff"/>
-    <path d="M226 214 Q256 200 286 214 Q256 246 226 214 Z" fill="#f2a33a"/>
-    <path d="M196 420 Q216 400 244 418 Q228 438 196 432 Z" fill="#f2a33a"/>
-    <path d="M316 420 Q296 400 268 418 Q284 438 316 432 Z" fill="#f2a33a"/>
-  </g>
-  <!-- gold crest -->
-  <path d="M256 236 L272 262 L256 290 L240 262 Z" fill="url(#gold)" stroke="#7a5c29" stroke-width="2"/>
+
+  <!-- The recessed enamel face and its three metal edges. -->
+  <path fill="url(#rim-edge)" d="M256 32a224 224 0 1 1 0 448 224 224 0 1 1 0-448Z"/>
+  <path fill="url(#gold)" d="M256 37a219 219 0 1 1 0 438 219 219 0 1 1 0-438Z"/>
+  <path fill="url(#rim-inner)" d="M256 50a206 206 0 1 1 0 412 206 206 0 1 1 0-412Z"/>
+  <path fill="url(#enamel)" d="M256 56a200 200 0 1 1 0 400 200 200 0 1 1 0-400Z"/>
+  <path d="M59 254a197 197 0 0 1 394 0" fill="none" stroke="#67a3a1" stroke-opacity=".22" stroke-width="2"/>
+
+  <!-- The penguin rests on the foot of the L. -->
+  <path d="M143 145H185L170 162V354H356L382 341L369 393H116L131 374V159Z"
+        fill="#080f1b" stroke="#080f1b" stroke-width="6" stroke-linejoin="round" transform="translate(0 4)"/>
+  <path d="M143 145H185L170 162V354H356L382 341L369 393H116L131 374V159Z"
+        fill="url(#letter)" stroke="#644023" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M143 145H185L170 162V354H356L382 341L372 354L359 363H160V158L166 151H145L140 162V377L134 384L116 393L131 374V159Z"
+        fill="url(#letter-bevel)"/>
+  <path d="M134 384H362L372 354L382 341L369 393H116Z" fill="#714828" opacity=".57"/>
+  <path d="M135 384H362M160 363H356L372 354" fill="none" stroke="#ffe0a1" stroke-opacity=".63" stroke-width="2"/>
+
+  <!-- Feet and a continuous silhouette with tucked flippers. -->
+  <path d="M257 327C244 327 229 333 219 341C213 345 211 351 217 355C228 363 252 361 267 356C273 354 274 347 272 341Z
+           M304 327C317 327 332 333 342 341C348 345 350 351 344 355C333 363 309 361 294 356C288 354 287 347 289 341Z"
+        fill="url(#amber)" stroke="#522c1c" stroke-width="3"/>
+  <path d="M224 352Q232 345 240 345M238 355Q244 349 252 348M337 352Q329 345 321 345M323 355Q317 349 309 348"
+        fill="none" stroke="#925024" stroke-width="2.5" stroke-linecap="round"/>
+
+  <path d="M232 215C221 198 219 173 228 151C238 126 261 112 288 111
+           C317 110 340 125 349 149C357 171 350 195 338 212
+           C344 227 356 243 365 263C375 284 379 302 375 319
+           C372 331 364 332 357 323L342 307
+           C334 335 313 352 280 353C247 354 223 340 213 315
+           L199 328C191 334 184 328 185 318C186 286 200 256 216 237
+           C223 229 229 222 232 215Z"
+        fill="url(#feathers)" stroke="url(#feather-rim)" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M219 257C208 272 198 296 195 312M349 250C359 265 367 288 369 308"
+        fill="none" stroke="#416268" stroke-opacity=".62" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- White cheek and breast, with the crown dipping between the eyes. -->
+  <path d="M237 181C242 163 259 151 271 156C281 159 284 170 286 176
+           C297 160 310 151 321 155C339 161 341 183 331 199
+           C324 210 317 214 317 225C317 235 326 244 332 259
+           C344 287 336 311 321 327C311 338 295 344 279 344
+           C251 344 229 332 222 309C213 281 227 255 242 236
+           C251 224 254 217 248 208C240 200 234 192 237 181Z"
+        fill="url(#belly)"/>
+  <path d="M249 216C263 226 292 231 317 214C306 232 271 241 245 225Z" fill="#66838a" opacity=".24"/>
+
+  <path d="M253 182C256 177 262 175 268 178C273 181 272 185 269 188
+           C263 193 254 189 253 182Z
+           M301 176C304 171 310 169 316 172C321 175 320 179 316 182
+           C311 186 302 183 301 176Z" fill="#101821"/>
+  <path d="M267 180a2.3 2.3 0 1 1-4.6 0 2.3 2.3 0 1 1 4.6 0Z
+           M315 174a2.3 2.3 0 1 1-4.6 0 2.3 2.3 0 1 1 4.6 0Z" fill="#fffaf0"/>
+
+  <path d="M272 196C280 186 289 183 299 187C310 191 318 196 326 196
+           C320 202 308 210 296 214C286 217 277 213 271 207C268 204 269 199 272 196Z"
+        fill="#b7682c" stroke="#673820" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="M272 196C280 186 289 183 299 187C310 191 318 196 326 196
+           C308 199 289 208 270 204Z" fill="url(#amber)"/>
+  <path d="M270 204C289 208 308 199 326 196" fill="none" stroke="#794123" stroke-width="2" stroke-linecap="round"/>
 </svg>
