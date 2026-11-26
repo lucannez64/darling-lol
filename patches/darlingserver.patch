@@ -8187,7 +8187,7 @@ index 26bbb8f..6da6249 100644
  		};
 diff --git a/duct-tape/src/kext_info.c b/duct-tape/src/kext_info.c
 new file mode 100644
-index 0000000..6dd46c4
+index 0000000..dd52b1a
 --- /dev/null
 +++ b/duct-tape/src/kext_info.c
 @@ -0,0 +1,2035 @@
@@ -8388,7 +8388,7 @@ index 0000000..6dd46c4
 +		4, { 8, 6, 4, 1 }
 +	},
 +	{
-+		13, "com.apple.driver.AppleImage4", "5.0.0", "5.0.0",
++		13, "com.apple.security.AppleImage4", "5.0.0", "5.0.0",
 +		"/System/Library/Extensions/AppleImage4.kext", "Contents/MacOS/AppleImage4",
 +		0x02c000u, 0x020000u, 4u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
@@ -9822,7 +9822,7 @@ index 0000000..6dd46c4
 +	uint32_t load_size = is_interface ? 0u : k->load_size;
 +	uint64_t exec_addr = is_interface ? 0ULL : load_addr;
 +	uint32_t exec_size = is_interface ? 0u : k->exec_size;
-+	uint32_t wired_size = (is_interface || load_size <= 0x1000u) ? 0u : (load_size - 0x1000u);
++	uint32_t wired_size = load_size;
 +	uint8_t uuid[16];
 +	dtape_kext_uuid_bytes(k, uuid);
 +

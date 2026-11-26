@@ -248,6 +248,7 @@ class KextRequestTests(unittest.TestCase):
             'com.apple.kpi.private',
             'com.apple.kpi.unsupported',
             'com.apple.kec.corecrypto',
+            'com.apple.security.AppleImage4',
             'com.apple.driver.AppleMobileFileIntegrity',
             'com.apple.security.sandbox',
             'com.apple.filesystems.apfs',
@@ -298,7 +299,7 @@ class KextRequestTests(unittest.TestCase):
                 self.assertGreater(size, 0)
                 self.assertEqual(size % 0x1000, 0)
                 self.assertLessEqual(entry['OSBundleExecLoadSize'], size)
-                self.assertEqual(entry['OSBundleWiredSize'], size - 0x1000)
+                self.assertEqual(entry['OSBundleWiredSize'], size)
                 ranges.append((addr, addr + size, bundle_id))
                 if bundle_id != '__kernel__':
                     self.assertTrue(
