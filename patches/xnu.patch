@@ -3332,7 +3332,7 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..4456ee7 100644
+index f273989..c4fbb42 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,13 +9,20 @@
@@ -3353,7 +3353,7 @@ index f273989..4456ee7 100644
  
  /* Darling specific */
  enum {
-+	_HW_ACTIVECPU = 26, // hw.activecpu's OID in XNU; unused in this table before
++	_HW_AVAILCPU_NAME = 1400, // "availcpu" is not a Darwin name; kept as an alias
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
@@ -3390,7 +3390,7 @@ index f273989..4456ee7 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +67,147 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +67,154 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -3450,6 +3450,13 @@ index f273989..4456ee7 100644
 +	sysctl_handle_size(sizeof(int));
 +#if defined(__i386__) || defined(__x86_64__)
 +	unsigned int regs[4];
++	__asm__("cpuid" : "=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]), "=d" (regs[3]) : "0" (0), "2" (0));
++	if (regs[0] < leaf)
++	{
++		// cpuid above the maximum leaf returns another leaf's data
++		*((int*) old) = 0;
++		return 0;
++	}
 +	__asm__("cpuid" : "=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]), "=d" (regs[3]) : "0" (leaf), "2" (0));
 +	if (darling_compat_profile_enabled())
 +		value = compat_optional_feature(leaf, reg, bit, regs[reg]);
@@ -3532,14 +3539,15 @@ index f273989..4456ee7 100644
 +};
  
  const struct known_sysctl sysctls_hw[] = {
- 	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
+-	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
 -	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_availcpu },
-+	{ .oid = _HW_ACTIVECPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", .handler = handle_availcpu },
++	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", .handler = handle_availcpu },
++	{ .oid = _HW_AVAILCPU_NAME, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
 +	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_ncpu },
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,27 +219,128 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +226,128 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -3671,7 +3679,7 @@ index f273989..4456ee7 100644
  sysctl_handler(handle_availcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -83,6 +348,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +355,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3685,7 +3693,7 @@ index f273989..4456ee7 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +383,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +390,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3703,7 +3711,7 @@ index f273989..4456ee7 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +452,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +459,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3768,7 +3776,7 @@ index f273989..4456ee7 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +517,457 @@ sysctl_handler(handle_machine)
+@@ -193,3 +524,462 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -4067,14 +4075,19 @@ index f273989..4456ee7 100644
 +
 +sysctl_handler(handle_usermem)
 +{
-+	unsigned long long memory = gethostinfo()->max_mem;
++	unsigned long long memory;
 +	struct vm_statistics64 stat;
 +	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-+	mach_port_t hself = mach_host_self();
-+	kern_return_t kr = _kernelrpc_host_statistics64(hself, HOST_VM_INFO64, &stat, &count);
++	mach_port_t hself;
++	kern_return_t kr;
 +
++	if (old == NULL) // a size query needs no statistics
++		return hw_out_int(0, old, oldlen);
++	hself = mach_host_self();
++	kr = _kernelrpc_host_statistics64(hself, HOST_VM_INFO64, &stat, &count);
 +	mach_port_deallocate(mach_task_self(), hself);
-+	if (kr != KERN_SUCCESS)
++	memory = gethostinfo()->max_mem;
++	if (kr != KERN_SUCCESS || memory == 0) // 0: the memory size is unknown
 +		return -EINVAL;
 +	return hw_out_int(usermem_value(memory,
 +		scaled_wired_pages(stat.wire_count, memory, host_real_mem)), old, oldlen);

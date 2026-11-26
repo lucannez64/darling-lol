@@ -38,7 +38,21 @@ if alias.resolve() != headers.resolve():
 #define HW_MACHINE     1
 #define HW_MODEL       2
 #define HW_NCPU        3
+#define HW_BYTEORDER   4
+#define HW_PHYSMEM     5
+#define HW_USERMEM     6
 #define HW_PAGESIZE    7
+#define HW_EPOCH       10
+#define HW_VECTORUNIT  13
+#define HW_BUS_FREQ    14
+#define HW_CACHELINE   16
+#define HW_L1ICACHESIZE 17
+#define HW_L1DCACHESIZE 18
+#define HW_L2SETTINGS  19
+#define HW_L2CACHESIZE 20
+#define HW_L3SETTINGS  21
+#define HW_L3CACHESIZE 22
+#define HW_TB_FREQ     23
 #define HW_MEMSIZE     24
 #define HW_AVAILCPU    25
 #endif
@@ -50,6 +64,16 @@ if alias.resolve() != headers.resolve():
 typedef int cpu_type_t;
 typedef int cpu_subtype_t;
 typedef int cpu_threadtype_t;
+#define CPUFAMILY_INTEL_PENRYN      0x78ea4fbc
+#define CPUFAMILY_INTEL_NEHALEM     0x6b5a4cd2
+#define CPUFAMILY_INTEL_WESTMERE    0x573b5eec
+#define CPUFAMILY_INTEL_SANDYBRIDGE 0x5490b78c
+#define CPUFAMILY_INTEL_IVYBRIDGE   0x1f65e835
+#define CPUFAMILY_INTEL_HASWELL     0x10b282dc
+#define CPUFAMILY_INTEL_BROADWELL   0x582ed09c
+#define CPUFAMILY_INTEL_SKYLAKE     0x37fc219f
+#define CPUFAMILY_INTEL_KABYLAKE    0x0f817246
+#define CPUFAMILY_INTEL_ICELAKE     0x38435547
 #endif
 """)
 (folder / "include/mach/mach_init.h").write_text("""\
@@ -95,6 +119,15 @@ struct host_basic_info {
 };
 #pragma pack(pop)
 #define HOST_BASIC_INFO_COUNT ((mach_msg_type_number_t)(sizeof(struct host_basic_info) / sizeof(integer_t)))
+/* hw.usermem reads the wired page count of HOST_VM_INFO64 */
+struct vm_statistics64 {
+    natural_t free_count;
+    natural_t active_count;
+    natural_t inactive_count;
+    natural_t wire_count;
+};
+#define HOST_VM_INFO64 4
+#define HOST_VM_INFO64_COUNT ((mach_msg_type_number_t)(sizeof(struct vm_statistics64) / sizeof(integer_t)))
 #endif
 """)
 

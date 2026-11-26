@@ -151,6 +151,15 @@ kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo
     return 0;
 }
 
+// The raw HOST_VM_INFO64 reply hw.usermem reads: 1 GiB wired.
+kern_return_t _kernelrpc_host_statistics64(mach_port_name_t host, int flavor, void* info, mach_msg_type_number_t* count) {
+    (void)host; (void)flavor; (void)count;
+    if (rpc_fail)
+        return 5; // KERN_FAILURE
+    ((struct vm_statistics64*)info)->wire_count = 262144;
+    return 0;
+}
+
 // sysctl_hw.c: what libsyscall's host_info wrapper writes into a reply.
 void darling_host_basic_info_present(struct host_basic_info* out, mach_msg_type_number_t count);
 
