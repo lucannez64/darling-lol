@@ -5272,7 +5272,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..3aa1409 100644
+index c2f70fb..bcfd3f1 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -7,6 +7,7 @@
@@ -5448,7 +5448,7 @@ index c2f70fb..3aa1409 100644
  		// arg is a memory location we want to know about
  		// We return information on the mapping where the address belongs or any following mapping
  		// Then we return -ESRCH.
-@@ -170,7 +301,112 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
+@@ -170,7 +301,145 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
  	}
  }
  
@@ -5461,17 +5461,24 @@ index c2f70fb..3aa1409 100644
 +		| ((v & 0xff000000u) >> 24);
 +}
 +
++#define PROC_INFO_MAX_MACHO_CMDS (128u * 1024u)
++
 +/* Parse LC_UUID from a Mach-O header buffer. For a universal (FAT) binary,
 + * writes the x86_64 slice file offset into *fat_slice_offset and returns false
-+ * so the caller can read the slice header and re-parse. */
++ * so the caller can read the slice header and re-parse. If load commands extend
++ * past len without finding LC_UUID, writes the bounded byte count required
++ * (up to PROC_INFO_MAX_MACHO_CMDS) into *needed_bytes. */
 +static bool parse_macho_uuid_bytes(const uint8_t* data, __SIZE_TYPE__ len,
-+		uint8_t out_uuid[16], uint64_t* fat_slice_offset)
++		uint8_t out_uuid[16], uint64_t* fat_slice_offset, uint32_t* needed_bytes)
 +{
 +	uint32_t magic, ncmds, sizeofcmds, hdr_size, i;
++	uint64_t total_needed;
 +	__SIZE_TYPE__ pos, end;
 +
 +	if (fat_slice_offset)
 +		*fat_slice_offset = 0;
++	if (needed_bytes)
++		*needed_bytes = 0;
 +	if (!data || len < 32)
 +		return false;
 +
@@ -5508,10 +5515,9 @@ index c2f70fb..3aa1409 100644
 +
 +	memcpy(&ncmds, data + 16, sizeof(ncmds));
 +	memcpy(&sizeofcmds, data + 20, sizeof(sizeofcmds));
++	total_needed = (uint64_t) hdr_size + (uint64_t) sizeofcmds;
 +	pos = hdr_size;
-+	end = (__SIZE_TYPE__) hdr_size + (__SIZE_TYPE__) sizeofcmds;
-+	if (end > len || end < pos)
-+		end = len;
++	end = total_needed < (uint64_t) len ? (__SIZE_TYPE__) total_needed : len;
 +
 +	for (i = 0; i < ncmds && pos + 8 <= end; i++) {
 +		uint32_t cmd = 0, cmdsize = 0;
@@ -5525,17 +5531,33 @@ index c2f70fb..3aa1409 100644
 +		}
 +		pos += cmdsize;
 +	}
++	if (needed_bytes && total_needed > (uint64_t) len && total_needed <= PROC_INFO_MAX_MACHO_CMDS)
++		*needed_bytes = (uint32_t) total_needed;
 +	return false;
 +}
 +
 +#ifndef VARIANT_DYLD
++static __SIZE_TYPE__ proc_info_read_full(long fd, uint8_t* dst, __SIZE_TYPE__ cap)
++{
++	__SIZE_TYPE__ total = 0;
++	while (total < cap) {
++		long got = LINUX_SYSCALL(__NR_read, fd, dst + total, cap - total);
++		if (got <= 0)
++			break;
++		total += (__SIZE_TYPE__) got;
++	}
++	return total;
++}
++
 +static void read_process_executable_uuid(int32_t pid, uint8_t out_uuid[16])
 +{
 +	char exec_path[4096];
 +	uint8_t hdr[8192];
 +	uint64_t fullLength = 0;
 +	uint64_t slice_offset = 0;
-+	long fd, got;
++	uint32_t needed = 0;
++	__SIZE_TYPE__ got;
++	long fd;
 +
 +	if (dserver_rpc_get_executable_path(pid, exec_path, sizeof(exec_path), &fullLength) != 0)
 +		return;
@@ -5546,13 +5568,24 @@ index c2f70fb..3aa1409 100644
 +	if (fd < 0)
 +		return;
 +
-+	got = LINUX_SYSCALL(__NR_read, fd, hdr, sizeof(hdr));
++	got = proc_info_read_full(fd, hdr, sizeof(hdr));
 +	if (got >= 32) {
-+		if (!parse_macho_uuid_bytes(hdr, (__SIZE_TYPE__) got, out_uuid, &slice_offset) && slice_offset > 0) {
++		if (!parse_macho_uuid_bytes(hdr, got, out_uuid, &slice_offset, &needed) && slice_offset > 0) {
 +			if (LINUX_SYSCALL(__NR_lseek, fd, slice_offset, 0 /* SEEK_SET */) >= 0) {
-+				got = LINUX_SYSCALL(__NR_read, fd, hdr, sizeof(hdr));
++				got = proc_info_read_full(fd, hdr, sizeof(hdr));
 +				if (got >= 32)
-+					parse_macho_uuid_bytes(hdr, (__SIZE_TYPE__) got, out_uuid, NULL);
++					parse_macho_uuid_bytes(hdr, got, out_uuid, NULL, &needed);
++			}
++		}
++		if (needed > sizeof(hdr) && needed <= PROC_INFO_MAX_MACHO_CMDS) {
++			uint8_t* dyn = (uint8_t*) malloc(needed);
++			if (dyn) {
++				if (LINUX_SYSCALL(__NR_lseek, fd, slice_offset, 0 /* SEEK_SET */) >= 0) {
++					got = proc_info_read_full(fd, dyn, needed);
++					if (got >= 32)
++						parse_macho_uuid_bytes(dyn, got, out_uuid, NULL, NULL);
++				}
++				free(dyn);
 +			}
 +		}
 +	}
@@ -5562,7 +5595,7 @@ index c2f70fb..3aa1409 100644
  
  static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
  {
-@@ -183,13 +419,14 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -183,13 +452,14 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
  
  	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
  
@@ -5581,7 +5614,7 @@ index c2f70fb..3aa1409 100644
  
  	//////////////////////////
  	// Read info for pid    //
-@@ -222,23 +459,24 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -222,23 +492,24 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
  	// Read info for ppid   //
  	//////////////////////////
  
@@ -5621,7 +5654,7 @@ index c2f70fb..3aa1409 100644
  }
  
  // glibc bits/confname.h
-@@ -328,6 +566,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -328,6 +599,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
  	info->pbi_start_tvusec = starttime_usecs;
  
  	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
@@ -5630,7 +5663,7 @@ index c2f70fb..3aa1409 100644
  
  	return sizeof(struct proc_bsdinfo);
  reterr:
-@@ -342,10 +582,12 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
+@@ -342,10 +615,12 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
  	// __simple_printf("Asking for pid/tid %d/%d\n", pid, tid);
  
  	struct proc_threadinfo* info = (struct proc_threadinfo*) buffer;
@@ -5645,7 +5678,7 @@ index c2f70fb..3aa1409 100644
  
  	__simple_sprintf(path, "/proc/%d/task/%d/comm", pid, tid);
  	// __simple_printf("Reading thread name from %s\n", path);
-@@ -360,7 +602,7 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
+@@ -360,7 +635,7 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
  	}
  
  	// TODO: Other proc_threadinfo fields
@@ -5654,7 +5687,7 @@ index c2f70fb..3aa1409 100644
  }
  
  static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
-@@ -390,7 +632,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -390,7 +665,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  
  	// comm
  	READELEM();
@@ -5665,7 +5698,7 @@ index c2f70fb..3aa1409 100644
  
  	// process state
  	READELEM();
-@@ -437,7 +681,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -437,7 +714,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  	if (is_64_bit)
  		info->pbsi_flags |= P_LP64;
  
@@ -5675,7 +5708,7 @@ index c2f70fb..3aa1409 100644
  reterr:
  	return -EINVAL;
  }
-@@ -455,6 +700,32 @@ static long _proc_pidinfo_regionpath_setup(int32_t pid, struct rdline_buffer* bu
+@@ -455,6 +733,32 @@ static long _proc_pidinfo_regionpath_setup(int32_t pid, struct rdline_buffer* bu
  	return fd;
  };
  
@@ -5708,7 +5741,7 @@ index c2f70fb..3aa1409 100644
  static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize)
  {
  	struct rdline_buffer buf;
-@@ -465,51 +736,44 @@ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer
+@@ -465,51 +769,44 @@ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer
  
  	if (!buffer)
  		return -EFAULT;
@@ -5781,7 +5814,7 @@ index c2f70fb..3aa1409 100644
  }
  
  static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, int32_t buffer_size) {
-@@ -526,9 +790,11 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+@@ -526,9 +823,11 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
  
  	if (!buffer)
  		return -EFAULT;
@@ -5794,7 +5827,7 @@ index c2f70fb..3aa1409 100644
  	fd = _proc_pidinfo_regionpath_setup(pid, &readline_buffer);
  	if (fd < 0)
  		return fd;
-@@ -545,7 +811,7 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+@@ -545,7 +844,7 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
  			NULL,
  			my_rp.prpo_path
  		)) {
@@ -5803,7 +5836,7 @@ index c2f70fb..3aa1409 100644
  				found = true;
  				break;
  			}
-@@ -554,8 +820,12 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+@@ -554,8 +853,12 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
  
  	close_internal(fd);
  
@@ -5817,7 +5850,7 @@ index c2f70fb..3aa1409 100644
  };
  
  // Parses line such as:
-@@ -643,8 +913,14 @@ static bool parse_smaps_firstline(
+@@ -643,8 +946,14 @@ static bool parse_smaps_firstline(
  	// Read file name (may be empty)
  	while (*p == ' ')
  		p++;
@@ -5834,7 +5867,7 @@ index c2f70fb..3aa1409 100644
  
  	return true;
  }
-@@ -727,7 +1003,7 @@ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -727,7 +1036,7 @@ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize)
  	uint64_t rss = __simple_atoi(elem, NULL);
  
  	ti->pti_virtual_size = vsize;
@@ -5843,7 +5876,7 @@ index c2f70fb..3aa1409 100644
  	ti->pti_total_user = utime;
  	ti->pti_total_system = stime;
  	// ti->pti_threads_user
-@@ -827,3 +1103,88 @@ bail:
+@@ -827,3 +1136,88 @@ bail:
  	close_internal(fd);
  	return count * sizeof(uint64_t);
  }
