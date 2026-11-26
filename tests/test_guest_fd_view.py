@@ -44,14 +44,24 @@ static long fake(long nr, ...)
 	va_end(ap);
 	if (nr == __NR_getpid) return 100;
 	int pid, fd;
-	if (!strcmp(path, "/proc/self/fd/7")) { strcpy(out, "/proc/100/fd"); return 12; }
+	/* /dev/fd is the inherited procfs, where this process is 5000; guest pids live under the prefix. */
+	if (!strcmp(path, "/proc/self")) { strcpy(out, "5000"); return 4; }
+	if (!strcmp(path, "/proc/self/fd/7")) { strcpy(out, "/proc/5000/fd"); return 13; }
+	if (!strcmp(path, "/proc/self/fd/6")) { strcpy(out, "/proc/777/fd"); return 12; }
+	if (!strcmp(path, "/proc/self/fd/9")) { strcpy(out, "/home/u/.darling/proc/42/fd"); return 27; }
 	if (!strcmp(path, "/proc/self/fd/8")) { strcpy(out, "/home/u/dir"); return 11; }
-	if (sscanf(path, "/proc/%d/fd/%d", &pid, &fd) != 2 || fd >= 2000000 || !links[fd]) return -2;
+	/* Other processes' descriptors are only read from the guest's own procfs. */
+	if (sscanf(path, "/home/u/.darling/proc/%d/fd/%d", &pid, &fd) != 2 || fd >= 2000000 || !links[fd]) return -2;
 	long n = strlen(links[fd]); if (n > size) n = size; memcpy(out, links[fd], n); return n;
 }
 #define LINUX_SYSCALL(...) fake(__VA_ARGS__)
 #define __simple_sprintf sprintf
 struct vchroot_unexpand_args { char path[4096]; };
+static int vchroot_guest_proc(const char* path, char* out, unsigned size)
+{
+	if (strlen(path) + 17 > size) return -36;
+	strcpy(out, "/home/u/.darling"); strcat(out, path); return 0;
+}
 static int vchroot_unexpand(struct vchroot_unexpand_args* a)
 {
 	const char* prefix = "/home/u/.darling";
@@ -71,7 +81,8 @@ int main(void)
 	int fds[] = {3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 1048575, 1048570, 77};
 	for (unsigned i = 0; i < sizeof(fds) / sizeof(*fds); ++i) printf("%d=%d ", fds[i], darling_fd_view_type(100, fds[i]));
 	printf("other=%d ", darling_fd_view_type(200, 1048570));
-	printf("dir7=%d dir8=%d\n", darling_fd_view_directory_pid(7), darling_fd_view_directory_pid(8));
+	printf("dir7=%d dir8=%d dir6=%d dir9=%d\n", darling_fd_view_directory_pid(7), darling_fd_view_directory_pid(8),
+	       darling_fd_view_directory_pid(6), darling_fd_view_directory_pid(9));
 	return 0;
 }
 '''
@@ -162,6 +173,8 @@ class GuestDescriptorViewTests(unittest.TestCase):
             self.assertEqual(result[hidden], '-1', hidden)
         self.assertEqual(result['dir7'], '100')
         self.assertEqual(result['dir8'], '0')
+        self.assertEqual(result['dir6'], '0')
+        self.assertEqual(result['dir9'], '42')
 
     def test_descriptor_limit_is_macos_and_never_touches_the_real_one(self):
         # The patch carries hunks, not whole files: compile the added NOFILE block and drive it the
@@ -196,6 +209,39 @@ static long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp) { (v
         self.assertIn('(long) (highest + 1 + 20) * (long) sizeof(struct proc_fdinfo)', info)
         dtable = patched_file(EMU + 'src/xnu_syscall/bsd/impl/unistd/getdtablesize.c')
         self.assertIn('return min(lim.rlim_cur, DARLING_MAXFILESPERPROC);', dtable)
+
+    def test_process_limit_is_bounded_by_kern_maxproc(self):
+        getrlimit = patched_file(EMU + 'src/xnu_syscall/bsd/impl/misc/getrlimit.c')
+        start = getrlimit.index('\tif (which == LINUX_RLIMIT_NPROC)\n')
+        block = getrlimit[start:getrlimit.index('\n\t}\n', start) + 4]
+        source = r'''
+#include <stdio.h>
+enum { LINUX_RLIMIT_NPROC = 6 };
+struct xnu_rlimit { unsigned long long rlim_cur, rlim_max; };
+static void darling_kern_proc_limits(int* maxproc, int* perid) { *maxproc = 4176; *perid = 2784; }
+static void clamp(unsigned which, struct xnu_rlimit* rlp)
+{
+@BLOCK@
+}
+int main(void)
+{
+	struct xnu_rlimit host = { 126609, 126609 }, low = { 100, 200 }, other = { 126609, 126609 };
+	clamp(LINUX_RLIMIT_NPROC, &host); clamp(LINUX_RLIMIT_NPROC, &low); clamp(7, &other);
+	printf("host=%llu/%llu low=%llu/%llu other=%llu\n", host.rlim_cur, host.rlim_max,
+	       low.rlim_cur, low.rlim_max, other.rlim_cur);
+	return 0;
+}
+'''.replace('@BLOCK@', block)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'case.c'
+            src.write_text(source)
+            subprocess.run(['cc', '-std=gnu11', '-w', '-o', str(Path(tmp) / 'case'), str(src)], check=True)
+            out = subprocess.run([str(Path(tmp) / 'case')], check=True, capture_output=True, text=True).stdout
+        # macOS 15.5 on the reference Mac: ulimit -u is kern.maxprocperuid, ulimit -Hu kern.maxproc.
+        self.assertEqual(out.split(), ['host=2784/4176', 'low=100/200', 'other=126609'])
+        kern = patched_file(EMU + 'src/xnu_syscall/bsd/helper/misc/sysctl_kern.c')
+        self.assertIn('void darling_kern_proc_limits(int* maxproc, int* maxprocperuid)', kern)
+
 
 
 if __name__ == '__main__':

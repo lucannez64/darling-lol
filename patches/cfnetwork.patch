@@ -153,19 +153,34 @@ index fdc7bc7..932eb03 100644
              }
  
 diff --git a/src/URL/NSCFURLSession.m b/src/URL/NSCFURLSession.m
-index 95a726b..86291e8 100644
+index 95a726b..78e48c9 100644
 --- a/src/URL/NSCFURLSession.m
 +++ b/src/URL/NSCFURLSession.m
-@@ -9,6 +9,8 @@
+@@ -9,6 +9,23 @@
  
  #import <Foundation/NSData.h>
  #import <Foundation/NSOperation.h>
 +#import <Foundation/NSSet.h>
 +#import <Foundation/NSArray.h>
++#import <CFNetwork/CFURLCache.h>
++#import "NSURLCacheInternal.h"
++
++// macOS creates ~/Library/HTTPStorages/<bundle id>/httpstorages.sqlite for
++// the process when its first NSURLSession is made.
++static void ensureHTTPStorages(void)
++{
++    static dispatch_once_t once = 0L;
++    dispatch_once(&once, ^{
++        NSString *directory = _NSURLStorageDirectory(@"HTTPStorages");
++        if (directory) {
++            _CFURLStorageEnsureHTTPStorages((CFStringRef)directory);
++        }
++    });
++}
  
  @implementation __NSCFURLSessionConfiguration
  @end
-@@ -20,19 +22,20 @@
+@@ -20,19 +37,20 @@
      static dispatch_once_t once = 0L;
      static NSURLSession *sharedSession = nil;
      dispatch_once(&once, ^{
@@ -189,9 +204,11 @@ index 95a726b..86291e8 100644
  }
  
  + (void)_releaseProcessAssertionForSessionIdentifier:(NSString *)identifier
-@@ -56,12 +59,66 @@
+@@ -55,13 +73,68 @@
+             [self release];
              return nil;
          }
++        ensureHTTPStorages();
          _nsCFConfig = (__NSCFURLSessionConfiguration *)[configuration retain];
 -        _delegateQueue = [queue retain];
 -        _delegate = delegate;
@@ -258,7 +275,7 @@ index 95a726b..86291e8 100644
  - (void)delegate_didFinishEventsForBackgroundURLSession
  {
      if ([self can_delegate_didFinishEventsForBackgroundURLSession])
-@@ -364,7 +421,13 @@
+@@ -364,7 +437,13 @@
  
  - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler
  {
@@ -273,7 +290,7 @@ index 95a726b..86291e8 100644
  }
  
  - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url
-@@ -374,9 +437,7 @@
+@@ -374,9 +453,7 @@
  
  - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler
  {
@@ -463,3 +480,1277 @@ index 39367a5..b6a0660 100644
  @end
  
  @implementation NSURLSessionDownloadTask
+diff --git a/private_include/CFNetwork/CFCachedURLResponse.h b/private_include/CFNetwork/CFCachedURLResponse.h
+index 99105fe..8f45936 100644
+--- a/private_include/CFNetwork/CFCachedURLResponse.h
++++ b/private_include/CFNetwork/CFCachedURLResponse.h
+@@ -37,6 +37,22 @@ CF_EXPORT Boolean _CFCachedURLResponseSetDataPath(CFCachedURLResponseRef, const
+ CF_EXPORT Boolean _CFCachedURLResponseEvictFromMemory(CFCachedURLResponseRef, const void* owner);
+ CF_EXPORT Boolean _CFCachedURLResponseCacheToMemory(CFCachedURLResponseRef, const void* owner);
+ 
++// Lazily loaded body (an on-disk cache store row); the loader returns a
++// retained CFData or NULL.
++typedef CFDataRef (*_CFCachedURLResponseDataLoader)(CFTypeRef context, int64_t identifier);
++CF_EXPORT CFCachedURLResponseRef _CFCachedURLResponseCreateWithDataLoader(CFAllocatorRef allocator,
++                                                                         CFURLResponseRef response,
++                                                                         size_t dataSize,
++                                                                         CFDictionaryRef userInfo,
++                                                                         CFCachedURLStoragePolicy storagePolicy,
++                                                                         _CFCachedURLResponseDataLoader loader,
++                                                                         CFTypeRef loaderContext,
++                                                                         int64_t loaderIdentifier);
++CF_EXPORT Boolean _CFCachedURLResponseSetDataLoader(CFCachedURLResponseRef, const void* owner,
++                                                    _CFCachedURLResponseDataLoader loader,
++                                                    CFTypeRef loaderContext,
++                                                    int64_t loaderIdentifier);
++
+ CF_EXTERN_C_END
+ 
+ #endif // __CFCACHEDURLRESPONSE__
+diff --git a/private_include/CFNetwork/CFURLCache.h b/private_include/CFNetwork/CFURLCache.h
+index e574c7a..61b34bc 100644
+--- a/private_include/CFNetwork/CFURLCache.h
++++ b/private_include/CFNetwork/CFURLCache.h
+@@ -92,6 +92,10 @@ void _CFURLCacheRemoveAllCachedResponses(CFURLCacheRef cache);
+ CF_EXPORT
+ void _CFURLCacheSetNSCache(CFURLCacheRef cache, void *nsCache);
+ 
++// Create <directory>/httpstorages.sqlite with the macOS alt_services schema.
++CF_EXPORT
++Boolean _CFURLStorageEnsureHTTPStorages(CFStringRef directory);
++
+ CF_EXTERN_C_END
+ 
+ #endif // __CFURLCACHE__
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index f4ec97f..5c550ae 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -129,6 +129,7 @@ add_framework(CFNetwork
+ 		objc
+ 		icucore
+ 		SystemConfiguration
++		sqlite3
+ 	CIRCULAR_DEPENDENCIES
+ 		Security
+ 
+diff --git a/src/URL/CFCachedURLResponse.c b/src/URL/CFCachedURLResponse.c
+index aedca9f..f818d6a 100644
+--- a/src/URL/CFCachedURLResponse.c
++++ b/src/URL/CFCachedURLResponse.c
+@@ -21,6 +21,11 @@ typedef struct _CFCachedURLResponse {
+     CFCachedURLStoragePolicy policy;
+     const void* owner;
+     CFStringRef dataPath;
++    // Body kept in the owner's on-disk store (Cache.db receiver_data):
++    // read back on demand instead of being held in memory.
++    _CFCachedURLResponseDataLoader loader;
++    CFTypeRef loaderContext;
++    int64_t loaderIdentifier;
+ } _CFCachedURLResponse;
+ 
+ 
+@@ -43,6 +48,18 @@ static void cachedResponseDeallocate(CFTypeRef cf) {
+     if (cachedResponse->dataPath != NULL) {
+         CFRelease(cachedResponse->dataPath);
+     }
++    if (cachedResponse->loaderContext != NULL) {
++        CFRelease(cachedResponse->loaderContext);
++    }
++}
++
++static void dropDataLoader(_CFCachedURLResponse* cachedResponse) {
++    if (cachedResponse->loaderContext != NULL) {
++        CFRelease(cachedResponse->loaderContext);
++    }
++    cachedResponse->loader = NULL;
++    cachedResponse->loaderContext = NULL;
++    cachedResponse->loaderIdentifier = 0;
+ }
+ 
+ static CFTypeID cachedResponseTypeID = _kCFRuntimeNotATypeID;
+@@ -103,6 +120,58 @@ CFCachedURLResponseRef CFCachedURLResponseCreate(CFAllocatorRef allocator,
+     return cachedResponse;
+ }
+ 
++CFCachedURLResponseRef _CFCachedURLResponseCreateWithDataLoader(CFAllocatorRef allocator,
++                                                               CFURLResponseRef response,
++                                                               size_t dataSize,
++                                                               CFDictionaryRef userInfo,
++                                                               CFCachedURLStoragePolicy storagePolicy,
++                                                               _CFCachedURLResponseDataLoader loader,
++                                                               CFTypeRef loaderContext,
++                                                               int64_t loaderIdentifier)
++{
++    if (!response || !loader) {
++        return NULL;
++    }
++    _CFCachedURLResponse* cachedResponse = (_CFCachedURLResponse*)_CFRuntimeCreateInstance(
++        allocator,
++        CFCachedURLResponseGetTypeID(),
++        sizeof(_CFCachedURLResponse) - sizeof(CFRuntimeBase),
++        NULL);
++    if (!cachedResponse) {
++        return NULL;
++    }
++    if (userInfo) {
++        cachedResponse->userInfo = CFDictionaryCreateCopy(kCFAllocatorDefault, userInfo);
++    }
++    cachedResponse->lock = OS_SPINLOCK_INIT;
++    cachedResponse->response = (CFURLResponseRef)CFRetain(response);
++    cachedResponse->policy = storagePolicy;
++    cachedResponse->dataSize = dataSize;
++    cachedResponse->loader = loader;
++    cachedResponse->loaderContext = loaderContext ? CFRetain(loaderContext) : NULL;
++    cachedResponse->loaderIdentifier = loaderIdentifier;
++    return cachedResponse;
++}
++
++Boolean _CFCachedURLResponseSetDataLoader(CFCachedURLResponseRef cachedResponse,
++                                          const void* owner,
++                                          _CFCachedURLResponseDataLoader loader,
++                                          CFTypeRef loaderContext,
++                                          int64_t loaderIdentifier)
++{
++    Boolean result = false;
++    OSSpinLockLock(&cachedResponse->lock);
++    if (owner && cachedResponse->owner == owner && !cachedResponse->dataPath && loader) {
++        dropDataLoader(cachedResponse);
++        cachedResponse->loader = loader;
++        cachedResponse->loaderContext = loaderContext ? CFRetain(loaderContext) : NULL;
++        cachedResponse->loaderIdentifier = loaderIdentifier;
++        result = true;
++    }
++    OSSpinLockUnlock(&cachedResponse->lock);
++    return result;
++}
++
+ CFURLResponseRef CFCachedURLResponseGetResponse(CFCachedURLResponseRef cachedResponse) {
+     return cachedResponse->response;
+ }
+@@ -199,7 +268,7 @@ Boolean _CFCachedURLResponseSetDataPath(CFCachedURLResponseRef cachedResponse,
+             break;
+         }
+ 
+-        if (_CFFSIsSamePath(cachedResponse->dataPath, dataPath)) {
++        if (!cachedResponse->loader && _CFFSIsSamePath(cachedResponse->dataPath, dataPath)) {
+             result = true;
+             break;
+         }
+@@ -230,6 +299,8 @@ Boolean _CFCachedURLResponseSetDataPath(CFCachedURLResponseRef cachedResponse,
+             } else {
+                 cachedResponse->dataPath = NULL;
+             }
++            // The body now lives in memory or in dataPath, not in the store.
++            dropDataLoader(cachedResponse);
+         }
+     } while (0);
+     OSSpinLockUnlock(&cachedResponse->lock);
+@@ -246,7 +317,7 @@ Boolean _CFCachedURLResponseEvictFromMemory(CFCachedURLResponseRef cachedRespons
+             break;
+         }
+ 
+-        if (cachedResponse->dataPath) {
++        if (cachedResponse->dataPath || cachedResponse->loader) {
+             if (cachedResponse->data) {
+                 CFRelease(cachedResponse->data);
+                 cachedResponse->data = NULL;
+@@ -271,7 +342,9 @@ Boolean _CFCachedURLResponseCacheToMemory(CFCachedURLResponseRef cachedResponse,
+         if (cachedResponse->data) {
+             result = true;
+         } else {
+-            result = _CFFSCreateDataFromFile(&cachedResponse->data, cachedResponse->dataPath);
++            CFDataRef data = NULL;
++            result = loadCachedResponseData(cachedResponse, &data);
++            cachedResponse->data = data;
+         }
+     } while (0);
+     OSSpinLockUnlock(&cachedResponse->lock);
+@@ -285,7 +358,13 @@ static Boolean loadCachedResponseData(CFCachedURLResponseRef cachedResponse, CFD
+     if (cachedResponse->data) {
+         *data = (CFDataRef)CFRetain(cachedResponse->data);
+         return true;
+-    } else {
++    } else if (cachedResponse->dataPath) {
+         return _CFFSCreateDataFromFile(data, cachedResponse->dataPath);
++    } else if (cachedResponse->loader) {
++        *data = cachedResponse->loader(cachedResponse->loaderContext,
++                                       cachedResponse->loaderIdentifier);
++        return *data != NULL;
+     }
++    *data = NULL;
++    return false;
+ }
+diff --git a/src/URL/CFURLCache.c b/src/URL/CFURLCache.c
+index d33535b..09c6730 100644
+--- a/src/URL/CFURLCache.c
++++ b/src/URL/CFURLCache.c
+@@ -15,14 +15,16 @@
+ #include "CFMiscUtils.h"
+ #include <libkern/OSAtomic.h>
+ #include <objc/message.h>
++#include <pthread.h>
++#include <sqlite3.h>
+ 
+ typedef struct {
+     CFRuntimeBase _base;
+     CFStringRef requestKey;
+     CFURLRequestRef request;
+     CFCachedURLResponseRef cachedResponse;
+-    CFStringRef parcelPath;
+-    CFStringRef dataPath;
++    int64_t entryID;      // cfurl_cache_response.entry_ID, 0 when not stored
++    CFStringRef dataPath; // fsCachedData/<UUID> for bodies kept on the file system
+     CFAbsoluteTime creationTime;
+     CFAbsoluteTime hitTime;
+     CFIndex hitCount;
+@@ -36,6 +38,7 @@ typedef struct _CFURLCache {
+     size_t diskCapacity;
+     size_t diskUsage;
+     CFStringRef path;
++    CFTypeRef store; // _CFURLCacheStore: Cache.db in 'path', NULL for memory only
+     CFMutableSetRef entries;
+     size_t disableLog;
+     id nsCache;
+@@ -45,21 +48,51 @@ static OSSpinLock sharedCacheLock = OS_SPINLOCK_INIT;
+ static CFURLCacheRef sharedCache = NULL;
+ 
+ static CFIndex const CacheEntryVersion = 1;
+-static CFStringRef const CacheEntryParcelFileExtension = CFSTR(".plist");
+-static CFStringRef const CacheEntryDataFileExtension = CFSTR(".data");
++
++/*
++ * On-disk layout of a macOS 15.5 NSURLCache (measured on the reference Mac):
++ *   <path>/Cache.db (+ -shm, -wal)   SQLite, journal_mode WAL, auto_vacuum 2,
++ *                                    page_size 4096, user_version 203
++ *   <path>/fsCachedData/<UUID>       bodies too large to keep in the database
++ * The statements below are the exact sqlite_master SQL of that database.
++ */
++static const char* const CacheDatabaseName = "Cache.db";
++static CFStringRef const CacheFSDataDirectoryName = CFSTR("fsCachedData");
++static const int CacheDatabaseUserVersion = 203;
++// Bodies up to this size are stored inline in cfurl_cache_receiver_data.
++static const size_t CacheInlineDataLimit = 4096;
++static const char* const CacheSchemaStatements[] = {
++    "CREATE TABLE cfurl_cache_response(entry_ID INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE, \t version INTEGER, hash_value INTEGER, storage_policy INTEGER, request_key TEXT UNIQUE, \t time_stamp NOT NULL DEFAULT CURRENT_TIMESTAMP, partition TEXT)",
++    "CREATE TABLE cfurl_cache_blob_data(entry_ID INTEGER PRIMARY KEY, response_object BLOB, request_object BLOB, \t\t\t  proto_props BLOB, user_info BLOB)",
++    "CREATE TABLE cfurl_cache_receiver_data(entry_ID INTEGER PRIMARY KEY, isDataOnFS INTEGER, receiver_data BLOB)",
++    "CREATE INDEX request_key_index ON cfurl_cache_response(request_key)",
++    "CREATE INDEX time_stamp_index ON cfurl_cache_response(time_stamp)",
++    "CREATE INDEX proto_props_index ON cfurl_cache_blob_data(entry_ID)",
++    "CREATE INDEX receiver_data_index ON cfurl_cache_receiver_data(entry_ID)",
++};
++
++typedef struct {
++    CFRuntimeBase _base;
++    pthread_mutex_t lock;
++    sqlite3* db;
++    CFStringRef fsDataPath;
++} _CFURLCacheStore;
++
++static CFTypeRef storeCreate(CFStringRef directory);
++static CFDataRef storeLoadReceiverData(CFTypeRef store, int64_t entryID);
++static int64_t storeInsertEntry(_CFURLCache*, CacheEntry*, CFDataRef inlineData);
++static void storeDeleteEntry(_CFURLCache*, int64_t entryID);
+ 
+ static CFPropertyListRef cachedResponseCreateParcel(CFCachedURLResponseRef);
+-static CFCachedURLResponseRef cachedResponseCreateFromParcel(CFPropertyListRef, CFStringRef);
++static CFCachedURLResponseRef cachedResponseCreateFromParcel(CFPropertyListRef, CFStringRef dataPath,
++                                                             size_t dataSize, CFTypeRef store, int64_t entryID);
+ 
+ static CFHashCode cacheEntryHash(CFTypeRef entryOrKey);
+ static Boolean cacheEntryEqual(CFTypeRef entryOrKey1, CFTypeRef entryOrKey2);
+ static CFComparisonResult cacheEntryEvictionSorter(CFTypeRef cf1, CFTypeRef cf2, void* context);
+-static CFPropertyListRef cacheEntryCreateParcel(CacheEntry*);
+-static CacheEntry* cacheEntryCreateFromParcel(CFStringRef);
+-static Boolean cacheEntryWriteParcel(CacheEntry*);
+ 
+ static CacheEntry* allocateCacheEntry(void);
+-static Boolean createCacheEntryPaths(_CFURLCache*, CacheEntry*);
++static CFStringRef createFSDataPath(_CFURLCache*);
+ 
+ static void loadCacheEntries(_CFURLCache*);
+ 
+@@ -77,7 +110,6 @@ static Boolean evictCacheEntriesToFitResponse(_CFURLCache*, CFCachedURLResponseR
+ 
+ static void cacheLog(_CFURLCache* cache, CFStringRef format, ...) CF_FORMAT_FUNCTION(2, 3);
+ 
+-static Boolean createNewFile(CFStringRef filePath);
+ static void deleteFileCallback(CFTypeRef fileName, void* path);
+ static Boolean isValidRequest(CFURLRequestRef request);
+ 
+@@ -90,6 +122,9 @@ static void cacheDeallocate(CFTypeRef cf) {
+     if (cache->path) {
+         CFRelease(cache->path);
+     }
++    if (cache->store) {
++        CFRelease(cache->store);
++    }
+     if (cache->entries) {
+         CFRelease(cache->entries);
+     }
+@@ -109,9 +144,17 @@ static void cacheEntryDeallocate(CFTypeRef cf) {
+     if (entry->dataPath) {
+         CFRelease(entry->dataPath);
+     }
+-    if (entry->parcelPath) {
+-        CFRelease(entry->parcelPath);
++}
++
++static void storeDeallocate(CFTypeRef cf) {
++    _CFURLCacheStore* store = (_CFURLCacheStore*)cf;
++    if (store->db) {
++        sqlite3_close(store->db);
+     }
++    if (store->fsDataPath) {
++        CFRelease(store->fsDataPath);
++    }
++    pthread_mutex_destroy(&store->lock);
+ }
+ 
+ static const CFRuntimeClass cacheClass = {
+@@ -126,8 +169,15 @@ static const CFRuntimeClass cacheEntryClass = {
+     .finalize = &cacheEntryDeallocate,
+ };
+ 
++static const CFRuntimeClass storeClass = {
++    .version = 0,
++    .className = "CFURLCacheStore",
++    .finalize = &storeDeallocate,
++};
++
+ static CFTypeID cacheTypeID = _kCFRuntimeNotATypeID;
+ static CFTypeID cacheEntryTypeID = _kCFRuntimeNotATypeID;
++static CFTypeID storeTypeID = _kCFRuntimeNotATypeID;
+ 
+ 
+ /* API */
+@@ -135,6 +185,7 @@ static CFTypeID cacheEntryTypeID = _kCFRuntimeNotATypeID;
+ CFTypeID CFURLCacheGetTypeID(void) {
+     _CFRuntimeRegisterClassOnce(&cacheTypeID, &cacheClass);
+     _CFRuntimeRegisterClassOnce(&cacheEntryTypeID, &cacheEntryClass);
++    _CFRuntimeRegisterClassOnce(&storeTypeID, &storeClass);
+     return cacheTypeID;
+ }
+ 
+@@ -194,6 +245,8 @@ CFURLCacheRef CFURLCacheCreate(CFAllocatorRef allocator, size_t memoryCapacity,
+             CFRelease(cache);
+             return NULL;
+         }
++        // Without a usable Cache.db the cache keeps working in memory.
++        cache->store = storeCreate(path);
+     }
+ 
+     cacheLog(cache, CFSTR("created with capacity = %zd:%zd bytes, path = '%@'"),
+@@ -405,23 +458,45 @@ Boolean _CFURLCacheAddCachedResponseForRequest(CFURLCacheRef cache,
+             break;
+         }
+ 
+-        CacheEntry* entry = allocateCacheEntry();
++        entry = allocateCacheEntry();
+         entry->creationTime = CFAbsoluteTimeGetCurrent();
+         entry->request = CFURLRequestCreateCopy(kCFAllocatorDefault, request);
+         entry->cachedResponse = (CFCachedURLResponseRef)CFRetain(cachedResponse);
+ 
+         CFCachedURLStoragePolicy policy = CFCachedURLResponseGetStoragePolicy(cachedResponse);
+-        if (policy == CFURLCacheStorageAllowed) {
+-            if (!createCacheEntryPaths(cache, entry)) {
+-                break;
++        if (policy == CFURLCacheStorageAllowed && cache->store) {
++            Boolean onFS = CFCachedURLResponseGetDataSize(cachedResponse) > CacheInlineDataLimit;
++            CFDataRef inlineData = NULL;
++            if (onFS) {
++                entry->dataPath = createFSDataPath(cache);
++                if (!entry->dataPath ||
++                    !_CFCachedURLResponseSetDataPath(cachedResponse, cache, entry->dataPath))
++                {
++                    break;
++                }
++            } else {
++                // Move any file-backed body into memory, then into the database.
++                if (!_CFCachedURLResponseSetDataPath(cachedResponse, cache, NULL) ||
++                    !CFCachedURLResponseLoadData(cachedResponse, &inlineData))
++                {
++                    break;
++                }
++            }
++            entry->entryID = storeInsertEntry(cache, entry, inlineData);
++            if (inlineData) {
++                CFRelease(inlineData);
+             }
+-            if (!cacheEntryWriteParcel(entry)) {
++            if (!entry->entryID) {
+                 break;
+             }
+-            if (!_CFCachedURLResponseSetDataPath(cachedResponse, cache, entry->dataPath)) {
++            if (!onFS && !_CFCachedURLResponseSetDataLoader(cachedResponse, cache,
++                                                            &storeLoadReceiverData,
++                                                            cache->store, entry->entryID))
++            {
+                 break;
+             }
+-
++        }
++        if (policy == CFURLCacheStorageAllowed) {
+             size_t memorySize = _CFCachedURLResponseGetMemorySize(cachedResponse);
+             if (cache->memoryUsage + memorySize > cache->memoryCapacity &&
+                 !_CFCachedURLResponseEvictFromMemory(cachedResponse, cache))
+@@ -434,19 +509,19 @@ Boolean _CFURLCacheAddCachedResponseForRequest(CFURLCacheRef cache,
+ 
+         result = true;
+     } while (false);
+-    OSSpinLockUnlock(&cache->lock);
+     if (!result) {
+         _CFCachedURLResponseSetDataPath(cachedResponse, cache, NULL);
+         _CFCachedURLResponseReleaseOwnership(cachedResponse, cache);
+         if (entry) {
+-            if (entry->parcelPath) {
+-                _CFFSUnlink(entry->parcelPath);
++            if (entry->entryID) {
++                storeDeleteEntry(cache, entry->entryID);
+             }
+             if (entry->dataPath) {
+                 _CFFSUnlink(entry->dataPath);
+             }
+         }
+     }
++    OSSpinLockUnlock(&cache->lock);
+     if (entry) {
+         CFRelease(entry);
+     }
+@@ -569,7 +644,10 @@ static CFPropertyListRef cachedResponseCreateParcel(CFCachedURLResponseRef cache
+ }
+ 
+ static CFCachedURLResponseRef cachedResponseCreateFromParcel(CFPropertyListRef rawParcel,
+-                                                             CFStringRef dataPath)
++                                                             CFStringRef dataPath,
++                                                             size_t dataSize,
++                                                             CFTypeRef store,
++                                                             int64_t entryID)
+ {
+     if (CFGetTypeID(rawParcel) != CFDictionaryGetTypeID()) {
+         return NULL;
+@@ -593,9 +671,17 @@ static CFCachedURLResponseRef cachedResponseCreateFromParcel(CFPropertyListRef r
+         CFCachedURLStoragePolicy storagePolicy = CFURLCacheStorageNotAllowed;
+         PARCEL_GET_ENUM(parcel, storagePolicy, "storagePolicy");
+ 
+-        cachedResponse = CFCachedURLResponseCreate(
+-            kCFAllocatorDefault,
+-            response, dataPath, userInfo, storagePolicy);
++        if (dataPath) {
++            cachedResponse = CFCachedURLResponseCreate(
++                kCFAllocatorDefault,
++                response, dataPath, userInfo, storagePolicy);
++        } else {
++            // Inline body: read from Cache.db when first needed.
++            cachedResponse = _CFCachedURLResponseCreateWithDataLoader(
++                kCFAllocatorDefault,
++                response, dataSize, userInfo, storagePolicy,
++                &storeLoadReceiverData, store, entryID);
++        }
+     }
+     while (0);
+     if (response) {
+@@ -647,209 +733,524 @@ static CFComparisonResult cacheEntryEvictionSorter(CFTypeRef cf1, CFTypeRef cf2,
+     }
+ }
+ 
+-static CFPropertyListRef cacheEntryCreateParcel(CacheEntry* entry) {
+-    CFMutableDictionaryRef parcel = CFDictionaryCreateMutable(
++static CacheEntry* allocateCacheEntry(void) {
++    return (CacheEntry*)_CFRuntimeCreateInstance(
+         kCFAllocatorDefault,
+-        0,
+-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++        cacheEntryTypeID,
++        sizeof(CacheEntry) - sizeof(CFRuntimeBase),
++        NULL);
++}
+ 
+-    do {
+-        PARCEL_SET_CFINDEX(parcel, CacheEntryVersion, "version");
++/* Cache.db store */
+ 
+-        PARCEL_SET_OBJECT(parcel, entry->dataPath, "dataPath");
+-        PARCEL_SET_TIME(parcel, entry->creationTime, "creationTime");
+-        PARCEL_SET_TIME(parcel, entry->hitTime, "hitTime");
+-        PARCEL_SET_CFINDEX(parcel, entry->hitCount, "hitCount");
++static Boolean storeExec(sqlite3* db, const char* sql) {
++    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
++}
+ 
+-        CFPropertyListRef subParcel = _CFURLRequestCreateParcel(entry->request);
+-        if (!subParcel) {
+-            break;
+-        }
+-        CFDictionarySetValue(parcel, CFSTR("request"), subParcel);
+-        CFRelease(subParcel);
++static Boolean storeHasTable(sqlite3* db, const char* name) {
++    sqlite3_stmt* stmt = NULL;
++    Boolean found = false;
++    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
++                           -1, &stmt, NULL) == SQLITE_OK) {
++        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
++        found = sqlite3_step(stmt) == SQLITE_ROW;
++    }
++    sqlite3_finalize(stmt);
++    return found;
++}
+ 
+-        subParcel = cachedResponseCreateParcel(entry->cachedResponse);
+-        if (!subParcel) {
+-            break;
++static Boolean storeCreateSchema(sqlite3* db) {
++    if (storeHasTable(db, "cfurl_cache_response")) {
++        return true;
++    }
++    if (!storeExec(db, "BEGIN")) {
++        return false;
++    }
++    for (size_t i = 0; i != sizeof(CacheSchemaStatements) / sizeof(CacheSchemaStatements[0]); ++i) {
++        if (!storeExec(db, CacheSchemaStatements[i])) {
++            storeExec(db, "ROLLBACK");
++            return false;
+         }
+-        CFDictionarySetValue(parcel, CFSTR("cachedResponse"), subParcel);
+-        CFRelease(subParcel);
++    }
++    char pragma[64];
++    snprintf(pragma, sizeof(pragma), "PRAGMA user_version = %d", CacheDatabaseUserVersion);
++    if (!storeExec(db, pragma) || !storeExec(db, "COMMIT")) {
++        storeExec(db, "ROLLBACK");
++        return false;
++    }
++    return true;
++}
+ 
+-        return parcel;
++static CFTypeRef storeCreate(CFStringRef directory) {
++    CFStringRef dbName = CFStringCreateWithCString(kCFAllocatorDefault, CacheDatabaseName,
++                                                   kCFStringEncodingUTF8);
++    CFStringRef dbPath = NULL;
++    _CFFSAppendPathComponent(&dbPath, directory, dbName);
++    CFRelease(dbName);
++    char* dbPathRep = _CFFSCreateRepresentation(dbPath);
++    CFRelease(dbPath);
++    if (!dbPathRep) {
++        return NULL;
+     }
+-    while (0);
+ 
+-    CFRelease(parcel);
+-    return NULL;
++    sqlite3* db = NULL;
++    int rc = sqlite3_open_v2(dbPathRep, &db,
++                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
++                             NULL);
++    free(dbPathRep);
++    if (rc != SQLITE_OK) {
++        if (db) {
++            sqlite3_close(db);
++        }
++        return NULL;
++    }
++    sqlite3_busy_timeout(db, 5000);
++    // auto_vacuum (2 = incremental, as on macOS) must be chosen before the
++    // first table exists; on an existing database the pragma is a no-op.
++    if (!storeHasTable(db, "cfurl_cache_response")) {
++        storeExec(db, "PRAGMA auto_vacuum = 2");
++    }
++    storeExec(db, "PRAGMA journal_mode = WAL");
++    if (!storeCreateSchema(db)) {
++        sqlite3_close(db);
++        return NULL;
++    }
++
++    _CFURLCacheStore* store = (_CFURLCacheStore*)_CFRuntimeCreateInstance(
++        kCFAllocatorDefault,
++        storeTypeID,
++        sizeof(_CFURLCacheStore) - sizeof(CFRuntimeBase),
++        NULL);
++    if (!store) {
++        sqlite3_close(db);
++        return NULL;
++    }
++    pthread_mutex_init(&store->lock, NULL);
++    store->db = db;
++    _CFFSAppendPathComponent(&store->fsDataPath, directory, CacheFSDataDirectoryName);
++    return store;
+ }
+ 
+-static CacheEntry* cacheEntryCreateFromParcel(CFStringRef parcelPath) {
+-    CFPropertyListRef rawParcel = NULL;
+-    if (!_CFFSCreatePropertyListFromFile(&rawParcel, parcelPath)) {
+-        return false;
++static void storeBindData(sqlite3_stmt* stmt, int index, CFDataRef data) {
++    if (data) {
++        sqlite3_bind_blob(stmt, index, CFDataGetBytePtr(data), (int)CFDataGetLength(data),
++                          SQLITE_TRANSIENT);
++    } else {
++        sqlite3_bind_null(stmt, index);
+     }
++}
+ 
+-    Boolean success = false;
+-    CacheEntry* entry = NULL;
+-    do {
+-        if (CFGetTypeID(rawParcel) != CFDictionaryGetTypeID()) {
+-            break;
++static void storeBindString(sqlite3_stmt* stmt, int index, CFStringRef string) {
++    char* rep = NULL;
++    if (string) {
++        CFIndex size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(string),
++                                                         kCFStringEncodingUTF8) + 1;
++        rep = (char*)malloc(size);
++        if (rep && !CFStringGetCString(string, rep, size, kCFStringEncodingUTF8)) {
++            free(rep);
++            rep = NULL;
+         }
+-        CFDictionaryRef parcel = (CFDictionaryRef)rawParcel;
++    }
++    if (rep) {
++        sqlite3_bind_text(stmt, index, rep, -1, free);
++    } else {
++        sqlite3_bind_null(stmt, index);
++    }
++}
+ 
+-        entry = allocateCacheEntry();
++static CFDataRef createPlistData(CFPropertyListRef plist) {
++    if (!plist) {
++        return NULL;
++    }
++    return CFPropertyListCreateData(kCFAllocatorDefault, plist,
++                                    kCFPropertyListBinaryFormat_v1_0, 0, NULL);
++}
+ 
+-        CFIndex version = 0;
+-        PARCEL_GET_CFINDEX(parcel, version, "version");
+-        if (version != CacheEntryVersion) {
+-            break;
+-        }
++static CFPropertyListRef createPlistFromColumn(sqlite3_stmt* stmt, int column) {
++    const void* bytes = sqlite3_column_blob(stmt, column);
++    int length = sqlite3_column_bytes(stmt, column);
++    if (!bytes || length <= 0) {
++        return NULL;
++    }
++    CFDataRef data = CFDataCreate(kCFAllocatorDefault, (const UInt8*)bytes, length);
++    CFPropertyListRef plist = CFPropertyListCreateWithData(kCFAllocatorDefault, data,
++                                                           kCFPropertyListImmutable, NULL, NULL);
++    CFRelease(data);
++    return plist;
++}
+ 
+-        PARCEL_GET_RETAINED_OBJECT(parcel, CFString, entry->dataPath, "dataPath");
+-        PARCEL_GET_TIME(parcel, entry->creationTime, "creationTime");
+-        PARCEL_GET_TIME(parcel, entry->hitTime, "hitTime");
+-        PARCEL_GET_CFINDEX(parcel, entry->hitCount, "hitCount");
++// The request_key column holds the absolute URL, as on macOS; requests other
++// than GET keep their method in front so they stay distinct.
++static CFStringRef createStoreKeyForRequest(CFURLRequestRef request) {
++    CFURLRef url = CFURLCopyAbsoluteURL(CFURLRequestGetURL(request));
++    CFStringRef method = CFURLRequestCopyHTTPMethod(request);
++    CFStringRef key;
++    if (!method || CFEqual(method, CFSTR("GET"))) {
++        key = CFStringCreateCopy(kCFAllocatorDefault, CFURLGetString(url));
++    } else {
++        key = CFStringCreateWithFormat(kCFAllocatorDefault, NULL, CFSTR("%@ %@"),
++                                       method, CFURLGetString(url));
++    }
++    if (method) {
++        CFRelease(method);
++    }
++    CFRelease(url);
++    return key;
++}
+ 
+-        CFPropertyListRef subParcel = CFDictionaryGetValue(parcel, CFSTR("request"));
+-        if (subParcel) {
+-            entry->request = _CFURLRequestCreateFromParcel(kCFAllocatorDefault, subParcel);
++static void storeDeleteRows(sqlite3* db, const char* where, int64_t entryID, CFStringRef key) {
++    static const char* const tables[] = {
++        "cfurl_cache_blob_data", "cfurl_cache_receiver_data", "cfurl_cache_response"
++    };
++    for (size_t i = 0; i != sizeof(tables) / sizeof(tables[0]); ++i) {
++        char sql[256];
++        snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE %s", tables[i], where);
++        sqlite3_stmt* stmt = NULL;
++        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
++            if (key) {
++                storeBindString(stmt, 1, key);
++            } else {
++                sqlite3_bind_int64(stmt, 1, entryID);
++            }
++            sqlite3_step(stmt);
+         }
++        sqlite3_finalize(stmt);
++    }
++}
+ 
+-        subParcel = CFDictionaryGetValue(parcel, CFSTR("cachedResponse"));
+-        if (subParcel) {
+-            entry->cachedResponse = cachedResponseCreateFromParcel(subParcel, entry->dataPath);
+-        }
++static int64_t storeInsertEntry(_CFURLCache* cache, CacheEntry* entry, CFDataRef inlineData) {
++    _CFURLCacheStore* store = (_CFURLCacheStore*)cache->store;
++    if (!store) {
++        return 0;
++    }
+ 
+-        if (!entry->request || !entry->dataPath || !entry->cachedResponse) {
++    CFStringRef key = createStoreKeyForRequest(entry->request);
++    CFPropertyListRef responseParcel = cachedResponseCreateParcel(entry->cachedResponse);
++    CFPropertyListRef requestParcel = _CFURLRequestCreateParcel(entry->request);
++    CFDataRef responseData = createPlistData(responseParcel);
++    CFDataRef requestData = createPlistData(requestParcel);
++    CFDataRef userInfoData = createPlistData(CFCachedURLResponseGetUserInfo(entry->cachedResponse));
++    CFStringRef fsName = NULL;
++    if (entry->dataPath) {
++        _CFFSGetLastPathComponent(&fsName, entry->dataPath);
++    }
++
++    int64_t entryID = 0;
++    sqlite3_stmt* stmt = NULL;
++    pthread_mutex_lock(&store->lock);
++    do {
++        if (!key || !responseData || !requestData || (entry->dataPath && !fsName)) {
++            break;
++        }
++        if (!storeExec(store->db, "BEGIN IMMEDIATE")) {
+             break;
+         }
++        // A row left by an earlier run for the same request is replaced.
++        const char* oldRows = "entry_ID IN (SELECT entry_ID FROM cfurl_cache_response WHERE request_key = ?)";
++        storeDeleteRows(store->db, oldRows, 0, key);
++
++        Boolean ok = false;
++        if (sqlite3_prepare_v2(store->db,
++                "INSERT INTO cfurl_cache_response(version, hash_value, storage_policy, request_key, partition) "
++                "VALUES (?, ?, ?, ?, NULL)", -1, &stmt, NULL) == SQLITE_OK) {
++            sqlite3_bind_int64(stmt, 1, CacheEntryVersion);
++            sqlite3_bind_int64(stmt, 2, (sqlite3_int64)(uint32_t)CFHash(key));
++            sqlite3_bind_int64(stmt, 3, CFCachedURLResponseGetStoragePolicy(entry->cachedResponse));
++            storeBindString(stmt, 4, key);
++            ok = sqlite3_step(stmt) == SQLITE_DONE;
++        }
++        sqlite3_finalize(stmt);
++        stmt = NULL;
++        int64_t newID = ok ? sqlite3_last_insert_rowid(store->db) : 0;
++
++        if (ok && sqlite3_prepare_v2(store->db,
++                "INSERT INTO cfurl_cache_blob_data(entry_ID, response_object, request_object, proto_props, user_info) "
++                "VALUES (?, ?, ?, NULL, ?)", -1, &stmt, NULL) == SQLITE_OK) {
++            sqlite3_bind_int64(stmt, 1, newID);
++            storeBindData(stmt, 2, responseData);
++            storeBindData(stmt, 3, requestData);
++            storeBindData(stmt, 4, userInfoData);
++            ok = sqlite3_step(stmt) == SQLITE_DONE;
++        } else {
++            ok = false;
++        }
++        sqlite3_finalize(stmt);
++        stmt = NULL;
++
++        if (ok && sqlite3_prepare_v2(store->db,
++                "INSERT INTO cfurl_cache_receiver_data(entry_ID, isDataOnFS, receiver_data) "
++                "VALUES (?, ?, ?)", -1, &stmt, NULL) == SQLITE_OK) {
++            sqlite3_bind_int64(stmt, 1, newID);
++            sqlite3_bind_int(stmt, 2, fsName ? 1 : 0);
++            if (fsName) {
++                storeBindString(stmt, 3, fsName);
++            } else if (inlineData) {
++                storeBindData(stmt, 3, inlineData);
++            } else {
++                sqlite3_bind_zeroblob(stmt, 3, 0);
++            }
++            ok = sqlite3_step(stmt) == SQLITE_DONE;
++        } else {
++            ok = false;
++        }
++        sqlite3_finalize(stmt);
++        stmt = NULL;
+ 
+-        entry->parcelPath = (CFStringRef)CFRetain(parcelPath);
+-        success = true;
++        if (ok && storeExec(store->db, "COMMIT")) {
++            entryID = newID;
++        } else {
++            storeExec(store->db, "ROLLBACK");
++        }
+     } while (0);
+-    CFRelease(rawParcel);
+-    if (!success && entry) {
+-        CFRelease(entry);
+-        entry = NULL;
++    pthread_mutex_unlock(&store->lock);
++
++    if (key) CFRelease(key);
++    if (responseParcel) CFRelease(responseParcel);
++    if (requestParcel) CFRelease(requestParcel);
++    if (responseData) CFRelease(responseData);
++    if (requestData) CFRelease(requestData);
++    if (userInfoData) CFRelease(userInfoData);
++    if (fsName) CFRelease(fsName);
++    return entryID;
++}
++
++static void storeDeleteEntry(_CFURLCache* cache, int64_t entryID) {
++    _CFURLCacheStore* store = (_CFURLCacheStore*)cache->store;
++    if (!store || !entryID) {
++        return;
++    }
++    pthread_mutex_lock(&store->lock);
++    if (storeExec(store->db, "BEGIN IMMEDIATE")) {
++        storeDeleteRows(store->db, "entry_ID = ?", entryID, NULL);
++        if (!storeExec(store->db, "COMMIT")) {
++            storeExec(store->db, "ROLLBACK");
++        }
+     }
++    pthread_mutex_unlock(&store->lock);
++}
+ 
+-    return entry;
++static CFDataRef storeLoadReceiverData(CFTypeRef storeRef, int64_t entryID) {
++    _CFURLCacheStore* store = (_CFURLCacheStore*)storeRef;
++    if (!store) {
++        return NULL;
++    }
++    CFDataRef data = NULL;
++    sqlite3_stmt* stmt = NULL;
++    pthread_mutex_lock(&store->lock);
++    if (sqlite3_prepare_v2(store->db,
++            "SELECT receiver_data FROM cfurl_cache_receiver_data WHERE entry_ID = ? AND isDataOnFS = 0",
++            -1, &stmt, NULL) == SQLITE_OK) {
++        sqlite3_bind_int64(stmt, 1, entryID);
++        if (sqlite3_step(stmt) == SQLITE_ROW) {
++            const void* bytes = sqlite3_column_blob(stmt, 0);
++            int length = sqlite3_column_bytes(stmt, 0);
++            data = CFDataCreate(kCFAllocatorDefault, (const UInt8*)(bytes ? bytes : ""), length);
++        }
++    }
++    sqlite3_finalize(stmt);
++    pthread_mutex_unlock(&store->lock);
++    return data;
+ }
+ 
+-static Boolean cacheEntryWriteParcel(CacheEntry* entry) {
+-    CFPropertyListRef parcel = cacheEntryCreateParcel(entry);
+-    if (!parcel) {
++/* HTTPStorages */
++
++// macOS 15.5 keeps alt-svc state of each app in
++// ~/Library/HTTPStorages/<bundle id>/httpstorages.sqlite (WAL, auto_vacuum 2,
++// user_version 0); this is the exact sqlite_master SQL of that database.
++static const char* const HTTPStoragesSchemaStatement =
++    "CREATE TABLE alt_services (        partition text NOT NULL,        host text NOT NULL,        alternateHost text NOT NULL,        port int NOT NULL,        alternatePort int NOT NULL,        type int NOT NULL,        creation_time int,        expires_time int,        UNIQUE(partition, host, port, type)        )";
++
++// Like the macOS networking stack, the process keeps the database open, so
++// its -wal and -shm files stay while the process runs.
++static pthread_mutex_t httpStoragesLock = PTHREAD_MUTEX_INITIALIZER;
++static sqlite3* httpStoragesDB = NULL;
++
++Boolean _CFURLStorageEnsureHTTPStorages(CFStringRef directory) {
++    pthread_mutex_lock(&httpStoragesLock);
++    Boolean opened = httpStoragesDB != NULL;
++    pthread_mutex_unlock(&httpStoragesLock);
++    if (opened) {
++        return true;
++    }
++    if (!directory || !_CFFSCheckCreateDirectory(directory)) {
+         return false;
+     }
+-    Boolean result = _CFFSWritePropertyListToFile(parcel, entry->parcelPath);
+-    CFRelease(parcel);
++    CFStringRef dbPath = NULL;
++    _CFFSAppendPathComponent(&dbPath, directory, CFSTR("httpstorages.sqlite"));
++    char* dbPathRep = _CFFSCreateRepresentation(dbPath);
++    CFRelease(dbPath);
++    if (!dbPathRep) {
++        return false;
++    }
++    sqlite3* db = NULL;
++    int rc = sqlite3_open_v2(dbPathRep, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
++    free(dbPathRep);
++    Boolean result = false;
++    if (rc == SQLITE_OK) {
++        sqlite3_busy_timeout(db, 5000);
++        if (storeHasTable(db, "alt_services")) {
++            result = true;
++        } else {
++            storeExec(db, "PRAGMA auto_vacuum = 2");
++            storeExec(db, "PRAGMA journal_mode = WAL");
++            result = storeExec(db, HTTPStoragesSchemaStatement);
++        }
++    }
++    pthread_mutex_lock(&httpStoragesLock);
++    if (result && !httpStoragesDB) {
++        httpStoragesDB = db;
++        db = NULL;
++    }
++    pthread_mutex_unlock(&httpStoragesLock);
++    if (db) {
++        sqlite3_close(db);
++    }
+     return result;
+ }
+ 
+-static CacheEntry* allocateCacheEntry(void) {
+-    return (CacheEntry*)_CFRuntimeCreateInstance(
+-        kCFAllocatorDefault,
+-        cacheEntryTypeID,
+-        sizeof(CacheEntry) - sizeof(CFRuntimeBase),
+-        NULL);
+-}
+-
+-static Boolean createCacheEntryPaths(_CFURLCache* cache, CacheEntry* entry) {
++static CFStringRef createFSDataPath(_CFURLCache* cache) {
++    _CFURLCacheStore* store = (_CFURLCacheStore*)cache->store;
++    if (!store || !_CFFSCheckCreateDirectory(store->fsDataPath)) {
++        return NULL;
++    }
+     CFUUIDRef uuid = CFUUIDCreate(kCFAllocatorDefault);
+     CFStringRef uuidString = CFUUIDCreateString(kCFAllocatorDefault, uuid);
+     CFRelease(uuid);
+-
+-    CFStringRef parcelFileName = CFStringCreateWithFormat(
+-        kCFAllocatorDefault,
+-        NULL,
+-        CFSTR("%@%@"), uuidString, CacheEntryParcelFileExtension);
+-    CFStringRef dataFileName = CFStringCreateWithFormat(
+-        kCFAllocatorDefault,
+-        NULL,
+-        CFSTR("%@%@"), uuidString, CacheEntryDataFileExtension);
++    CFStringRef path = NULL;
++    _CFFSAppendPathComponent(&path, store->fsDataPath, uuidString);
+     CFRelease(uuidString);
++    return path;
++}
+ 
+-    CFStringRef parcelPath = NULL;
+-    CFStringRef dataPath = NULL;
++static CacheEntry* cacheEntryCreateFromRow(_CFURLCache* cache, sqlite3_stmt* stmt) {
++    // Columns: entry_ID, version, unix time_stamp, storage_policy,
++    //          response_object, request_object, isDataOnFS, receiver_data (FS name), receiver size
++    _CFURLCacheStore* store = (_CFURLCacheStore*)cache->store;
++    CacheEntry* entry = allocateCacheEntry();
++    CFPropertyListRef responseParcel = NULL;
++    CFPropertyListRef requestParcel = NULL;
++    Boolean success = false;
++    do {
++        entry->entryID = sqlite3_column_int64(stmt, 0);
++        if (sqlite3_column_int64(stmt, 1) != CacheEntryVersion ||
++            sqlite3_column_int64(stmt, 3) != CFURLCacheStorageAllowed) {
++            break;
++        }
++        entry->creationTime = (CFAbsoluteTime)sqlite3_column_int64(stmt, 2) -
++                              kCFAbsoluteTimeIntervalSince1970;
+ 
+-    _CFFSAppendPathComponent(&parcelPath, cache->path, parcelFileName);
+-    _CFFSAppendPathComponent(&dataPath, cache->path, dataFileName);
+-    CFRelease(parcelFileName);
+-    CFRelease(dataFileName);
++        requestParcel = createPlistFromColumn(stmt, 5);
++        if (requestParcel) {
++            entry->request = _CFURLRequestCreateFromParcel(kCFAllocatorDefault, requestParcel);
++        }
++        responseParcel = createPlistFromColumn(stmt, 4);
++        if (!entry->request || !responseParcel ||
++            CFGetTypeID(responseParcel) != CFDictionaryGetTypeID()) {
++            break;
++        }
+ 
+-    Boolean result = false;
+-    if (createNewFile(parcelPath)) {
+-        if (!createNewFile(dataPath)) {
+-            _CFFSUnlink(parcelPath);
++        if (sqlite3_column_int(stmt, 6)) {
++            const unsigned char* name = sqlite3_column_text(stmt, 7);
++            if (!name || !*name || strchr((const char*)name, '/')) {
++                break;
++            }
++            CFStringRef fsName = CFStringCreateWithCString(kCFAllocatorDefault,
++                                                           (const char*)name, kCFStringEncodingUTF8);
++            if (!fsName) {
++                break;
++            }
++            _CFFSAppendPathComponent(&entry->dataPath, store->fsDataPath, fsName);
++            CFRelease(fsName);
++            entry->cachedResponse = cachedResponseCreateFromParcel(responseParcel, entry->dataPath,
++                                                                   0, NULL, 0);
+         } else {
+-            entry->parcelPath = parcelPath;
+-            entry->dataPath = dataPath;
+-            result = true;
++            entry->cachedResponse = cachedResponseCreateFromParcel(responseParcel, NULL,
++                                                                   (size_t)sqlite3_column_int64(stmt, 8),
++                                                                   store, entry->entryID);
+         }
++        if (!entry->cachedResponse ||
++            CFCachedURLResponseGetStoragePolicy(entry->cachedResponse) != CFURLCacheStorageAllowed) {
++            break;
++        }
++        success = true;
++    } while (0);
++    if (responseParcel) CFRelease(responseParcel);
++    if (requestParcel) CFRelease(requestParcel);
++    if (!success) {
++        CFRelease(entry);
++        entry = NULL;
+     }
+-    if (!result) {
+-        CFRelease(parcelPath);
+-        CFRelease(dataPath);
+-    }
+-
+-    return result;
++    return entry;
+ }
+ 
+ static void loadCacheEntries(_CFURLCache* cache) {
+-    CFMutableArrayRef files = NULL;
+-    if (!_CFFSListPathContents(cache->path, &files, NULL)) {
++    _CFURLCacheStore* store = (_CFURLCacheStore*)cache->store;
++    if (!store) {
+         return;
+     }
+ 
+-    CFMutableSetRef filesToDelete = CFSetCreateMutable(
+-        kCFAllocatorDefault,
+-        0,
+-        &kCFTypeSetCallBacks);
+-    for (CFIndex i = 0; i != CFArrayGetCount(files); ++i) {
+-        CFSetAddValue(filesToDelete, CFArrayGetValueAtIndex(files, i));
+-    }
++    CFMutableArrayRef staleIDs = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
++    CFMutableSetRef liveFiles = CFSetCreateMutable(kCFAllocatorDefault, 0, &kCFTypeSetCallBacks);
+ 
+     cache->disableLog++;
+-    for (CFIndex i = 0; i != CFArrayGetCount(files); ++i) {
+-        CFStringRef fileName = (CFStringRef)CFArrayGetValueAtIndex(files, i);
+-        if (!CFStringHasSuffix(fileName, CacheEntryParcelFileExtension)) {
+-            continue;
+-        }
+-
+-        CFStringRef parcelPath;
+-        _CFFSAppendPathComponent(&parcelPath, cache->path, fileName);
+-        CacheEntry* entry = cacheEntryCreateFromParcel(parcelPath);
+-        CFRelease(parcelPath);
+-        if (!entry) {
+-            continue;
+-        }
+-
+-        if (!_CFCachedURLResponseClaimOwnership(entry->cachedResponse, cache)) {
++    sqlite3_stmt* stmt = NULL;
++    pthread_mutex_lock(&store->lock);
++    if (sqlite3_prepare_v2(store->db,
++            "SELECT r.entry_ID, r.version, CAST(strftime('%s', r.time_stamp) AS INTEGER), r.storage_policy, "
++            "b.response_object, b.request_object, d.isDataOnFS, d.receiver_data, length(d.receiver_data) "
++            "FROM cfurl_cache_response r "
++            "LEFT JOIN cfurl_cache_blob_data b ON b.entry_ID = r.entry_ID "
++            "LEFT JOIN cfurl_cache_receiver_data d ON d.entry_ID = r.entry_ID "
++            "ORDER BY r.entry_ID", -1, &stmt, NULL) == SQLITE_OK) {
++        while (sqlite3_step(stmt) == SQLITE_ROW) {
++            int64_t entryID = sqlite3_column_int64(stmt, 0);
++            CacheEntry* entry = cacheEntryCreateFromRow(cache, stmt);
++            if (!entry || !_CFCachedURLResponseClaimOwnership(entry->cachedResponse, cache)) {
++                CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt64Type, &entryID);
++                CFArrayAppendValue(staleIDs, number);
++                CFRelease(number);
++                if (entry) {
++                    CFRelease(entry);
++                }
++                continue;
++            }
++            if (entry->dataPath) {
++                CFStringRef fileName = NULL;
++                _CFFSGetLastPathComponent(&fileName, entry->dataPath);
++                CFSetAddValue(liveFiles, fileName);
++                CFRelease(fileName);
++            }
++            addCacheEntry(cache, entry);
+             CFRelease(entry);
+-            continue;
+         }
++    }
++    sqlite3_finalize(stmt);
++    pthread_mutex_unlock(&store->lock);
+ 
+-        addCacheEntry(cache, entry);
+-        CFSetRemoveValue(filesToDelete, fileName);
+-
+-        if (entry->dataPath) {
+-            CFStringRef dataFileName = NULL;
+-            _CFFSGetLastPathComponent(&dataFileName, entry->dataPath);
+-            CFSetRemoveValue(filesToDelete, dataFileName);
+-            CFRelease(dataFileName);
+-        }
+-        CFRelease(entry);
++    for (CFIndex i = 0; i != CFArrayGetCount(staleIDs); ++i) {
++        int64_t entryID = 0;
++        CFNumberGetValue((CFNumberRef)CFArrayGetValueAtIndex(staleIDs, i), kCFNumberSInt64Type, &entryID);
++        storeDeleteEntry(cache, entryID);
+     }
+     cache->disableLog--;
+ 
+     cacheLog(cache, CFSTR("loaded %ld entries"), CFSetGetCount(cache->entries));
+ 
+-    CFSetApplyFunction(filesToDelete, &deleteFileCallback, (void*)cache->path);
++    // Drop fsCachedData files no row refers to.
++    CFMutableArrayRef files = NULL;
++    if (_CFFSListPathContents(store->fsDataPath, &files, NULL)) {
++        for (CFIndex i = 0; i != CFArrayGetCount(files); ++i) {
++            CFStringRef fileName = (CFStringRef)CFArrayGetValueAtIndex(files, i);
++            if (!CFSetContainsValue(liveFiles, fileName)) {
++                deleteFileCallback(fileName, (void*)store->fsDataPath);
++            }
++        }
++        CFRelease(files);
++    }
+ 
+-    CFRelease(files);
+-    CFRelease(filesToDelete);
++    CFRelease(staleIDs);
++    CFRelease(liveFiles);
+ }
+-
+ static void addCacheEntry(_CFURLCache* cache, CacheEntry* entry) {
+     size_t memorySize = _CFCachedURLResponseGetMemorySize(entry->cachedResponse);
+     size_t diskSize = _CFCachedURLResponseGetDiskSize(entry->cachedResponse);
+@@ -873,11 +1274,12 @@ static void removeCacheEntry(_CFURLCache* cache, CacheEntry* entry) {
+     cache->memoryUsage -= memorySize;
+     cache->diskUsage -= diskSize;
+ 
+-    if (entry->parcelPath) {
+-        _CFFSUnlink(entry->parcelPath);
+-    }
+-
++    // Keep the body readable for callers still holding the response, then
++    // drop the database rows and the fsCachedData file.
+     _CFCachedURLResponseSetDataPath(entry->cachedResponse, cache, NULL);
++    if (entry->entryID) {
++        storeDeleteEntry(cache, entry->entryID);
++    }
+     if (entry->dataPath) {
+         _CFFSUnlink(entry->dataPath);
+     }
+@@ -1066,15 +1468,6 @@ static void cacheLog(_CFURLCache* cache, CFStringRef format, ...) {
+     CFRelease(message);
+ }
+ 
+-static Boolean createNewFile(CFStringRef filePath) {
+-    int fd = _CFFSOpen(filePath, O_CREAT | O_WRONLY | O_EXCL, 0644);
+-    if (fd == -1) {
+-        return false;
+-    }
+-    close(fd);
+-    return true;
+-}
+-
+ static void deleteFileCallback(CFTypeRef fileName, void* path) {
+     CFStringRef filePath;
+     _CFFSAppendPathComponent(&filePath, (CFStringRef)path, (CFStringRef)fileName);
+diff --git a/src/URL/NSURLCache.m b/src/URL/NSURLCache.m
+index c2d834f..2f56ba7 100644
+--- a/src/URL/NSURLCache.m
++++ b/src/URL/NSURLCache.m
+@@ -11,9 +11,34 @@
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSData.h>
+ #import <Foundation/NSPathUtilities.h>
+-
+-static NSUInteger NSURLCacheDefaultMemoryCapacity = 512000;
+-static NSUInteger NSURLCacheDefaultDiskCapacity = 10000000;
++#import <Foundation/NSBundle.h>
++#import <Foundation/NSProcessInfo.h>
++#import <Foundation/NSURL.h>
++
++// macOS SDK NSURLCache.h: the default shared cache has 4 MB of memory and
++// 20 MB of disk at ~/Library/Caches/<bundle id>.
++static NSUInteger NSURLCacheDefaultMemoryCapacity = 4 * 1024 * 1024;
++static NSUInteger NSURLCacheDefaultDiskCapacity = 20 * 1024 * 1024;
++
++// ~/Library/<folder>/<main bundle identifier>, or the process name when the
++// process has no bundle identifier.
++NSString* _NSURLStorageDirectory(NSString* folder)
++{
++    NSString* name = [[NSBundle mainBundle] bundleIdentifier];
++    if ([name length] == 0) {
++        name = [[NSProcessInfo processInfo] processName];
++    }
++    if ([name length] == 0 || [name rangeOfString:@"/"].location != NSNotFound) {
++        return nil;
++    }
++    NSString* home = NSHomeDirectory();
++    if ([home length] == 0) {
++        return nil;
++    }
++    return [[[home stringByAppendingPathComponent:@"Library"]
++                   stringByAppendingPathComponent:folder]
++                   stringByAppendingPathComponent:name];
++}
+ 
+ @implementation NSCachedURLResponse
+ 
+@@ -164,28 +189,15 @@ static Boolean sharedURLCacheSet = false;
+ 
+ - (id)initWithMemoryCapacity:(NSUInteger)memoryCapacity diskCapacity:(NSUInteger)diskCapacity diskPath:(NSString*)path
+ {
+-    // Calculate full path for the cache.
+-    NSString* cachePath;
+-    {
+-        const char* cacheDir = getenv("CACHEDIR");
+-        if (!cacheDir)
+-        {
+-            // Memory caching only
+-            cachePath = nil;
+-        }
+-        else
+-        {
+-            NSString* basePath = [[NSString stringWithUTF8String:cacheDir] stringByAppendingPathComponent:@"NSURLCache"];
+-            if (path)
+-            {
+-                // Discard everything but the last component from the 'path' argument.
+-                cachePath = [basePath stringByAppendingPathComponent:[path lastPathComponent]];
+-            }
+-            else
+-            {
+-                // Nil 'path' means "default cache location"
+-                cachePath = basePath;
+-            }
++    // Cache.db and fsCachedData/ live in the cache directory: nil means
++    // ~/Library/Caches/<bundle id>, a relative path is placed inside it and
++    // an absolute path is used as given.
++    NSString* cachePath = _NSURLStorageDirectory(@"Caches");
++    if (path) {
++        if ([path isAbsolutePath]) {
++            cachePath = path;
++        } else if (cachePath) {
++            cachePath = [cachePath stringByAppendingPathComponent:path];
+         }
+     }
+ 
+@@ -203,6 +215,11 @@ static Boolean sharedURLCacheSet = false;
+     return self;
+ }
+ 
++- (id)initWithMemoryCapacity:(NSUInteger)memoryCapacity diskCapacity:(NSUInteger)diskCapacity directoryURL:(NSURL*)directoryURL
++{
++    return [self initWithMemoryCapacity:memoryCapacity diskCapacity:diskCapacity diskPath:[directoryURL path]];
++}
++
+ - (id)_initWithExistingSharedCFURLCache:(CFURLCacheRef)cache
+ {
+     self = [super init];
+diff --git a/src/URL/NSURLCacheInternal.h b/src/URL/NSURLCacheInternal.h
+index afb9b6a..637dff1 100644
+--- a/src/URL/NSURLCacheInternal.h
++++ b/src/URL/NSURLCacheInternal.h
+@@ -11,3 +11,7 @@
+ - (id)_initWithExistingSharedCFURLCache:(CFURLCacheRef)cache;
+ - (CFURLCacheRef)_CFURLCache;
+ @end
++
++@class NSString;
++// ~/Library/<folder>/<main bundle identifier> (process name without one).
++NSString* _NSURLStorageDirectory(NSString* folder);
