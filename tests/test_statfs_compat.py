@@ -52,10 +52,12 @@ class StatfsCompatTests(unittest.TestCase):
         fstatfs_added = added(FSTATFS)
         getfsstat_added = added(GETFSSTAT)
 
-        self.assertIn('darling_compat_profile_enabled()', statfs_added)
+        self.assertIn('vc.flags = VCHROOT_FOLLOW;', statfs_added)
+        self.assertIn('darling_compat_profile_enabled() && !lolsys_is_system_root_path(path)', statfs_added)
         self.assertIn('vchroot_unexpand(&uargs)', statfs_added)
         self.assertIn('lolsys_apply_compat_statfs64(uargs.path, buf)', statfs_added)
         self.assertIn('__builtin_memset(buf, 0, sizeof(*buf));', statfs_added)
+        self.assertIn("if (len > 1 && path[len] != '\\0' && path[len] != '/')", statfs_added)
 
         self.assertIn('darling_compat_profile_enabled() && lolsys_apply_compat_statfs64(path, buf)', fstatfs_added)
         self.assertIn('__builtin_memset(buf, 0, sizeof(*buf));', fstatfs_added)
@@ -262,6 +264,50 @@ int main(void)
 	assert(strcmp(mounts[1].f_fstypename, "devfs") == 0);
 	assert(strcmp(mounts[1].f_mntonname, "/dev") == 0);
 	assert(strcmp(mounts[1].f_mntfromname, "devfs") == 0);
+	return 0;
+}
+''')
+
+    def test_mount_prefix_boundary_guard_does_not_match_sibling_paths(self):
+        # Verify the exact mount-matching loop semantics from lolsys_fill_mount_names()
+        # in statfs.c: /mnt/data must match /mnt/data and /mnt/data/file, never
+        # /mnt/database/file.
+        statfs_added = added(STATFS)
+        self.assertIn("if (len > 1 && path[len] != '\\0' && path[len] != '/')", statfs_added)
+        self.run_c(r'''
+#include <assert.h>
+#include <string.h>
+
+struct entry { const char* mnton; const char* fstype; };
+
+static const char* match_mount(const struct entry* table, int n, const char* path)
+{
+	int max_len = 0;
+	const char* best = "";
+	for (int i = 0; i < n; i++) {
+		int len = (int) strlen(table[i].mnton);
+		if (len == 0)
+			continue;
+		if (strncmp(table[i].mnton, path, (size_t) len) != 0 || len < max_len)
+			continue;
+		if (len > 1 && path[len] != '\0' && path[len] != '/')
+			continue;
+		max_len = len;
+		best = table[i].fstype;
+	}
+	return best;
+}
+
+int main(void)
+{
+	const struct entry mounts[] = {
+		{ "/", "ext4" },
+		{ "/mnt/data", "btrfs" },
+	};
+	assert(strcmp(match_mount(mounts, 2, "/mnt/database/file"), "ext4") == 0);
+	assert(strcmp(match_mount(mounts, 2, "/mnt/data/file"), "btrfs") == 0);
+	assert(strcmp(match_mount(mounts, 2, "/mnt/data"), "btrfs") == 0);
+	assert(strcmp(match_mount(mounts, 2, "/other"), "ext4") == 0);
 	return 0;
 }
 ''')

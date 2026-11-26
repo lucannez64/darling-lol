@@ -6525,7 +6525,7 @@ index fc2cdb7..9bc58e6 100644
  		ret = LINUX_SYSCALL(__NR_mknod, vc.path, mode | LINUX_S_IFIFO, 0);
  	#else
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
-index a6a5162..30c3616 100644
+index a6a5162..8022924 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
 @@ -1,10 +1,12 @@
@@ -6685,7 +6685,7 @@ index a6a5162..30c3616 100644
  long sys_statfs(const char* path, struct bsd_statfs* buf)
  {
  #ifdef __x86_64__
-@@ -32,11 +171,8 @@ long sys_statfs(const char* path, struct bsd_statfs* buf)
+@@ -32,14 +171,11 @@ long sys_statfs(const char* path, struct bsd_statfs* buf)
  
  long sys_statfs64(const char* path, struct bsd_statfs64* buf)
  {
@@ -6697,7 +6697,11 @@ index a6a5162..30c3616 100644
 -	int max_len = 0;
  
  	struct vchroot_expand_args vc;
- 	vc.flags = 0;
+-	vc.flags = 0;
++	vc.flags = VCHROOT_FOLLOW;
+ 	vc.dfd = get_perthread_wd();
+ 
+ 	strcpy(vc.path, path);
 @@ -56,49 +192,20 @@ long sys_statfs64(const char* path, struct bsd_statfs64* buf)
  	if (ret < 0)
  		return errno_linux_to_bsd(ret);
@@ -6745,7 +6749,7 @@ index a6a5162..30c3616 100644
 -
 -		strlcpy(buf->f_fstypename, p, sizeof(buf->f_fstypename));
 -		strlcpy(buf->f_mntfromname, mntfrom, sizeof(buf->f_mntfromname));
-+	if (darling_compat_profile_enabled()) {
++	if (darling_compat_profile_enabled() && !lolsys_is_system_root_path(path)) {
 +		struct vchroot_unexpand_args uargs;
 +		strlcpy(uargs.path, vc.path, sizeof(uargs.path));
 +		if (vchroot_unexpand(&uargs) == 0 && lolsys_apply_compat_statfs64(uargs.path, buf))
