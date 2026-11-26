@@ -184,6 +184,7 @@ static void copyout_string(const char* str, char* out, unsigned long* out_len)
 
 struct cpuid_regs {{ unsigned int eax, ebx, ecx, edx; }};
 static int g_compat = 1;
+static unsigned int g_crystal; /* leaf 0x15 ECX; 0 on the identity part */
 static int g_amd = 1;
 static int g_old_host = 0;      /* maximum basic leaf g_old_max */
 static unsigned int g_old_max = 4;
@@ -252,7 +253,7 @@ static struct cpuid_regs host_cpuid(unsigned int leaf, unsigned int subleaf)
             r.eax = 0x100; r.ebx = 0x240;
         }}
         break;
-    case 0x15: if (!g_amd) {{ r.eax = 2; r.ebx = 216; }} break;
+    case 0x15: if (!g_amd) {{ r.eax = 2; r.ebx = 216; r.ecx = g_crystal; }} break;
     case 0x80000000: r.eax = (g_amd && g_topoext) ? 0x80000023 : 0x80000008; break;
     case 0x80000001:
         r.eax = g_amd ? 0x00a20f12 : 0;
@@ -462,7 +463,9 @@ static void group_leaves(void)
     assert(missing(handle_tlb_data_large_level1) && missing(handle_tlb_shared));
     assert(integer(handle_microcode_version) == 234);
     assert(integer(handle_processor_flag) == 5);
-    assert(quad(handle_tsc_frequency) == 2592000000ull); /* 24 MHz * 216 / 2 */
+    /* 24 MHz * 216 / 2 for the identity; a host whose leaf names no crystal
+     * reports the rate its kernel measured */
+    assert(quad(handle_tsc_frequency) == (g_compat ? 2592000000ull : 3393615000ull));
 }}
 
 /* the values every profile and host must give for the identity part */
@@ -577,6 +580,16 @@ int main(void)
     len = 8; old = &leaf7;
     assert(CALL(handle_tsc_frequency) == -ENOENT);
     g_cpuinfo = 1;
+    /* an Intel host: the crystal its leaf 0x15 names, else its kernel's rate,
+     * else XNU's 24 MHz */
+    g_amd = 0;
+    g_crystal = 25000000;
+    assert(quad(handle_tsc_frequency) == 2700000000ull);
+    g_crystal = 0;
+    assert(quad(handle_tsc_frequency) == 3393615000ull);
+    g_cpuinfo = 0;
+    assert(quad(handle_tsc_frequency) == 2592000000ull);
+    g_cpuinfo = 1; g_amd = 1;
     assert(integer(handle_mwait_sub_cstates) == 0x11);
     assert(integer(handle_thermal_sensor) == 0 && integer(handle_thermal_invariant_apic_timer) == 1);
     assert(integer(handle_thermal_thresholds) == 0 && integer(handle_thermal_acnt_mcnt) == 1);

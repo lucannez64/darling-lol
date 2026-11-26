@@ -4428,7 +4428,7 @@ index bd9cdc2..cffcbe2 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
-index 4319355..8475dba 100644
+index 4319355..0b76800 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
 @@ -2,8 +2,13 @@
@@ -4817,7 +4817,7 @@ index 4319355..8475dba 100644
  	v.name[12] = 0;
  	copyout_string(v.name, (char*) old, oldlen);
  
-@@ -103,219 +396,794 @@ sysctl_handler(handle_vendor)
+@@ -103,219 +396,799 @@ sysctl_handler(handle_vendor)
  
  sysctl_handler(handle_max_basic)
  {
@@ -5739,14 +5739,19 @@ index 4319355..8475dba 100644
 +sysctl_handler(handle_tsc_frequency)
 +{
 +	struct cpuid_regs r = { 0, 0, 0, 0 };
-+	unsigned long long frequency;
++	unsigned long long frequency = 0;
++	bool ratio;
 +
 +	if (max_basic_leaf() >= 0x15)
 +		r = presented_cpuid(0x15, 0);
-+	if (r.eax != 0 && r.ebx != 0)
-+		frequency = (r.ecx ? r.ecx : 24000000ULL) * r.ebx / r.eax;
-+	else
-+		frequency = host_tsc_frequency();
++	ratio = r.eax != 0 && r.ebx != 0;
++	if (ratio && r.ecx != 0)
++		frequency = (unsigned long long) r.ecx * r.ebx / r.eax;
++	else if (!ratio || !darling_compat_profile_enabled())
++		frequency = host_tsc_frequency(); // a host's crystal is not always 24 MHz
++	// The leaf names no crystal: XNU's 24 MHz, which is the compat CPU's.
++	if (frequency == 0 && ratio)
++		frequency = 24000000ULL * r.ebx / r.eax;
 +	return frequency ? copyout_quad(frequency, old, oldlen) : -ENOENT;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_net.c

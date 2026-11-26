@@ -244,9 +244,10 @@ entries and 64 + 64 small-page data entries. `microcode_version` (234) and
 under `profile=host` from the host kernel's
 `/sys/devices/system/cpu/cpu0/microcode`. `machdep.tsc.frequency` is XNU's
 24 MHz crystal times the leaf `0x15` ratio, 2592000000; `rdtsc` is not trapped
-and still counts at the host's rate. Under `profile=host` a host without that
-leaf reports the rate its kernel measured (half the `bogomips` of
-`/proc/cpuinfo`, in MHz). `xsave.*` is the one group that keeps host
+and still counts at the host's rate. Under `profile=host` the crystal is the
+one leaf `0x15` names; a host whose leaf names none, or that has no such leaf,
+reports the rate its kernel measured (half the `bogomips` of `/proc/cpuinfo`,
+in MHz). `xsave.*` is the one group that keeps host
 values: `XGETBV` and `XSAVE` are not trapped, so leaf `0xd` keeps the host's
 state components and area sizes, and only sub-leaf 1 drops what an i7-9750H
 lacks (XFD, the CET states). A real MacBookPro16,1 reports `31 832 1088 0` and
