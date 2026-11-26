@@ -94,21 +94,36 @@ python3 "$repo/tools/sync-canonical-runtime-overlays.py" --prefix "$prefix_dir" 
 # is signed only when this process can actually write it; the per-user
 # RuntimeLibraries/RuntimeFrameworks overlays are always signed.
 if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
-  if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
-    make -s -C "$repo/tools/dc-codesign" dc-codesign || \
-      echo 'dc-codesign did not build (it needs the OpenSSL headers)' >&2
-  fi
-  # Unsigned overlays are loaded into every Riot process (issue #31): fetch a
-  # pinned rcodesign when none is installed. An explicit RCODESIGN wins.
-  if [ -z "${RCODESIGN:-}" ] && rcodesign_path=$(sh "$repo/tools/install-rcodesign.sh"); then
-    export RCODESIGN="$rcodesign_path"
-  fi
   sign_args="--prefix --quiet"
+  stamp_sdk=
   if [ -w /usr/local/libexec/darling ]; then
     sign_args="--sdk $sign_args"
+    stamp_sdk=--sdk
   fi
-  if ! sh "$repo/tools/sign-darling-runtime.sh" $sign_args; then
-    cat >&2 <<'EOF'
+  sign_stamp=build/runtime-sign-stamp.json
+  # Signing rewrites every Mach-O and a writable SDK pass also rewrites the
+  # trust store, so an unchanged stamp means the trees still carry the
+  # signatures the last successful pass left. The stamp covers exactly the
+  # roots the pass selects; a rebuilt overlay, a re-synced canonical copy, a
+  # new submodule or a removed trust store all change it. RCLOL_FORCE_SIGN=1
+  # bypasses the stamp and signs again.
+  if [ "${RCLOL_FORCE_SIGN:-0}" != 1 ] &&
+    python3 build/runtime/tools/runtime-sign-stamp.py --root "$repo" \
+      --prefix "$prefix_dir" $stamp_sdk --state "$sign_stamp" check; then
+    echo 'Runtime overlays are signed; skipping the signing pass.'
+    signing_ok=1
+  else
+    if [ ! -x "$repo/tools/dc-codesign/dc-codesign" ]; then
+      make -s -C "$repo/tools/dc-codesign" dc-codesign || \
+        echo 'dc-codesign did not build (it needs the OpenSSL headers)' >&2
+    fi
+    # Unsigned overlays are loaded into every Riot process (issue #31): fetch a
+    # pinned rcodesign when none is installed. An explicit RCODESIGN wins.
+    if [ -z "${RCODESIGN:-}" ] && rcodesign_path=$(sh "$repo/tools/install-rcodesign.sh"); then
+      export RCODESIGN="$rcodesign_path"
+    fi
+    if ! sh "$repo/tools/sign-darling-runtime.sh" $sign_args; then
+      cat >&2 <<'EOF'
 
 ==================================================================
  WARNING: the darling-lol runtime is NOT signed.
@@ -119,8 +134,12 @@ if [ -x "$repo/tools/sign-darling-runtime.sh" ]; then
 ==================================================================
 
 EOF
-  else
-    signing_ok=1
+    else
+      signing_ok=1
+      python3 build/runtime/tools/runtime-sign-stamp.py --root "$repo" \
+        --prefix "$prefix_dir" $stamp_sdk --state "$sign_stamp" record || \
+        echo 'Signing stamp not recorded; the next update signs the overlays again' >&2
+    fi
   fi
 fi
 # Only a completed install and a successful signing pass may vouch for the next
