@@ -266,6 +266,14 @@ int main(void)
     len = 4; old = &word;
     word = 0x55555555;
     assert(CALL(handle_feature_bits) == -ENOMEM && len == 0 && word == 0x55555555);
+    /* the name strings too: a size query, then a short buffer is not truncated into */
+    len = 0; old = 0;
+    assert(CALL(handle_extfeatures) == 0 && len > 4);
+    assert(CALL(handle_leaf7_features) == 0 && len > 4);
+    word = 0x55555555; len = 4; old = &word;
+    assert(CALL(handle_extfeatures) == -ENOMEM && len == 0 && word == 0x55555555);
+    len = 4;
+    assert(CALL(handle_leaf7_features) == -ENOMEM && len == 0 && word == 0x55555555);
     return 0;
 }}
 """
