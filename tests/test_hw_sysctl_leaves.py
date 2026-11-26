@@ -202,9 +202,9 @@ class HwSysctlLeavesTests(unittest.TestCase):
     def test_cpuid_trap_and_sysctls_share_the_leaf7_mask(self):
         header = added_lines(f'{EMULATION}/include/common/cpu_identity.h')
         trace = added_lines(f'{EMULATION}/src/linux_premigration/signal/cpuid_trace.c')
-        self.assertIn('#define DARLING_COMPAT_LEAF7_EBX 0x029c6fbfu', header)
+        self.assertIn('#define DARLING_COMPAT_LEAF7_EBX 0x029c67afu', header)
         self.assertIn('*ebx &= DARLING_COMPAT_LEAF7_EBX;', trace)
-        self.assertNotIn('0x029c6fbf', trace)
+        self.assertNotIn('0x029c6', trace)
 
     @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
     def test_handlers_report_the_identity_part_and_xnu_sizes(self):
@@ -412,6 +412,8 @@ int main(void)
     assert(compat_optional_feature(7, 1, 19, 0xffffffffu) == 1); /* ADX */
     assert(compat_optional_feature(7, 1, 19, 0u) == 0);
     assert(compat_optional_feature(7, 1, 9, 0xffffffffu) == 1);  /* ERMS */
+    assert(compat_optional_feature(7, 1, 4, 0xffffffffu) == 0);  /* HLE: not on the part */
+    assert(compat_optional_feature(7, 1, 11, 0xffffffffu) == 0); /* RTM: not on the part */
     assert(compat_optional_feature(7, 1, 16, 0xffffffffu) == 0); /* AVX512F */
     assert(compat_optional_feature(7, 1, 17, 0xffffffffu) == 0); /* AVX512DQ */
     assert(compat_optional_feature(7, 1, 21, 0xffffffffu) == 0); /* AVX512IFMA */

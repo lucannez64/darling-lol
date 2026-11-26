@@ -223,22 +223,21 @@ int main(void)
     identity_leaves();
     /* leaf 7: the host's bits inside the Coffee Lake mask; no AVX-512, no SHA */
     leaf7 = quad(handle_leaf7_feature_bits);
-    assert(leaf7 == (0x219c07a9u & DARLING_COMPAT_LEAF7_EBX));
+    assert(leaf7 == 0x009c07a9u);
     assert(strcmp(string(handle_leaf7_features),
         "RDWRFSGS BMI1 AVX2 SMEP BMI2 ERMS INVPCID RDSEED ADX SMAP CLFSOPT") == 0);
     len = sizeof(word); old = &word;
     assert(CALL(handle_leaf7_feature_bits_edx) == -ENOENT); /* the trap clears EDX */
-    /* leaf 0x80000001 as the trap presents it, plus the invariant TSC */
-    {{
-        struct cpuid_regs ext = presented_cpuid(0x80000001u, 0);
-        assert(quad(handle_extfeature_bits) == (((unsigned long long) ext.ecx << 32) | ext.edx | 0x100));
-    }}
-    assert(strcmp(string(handle_extfeatures), "SYSCALL XD 1GBPAGE EM64T LAHF LZCNT RDTSCP TSCI") == 0);
+    /* leaf 0x80000001 and the invariant TSC: the real part's word, none of the
+     * host's AMD-only bits */
+    assert(quad(handle_extfeature_bits) == 1241984796928ull);
+    assert(strcmp(string(handle_extfeatures),
+        "SYSCALL XD 1GBPAGE EM64T LAHF LZCNT PREFETCHW RDTSCP TSCI") == 0);
 
     /* compat on the part itself */
     g_amd = 0;
     identity_leaves();
-    assert(quad(handle_leaf7_feature_bits) == (0x029c67afu & DARLING_COMPAT_LEAF7_EBX));
+    assert(quad(handle_leaf7_feature_bits) == 43804591ull); /* the real EBX word */
     assert(strcmp(string(handle_leaf7_features),
         "RDWRFSGS TSC_THREAD_OFFSET SGX BMI1 AVX2 SMEP BMI2 ERMS INVPCID FPU_CSDS MPX "
         "RDSEED ADX SMAP CLFSOPT IPT") == 0);
