@@ -37,7 +37,8 @@ wait_jobs() {
 stop_jobs() {
 	trap - INT TERM HUP
 	for pid in $pids; do
-		if [ -n "$group" ]; then kill -TERM -- "-$pid" 2>/dev/null || :; fi
+		# No `--`: dash's kill reads it as a pid once a signal is given.
+		if [ -n "$group" ]; then kill -TERM "-$pid" 2>/dev/null || :; fi
 		kill -TERM "$pid" 2>/dev/null || :
 	done
 	for pid in $pids; do wait "$pid" 2>/dev/null || :; done
