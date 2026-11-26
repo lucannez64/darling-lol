@@ -140,9 +140,11 @@ guest probes; do not run the guest probes on your own.
 | `tools/checkout_digest.py` | Shared digest of the prepared checkout used by the update stamps |
 | `tools/console.py` | Colored `✔`/`!`/`✖` status lines shared by the update stamps |
 | `tools/runtime-overlay-stamp.py` | Digest that lets `install-runtime.sh` skip an unchanged overlay rebuild |
+| `tools/run-parallel.sh` | Run one command per input line, up to `RCLOL_PARALLEL_JOBS` at once, for the GPU overlay builders |
 | `tools/build-configure-stamp.py` | Digest that lets `build.sh` skip a redundant `cmake -S -B` |
 | `tools/darling-install-stamp.py` | Digest that lets `update.sh` skip an unchanged `cmake --install` |
 | `tools/sdk-sign-stamp.py` | Digest that lets `update.sh` skip an unchanged SDK signing pass |
+| `tools/runtime-sign-stamp.py` | Digest that lets `install-runtime.sh` skip an unchanged overlay (and writable-SDK) signing pass |
 | `tools/perf-baseline.py` | Collect the baseline data used in `docs/COMPATIBILITY.md` |
 
 ## Launch flags
