@@ -41,6 +41,21 @@ class MetalDeviceInfoTests(unittest.TestCase):
             self.assertIn('METAL_DEVICE_INFO failures=0 pass=1', result.stdout)
             self.assertIn('PASS registry ID is non-zero', result.stdout)
             self.assertIn('PASS Mac GPU name', result.stdout)
+            self.assertIn('PASS GPU family queries', result.stdout)
+            self.assertIn('PASS feature set queries', result.stdout)
+
+    def test_mtldevice_delegates_family_and_feature_set_queries(self):
+        patch = (ROOT / 'patches/metal.patch').read_text()
+        self.assertIn(
+            '+- (BOOL)supportsFamily: (NSUInteger)family { return MTLDeviceInfo::supportsFamily(family) ? YES : NO; }',
+            patch,
+        )
+        self.assertIn(
+            '+- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return MTLDeviceInfo::supportsFeatureSet(featureSet) ? YES : NO; }',
+            patch,
+        )
+        self.assertNotIn('+- (BOOL)supportsFamily: (NSUInteger)family { return YES; }', patch)
+        self.assertNotIn('+- (BOOL)supportsFeatureSet: (NSUInteger)featureSet { return YES; }', patch)
 
 
 if __name__ == '__main__':
