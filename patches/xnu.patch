@@ -6400,20 +6400,29 @@ index c3c33f9..831e8cb 100644
  			ret = errno_linux_to_bsd(ret);
  
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c
-index 1098510..1741d5a 100644
+index 1098510..5d75d11 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/fstatfs.c
-@@ -19,6 +19,9 @@ extern __SIZE_TYPE__ strlen(const char* str);
+@@ -5,6 +5,7 @@
+ 
+ #include <darling/emulation/conversion/stat/common.h>
+ #include <darling/emulation/common/base.h>
++#include <darling/emulation/common/cpu_identity.h>
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/common/simple.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
+@@ -19,6 +20,10 @@ extern __SIZE_TYPE__ strlen(const char* str);
  extern int strncmp(const char* s1, const char* s2, __SIZE_TYPE__ len);
  extern int sprintf(char *str, const char *format, ...);
  
 +/* darling-lol M58F140: shared cached /proc/self/mounts lookup (see statfs.c) */
 +VISIBLE void lolsys_fill_mount_names(const char* path, char* mnton, __SIZE_TYPE__ mnton_sz, char* fstype, __SIZE_TYPE__ fstype_sz, char* mntfrom, __SIZE_TYPE__ mntfrom_sz);
++VISIBLE int lolsys_apply_compat_statfs64(const char* guest_path, struct bsd_statfs64* buf);
 +
  long sys_fstatfs(int fd, struct bsd_statfs* buf)
  {
  #ifdef __x86_64__
-@@ -31,12 +34,9 @@ long sys_fstatfs(int fd, struct bsd_statfs* buf)
+@@ -31,12 +36,9 @@ long sys_fstatfs(int fd, struct bsd_statfs* buf)
  
  long sys_fstatfs64(int fd, struct bsd_statfs64* buf)
  {
@@ -6427,7 +6436,14 @@ index 1098510..1741d5a 100644
  
  #ifdef __NR_fstatfs64
  	ret = LINUX_SYSCALL3(__NR_fstatfs64, fd, sizeof(lbuf), &lbuf);
-@@ -54,48 +54,11 @@ long sys_fstatfs64(int fd, struct bsd_statfs64* buf)
+@@ -47,55 +49,21 @@ long sys_fstatfs64(int fd, struct bsd_statfs64* buf)
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
+-	statfs_linux_to_bsd64(&lbuf, buf);
+-
+ 	ret = fdpath(fd, path, sizeof(path));
+ 
  	if (ret < 0)
  		return ret;
  
@@ -6440,8 +6456,8 @@ index 1098510..1741d5a 100644
 -	buf->f_mntonname[0] = 0;
 -	buf->f_fstypename[0] = 0;
 -	buf->f_mntfromname[0] = 0;
- 	buf->f_iosize = 512;
- 
+-	buf->f_iosize = 512;
+-
 -	while (__simple_readline(fd_m, &rbuf, line, sizeof(line)))
 -	{
 -		char* p;
@@ -6468,11 +6484,16 @@ index 1098510..1741d5a 100644
 -		p = strtok_r(NULL, " ", &saveptr);
 -		if (p == NULL)
 -			continue;
--
++	__builtin_memset(buf, 0, sizeof(*buf));
++	statfs_linux_to_bsd64(&lbuf, buf);
++	buf->f_iosize = (buf->f_bsize >= 4096u) ? (int) buf->f_bsize : 4096;
+ 
 -		strlcpy(buf->f_fstypename, p, sizeof(buf->f_fstypename));
 -		strlcpy(buf->f_mntfromname, mntfrom, sizeof(buf->f_mntfromname));
 -	}
--
++	if (darling_compat_profile_enabled() && lolsys_apply_compat_statfs64(path, buf))
++		return 0;
+ 
 -	close_internal(fd_m);
 +	lolsys_fill_mount_names(path,
 +	    buf->f_mntonname, sizeof(buf->f_mntonname),
@@ -6504,10 +6525,23 @@ index fc2cdb7..9bc58e6 100644
  		ret = LINUX_SYSCALL(__NR_mknod, vc.path, mode | LINUX_S_IFIFO, 0);
  	#else
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
-index a6a5162..2155dc4 100644
+index a6a5162..30c3616 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/statfs.c
-@@ -20,6 +20,92 @@ extern __SIZE_TYPE__ strlcpy(char* dst, const char* src, __SIZE_TYPE__ size);
+@@ -1,10 +1,12 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/stat/statfs.h>
+ 
+ #include <stddef.h>
++#include <stdbool.h>
+ #include <sys/fcntl.h>
+ 
+ #include <darling/emulation/conversion/stat/common.h>
+ #include <darling/emulation/common/base.h>
++#include <darling/emulation/common/cpu_identity.h>
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/common/simple.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
+@@ -20,6 +22,143 @@ extern __SIZE_TYPE__ strlcpy(char* dst, const char* src, __SIZE_TYPE__ size);
  extern __SIZE_TYPE__ strlen(const char* str);
  extern int strncmp(const char* s1, const char* s2, __SIZE_TYPE__ len);
  
@@ -6590,6 +6624,8 @@ index a6a5162..2155dc4 100644
 +			continue;
 +		if (strncmp(e->mnton, path, len) != 0 || len < max_len)
 +			continue;
++		if (len > 1 && path[len] != '\0' && path[len] != '/')
++			continue;
 +		max_len = len;
 +		strlcpy(mnton, e->mnton, mnton_sz);
 +		strlcpy(fstype, e->fstype, fstype_sz);
@@ -6597,10 +6633,59 @@ index a6a5162..2155dc4 100644
 +	}
 +}
 +
++static bool lolsys_is_system_root_path(const char* path)
++{
++	static const char exit_path[] = "/Volumes/SystemRoot";
++	const __SIZE_TYPE__ len = sizeof(exit_path) - 1;
++	return path != NULL
++		&& strncmp(path, exit_path, len) == 0
++		&& (path[len] == '\0' || path[len] == '/');
++}
++
++static bool lolsys_is_devfs_path(const char* path)
++{
++	return path != NULL
++		&& strncmp(path, "/dev", 4) == 0
++		&& (path[4] == '\0' || path[4] == '/');
++}
++
++/* Under profile=compat, guest-prefix paths report macOS APFS/devfs mount
++ * metadata instead of the host Linux filesystem type, block device and mount
++ * point from /proc/self/mounts. Block and inode counts from the underlying
++ * statfs are preserved so disk-space queries remain accurate. */
++VISIBLE
++int lolsys_apply_compat_statfs64(const char* guest_path, struct bsd_statfs64* buf)
++{
++	if (guest_path == NULL || guest_path[0] != '/' || lolsys_is_system_root_path(guest_path))
++		return 0;
++
++	buf->f_owner = 0;
++	buf->f_fssubtype = 0;
++	if (buf->f_iosize <= 0)
++		buf->f_iosize = (buf->f_bsize >= 4096u) ? (int) buf->f_bsize : 4096;
++
++	if (lolsys_is_devfs_path(guest_path)) {
++		buf->f_type = 19u; /* devfs */
++		/* MNT_LOCAL | MNT_DOVOLFS | MNT_DONTBROWSE | MNT_MULTILABEL */
++		buf->f_flags = 0x04109000u;
++		strlcpy(buf->f_fstypename, "devfs", sizeof(buf->f_fstypename));
++		strlcpy(buf->f_mntonname, "/dev", sizeof(buf->f_mntonname));
++		strlcpy(buf->f_mntfromname, "devfs", sizeof(buf->f_mntfromname));
++	} else {
++		buf->f_type = 26u; /* apfs */
++		/* MNT_LOCAL | MNT_ROOTFS | MNT_DOVOLFS | MNT_JOURNALED | MNT_MULTILABEL */
++		buf->f_flags = 0x0480d000u;
++		strlcpy(buf->f_fstypename, "apfs", sizeof(buf->f_fstypename));
++		strlcpy(buf->f_mntonname, "/", sizeof(buf->f_mntonname));
++		strlcpy(buf->f_mntfromname, "/dev/disk1s1", sizeof(buf->f_mntfromname));
++	}
++	return 1;
++}
++
  long sys_statfs(const char* path, struct bsd_statfs* buf)
  {
  #ifdef __x86_64__
-@@ -32,11 +118,8 @@ long sys_statfs(const char* path, struct bsd_statfs* buf)
+@@ -32,11 +171,8 @@ long sys_statfs(const char* path, struct bsd_statfs* buf)
  
  long sys_statfs64(const char* path, struct bsd_statfs64* buf)
  {
@@ -6613,9 +6698,13 @@ index a6a5162..2155dc4 100644
  
  	struct vchroot_expand_args vc;
  	vc.flags = 0;
-@@ -58,47 +141,9 @@ long sys_statfs64(const char* path, struct bsd_statfs64* buf)
+@@ -56,49 +192,20 @@ long sys_statfs64(const char* path, struct bsd_statfs64* buf)
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
  
++	__builtin_memset(buf, 0, sizeof(*buf));
  	statfs_linux_to_bsd64(&lbuf, buf);
++	buf->f_iosize = (buf->f_bsize >= 4096u) ? (int) buf->f_bsize : 4096;
  
 -	fd = sys_open("/proc/self/mounts", O_RDONLY, 0);
 -	if (fd < 0)
@@ -6656,8 +6745,13 @@ index a6a5162..2155dc4 100644
 -
 -		strlcpy(buf->f_fstypename, p, sizeof(buf->f_fstypename));
 -		strlcpy(buf->f_mntfromname, mntfrom, sizeof(buf->f_mntfromname));
--	}
--
++	if (darling_compat_profile_enabled()) {
++		struct vchroot_unexpand_args uargs;
++		strlcpy(uargs.path, vc.path, sizeof(uargs.path));
++		if (vchroot_unexpand(&uargs) == 0 && lolsys_apply_compat_statfs64(uargs.path, buf))
++			return 0;
+ 	}
+ 
 -	close_internal(fd);
 +	lolsys_fill_mount_names(vc.path,
 +	    buf->f_mntonname, sizeof(buf->f_mntonname),
@@ -11048,3 +11142,67 @@ index dd67573..b760391 100644
  
  no_fork:
  		if (desc && desc->attrp)
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/getfsstat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/getfsstat.c
+index d1cdd3d..0656874 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/getfsstat.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/getfsstat.c
+@@ -1,19 +1,40 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/stat/getfsstat.h>
+ 
+ #include <stddef.h>
++#include <sys/errno.h>
+ #include <sys/fcntl.h>
+ 
+ #include <darling/emulation/conversion/stat/common.h>
+ #include <darling/emulation/common/base.h>
++#include <darling/emulation/common/cpu_identity.h>
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/common/simple.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/stat/statfs.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ 
+ extern char *strtok_r(char *str, const char *delim, char **saveptr);
+ extern unsigned long strlcpy(char* dst, const char* src, unsigned long size);
+ 
++static long lolsys_getfsstat64_compat(struct bsd_statfs64* buf, int bufsize)
++{
++	static const char* const mounts[2] = { "/", "/dev" };
++	int i, max, count = 0;
++
++	if (buf == NULL)
++		return 2;
++	if (bufsize < 0)
++		return -EINVAL;
++
++	max = bufsize / (int) sizeof(struct bsd_statfs64);
++	for (i = 0; i < 2 && count < max; i++) {
++		if (sys_statfs64(mounts[i], &buf[count]) == 0)
++			count++;
++	}
++	return count;
++}
++
+ long sys_getfsstat(struct bsd_statfs* buf, int bufsize, int flags)
+ {
+ #ifdef __x86_64__
+@@ -31,6 +52,9 @@ long sys_getfsstat64(struct bsd_statfs64* buf, int bufsize, int flags)
+ 	char line[512];
+ 	int count = 0;
+ 
++	if (darling_compat_profile_enabled())
++		return lolsys_getfsstat64_compat(buf, bufsize);
++
+ 	fd = sys_open("/proc/self/mounts", O_RDONLY, 0);
+ 	if (fd < 0)
+ 		return errno_linux_to_bsd(fd);
+@@ -48,6 +72,8 @@ long sys_getfsstat64(struct bsd_statfs64* buf, int bufsize, int flags)
+ 			if (bufsize < sizeof(struct bsd_statfs64) * (count+1))
+ 				break;
+ 
++			__builtin_memset(&buf[count], 0, sizeof(buf[count]));
++
+ 			p = strtok_r(line, " ", &saveptr);
+ 			if (p == NULL)
+ 				continue;
