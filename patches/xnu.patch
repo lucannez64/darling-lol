@@ -1932,10 +1932,10 @@ index 0000000..9901d10
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..1b8d54e
+index 0000000..085c156
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1153 @@
+@@ -0,0 +1,1294 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -2025,6 +2025,8 @@ index 0000000..1b8d54e
 +#define RCLOL_PERF_TYPE_BREAKPOINT 5u
 +#define RCLOL_HW_BREAKPOINT_X      4u
 +#define RCLOL_TRAP_PERF            6     // si_code for perf-generated SIGTRAP
++#define RCLOL_PERF_EVENT_IOC_MODIFY_ATTRIBUTES 0x4008240bUL
++#define RCLOL_CHAIN_SLOTS          32
 +
 +#define RCLOL_O_WRONLY  0x001
 +#define RCLOL_O_CREAT   0x040
@@ -2074,6 +2076,18 @@ index 0000000..1b8d54e
 +static int g_site_count = 0;
 +static int g_log_enabled = 0;
 +static int g_log_fd = -1;
++
++// Chained Group 1 state: when mvg.framework is also mapped in LeagueofLegends,
++// Group 1 uses only DR0 permanently (site 0) plus one ephemeral thread-local
++// DR1 breakpoint stepping site 1 -> site 2 -> site 3 -> close, freeing DR2-DR3
++// for mvg.framework's two cpuinfo helpers within the 4-DR hardware budget.
++struct rclol_chain_slot {
++	long tid;
++	int fd;
++};
++static struct rclol_site g_chain_sites[RCLOL_MAX_SITES];
++static int g_chain_count = 0;
++static struct rclol_chain_slot g_chain_slots[RCLOL_CHAIN_SLOTS];
 +
 +// ---------------------------------------------------------------------------
 +// Tiny async-signal-safe helpers (raw syscalls, no libc).
@@ -2126,9 +2140,28 @@ index 0000000..1b8d54e
 +// ---------------------------------------------------------------------------
 +// Arming
 +
++static void rclol_init_bp_attr(struct rclol_perf_event_attr* attr,
++	unsigned long runtime_addr, unsigned long cookie, int inherit)
++{
++	__builtin_memset(attr, 0, sizeof(*attr));
++	attr->type = RCLOL_PERF_TYPE_BREAKPOINT;
++	attr->size = sizeof(*attr);
++	attr->bp_type = RCLOL_HW_BREAKPOINT_X;
++	attr->bp_addr = runtime_addr;
++	attr->bp_len = sizeof(long);           // 8, per the task spec
++	attr->sample_period = 1;
++	attr->exclude_kernel = 1;
++	attr->exclude_hv = 1;
++	attr->inherit = inherit ? 1 : 0;       // later threads inherit when permanent
++	attr->remove_on_exec = 1;              // required with sigtrap + inherit
++	attr->sigtrap = 1;
++	attr->sig_data = cookie;               // delivered as siginfo.si_perf_data
++}
++
 +int rclol_cpuid_trace_arm(unsigned long runtime_addr, unsigned long cookie)
 +{
-+	if (g_site_count >= RCLOL_MAX_SITES)
++	int max_sites = g_chain_count > 0 ? RCLOL_MAX_SITES - 1 : RCLOL_MAX_SITES;
++	if (g_site_count >= max_sites)
 +		return -1;
 +
 +	// Protect against game updates: only arm an actual `cpuid` (0f a2).
@@ -2143,19 +2176,7 @@ index 0000000..1b8d54e
 +	}
 +
 +	struct rclol_perf_event_attr attr;
-+	__builtin_memset(&attr, 0, sizeof(attr));
-+	attr.type = RCLOL_PERF_TYPE_BREAKPOINT;
-+	attr.size = sizeof(attr);
-+	attr.bp_type = RCLOL_HW_BREAKPOINT_X;
-+	attr.bp_addr = runtime_addr;
-+	attr.bp_len = sizeof(long);           // 8, per the task spec
-+	attr.sample_period = 1;
-+	attr.exclude_kernel = 1;
-+	attr.exclude_hv = 1;
-+	attr.inherit = 1;                     // later threads inherit the breakpoint
-+	attr.remove_on_exec = 1;              // required with sigtrap + inherit
-+	attr.sigtrap = 1;
-+	attr.sig_data = cookie;               // delivered as siginfo.si_perf_data
++	rclol_init_bp_attr(&attr, runtime_addr, cookie, 1);
 +
 +	// pid=0 (this process), cpu=-1 (any cpu), group_fd=-1, flags=0.
 +	long fd = rclol_sys(__NR_perf_event_open, (long) &attr, 0, -1, -1, 0, 0);
@@ -2477,6 +2498,77 @@ index 0000000..1b8d54e
 +// ---------------------------------------------------------------------------
 +// Signal-handler fast path
 +
++static struct rclol_chain_slot* rclol_chain_slot_find_or_claim(long tid, int claim)
++{
++	for (int i = 0; i < RCLOL_CHAIN_SLOTS; ++i) {
++		if (__atomic_load_n(&g_chain_slots[i].tid, __ATOMIC_ACQUIRE) == tid)
++			return &g_chain_slots[i];
++	}
++	if (!claim)
++		return NULL;
++	for (int i = 0; i < RCLOL_CHAIN_SLOTS; ++i) {
++		long expected = 0;
++		if (__atomic_compare_exchange_n(&g_chain_slots[i].tid, &expected, tid,
++				0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
++			g_chain_slots[i].fd = -1;
++			return &g_chain_slots[i];
++		}
++	}
++	return NULL;
++}
++
++static int rclol_chain_open_site(const struct rclol_site* next_site)
++{
++	struct rclol_perf_event_attr attr;
++	rclol_init_bp_attr(&attr, next_site->runtime, next_site->cookie, 0);
++	return (int) rclol_sys(__NR_perf_event_open, (long) &attr, 0, -1, -1, 0, 0);
++}
++
++static int rclol_chain_retarget_site(int fd, const struct rclol_site* next_site)
++{
++	struct rclol_perf_event_attr attr;
++	rclol_init_bp_attr(&attr, next_site->runtime, next_site->cookie, 0);
++	if (fd >= 0 && rclol_sys(__NR_ioctl, fd, (long) RCLOL_PERF_EVENT_IOC_MODIFY_ATTRIBUTES,
++			(long) &attr, 0, 0, 0) == 0)
++		return fd;
++	if (fd >= 0)
++		rclol_sys(__NR_close, fd, 0, 0, 0, 0, 0);
++	return rclol_chain_open_site(next_site);
++}
++
++static void rclol_chain_advance(int chain_idx)
++{
++	long tid = rclol_gettid();
++	if (chain_idx == 0) {
++		struct rclol_chain_slot* slot = rclol_chain_slot_find_or_claim(tid, 1);
++		if (!slot)
++			return;
++		if (slot->fd >= 0) {
++			slot->fd = rclol_chain_retarget_site(slot->fd, &g_chain_sites[1]);
++		} else {
++			slot->fd = rclol_chain_open_site(&g_chain_sites[1]);
++		}
++		if (slot->fd < 0)
++			__atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
++	} else if (chain_idx > 0 && chain_idx + 1 < g_chain_count) {
++		struct rclol_chain_slot* slot = rclol_chain_slot_find_or_claim(tid, 0);
++		if (!slot)
++			return;
++		slot->fd = rclol_chain_retarget_site(slot->fd, &g_chain_sites[chain_idx + 1]);
++		if (slot->fd < 0)
++			__atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
++	} else if (chain_idx + 1 == g_chain_count) {
++		struct rclol_chain_slot* slot = rclol_chain_slot_find_or_claim(tid, 0);
++		if (!slot)
++			return;
++		if (slot->fd >= 0) {
++			rclol_sys(__NR_close, slot->fd, 0, 0, 0, 0, 0);
++			slot->fd = -1;
++		}
++		__atomic_store_n(&slot->tid, 0, __ATOMIC_RELEASE);
++	}
++}
++
 +bool rclol_cpuid_trace_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt)
 +{
 +	if (!info || !ctxt)
@@ -2488,8 +2580,18 @@ index 0000000..1b8d54e
 +	unsigned long cookie = (unsigned long) info->si_value;
 +
 +	struct rclol_site* site = NULL;
-+	for (int i = 0; i < g_site_count; ++i) {
-+		if (g_sites[i].cookie == cookie) { site = &g_sites[i]; break; }
++	int chain_idx = -1;
++	for (int i = 0; i < g_chain_count; ++i) {
++		if (g_chain_sites[i].cookie == cookie) {
++			site = &g_chain_sites[i];
++			chain_idx = i;
++			break;
++		}
++	}
++	if (!site) {
++		for (int i = 0; i < g_site_count; ++i) {
++			if (g_sites[i].cookie == cookie) { site = &g_sites[i]; break; }
++		}
 +	}
 +	if (!site)
 +		return false; // a perf SIGTRAP that isn't ours; let normal handling run
@@ -2513,6 +2615,9 @@ index 0000000..1b8d54e
 +	r->rcx = oc;
 +	r->rdx = od;
 +	r->rip += 2;  // skip the two-byte `0f a2`
++
++	if (chain_idx >= 0)
++		rclol_chain_advance(chain_idx);
 +
 +	unsigned long n = site->hits++;
 +	if (g_log_enabled) {
@@ -2539,6 +2644,9 @@ index 0000000..1b8d54e
 +
 +unsigned long rclol_cpuid_trace_hits(unsigned long cookie)
 +{
++	for (int i = 0; i < g_chain_count; ++i)
++		if (g_chain_sites[i].cookie == cookie)
++			return g_chain_sites[i].hits;
 +	for (int i = 0; i < g_site_count; ++i)
 +		if (g_sites[i].cookie == cookie)
 +			return g_sites[i].hits;
@@ -2634,8 +2742,8 @@ index 0000000..1b8d54e
 +}
 +
 +// Scan __TEXT,__text for Group 1's four cpuid sites (+0, +0x34, +0x60, +0x102).
-+static int rclol_arm_group1_scan(unsigned long text_start, unsigned long text_end,
-+	unsigned long slide)
++static int rclol_find_group1_scan(unsigned long text_start, unsigned long text_end,
++	unsigned long slide, unsigned long out_sites[RCLOL_MAX_SITES])
 +{
 +	if (text_end <= text_start || text_end - text_start < 0x104UL)
 +		return 0;
@@ -2647,20 +2755,19 @@ index 0000000..1b8d54e
 +		    p[0x60] == 0x0f && p[0x61] == 0xa2 &&
 +		    p[0x102] == 0x0f && p[0x103] == 0xa2) {
 +			unsigned long found_unslid = (unsigned long) p - slide;
-+			const unsigned long found_sites[RCLOL_MAX_SITES] = {
-+				found_unslid,
-+				found_unslid + 0x34UL,
-+				found_unslid + 0x60UL,
-+				found_unslid + 0x102UL,
-+			};
-+			return rclol_arm_group1_sites(found_sites, slide);
++			out_sites[0] = found_unslid;
++			out_sites[1] = found_unslid + 0x34UL;
++			out_sites[2] = found_unslid + 0x60UL;
++			out_sites[3] = found_unslid + 0x102UL;
++			return 1;
 +		}
 +	}
 +	return 0;
 +}
 +
-+static int rclol_arm_group1_select(const void* base, unsigned long slide,
-+	const unsigned long static_sites[RCLOL_MAX_SITES])
++static int rclol_find_group1_sites(const void* base, unsigned long slide,
++	const unsigned long static_sites[RCLOL_MAX_SITES],
++	unsigned long out_sites[RCLOL_MAX_SITES])
 +{
 +	unsigned long text_start = 0, text_end = 0;
 +	int has_text = rclol_find_text_section(base, slide, &text_start, &text_end);
@@ -2674,9 +2781,21 @@ index 0000000..1b8d54e
 +			break;
 +		}
 +	}
-+	if (static_ok)
-+		return rclol_arm_group1_sites(static_sites, slide);
-+	return rclol_arm_group1_scan(text_start, text_end, slide);
++	if (static_ok) {
++		for (int i = 0; i < RCLOL_MAX_SITES; ++i)
++			out_sites[i] = static_sites[i];
++		return 1;
++	}
++	return rclol_find_group1_scan(text_start, text_end, slide, out_sites);
++}
++
++static int rclol_arm_group1_select(const void* base, unsigned long slide,
++	const unsigned long static_sites[RCLOL_MAX_SITES])
++{
++	unsigned long sites[RCLOL_MAX_SITES];
++	if (!rclol_find_group1_sites(base, slide, static_sites, sites))
++		return 0;
++	return rclol_arm_group1_sites(sites, slide);
 +}
 +
 +// Scan mvg.framework's __TEXT,__text for cpuinfo's two generic cpuid/cpuidex
@@ -2971,6 +3090,23 @@ index 0000000..1b8d54e
 +	return NULL;
 +}
 +
++static int rclol_arm_group1_chained(const void* base, unsigned long slide,
++	const unsigned long static_sites[RCLOL_MAX_SITES])
++{
++	unsigned long sites[RCLOL_MAX_SITES];
++	if (!rclol_find_group1_sites(base, slide, static_sites, sites))
++		return 0;
++	if (rclol_cpuid_trace_arm(sites[0] + slide, sites[0]) < 0)
++		return 0;
++	for (int i = 0; i < RCLOL_MAX_SITES; ++i) {
++		g_chain_sites[i].cookie = sites[i];
++		g_chain_sites[i].runtime = sites[i] + slide;
++		g_chain_sites[i].hits = 0;
++	}
++	g_chain_count = RCLOL_MAX_SITES;
++	return 1;
++}
++
 +void rclol_cpuid_trace_setup(void)
 +{
 +	// Two switches: the launcher's hardware profile (RCLOL_PLATFORM_PROFILE,
@@ -3071,7 +3207,12 @@ index 0000000..1b8d54e
 +
 +	if (chosen) {
 +		if (chosen == rclol_group1) {
-+			rclol_arm_group1_select((const void*) base, slide, chosen);
++			unsigned long mvg_base = rclol_find_mvg_base();
++			if (mvg_base != 0 && rclol_arm_group1_chained((const void*) base, slide, chosen)) {
++				rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);
++			} else {
++				rclol_arm_group1_select((const void*) base, slide, chosen);
++			}
 +		} else {
 +			for (int i = 0; i < RCLOL_MAX_SITES; ++i)
 +				rclol_cpuid_trace_arm(chosen[i] + slide, chosen[i]);
@@ -3696,47 +3837,51 @@ index f273989..7ecb675 100644
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..61fe056 100644
+index bd9cdc2..cffcbe2 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -14,5 +14,6 @@
+@@ -13,6 +13,7 @@
+ #include <darling/emulation/conversion/errno.h>
  #include <darling/emulation/conversion/fcntl/open.h>
  #include <darling/emulation/common/simple.h>
 +#include <darling/emulation/common/cpu_identity.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
-@@ -23,6 +24,9 @@
+@@ -23,6 +24,10 @@
  enum {
  	_KERN_MSGBUF = 1000,
  	_KERN_OSPRODUCTVERSION,
 +	_KERN_HV_VMM_PRESENT,
 +	_KERN_OSVARIANT_STATUS,
 +	_KERN_OSRELEASETYPE,
++	_KERN_BOOTARGS,
  
  	_KERN_SEMMNS = 1000,
  };
-@@ -46,6 +50,9 @@ static sysctl_handler(handle_usrstack64);
+@@ -46,6 +51,10 @@ static sysctl_handler(handle_usrstack64);
  static sysctl_handler(handle_sysv_semmns);
  static sysctl_handler(handle_osproductversion);
  static sysctl_handler(handle_osrevision);
 +static sysctl_handler(handle_hv_vmm_present);
 +static sysctl_handler(handle_osvariant_status);
 +static sysctl_handler(handle_osreleasetype);
++static sysctl_handler(handle_bootargs);
  
  extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
  extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
-@@ -76,6 +82,9 @@ const struct known_sysctl sysctls_kern[] = {
+@@ -76,6 +85,10 @@ const struct known_sysctl sysctls_kern[] = {
  	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
  	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
  	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
 +	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
 +	{ .oid = _KERN_OSVARIANT_STATUS, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "osvariant_status", .handler = handle_osvariant_status },
 +	{ .oid = _KERN_OSRELEASETYPE, .type = CTLTYPE_STRING, .exttype = "S", .name = "osreleasetype", .handler = handle_osreleasetype },
++	{ .oid = _KERN_BOOTARGS, .type = CTLTYPE_STRING, .exttype = "S", .name = "bootargs", .handler = handle_bootargs },
  	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
  	{ .oid = -1 }
  };
-@@ -139,18 +142,23 @@ sysctl_handler(handle_boottime)
+@@ -139,18 +152,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -3766,7 +3911,7 @@ index bd9cdc2..61fe056 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +357,35 @@ static sysctl_handler(handle_osrevision) {
+@@ -342,3 +360,40 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -3800,6 +3945,11 @@ index bd9cdc2..61fe056 100644
 +
 +static sysctl_handler(handle_osreleasetype) {
 +	copyout_string("RELEASE", (char*)old, oldlen);
++	return 0;
++}
++
++static sysctl_handler(handle_bootargs) {
++	copyout_string("", (char*)old, oldlen);
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_machdep.c
@@ -5272,7 +5422,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..136171b 100644
+index c2f70fb..bcfd3f1 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -7,6 +7,7 @@
@@ -5431,7 +5581,230 @@ index c2f70fb..136171b 100644
  static bool parse_smaps_firstline(
  	const char* line,
  	uint64_t* pri_address,
-@@ -328,6 +454,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -112,11 +238,16 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_taskallinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize);
++static long _proc_pidinfo_listfds(int32_t pid, void* buffer, int32_t bufsize);
+ 
+ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize)
+ {
+ 	switch (flavor)
+ 	{
++		case PROC_PIDLISTFDS:
++		{
++			return _proc_pidinfo_listfds(pid, buffer, bufsize);
++		}
+ 		// arg is a memory location we want to know about
+ 		// We return information on the mapping where the address belongs or any following mapping
+ 		// Then we return -ESRCH.
+@@ -170,7 +301,145 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
+ 	}
+ }
+ 
+-static char fakeuuid[16];
++static uint32_t proc_info_bswap32(uint32_t v)
++{
++	return ((v & 0x000000ffu) << 24)
++		| ((v & 0x0000ff00u) << 8)
++		| ((v & 0x00ff0000u) >> 8)
++		| ((v & 0xff000000u) >> 24);
++}
++
++#define PROC_INFO_MAX_MACHO_CMDS (128u * 1024u)
++
++/* Parse LC_UUID from a Mach-O header buffer. For a universal (FAT) binary,
++ * writes the x86_64 slice file offset into *fat_slice_offset and returns false
++ * so the caller can read the slice header and re-parse. If load commands extend
++ * past len without finding LC_UUID, writes the bounded byte count required
++ * (up to PROC_INFO_MAX_MACHO_CMDS) into *needed_bytes. */
++static bool parse_macho_uuid_bytes(const uint8_t* data, __SIZE_TYPE__ len,
++		uint8_t out_uuid[16], uint64_t* fat_slice_offset, uint32_t* needed_bytes)
++{
++	uint32_t magic, ncmds, sizeofcmds, hdr_size, i;
++	uint64_t total_needed;
++	__SIZE_TYPE__ pos, end;
++
++	if (fat_slice_offset)
++		*fat_slice_offset = 0;
++	if (needed_bytes)
++		*needed_bytes = 0;
++	if (!data || len < 32)
++		return false;
++
++	memcpy(&magic, data, sizeof(magic));
++	if (magic == 0xbebafecau /* FAT_CIGAM */) {
++		uint32_t nfat = 0;
++		memcpy(&nfat, data + 4, sizeof(nfat));
++		nfat = proc_info_bswap32(nfat);
++		if (nfat > 16)
++			nfat = 16;
++		for (i = 0; i < nfat; i++) {
++			__SIZE_TYPE__ off = 8 + (__SIZE_TYPE__) i * 20;
++			uint32_t cputype = 0, slice_off = 0;
++			if (off + 20 > len)
++				break;
++			memcpy(&cputype, data + off, sizeof(cputype));
++			memcpy(&slice_off, data + off + 8, sizeof(slice_off));
++			if (proc_info_bswap32(cputype) == 0x01000007u /* CPU_TYPE_X86_64 */) {
++				if (fat_slice_offset)
++					*fat_slice_offset = proc_info_bswap32(slice_off);
++				return false;
++			}
++		}
++		return false;
++	}
++
++	if (magic == 0xfeedfacfu /* MH_MAGIC_64 */) {
++		hdr_size = 32;
++	} else if (magic == 0xfeedfaceu /* MH_MAGIC */) {
++		hdr_size = 28;
++	} else {
++		return false;
++	}
++
++	memcpy(&ncmds, data + 16, sizeof(ncmds));
++	memcpy(&sizeofcmds, data + 20, sizeof(sizeofcmds));
++	total_needed = (uint64_t) hdr_size + (uint64_t) sizeofcmds;
++	pos = hdr_size;
++	end = total_needed < (uint64_t) len ? (__SIZE_TYPE__) total_needed : len;
++
++	for (i = 0; i < ncmds && pos + 8 <= end; i++) {
++		uint32_t cmd = 0, cmdsize = 0;
++		memcpy(&cmd, data + pos, sizeof(cmd));
++		memcpy(&cmdsize, data + pos + 4, sizeof(cmdsize));
++		if (cmdsize < 8 || cmdsize > end - pos)
++			break;
++		if (cmd == 0x1bu /* LC_UUID */ && cmdsize >= 24) {
++			memcpy(out_uuid, data + pos + 8, 16);
++			return true;
++		}
++		pos += cmdsize;
++	}
++	if (needed_bytes && total_needed > (uint64_t) len && total_needed <= PROC_INFO_MAX_MACHO_CMDS)
++		*needed_bytes = (uint32_t) total_needed;
++	return false;
++}
++
++#ifndef VARIANT_DYLD
++static __SIZE_TYPE__ proc_info_read_full(long fd, uint8_t* dst, __SIZE_TYPE__ cap)
++{
++	__SIZE_TYPE__ total = 0;
++	while (total < cap) {
++		long got = LINUX_SYSCALL(__NR_read, fd, dst + total, cap - total);
++		if (got <= 0)
++			break;
++		total += (__SIZE_TYPE__) got;
++	}
++	return total;
++}
++
++static void read_process_executable_uuid(int32_t pid, uint8_t out_uuid[16])
++{
++	char exec_path[4096];
++	uint8_t hdr[8192];
++	uint64_t fullLength = 0;
++	uint64_t slice_offset = 0;
++	uint32_t needed = 0;
++	__SIZE_TYPE__ got;
++	long fd;
++
++	if (dserver_rpc_get_executable_path(pid, exec_path, sizeof(exec_path), &fullLength) != 0)
++		return;
++	if (exec_path[0] == '\0')
++		return;
++
++	fd = LINUX_SYSCALL(__NR_openat, -100 /* AT_FDCWD */, exec_path, LINUX_O_RDONLY, 0);
++	if (fd < 0)
++		return;
++
++	got = proc_info_read_full(fd, hdr, sizeof(hdr));
++	if (got >= 32) {
++		if (!parse_macho_uuid_bytes(hdr, got, out_uuid, &slice_offset, &needed) && slice_offset > 0) {
++			if (LINUX_SYSCALL(__NR_lseek, fd, slice_offset, 0 /* SEEK_SET */) >= 0) {
++				got = proc_info_read_full(fd, hdr, sizeof(hdr));
++				if (got >= 32)
++					parse_macho_uuid_bytes(hdr, got, out_uuid, NULL, &needed);
++			}
++		}
++		if (needed > sizeof(hdr) && needed <= PROC_INFO_MAX_MACHO_CMDS) {
++			uint8_t* dyn = (uint8_t*) malloc(needed);
++			if (dyn) {
++				if (LINUX_SYSCALL(__NR_lseek, fd, slice_offset, 0 /* SEEK_SET */) >= 0) {
++					got = proc_info_read_full(fd, dyn, needed);
++					if (got >= 32)
++						parse_macho_uuid_bytes(dyn, got, out_uuid, NULL, NULL);
++				}
++				free(dyn);
++			}
++		}
++	}
++	LINUX_SYSCALL(__NR_close, fd);
++}
++#endif
+ 
+ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+ {
+@@ -183,13 +452,14 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 
+ 	struct proc_uniqidentifierinfo* info = (struct proc_uniqidentifierinfo*) buffer;
+ 
+-	if (bufsize < sizeof(*info))
++	if (!buffer)
++		return -EFAULT;
++	if (bufsize < (int32_t) sizeof(*info))
+ 		return -ENOSPC;
+ 
+-	memset(buffer, 0, bufsize);
++	memset(buffer, 0, sizeof(*info));
+ 
+-#warning Get UUID from kernel
+-	memcpy(info->p_uuid, fakeuuid, sizeof(info->p_uuid));
++	read_process_executable_uuid(pid, info->p_uuid);
+ 
+ 	//////////////////////////
+ 	// Read info for pid    //
+@@ -222,23 +492,24 @@ static long _proc_pidonfo_uniqinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 	// Read info for ppid   //
+ 	//////////////////////////
+ 
+-	__simple_sprintf(path, "/proc/%d/stat", ppid);
+-	if (!read_string(path, stat, sizeof(stat)))
+-		return -ESRCH;
+-
+-	statptr = stat;
+-	skip_stat_elems(&statptr, 21); // skip until starttime
+-	elem = next_stat_elem(&statptr);
+-
+-	if (!elem)
+-		return -EINVAL;
+-
+-	starttime = __simple_atoi(elem, NULL);
+-	info->p_puniqueid = starttime << 16;
+-	info->p_puniqueid |= (ppid & 0xffff);
++	if (ppid > 0) {
++		__simple_sprintf(path, "/proc/%d/stat", ppid);
++		if (read_string(path, stat, sizeof(stat))) {
++			statptr = stat;
++			skip_stat_elems(&statptr, 21); // skip until starttime
++			elem = next_stat_elem(&statptr);
++			if (elem) {
++				starttime = __simple_atoi(elem, NULL);
++				info->p_puniqueid = starttime << 16;
++				info->p_puniqueid |= (ppid & 0xffff);
++			}
++		}
++	}
+ 
++	return sizeof(*info);
++#else
++	return -ENOTSUP;
+ #endif
+-	return 1;
+ }
+ 
+ // glibc bits/confname.h
+@@ -328,6 +599,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
  	info->pbi_start_tvusec = starttime_usecs;
  
  	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
@@ -5440,7 +5813,31 @@ index c2f70fb..136171b 100644
  
  	return sizeof(struct proc_bsdinfo);
  reterr:
-@@ -390,7 +518,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -342,10 +615,12 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
+ 	// __simple_printf("Asking for pid/tid %d/%d\n", pid, tid);
+ 
+ 	struct proc_threadinfo* info = (struct proc_threadinfo*) buffer;
+-	if (bufsize < sizeof(*info))
++	if (!buffer)
++		return -EFAULT;
++	if (bufsize < (int32_t) sizeof(*info))
+ 		return -ENOSPC;
+ 
+-	memset(buffer, 0, bufsize);
++	memset(buffer, 0, sizeof(*info));
+ 
+ 	__simple_sprintf(path, "/proc/%d/task/%d/comm", pid, tid);
+ 	// __simple_printf("Reading thread name from %s\n", path);
+@@ -360,7 +635,7 @@ static long _proc_pidinfo_pidthreadinfo(int32_t pid, uint64_t thread_handle, voi
+ 	}
+ 
+ 	// TODO: Other proc_threadinfo fields
+-	return 1;
++	return sizeof(*info);
+ }
+ 
+ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -390,7 +665,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  
  	// comm
  	READELEM();
@@ -5451,7 +5848,7 @@ index c2f70fb..136171b 100644
  
  	// process state
  	READELEM();
-@@ -437,7 +567,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -437,7 +714,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  	if (is_64_bit)
  		info->pbsi_flags |= P_LP64;
  
@@ -5461,6 +5858,263 @@ index c2f70fb..136171b 100644
  reterr:
  	return -EINVAL;
  }
+@@ -455,6 +733,32 @@ static long _proc_pidinfo_regionpath_setup(int32_t pid, struct rdline_buffer* bu
+ 	return fd;
+ };
+ 
++static void unexpand_smaps_path(char* path, __SIZE_TYPE__ path_size)
++{
++	struct vchroot_unexpand_args uargs;
++	__SIZE_TYPE__ len;
++
++	if (!path || path_size == 0)
++		return;
++	if (path[0] != '/') {
++		path[0] = '\0';
++		return;
++	}
++
++	len = strlen(path);
++	if (len >= sizeof(uargs.path))
++		len = sizeof(uargs.path) - 1;
++	memcpy(uargs.path, path, len);
++	uargs.path[len] = '\0';
++
++	if (vchroot_unexpand(&uargs) == 0) {
++		strncpy(path, uargs.path, path_size - 1);
++		path[path_size - 1] = '\0';
++	} else {
++		path[0] = '\0';
++	}
++}
++
+ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer, int32_t bufsize)
+ {
+ 	struct rdline_buffer buf;
+@@ -465,51 +769,44 @@ static long _proc_pidinfo_regionpathinfo(int32_t pid, uint64_t arg, void* buffer
+ 
+ 	if (!buffer)
+ 		return -EFAULT;
+-	if (bufsize < sizeof(my_rpi))
++	if (bufsize < (int32_t) sizeof(my_rpi))
+ 		return -ENOSPC;
+ 
++	memset(&my_rpi, 0, sizeof(my_rpi));
++
+ 	fd = _proc_pidinfo_regionpath_setup(pid, &buf);
+ 	if (fd < 0)
+ 		return fd;
+ 
+ 	while ((line = _readline(fd, &buf)) != NULL)
+ 	{
+-		if (!foundRegion)
++		if (parse_smaps_firstline(
++			line,
++			&my_rpi.prp_prinfo.pri_address,
++			&my_rpi.prp_prinfo.pri_size,
++			&my_rpi.prp_prinfo.pri_protection,
++			&my_rpi.prp_prinfo.pri_share_mode,
++			&my_rpi.prp_prinfo.pri_offset,
++			&my_rpi.prp_vip.vip_vi.vi_stat.vst_dev,
++			&my_rpi.prp_vip.vip_vi.vi_stat.vst_ino,
++			my_rpi.prp_vip.vip_path
++		))
+ 		{
+-			// Searching for matching memory region.
+-			// This call returns true if we see the start of another mapping.
+-			if (parse_smaps_firstline(
+-				line,
+-				&my_rpi.prp_prinfo.pri_address,
+-				&my_rpi.prp_prinfo.pri_size,
+-				&my_rpi.prp_prinfo.pri_protection,
+-				&my_rpi.prp_prinfo.pri_share_mode,
+-				&my_rpi.prp_prinfo.pri_offset,
+-				&my_rpi.prp_vip.vip_vi.vi_stat.vst_dev,
+-				&my_rpi.prp_vip.vip_vi.vi_stat.vst_ino,
+-				my_rpi.prp_vip.vip_path
+-			))
++			if ((my_rpi.prp_prinfo.pri_address + my_rpi.prp_prinfo.pri_size) > arg)
+ 			{
+-				if (arg >= my_rpi.prp_prinfo.pri_address && arg < (my_rpi.prp_prinfo.pri_address + my_rpi.prp_prinfo.pri_size))
+-				{
+-					foundRegion = true;
+-				}
++				foundRegion = true;
++				break;
+ 			}
+ 		}
+-		else
+-		{
+-			// TODO: Parse additional information (e.g. RSS)
+-		}
+ 	}
+ 	close_internal(fd);
+ 
+-	if (my_rpi.prp_vip.vip_path[0])
+-	{
+-		// TODO: Provide information in struct vinfo_stat
+-	}
++	if (!foundRegion)
++		return -ESRCH;
+ 
++	unexpand_smaps_path(my_rpi.prp_vip.vip_path, sizeof(my_rpi.prp_vip.vip_path));
+ 	memcpy(buffer, &my_rpi, sizeof(my_rpi));
+-	return foundRegion ? 1 : -ESRCH;
++	return sizeof(my_rpi);
+ }
+ 
+ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, int32_t buffer_size) {
+@@ -526,9 +823,11 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ 
+ 	if (!buffer)
+ 		return -EFAULT;
+-	if (buffer_size < sizeof(my_rp))
++	if (buffer_size < (int32_t) sizeof(my_rp))
+ 		return -ENOSPC;
+ 
++	memset(&my_rp, 0, sizeof(my_rp));
++
+ 	fd = _proc_pidinfo_regionpath_setup(pid, &readline_buffer);
+ 	if (fd < 0)
+ 		return fd;
+@@ -545,7 +844,7 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ 			NULL,
+ 			my_rp.prpo_path
+ 		)) {
+-			if (arg >= my_rp.prpo_addr && arg < (my_rp.prpo_addr + my_rp.prpo_regionlength)) {
++			if ((my_rp.prpo_addr + my_rp.prpo_regionlength) > arg) {
+ 				found = true;
+ 				break;
+ 			}
+@@ -554,8 +853,12 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ 
+ 	close_internal(fd);
+ 
++	if (!found)
++		return -ESRCH;
++
++	unexpand_smaps_path(my_rp.prpo_path, sizeof(my_rp.prpo_path));
+ 	memcpy(buffer, &my_rp, sizeof(my_rp));
+-	return found ? strlen(my_rp.prpo_path) : -EINVAL;
++	return sizeof(my_rp);
+ };
+ 
+ // Parses line such as:
+@@ -643,8 +946,14 @@ static bool parse_smaps_firstline(
+ 	// Read file name (may be empty)
+ 	while (*p == ' ')
+ 		p++;
+-	if (*p && vip_path) // Is file name present? (and the caller wants it)
+-		strcpy(vip_path, p);
++	if (vip_path) {
++		if (*p) {
++			strncpy(vip_path, p, MAXPATHLEN - 1);
++			vip_path[MAXPATHLEN - 1] = '\0';
++		} else {
++			vip_path[0] = '\0';
++		}
++	}
+ 
+ 	return true;
+ }
+@@ -727,7 +1036,7 @@ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize)
+ 	uint64_t rss = __simple_atoi(elem, NULL);
+ 
+ 	ti->pti_virtual_size = vsize;
+-	ti->pti_resident_size = rss;
++	ti->pti_resident_size = rss * 4096ULL;
+ 	ti->pti_total_user = utime;
+ 	ti->pti_total_system = stime;
+ 	// ti->pti_threads_user
+@@ -827,3 +1136,88 @@ bail:
+ 	close_internal(fd);
+ 	return count * sizeof(uint64_t);
+ }
++
++static uint32_t proc_fdtype_from_link(const char* target)
++{
++	if (!target || target[0] == '\0')
++		return PROX_FDTYPE_VNODE;
++	if (strncmp(target, "socket:[", 8) == 0)
++		return PROX_FDTYPE_SOCKET;
++	if (strncmp(target, "pipe:[", 6) == 0)
++		return PROX_FDTYPE_PIPE;
++	if (strncmp(target, "anon_inode:[eventpoll]", 22) == 0
++		|| strncmp(target, "anon_inode:[signalfd]", 21) == 0
++		|| strncmp(target, "anon_inode:[timerfd]", 20) == 0)
++		return PROX_FDTYPE_KQUEUE;
++	return PROX_FDTYPE_VNODE;
++}
++
++static long _proc_pidinfo_listfds(int32_t pid, void* buffer, int32_t bufsize)
++{
++	struct proc_fdinfo* fds = (struct proc_fdinfo*) buffer;
++	int32_t maxCount = 0;
++	int32_t count = 0;
++	int fd, ret;
++	long basep = 0;
++	char dents[512];
++	char path[64];
++	int32_t self_pid;
++
++	if (buffer != NULL && bufsize < 0)
++		return -EINVAL;
++	if (buffer != NULL)
++		maxCount = bufsize / (int32_t) sizeof(struct proc_fdinfo);
++
++	__simple_sprintf(path, "/proc/%d/fd", pid);
++	fd = sys_open_nocancel(path, BSD_O_RDONLY | BSD_O_DIRECTORY, 0);
++	if (fd < 0)
++		return -ESRCH;
++
++	self_pid = (int32_t) LINUX_SYSCALL(__NR_getpid);
++
++	while ((ret = sys_getdirentries(fd, dents, sizeof(dents), &basep)) > 0)
++	{
++		int pos = 0;
++		while (pos < ret)
++		{
++			struct bsd_dirent* dent = (struct bsd_dirent*) &dents[pos];
++			int32_t fdnum;
++
++			if (dent->d_reclen == 0)
++				break;
++			pos += dent->d_reclen;
++			if (!isdigit(dent->d_name[0]))
++				continue;
++
++			fdnum = (int32_t) __simple_atoi(dent->d_name, NULL);
++			if (pid == self_pid && fdnum == fd)
++				continue;
++
++			if (buffer != NULL) {
++				char fdpath_buf[64];
++				char target[64];
++				long tlen;
++
++				if (count >= maxCount)
++					goto done;
++
++				__simple_sprintf(fdpath_buf, "/proc/%d/fd/%d", pid, fdnum);
++				tlen = sys_readlink(fdpath_buf, target, sizeof(target) - 1);
++				if (tlen < 0)
++					target[0] = '\0';
++				else
++					target[tlen] = '\0';
++
++				fds[count].proc_fd = fdnum;
++				fds[count].proc_fdtype = proc_fdtype_from_link(target);
++			}
++			++count;
++		}
++	}
++
++done:
++	close_internal(fd);
++	if (buffer == NULL)
++		return (count + 8) * (long) sizeof(struct proc_fdinfo);
++	return count * (long) sizeof(struct proc_fdinfo);
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 index 0a8f1e4..9651453 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
