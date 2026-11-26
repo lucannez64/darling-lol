@@ -117,12 +117,12 @@ class PrefixTests(unittest.TestCase):
                          ['prefix', 'prefix.partial'])
 
     def test_failed_copy_keeps_the_old_prefix_and_removes_only_its_staging(self):
-        self.require_user_xattrs()
         prefix = self.load()
         new = self.folder / 'bulk/prefix'
         new.parent.mkdir()
         error = subprocess.CalledProcessError(1, 'cp')
-        with self.cross_device(prefix), patch.object(prefix.subprocess, 'run', side_effect=error):
+        with self.cross_device(prefix), patch.object(prefix, 'check_xattrs'), \
+                patch.object(prefix.subprocess, 'run', side_effect=error):
             with self.assertRaises(subprocess.CalledProcessError):
                 prefix.move(self.old, new)
         self.assertEqual((self.old / 'Applications/League of Legends.app/game').read_text(), 'game data')
