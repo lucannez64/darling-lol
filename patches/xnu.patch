@@ -1932,7 +1932,7 @@ index 0000000..9901d10
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..085c156
+index 0000000..9131c0d
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 @@ -0,0 +1,1294 @@
@@ -2394,7 +2394,7 @@ index 0000000..085c156
 +		 * an instruction the host lacks. */
 +		*eax = 0;
 +		if (subleaf == 0u) {
-+			*ebx &= 0x029c6fbfu;
++			*ebx &= DARLING_COMPAT_LEAF7_EBX;
 +			*ecx = 0;
 +			*edx = 0;
 +		} else {
@@ -3332,10 +3332,10 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..7ecb675 100644
+index f273989..c4fbb42 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-@@ -9,13 +9,19 @@
+@@ -9,13 +9,20 @@
  #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
  #include <darling/emulation/linux_premigration/ext/sys/utsname.h>
  #include <darling/emulation/common/simple.h>
@@ -3349,14 +3349,15 @@ index f273989..7ecb675 100644
 +// The raw darlingserver reply; host_info() itself is wrapped in libsyscall/mach/host.c
 +// to present the values below.
 +extern kern_return_t _kernelrpc_host_info(mach_port_name_t host, int itype, void* hinfo, mach_msg_type_number_t* count);
++extern kern_return_t _kernelrpc_host_statistics64(mach_port_name_t host, int flavor, void* info, mach_msg_type_number_t* count);
  
  /* Darling specific */
  enum {
-+	_HW_ACTIVECPU = 26, // hw.activecpu's OID in XNU; unused in this table before
++	_HW_AVAILCPU_NAME = 1400, // "availcpu" is not a Darwin name; kept as an alias
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +30,17 @@ enum {
+@@ -24,10 +31,31 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -3368,6 +3369,20 @@ index f273989..7ecb675 100644
 +	_HW_L2CACHESIZE,
 +	_HW_L3CACHESIZE,
 +	_HW_PACKAGES,
++	// by-name leaves XNU registers with OID_AUTO
++	_HW_CPUFAMILY = 1300,
++	_HW_CPUSUBFAMILY,
++	_HW_PAGESIZE32,
++	_HW_BUSFREQUENCY,
++	_HW_BUSFREQUENCY_MIN,
++	_HW_BUSFREQUENCY_MAX,
++	_HW_CPUFREQUENCY_MIN,
++	_HW_CPUFREQUENCY_MAX,
++	_HW_CACHELINESIZE,
++	_HW_L1ICACHESIZE,
++	_HW_L1DCACHESIZE,
++	_HW_TBFREQUENCY,
++	_HW_TARGETTYPE,
  };
  
  static sysctl_handler(handle_availcpu);
@@ -3375,7 +3390,7 @@ index f273989..7ecb675 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +52,97 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +67,154 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -3387,6 +3402,29 @@ index f273989..7ecb675 100644
 +static sysctl_handler(handle_l2cachesize);
 +static sysctl_handler(handle_l3cachesize);
 +static sysctl_handler(handle_packages);
++static sysctl_handler(handle_byteorder);
++static sysctl_handler(handle_physmem);
++static sysctl_handler(handle_usermem);
++static sysctl_handler(handle_vectorunit);
++static sysctl_handler(handle_cpufamily);
++static sysctl_handler(handle_cpusubfamily);
++static sysctl_handler(handle_pagesize32);
++static sysctl_handler(handle_busfrequency);
++static sysctl_handler(handle_busfrequency_compat);
++static sysctl_handler(handle_cachelinesize);
++static sysctl_handler(handle_cachelinesize_compat);
++static sysctl_handler(handle_l1icachesize);
++static sysctl_handler(handle_l1icachesize_compat);
++static sysctl_handler(handle_l1dcachesize);
++static sysctl_handler(handle_l1dcachesize_compat);
++static sysctl_handler(handle_l2settings);
++static sysctl_handler(handle_l2cachesize_compat);
++static sysctl_handler(handle_l3settings);
++static sysctl_handler(handle_l3cachesize_compat);
++static sysctl_handler(handle_tbfrequency);
++static sysctl_handler(handle_tbfrequency_compat);
++static sysctl_handler(handle_epoch);
++static sysctl_handler(handle_targettype);
 +
 +static int compat_optional_feature(unsigned int leaf, int reg, int bit, unsigned int host_word)
 +{
@@ -3396,8 +3434,11 @@ index f273989..7ecb675 100644
 +		return ((host_word & id->leaf1_ecx) >> bit) & 1;
 +	if (leaf == 1 && reg == 3)
 +		return ((host_word & id->leaf1_edx) >> bit) & 1;
-+	if (leaf == 7 && reg == 1 && bit == 16)
-+		return 0; /* i7-9750H (Coffee Lake) has no AVX-512F */
++	// Same view of leaf 7 as the cpuid trap: no AVX-512 on Coffee Lake-H.
++	if (leaf == 7 && reg == 1)
++		return ((host_word & DARLING_COMPAT_LEAF7_EBX) >> bit) & 1;
++	if (leaf == 7)
++		return 0;
 +	return (host_word >> bit) & 1;
 +}
 +
@@ -3409,6 +3450,13 @@ index f273989..7ecb675 100644
 +	sysctl_handle_size(sizeof(int));
 +#if defined(__i386__) || defined(__x86_64__)
 +	unsigned int regs[4];
++	__asm__("cpuid" : "=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]), "=d" (regs[3]) : "0" (0), "2" (0));
++	if (regs[0] < leaf)
++	{
++		// cpuid above the maximum leaf returns another leaf's data
++		*((int*) old) = 0;
++		return 0;
++	}
 +	__asm__("cpuid" : "=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]), "=d" (regs[3]) : "0" (leaf), "2" (0));
 +	if (darling_compat_profile_enabled())
 +		value = compat_optional_feature(leaf, reg, bit, regs[reg]);
@@ -3439,6 +3487,18 @@ index f273989..7ecb675 100644
 +optional_handler(bmi1, 7, 1, 3)
 +optional_handler(bmi2, 7, 1, 8)
 +optional_handler(avx512f, 7, 1, 16)
++optional_handler(enfstrg, 7, 1, 9)
++optional_handler(rtm, 7, 1, 11)
++optional_handler(hle, 7, 1, 4)
++optional_handler(adx, 7, 1, 19)
++optional_handler(mpx, 7, 1, 14)
++optional_handler(sgx, 7, 1, 2)
++optional_handler(avx512cd, 7, 1, 28)
++optional_handler(avx512dq, 7, 1, 17)
++optional_handler(avx512bw, 7, 1, 30)
++optional_handler(avx512vl, 7, 1, 31)
++optional_handler(avx512ifma, 7, 1, 21)
++optional_handler(avx512vbmi, 7, 2, 1)
 +
 +enum {
 +	_HW_OPTIONAL = 1100,
@@ -3463,18 +3523,31 @@ index f273989..7ecb675 100644
 +	{ .oid = 16, .type = CTLTYPE_INT, .exttype = "I", .name = "bmi2", .handler = handle_optional_bmi2 },
 +	{ .oid = 17, .type = CTLTYPE_INT, .exttype = "I", .name = "avx512f", .handler = handle_optional_avx512f },
 +	{ .oid = 18, .type = CTLTYPE_INT, .exttype = "I", .name = "x86_64", .handler = handle_cpu64bitcapable },
++	{ .oid = 19, .type = CTLTYPE_INT, .exttype = "I", .name = "enfstrg", .handler = handle_optional_enfstrg },
++	{ .oid = 20, .type = CTLTYPE_INT, .exttype = "I", .name = "rtm", .handler = handle_optional_rtm },
++	{ .oid = 21, .type = CTLTYPE_INT, .exttype = "I", .name = "hle", .handler = handle_optional_hle },
++	{ .oid = 22, .type = CTLTYPE_INT, .exttype = "I", .name = "adx", .handler = handle_optional_adx },
++	{ .oid = 23, .type = CTLTYPE_INT, .exttype = "I", .name = "mpx", .handler = handle_optional_mpx },
++	{ .oid = 24, .type = CTLTYPE_INT, .exttype = "I", .name = "sgx", .handler = handle_optional_sgx },
++	{ .oid = 25, .type = CTLTYPE_INT, .exttype = "I", .name = "avx512cd", .handler = handle_optional_avx512cd },
++	{ .oid = 26, .type = CTLTYPE_INT, .exttype = "I", .name = "avx512dq", .handler = handle_optional_avx512dq },
++	{ .oid = 27, .type = CTLTYPE_INT, .exttype = "I", .name = "avx512bw", .handler = handle_optional_avx512bw },
++	{ .oid = 28, .type = CTLTYPE_INT, .exttype = "I", .name = "avx512vl", .handler = handle_optional_avx512vl },
++	{ .oid = 29, .type = CTLTYPE_INT, .exttype = "I", .name = "avx512ifma", .handler = handle_optional_avx512ifma },
++	{ .oid = 30, .type = CTLTYPE_INT, .exttype = "I", .name = "avx512vbmi", .handler = handle_optional_avx512vbmi },
 +	{ .oid = -1 }
 +};
  
  const struct known_sysctl sysctls_hw[] = {
- 	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
+-	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
 -	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_availcpu },
-+	{ .oid = _HW_ACTIVECPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", .handler = handle_availcpu },
++	{ .oid = HW_AVAILCPU, .type = CTLTYPE_INT, .exttype = "", .name = "activecpu", .handler = handle_availcpu },
++	{ .oid = _HW_AVAILCPU_NAME, .type = CTLTYPE_INT, .exttype = "", .name = "availcpu", .handler = handle_availcpu },
 +	{ .oid = HW_NCPU, .type = CTLTYPE_INT, .exttype = "", .name = "ncpu", .handler = handle_ncpu },
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,27 +154,101 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +226,128 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -3488,6 +3561,33 @@ index f273989..7ecb675 100644
 +	{ .oid = _HW_L2CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l2cachesize", .handler = handle_l2cachesize },
 +	{ .oid = _HW_L3CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l3cachesize", .handler = handle_l3cachesize },
 +	{ .oid = _HW_PACKAGES, .type = CTLTYPE_INT, .exttype = "I", .name = "packages", .handler = handle_packages },
++	{ .oid = HW_BYTEORDER, .type = CTLTYPE_INT, .exttype = "I", .name = "byteorder", .handler = handle_byteorder },
++	{ .oid = HW_PHYSMEM, .type = CTLTYPE_INT, .exttype = "IU", .name = "physmem", .handler = handle_physmem },
++	{ .oid = HW_USERMEM, .type = CTLTYPE_INT, .exttype = "I", .name = "usermem", .handler = handle_usermem },
++	{ .oid = HW_VECTORUNIT, .type = CTLTYPE_INT, .exttype = "I", .name = "vectorunit", .handler = handle_vectorunit },
++	{ .oid = HW_EPOCH, .type = CTLTYPE_INT, .exttype = "I", .name = "epoch", .handler = handle_epoch },
++	{ .oid = _HW_TARGETTYPE, .type = CTLTYPE_STRING, .exttype = "S", .name = "targettype", .handler = handle_targettype },
++	{ .oid = _HW_CPUFAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufamily", .handler = handle_cpufamily },
++	{ .oid = _HW_CPUSUBFAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "cpusubfamily", .handler = handle_cpusubfamily },
++	{ .oid = _HW_PAGESIZE32, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "pagesize32", .handler = handle_pagesize32 },
++	{ .oid = _HW_BUSFREQUENCY, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "busfrequency", .handler = handle_busfrequency },
++	{ .oid = _HW_BUSFREQUENCY_MIN, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "busfrequency_min", .handler = handle_busfrequency },
++	{ .oid = _HW_BUSFREQUENCY_MAX, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "busfrequency_max", .handler = handle_busfrequency },
++	{ .oid = HW_BUS_FREQ, .type = CTLTYPE_INT, .exttype = "I", .name = "busfrequency_compat", .handler = handle_busfrequency_compat },
++	{ .oid = _HW_CPUFREQUENCY_MIN, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cpufrequency_min", .handler = handle_cpufrequency },
++	{ .oid = _HW_CPUFREQUENCY_MAX, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cpufrequency_max", .handler = handle_cpufrequency },
++	{ .oid = _HW_CACHELINESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cachelinesize", .handler = handle_cachelinesize },
++	{ .oid = HW_CACHELINE, .type = CTLTYPE_INT, .exttype = "I", .name = "cachelinesize_compat", .handler = handle_cachelinesize_compat },
++	{ .oid = _HW_L1ICACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1icachesize", .handler = handle_l1icachesize },
++	{ .oid = HW_L1ICACHESIZE, .type = CTLTYPE_INT, .exttype = "I", .name = "l1icachesize_compat", .handler = handle_l1icachesize_compat },
++	{ .oid = _HW_L1DCACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l1dcachesize", .handler = handle_l1dcachesize },
++	{ .oid = HW_L1DCACHESIZE, .type = CTLTYPE_INT, .exttype = "I", .name = "l1dcachesize_compat", .handler = handle_l1dcachesize_compat },
++	{ .oid = HW_L2SETTINGS, .type = CTLTYPE_INT, .exttype = "I", .name = "l2settings", .handler = handle_l2settings },
++	{ .oid = HW_L2CACHESIZE, .type = CTLTYPE_INT, .exttype = "I", .name = "l2cachesize_compat", .handler = handle_l2cachesize_compat },
++	{ .oid = HW_L3SETTINGS, .type = CTLTYPE_INT, .exttype = "I", .name = "l3settings", .handler = handle_l3settings },
++	{ .oid = HW_L3CACHESIZE, .type = CTLTYPE_INT, .exttype = "I", .name = "l3cachesize_compat", .handler = handle_l3cachesize_compat },
++	{ .oid = _HW_TBFREQUENCY, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "tbfrequency", .handler = handle_tbfrequency },
++	{ .oid = HW_TB_FREQ, .type = CTLTYPE_INT, .exttype = "I", .name = "tbfrequency_compat", .handler = handle_tbfrequency_compat },
  	{ .oid = -1 }
  };
  
@@ -3579,7 +3679,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_availcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -83,6 +247,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +355,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3593,7 +3693,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +282,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +390,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3611,7 +3711,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +351,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +459,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3676,7 +3776,7 @@ index f273989..7ecb675 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +425,159 @@ sysctl_handler(handle_machine)
+@@ -193,3 +524,462 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -3704,9 +3804,9 @@ index f273989..7ecb675 100644
 +
 +// Number of CPUs in a sysfs list such as "0-1,4-5" (darling_cpu_count_list, shared with the topology probe)
 +
-+// Describes the data/unified cache of one level (1 = L1D) of the host's CPU 0.
-+// Instruction caches are skipped, as in XNU. Returns false if the host doesn't report the level.
-+static bool host_cache_level(unsigned int level, unsigned long long* size, unsigned int* sharing)
++// Describes one cache of the host's CPU 0: the instruction cache of `level`,
++// or its data/unified cache (1 = L1D). Returns false if the host doesn't report it.
++static bool host_cache(unsigned int level, bool instruction, unsigned long long* size, unsigned int* sharing)
 +{
 +	char path[96], buf[64];
 +
@@ -3722,7 +3822,7 @@ index f273989..7ecb675 100644
 +			continue;
 +
 +		__simple_sprintf(path, HOST_CACHE_DIR "index%d/type", index);
-+		if (!read_string(path, buf, sizeof(buf)) || buf[0] == 'I')
++		if (!read_string(path, buf, sizeof(buf)) || (buf[0] == 'I') != instruction)
 +			continue;
 +
 +		__simple_sprintf(path, HOST_CACHE_DIR "index%d/size", index);
@@ -3742,6 +3842,11 @@ index f273989..7ecb675 100644
 +		return true;
 +	}
 +	return false;
++}
++
++static bool host_cache_level(unsigned int level, unsigned long long* size, unsigned int* sharing)
++{
++	return host_cache(level, false, size, sharing);
 +}
 +
 +// The compat profile reports the compatibility part's caches, not the host's:
@@ -3835,6 +3940,304 @@ index f273989..7ecb675 100644
 +	sysctl_handle_size(sizeof(int));
 +	*((int*) old) = 1;
 +	return 0;
++}
++
++// ---------------------------------------------------------------------------
++// The remaining hw.* leaves of bsd/kern/kern_mib.c on an Intel Mac.
++
++// SYSCTL_OUT: a short buffer is left untouched and gets ENOMEM with length 0.
++static long hw_out(const void* value, unsigned long size, void* old, unsigned long* oldlen)
++{
++	if (old == NULL)
++	{
++		*oldlen = size;
++		return 0;
++	}
++	if (*oldlen < size)
++	{
++		*oldlen = 0;
++		return -ENOMEM;
++	}
++	for (unsigned long i = 0; i < size; i++)
++		((char*) old)[i] = ((const char*) value)[i];
++	*oldlen = size;
++	return 0;
++}
++
++// sysctl_io_number: a 64-bit value also fits a caller's int buffer.
++static long hw_out_number(long long value, void* old, unsigned long* oldlen)
++{
++	int small = (int) value;
++
++	if (old != NULL && *oldlen == sizeof(small))
++		return hw_out(&small, sizeof(small), old, oldlen);
++	return hw_out(&value, sizeof(value), old, oldlen);
++}
++
++static long hw_out_int(int value, void* old, unsigned long* oldlen)
++{
++	return hw_out(&value, sizeof(value), old, oldlen);
++}
++
++static long hw_out_quad(long long value, void* old, unsigned long* oldlen)
++{
++	return hw_out(&value, sizeof(value), old, oldlen);
++}
++
++// cpuid_set_cpufamily() in osfmk/i386/cpuid.c, from the leaf 1 signature.
++static unsigned int cpufamily_from_signature(unsigned int signature)
++{
++	unsigned int family = (signature >> 8) & 0xf;
++	unsigned int model = (signature >> 4) & 0xf;
++
++	if (family == 15)
++		family += (signature >> 20) & 0xff;
++	if (family == 6 || family >= 15)
++		model |= (signature >> 12) & 0xf0;
++	if (family != 6)
++		return 0; // CPUFAMILY_UNKNOWN
++
++	switch (model)
++	{
++		case 0x17: return CPUFAMILY_INTEL_PENRYN;
++		case 0x1a: case 0x1e: case 0x1f: case 0x2e: return CPUFAMILY_INTEL_NEHALEM;
++		case 0x25: case 0x2c: case 0x2f: return CPUFAMILY_INTEL_WESTMERE;
++		case 0x2a: case 0x2d: return CPUFAMILY_INTEL_SANDYBRIDGE;
++		case 0x3a: case 0x3e: return CPUFAMILY_INTEL_IVYBRIDGE;
++		case 0x3c: case 0x3f: case 0x45: case 0x46: return CPUFAMILY_INTEL_HASWELL;
++		case 0x3d: case 0x47: return CPUFAMILY_INTEL_BROADWELL;
++		case 0x4e: case 0x5e: case 0x55: return CPUFAMILY_INTEL_SKYLAKE;
++		case 0x8e: case 0x9e: return CPUFAMILY_INTEL_KABYLAKE;
++		case 0x7e: case 0x7d: case 0x9f: return CPUFAMILY_INTEL_ICELAKE;
++		default: return 0;
++	}
++}
++
++static void host_leaf1(unsigned int* eax, unsigned int* ebx)
++{
++	*eax = *ebx = 0;
++#if defined(__i386__) || defined(__x86_64__)
++	unsigned int c, d;
++	__asm__("cpuid" : "=a" (*eax), "=b" (*ebx), "=c" (c), "=d" (d) : "0" (1), "2" (0));
++#endif
++}
++
++sysctl_handler(handle_cpufamily)
++{
++	unsigned int signature, ebx;
++
++	if (darling_compat_profile_enabled())
++		signature = darling_compat_cpu_identity()->signature;
++	else
++		host_leaf1(&signature, &ebx);
++	return hw_out_int((int) cpufamily_from_signature(signature), old, oldlen);
++}
++
++sysctl_handler(handle_cpusubfamily)
++{
++	return hw_out_int(0, old, oldlen); // CPUSUBFAMILY_UNKNOWN on every Intel Mac
++}
++
++sysctl_handler(handle_byteorder)
++{
++	return hw_out_int(1234, old, oldlen);
++}
++
++// The legacy 32-bit memory size saturates at 2 GiB, like host_basic_info.memory_size.
++sysctl_handler(handle_physmem)
++{
++	unsigned long long memory = gethostinfo()->max_mem;
++	unsigned int value = (unsigned int) (memory > 0x80000000ULL ? 0x80000000ULL : memory);
++
++	return hw_out(&value, sizeof(value), old, oldlen);
++}
++
++// The wired page count as host_statistics64() reports it: scaled down when the
++// profile's memory size is below the host's (libsyscall/mach/host.c).
++static unsigned long long scaled_wired_pages(unsigned long long wired,
++		unsigned long long reported, unsigned long long host_real)
++{
++	unsigned long long reported_mb = reported >> 20, host_mb = host_real >> 20;
++
++	if (reported_mb != 0 && reported_mb < host_mb)
++		return wired * reported_mb / host_mb;
++	return wired;
++}
++
++// XNU: (int)(mem_size - vm_page_wire_count * page_size), with mem_size the
++// 2 GiB-saturated size of hw.physmem. It wraps once more than 2 GiB is wired.
++static int usermem_value(unsigned long long memory, unsigned long long wired_pages)
++{
++	unsigned long long mem_size = memory > 0x80000000ULL ? 0x80000000ULL : memory;
++
++	return (int) (unsigned int) (mem_size - wired_pages * 4096ULL);
++}
++
++sysctl_handler(handle_usermem)
++{
++	unsigned long long memory;
++	struct vm_statistics64 stat;
++	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
++	mach_port_t hself;
++	kern_return_t kr;
++
++	if (old == NULL) // a size query needs no statistics
++		return hw_out_int(0, old, oldlen);
++	hself = mach_host_self();
++	kr = _kernelrpc_host_statistics64(hself, HOST_VM_INFO64, &stat, &count);
++	mach_port_deallocate(mach_task_self(), hself);
++	memory = gethostinfo()->max_mem;
++	if (kr != KERN_SUCCESS || memory == 0) // 0: the memory size is unknown
++		return -EINVAL;
++	return hw_out_int(usermem_value(memory,
++		scaled_wired_pages(stat.wire_count, memory, host_real_mem)), old, oldlen);
++}
++
++sysctl_handler(handle_vectorunit)
++{
++	return hw_out_int(1, old, oldlen); // every x86-64 CPU has SSE2
++}
++
++sysctl_handler(handle_pagesize32)
++{
++	return hw_out_number(4096, old, oldlen);
++}
++
++// Intel Macs since Sandy Bridge report the 100 MHz base clock.
++static long long bus_frequency(void)
++{
++	return 100000000LL;
++}
++
++sysctl_handler(handle_busfrequency)
++{
++	return hw_out_quad(bus_frequency(), old, oldlen);
++}
++
++sysctl_handler(handle_busfrequency_compat)
++{
++	return hw_out_int((int) bus_frequency(), old, oldlen);
++}
++
++static unsigned int cache_line_size(void)
++{
++	unsigned int eax, ebx;
++
++	if (darling_compat_profile_enabled())
++		return 64;
++	host_leaf1(&eax, &ebx);
++	ebx = ((ebx >> 8) & 0xff) * 8; // CLFLUSH line size
++	return ebx ? ebx : 64;
++}
++
++// L1I: the compat part's is the size of its L1D, as in the cpuid trap's leaf 4.
++static unsigned long long l1i_cache_size(void)
++{
++	unsigned long long size = 0;
++	unsigned int sharing = 0;
++
++	if (darling_compat_profile_enabled())
++		compat_cache_level(1, &size, &sharing);
++	else
++		host_cache(1, true, &size, &sharing);
++	return size;
++}
++
++static unsigned long long cache_size(unsigned int level)
++{
++	unsigned long long size = 0;
++	unsigned int sharing = 0;
++
++	cache_level(level, &size, &sharing);
++	return size;
++}
++
++sysctl_handler(handle_cachelinesize)
++{
++	return hw_out_quad(cache_line_size(), old, oldlen);
++}
++
++sysctl_handler(handle_cachelinesize_compat)
++{
++	return hw_out_int((int) cache_line_size(), old, oldlen);
++}
++
++sysctl_handler(handle_l1icachesize)
++{
++	return hw_out_quad((long long) l1i_cache_size(), old, oldlen);
++}
++
++sysctl_handler(handle_l1icachesize_compat)
++{
++	return hw_out_int((int) l1i_cache_size(), old, oldlen);
++}
++
++sysctl_handler(handle_l1dcachesize)
++{
++	return hw_out_quad((long long) cache_size(1), old, oldlen);
++}
++
++sysctl_handler(handle_l1dcachesize_compat)
++{
++	return hw_out_int((int) cache_size(1), old, oldlen);
++}
++
++// XNU answers EINVAL for the size and settings of a cache level the CPU lacks.
++static long legacy_cache_size(unsigned int level, void* old, unsigned long* oldlen)
++{
++	unsigned long long size = cache_size(level);
++
++	if (size == 0)
++		return -EINVAL;
++	return hw_out_int((int) size, old, oldlen);
++}
++
++static long cache_settings(unsigned int level, void* old, unsigned long* oldlen)
++{
++	if (cache_size(level) == 0)
++		return -EINVAL;
++	return hw_out_int(1, old, oldlen);
++}
++
++sysctl_handler(handle_l2settings)
++{
++	return cache_settings(2, old, oldlen);
++}
++
++sysctl_handler(handle_l2cachesize_compat)
++{
++	return legacy_cache_size(2, old, oldlen);
++}
++
++sysctl_handler(handle_l3settings)
++{
++	return cache_settings(3, old, oldlen);
++}
++
++sysctl_handler(handle_l3cachesize_compat)
++{
++	return legacy_cache_size(3, old, oldlen);
++}
++
++// mach_absolute_time() counts nanoseconds on Intel Macs.
++sysctl_handler(handle_tbfrequency)
++{
++	return hw_out_number(1000000000LL, old, oldlen);
++}
++
++sysctl_handler(handle_tbfrequency_compat)
++{
++	return hw_out_int(1000000000, old, oldlen);
++}
++
++sysctl_handler(handle_epoch)
++{
++	return hw_out_int(0, old, oldlen);
++}
++
++sysctl_handler(handle_targettype)
++{
++	return hw_out("Mac", sizeof("Mac"), old, oldlen);
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 index bd9cdc2..cffcbe2 100644
@@ -11252,10 +11655,10 @@ index a26ae39..0fb6d6a 100644
  	.space 13, 0x90
 diff --git a/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
 new file mode 100644
-index 0000000..70ded6d
+index 0000000..d3c0e46
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,66 @@
 +#ifndef DARLING_LOL_CPU_IDENTITY_H
 +#define DARLING_LOL_CPU_IDENTITY_H
 +
@@ -11297,6 +11700,10 @@ index 0000000..70ded6d
 +	uint32_t base_mhz;    // hw.cpufrequency, leaf 0x16 EAX
 +	uint32_t max_mhz;     // leaf 0x16 EBX (maximum turbo)
 +};
++
++// cpuid leaf 7 subleaf 0 EBX of the compatibility part: the host's bits outside
++// this mask (AVX-512, SHA) are never reported. ECX and EDX are zero.
++#define DARLING_COMPAT_LEAF7_EBX 0x029c6fbfu
 +
 +// The compatibility identity. Never NULL.
 +const struct darling_cpu_identity* darling_compat_cpu_identity(void);

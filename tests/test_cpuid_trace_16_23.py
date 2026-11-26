@@ -220,10 +220,16 @@ int main(void) {{
         self.assertIn('static int g_log_enabled = 0;', src)
         self.assertIn('if (ffd >= 0) {\n\t\tg_log_enabled = 1;', src)
 
+        # The leaf 7 mask is shared with hw.optional.* through the identity header.
+        patch = (ROOT / 'patches/xnu.patch').read_text()
+        leaf7_mask = next(line[1:] for line in patch.splitlines()
+                          if line.startswith('+#define DARLING_COMPAT_LEAF7_EBX '))
+
         harness = f"""
 #include <assert.h>
 #include <stdint.h>
 
+{leaf7_mask}
 #define RCLOL_CPUID_LOG_PATH "/tmp/should-not-open"
 #define RCLOL_O_WRONLY 0x001
 #define RCLOL_O_CREAT  0x040
