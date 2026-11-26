@@ -108,7 +108,7 @@ index ba52cd3..abd7971 100644
  
  - (BOOL) selectFile: (NSString *) path
 diff --git a/AppKit/NSAccessibility.m b/AppKit/NSAccessibility.m
-index 39d1b10..c5bfc06 100644
+index 39d1b10..bd1ca65 100644
 --- a/AppKit/NSAccessibility.m
 +++ b/AppKit/NSAccessibility.m
 @@ -13,6 +13,8 @@ NSString *const NSAccessibilityEnabledAttribute =
@@ -120,7 +120,16 @@ index 39d1b10..c5bfc06 100644
  NSString *const NSAccessibilityHelpAttribute = @"NSAccessibilityHelpAttribute";
  NSString *const NSAccessibilityMaxValueAttribute =
          @"NSAccessibilityMaxValueAttribute";
-@@ -618,3 +620,44 @@ void NSAccessibilityPostNotificationWithUserInfo(id element,
+@@ -118,6 +120,8 @@ NSString *const NSAccessibilityCancelButtonAttribute =
+         @"NSAccessibilityCancelButtonAttribute";
+ NSString *const NSAccessibilityCloseButtonAttribute =
+         @"NSAccessibilityCloseButtonAttribute";
++NSString *const NSAccessibilityFullScreenButtonAttribute =
++        @"AXFullScreenButton";
+ NSString *const NSAccessibilityDefaultButtonAttribute =
+         @"NSAccessibilityDefaultButtonAttribute";
+ NSString *const NSAccessibilityGrowAreaAttribute =
+@@ -618,3 +622,44 @@ void NSAccessibilityPostNotificationWithUserInfo(id element,
  {
      printf("STUB %s\n", __PRETTY_FUNCTION__);
  }
@@ -9418,7 +9427,7 @@ index e441489..35360a9 100644
  APPKIT_EXPORT id NSAccessibilityUnignoredDescendant(id element);
  APPKIT_EXPORT NSArray *NSAccessibilityUnignoredChildren(NSArray *originalChildren);
 diff --git a/AppKit/include/AppKit/NSAccessibilityConstants.h b/AppKit/include/AppKit/NSAccessibilityConstants.h
-index 282312d..03c75b2 100644
+index 282312d..0999573 100644
 --- a/AppKit/include/AppKit/NSAccessibilityConstants.h
 +++ b/AppKit/include/AppKit/NSAccessibilityConstants.h
 @@ -9,6 +9,7 @@ APPKIT_EXPORT NSString *const NSAccessibilityContentsAttribute;
@@ -9429,6 +9438,14 @@ index 282312d..03c75b2 100644
  APPKIT_EXPORT NSString *const NSAccessibilityHelpAttribute;
  APPKIT_EXPORT NSString *const NSAccessibilityMaxValueAttribute;
  APPKIT_EXPORT NSString *const NSAccessibilityMinValueAttribute;
+@@ -72,6 +73,7 @@ APPKIT_EXPORT NSString *const NSAccessibilityVisibleNameKey;
+ 
+ APPKIT_EXPORT NSString *const NSAccessibilityCancelButtonAttribute;
+ APPKIT_EXPORT NSString *const NSAccessibilityCloseButtonAttribute;
++APPKIT_EXPORT NSString *const NSAccessibilityFullScreenButtonAttribute;
+ APPKIT_EXPORT NSString *const NSAccessibilityDefaultButtonAttribute;
+ APPKIT_EXPORT NSString *const NSAccessibilityGrowAreaAttribute;
+ APPKIT_EXPORT NSString *const NSAccessibilityMainAttribute;
 diff --git a/AppKit/include/AppKit/NSAccessibilityCustomAction.h b/AppKit/include/AppKit/NSAccessibilityCustomAction.h
 new file mode 100644
 index 0000000..6080c4d
