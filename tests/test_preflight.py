@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -342,6 +344,14 @@ class LlvmToolsFixture(unittest.TestCase):
         path.chmod(0o755)
         return path
 
+    def slow_stub(self, name):
+        # PATH now holds only the stubs: resolve sleep from the original PATH,
+        # since /bin/sleep does not exist everywhere (e.g. the Nix build sandbox).
+        sleep = shutil.which('sleep', path=self.saved)
+        if sleep is None:
+            raise unittest.SkipTest('sleep is unavailable')
+        return self.stub(name, f'exec {shlex.quote(sleep)} 5')
+
     def test_prefers_the_unversioned_name(self):
         unversioned = self.stub('llvm-objdump')
         self.stub('llvm-objdump-23')
@@ -369,7 +379,7 @@ class LlvmToolsFixture(unittest.TestCase):
 
 
     def test_llvm_config_timeout_is_reported(self):
-        self.stub('llvm-config', 'exec /bin/sleep 5')
+        self.slow_stub('llvm-config')
         self.tools.TIMEOUT = 1
         with self.assertRaises(SystemExit) as raised:
             self.tools.config('--version')
@@ -378,7 +388,7 @@ class LlvmToolsFixture(unittest.TestCase):
 
 
     def test_llvm_config_timeout_does_not_hang_the_bindir_probe(self):
-        self.stub('llvm-config', 'exec /bin/sleep 5')
+        self.slow_stub('llvm-config')
         self.tools.TIMEOUT = 1
         self.assertIsNone(self.tools.find('llvm-objdump'))
 

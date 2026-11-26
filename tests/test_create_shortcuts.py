@@ -96,7 +96,7 @@ exit 1
             env['PATH'] = path + os.pathsep + env.get('PATH', '')
         if input is None:
             return subprocess.run(
-                ['/bin/bash', str(self.repo / 'scripts/create-shortcuts.sh'), *args],
+                ['bash', str(self.repo / 'scripts/create-shortcuts.sh'), *args],
                 capture_output=True, text=True, env=env, check=False,
                 cwd=str(self.repo))
         return self.run_pty(args, env, input)
@@ -110,7 +110,7 @@ exit 1
                'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
                **overrides}
         return subprocess.run(
-            ['/bin/bash', '-c',
+            ['bash', '-c',
              f'source "$DARLING_LOL_SHORTCUT_SCRIPT"\n{snippet}'],
             capture_output=True, text=True, env=env, check=False,
             cwd=str(self.repo))
@@ -127,7 +127,7 @@ exit 1
 
         master, slave = pty.openpty()
         process = subprocess.Popen(
-            ['/bin/bash', str(self.repo / 'scripts/create-shortcuts.sh'), *args],
+            ['bash', str(self.repo / 'scripts/create-shortcuts.sh'), *args],
             stdin=slave, stdout=slave, stderr=slave, env=env,
             cwd=str(self.repo), close_fds=True)
         os.close(slave)
