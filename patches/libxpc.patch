@@ -148,7 +148,7 @@ index 0870a6c..e2d4bd6 100644
  
  XPC_EXPORT
 diff --git a/src/pipe.m b/src/pipe.m
-index d04fb98..5988fc4 100644
+index d04fb98..15e5443 100644
 --- a/src/pipe.m
 +++ b/src/pipe.m
 @@ -45,6 +45,17 @@ XPC_LOGGER_DEF(pipe);
@@ -199,7 +199,7 @@ index d04fb98..5988fc4 100644
  			*replyPort = header->msgh_local_port;
  
  			status = 0;
-@@ -411,11 +434,21 @@ out:
+@@ -411,11 +434,24 @@ out:
  
  		pthread_rwlock_init(&this->state_lock, NULL);
  
@@ -209,11 +209,14 @@ index d04fb98..5988fc4 100644
  			return nil;
  		}
  
-+		/* Bootstrap servers receive routine messages directly on the supplied
-+		 * port; they do not accept the connection protocol's CHECKIN handshake.
++		/* launchd receives routine messages directly on the bootstrap port, as
++		 * on macOS (xpc_pipe_create_from_port(bootstrap_port, 0)); it does not
++		 * accept the connection protocol's CHECKIN handshake. Select this by
++		 * destination: XPC_PIPE_USE_SYNC_IPC_OVERRIDE is Apple's QoS flag and
++		 * other callers pass it for ordinary services.
 +		 * The retained right belongs solely to send_port in this mode.
 +		 */
-+		if (flags & XPC_PIPE_USE_SYNC_IPC_OVERRIDE) {
++		if (MACH_PORT_VALID(bootstrap_port) && port == bootstrap_port) {
 +			this->send_port = port;
 +			this->state = xpc_pipe_state_active;
 +			return self;
@@ -222,7 +225,7 @@ index d04fb98..5988fc4 100644
  		this->checkin_port = port;
  		this->send_port = xpc_mach_port_create_send_receive();
  		this->recv_port = xpc_mach_port_create_receive();
-@@ -581,7 +614,12 @@ retry:
+@@ -581,7 +617,12 @@ retry:
  					goto out;
  				}
  

@@ -44,13 +44,16 @@ class LaunchdOverridesDirectoryTests(unittest.TestCase):
         if not compiler:
             self.skipTest('a C compiler is required for prefix state provisioning')
         code = startup_additions()
-        helper = re.search(r'static void setupLaunchdState\(void\)\s*\{.*?^\}', code, re.M | re.S)
-        self.assertIsNotNone(helper, 'prefix-local launchd state helper must be distributed')
+        helpers = [re.search(r'static void ' + name + r'\([^)]*\)\s*\{.*?^\}', code, re.M | re.S)
+                   for name in ('createLaunchdStateDir', 'setupLaunchdState')]
+        for helper in helpers:
+            self.assertIsNotNone(helper, 'prefix-local launchd state helpers must be distributed')
+        # The prefix has no private/var/db yet: missing parents must be created.
         with tempfile.TemporaryDirectory(prefix='launchd-prefix-') as folder:
             root = Path(folder)
-            (root / 'private/var/db').mkdir(parents=True)
             source, binary = root / 'check.c', root / 'check'
-            source.write_text(PREFIX_HARNESS.replace('/* HELPER */', helper.group(0)))
+            source.write_text(PREFIX_HARNESS.replace(
+                '/* HELPER */', '\n\n'.join(helper.group(0) for helper in helpers)))
             built = subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror',
                                     str(source), '-o', str(binary)],
                                    capture_output=True, text=True, timeout=30)
@@ -59,6 +62,17 @@ class LaunchdOverridesDirectoryTests(unittest.TestCase):
                                     text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('LAUNCHD_PREFIX_STATE_PASS', result.stdout)
+
+            # A file where a directory belongs must not stop Darling from
+            # starting; launchd runs without persisted state and it warns.
+            blocked = root / 'blocked'
+            (blocked / 'private/var').mkdir(parents=True)
+            (blocked / 'private/var/db').write_text('not a directory')
+            result = subprocess.run([str(binary), str(blocked), 'blocked'],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('LAUNCHD_PREFIX_BLOCKED_PASS', result.stdout)
+            self.assertIn('is not a directory', result.stderr)
 
     def test_runtime_installs_overrides_directories_with_mode_755(self):
         cmake = shutil.which('cmake')
@@ -124,15 +138,14 @@ static int test_setegid(gid_t gid) {
 #define getegid test_getegid
 #define seteuid test_seteuid
 #define setegid test_setegid
-static void createDir(const char *path) {
-    struct stat st;
-    assert(effective_uid == g_originalUid && effective_gid == g_originalGid);
-    if (stat(path, &st) == 0) assert(S_ISDIR(st.st_mode));
-    else { assert(errno == ENOENT); assert(mkdir(path, 0755) == 0); }
-}
 /* HELPER */
 int main(int argc, char **argv) {
-    assert(argc == 2); prefix = argv[1]; umask(0077);
+    assert(argc == 2 || argc == 3); prefix = argv[1]; umask(0077);
+    if (argc == 3) {
+        setupLaunchdState();
+        assert(effective_uid == 0 && effective_gid == 0 && transitions == 4);
+        puts("LAUNCHD_PREFIX_BLOCKED_PASS"); return 0;
+    }
     setupLaunchdState();
     assert(umask(0077) == 0077);
     assert(effective_uid == 0 && effective_gid == 0 && transitions == 4);

@@ -13664,7 +13664,7 @@ index 1e9ec25..0114e25 100644
  				break;
  			}
 diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
-index a68739ff..40c49e0b 100644
+index a68739ff..da0da1de 100644
 --- a/src/launchd/src/core.c
 +++ b/src/launchd/src/core.c
 @@ -463,6 +463,9 @@ static job_t job_mig_intran2(jobmgr_t jm, mach_port_t mport, pid_t upid);
@@ -13752,7 +13752,74 @@ index a68739ff..40c49e0b 100644
  void
  jobmgr_kill_stray_children(jobmgr_t jm, pid_t *p, size_t np)
  {
-@@ -11796,6 +11860,7 @@ jobmgr_init(bool sflag)
+@@ -7601,6 +7665,49 @@ semaphoreitem_setup(launch_data_t obj, const char *key, void *context)
+ 	}
+ }
+ 
++/* Records each label that has registered WatchPaths in the launchd database,
++ * so the first registration survives runtime restarts as it does on macOS.
++ * Returns true only for the first registration of the label.
++ */
++static bool
++externalevent_first_watchpaths_registration(job_t j)
++{
++	char *dir = launchd_copy_persistent_store(LAUNCHD_PERSISTENT_STORE_DB, "watchpaths-registered");
++	if (!dir) {
++		return false;
++	}
++	if (mkdir(dir, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) == -1 && errno != EEXIST) {
++		job_log(j, LOG_ERR, "Could not create %s: %d: %s", dir, errno, strerror(errno));
++		free(dir);
++		return false;
++	}
++
++	char name[PATH_MAX];
++	size_t i = 0;
++	for (const char *c = j->label; *c && i + 1 < sizeof(name); c++) {
++		name[i++] = (*c == '/') ? '_' : *c;
++	}
++	name[i] = '\0';
++
++	char *marker = NULL;
++	(void)asprintf(&marker, "%s/%s", dir, name);
++	free(dir);
++	if (!marker) {
++		return false;
++	}
++	int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
++	int error = errno;
++	free(marker);
++	if (fd == -1) {
++		if (error != EEXIST) {
++			job_log(j, LOG_ERR, "Could not record WatchPaths registration: %d: %s", error, strerror(error));
++		}
++		return false;
++	}
++	(void)close(fd);
++	return true;
++}
++
+ bool
+ externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_object_t event, uint64_t flags)
+ {
+@@ -7639,6 +7746,16 @@ externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_obje
+ 
+ 	job_log(j, LOG_DEBUG, "New event: %s/%s", sys->name, evname);
+ 
++	/* macOS runs a WatchPaths job once when its label is first registered, and
++	 * not again when the same label is unloaded and loaded later.
++	 */
++	if (strcmp(sys->name, "com.apple.fsevents.matching") == 0 &&
++		strcmp(evname, "com.apple.launchd.WatchPaths") == 0 &&
++		externalevent_first_watchpaths_registration(j)) {
++		job_log(j, LOG_DEBUG, "First WatchPaths registration; starting once.");
++		j->start_pending = true;
++	}
++
+ 	eventsystem_ping();
+ 	return true;
+ }
+@@ -11796,6 +11913,7 @@ jobmgr_init(bool sflag)
  		}
  	}
  	s_no_hang_fd = _fd(s_no_hang_fd);
@@ -15124,13 +15191,22 @@ index 00000000..b025847a
 +</plist>
 diff --git a/src/UserEventAgent/main.c b/src/UserEventAgent/main.c
 new file mode 100644
-index 00000000..d114160c
+index 00000000..b8c63a70
 --- /dev/null
 +++ b/src/UserEventAgent/main.c
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,626 @@
 +/* SPDX-License-Identifier: GPL-3.0-only
 + * Copyright (C) 2026 darling-lol contributors
 + * Filesystem LaunchEvents provider for Darling's launchd-842.
++ *
++ * Serves the com.apple.fsevents.matching stream like macOS's UserEventAgent:
++ * - WatchPaths: one pulse per change anywhere at or below a watched path
++ *   (FSEvents reports directory trees), symlinks followed, bursts coalesced;
++ * - QueueDirectories: level state, true while any directory is non-empty;
++ * - KeepAlive PathState: level state, true while any path matches its wanted
++ *   existence.
++ * One inotify instance serves every watch; descriptors are reference counted
++ * because inotify returns one descriptor per inode.
 + */
 +#include <sys/event.h>
 +#include <sys/stat.h>
@@ -15143,6 +15219,7 @@ index 00000000..d114160c
 +#include <dirent.h>
 +#include <errno.h>
 +#include <fcntl.h>
++#include <limits.h>
 +#include <signal.h>
 +#include <stdbool.h>
 +#include <stdint.h>
@@ -15152,16 +15229,44 @@ index 00000000..d114160c
 +#include <unistd.h>
 +
 +static const char *stream = "com.apple.fsevents.matching";
-+static int queue;
++/* FSEvents-style latency: changes within this window become one pulse.
++ * Measured on macOS 15.5: changes 1 s apart already run twice (the second
++ * run deferred by launchd's ThrottleInterval), a burst of touches runs once,
++ * and a change while the job is still running is dropped by launchd.
++ */
++#define COALESCE_SECONDS 0.5
++/* Re-check in periodically in case a SIGUSR1 from launchd was missed. */
++#define RECHECK_SECONDS 30.0
++/* Retry incomplete watches (descriptor limits, races) this often. */
++#define RETRY_SECONDS 5.0
++/* Upper bound on directories watched below one path. */
++#define MAX_TREE_DIRECTORIES 65536
++
++#define TREE_MASK (IN_MODIFY | IN_ATTRIB | IN_CREATE | IN_DELETE | IN_MOVED_FROM | \
++	IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF)
++
++static int queue = -1;
++static int notify = -1;
 +static xpc_pipe_t launchd_pipe;
 +static bool registrations_changed;
 +
++struct descriptor {
++	int wd;
++	unsigned references;
++	struct descriptor *next;
++};
++static struct descriptor *descriptors;
++
 +struct path_watch {
 +	char *path;
-+	char *parent;
-+	int fd, parent_fd;
-+	struct stat previous, parent_info;
-+	bool existed, initialized, changed;
++	char *parent;       /* Nearest existing ancestor of path. */
++	char *component;    /* Name below parent leading toward path. */
++	bool component_is_path; /* parent is the path's own directory. */
++	int parent_wd;
++	int *tree;          /* Descriptors for path and, for a directory, its subtree. */
++	size_t tree_count, tree_capacity;
++	struct stat previous;
++	bool existed, initialized, changed, dirty, incomplete;
 +	struct path_watch *next;
 +};
 +
@@ -15170,7 +15275,7 @@ index 00000000..d114160c
 +	xpc_object_t description;
 +	struct path_watch *paths;
 +	bool watchpaths, state, state_known;
-+	double pending; /* First change plus the one-second coalescing latency. */
++	double pending; /* When the coalesced pulse is due; 0 when none. */
 +	struct event *next;
 +};
 +static struct event *events;
@@ -15196,6 +15301,8 @@ index 00000000..d114160c
 +	return (double)mach_absolute_time() * scale.numer / scale.denom / 1e9;
 +}
 +
++/* ---- launchd ---------------------------------------------------------- */
++
 +static xpc_object_t request(uint64_t operation)
 +{
 +	xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
@@ -15209,13 +15316,13 @@ index 00000000..d114160c
 +	xpc_object_t reply = NULL;
 +	int error = xpc_pipe_routine(launchd_pipe, message, &reply);
 +	xpc_release(message);
-+	if (!error && xpc_get_type(reply) == XPC_TYPE_DICTIONARY) {
++	if (!error && reply && xpc_get_type(reply) == XPC_TYPE_DICTIONARY) {
 +		int provider_error = (int)xpc_dictionary_get_uint64(reply, XPC_EVENT_ROUTINE_KEY_ERROR);
 +		/* An unload may race a state update. Keep other tokens' pending pulses. */
 +		if (provider_error == ESRCH) return reply;
 +		error = provider_error;
 +	}
-+	if (error || xpc_get_type(reply) != XPC_TYPE_DICTIONARY) {
++	if (error || !reply || xpc_get_type(reply) != XPC_TYPE_DICTIONARY) {
 +		fprintf(stderr, "UserEventAgent: launchd event routine failed: %d\n", error);
 +		if (reply) xpc_release(reply);
 +		/* launchd restarts this KeepAlive provider; never cache an unsent state. */
@@ -15236,12 +15343,252 @@ index 00000000..d114160c
 +	return !removed;
 +}
 +
++/* launchd starts the job on true (deferred by ThrottleInterval, ignored while
++ * the job runs, as on macOS); the false that follows stops a relaunch loop.
++ */
 +static void pulse_watchpaths(struct event *event)
 +{
-+	set_state(event->token, true);
-+	set_state(event->token, false);
++	if (set_state(event->token, true)) set_state(event->token, false);
 +	event->pending = 0;
 +}
++
++/* ---- inotify descriptors -------------------------------------------- */
++
++static int descriptor_acquire(const char *path)
++{
++	int wd = inotify_add_watch(notify, path, TREE_MASK);
++	if (wd < 0) return -1;
++	for (struct descriptor *d = descriptors; d; d = d->next) {
++		if (d->wd == wd) { d->references++; return wd; }
++	}
++	struct descriptor *d = allocate(sizeof(*d));
++	d->wd = wd;
++	d->references = 1;
++	d->next = descriptors;
++	descriptors = d;
++	return wd;
++}
++
++static void descriptor_release(int wd)
++{
++	if (wd < 0) return;
++	for (struct descriptor **slot = &descriptors; *slot; slot = &(*slot)->next) {
++		struct descriptor *d = *slot;
++		if (d->wd != wd) continue;
++		if (--d->references == 0) {
++			(void)inotify_rm_watch(notify, wd);
++			*slot = d->next;
++			free(d);
++		}
++		return;
++	}
++}
++
++static void tree_add(struct path_watch *watch, int wd)
++{
++	if (watch->tree_count == watch->tree_capacity) {
++		size_t capacity = watch->tree_capacity ? watch->tree_capacity * 2 : 8;
++		int *tree = realloc(watch->tree, capacity * sizeof(*tree));
++		if (!tree) { perror("UserEventAgent: realloc"); exit(1); }
++		watch->tree = tree;
++		watch->tree_capacity = capacity;
++	}
++	watch->tree[watch->tree_count++] = wd;
++}
++
++static bool tree_contains(const struct path_watch *watch, int wd)
++{
++	for (size_t i = 0; i < watch->tree_count; ++i)
++		if (watch->tree[i] == wd) return true;
++	return false;
++}
++
++static void watch_release(struct path_watch *watch)
++{
++	for (size_t i = 0; i < watch->tree_count; ++i) descriptor_release(watch->tree[i]);
++	watch->tree_count = 0;
++	descriptor_release(watch->parent_wd);
++	watch->parent_wd = -1;
++}
++
++/* Watch a directory and every directory below it, without following
++ * symlinks inside the tree (FSEvents reports the link, not its target).
++ */
++static void watch_tree(struct path_watch *watch, const char *directory, size_t *budget)
++{
++	if (*budget == 0) { watch->incomplete = true; return; }
++	--*budget;
++	int wd = descriptor_acquire(directory);
++	if (wd < 0) { watch->incomplete = true; return; }
++	tree_add(watch, wd);
++	DIR *listing = opendir(directory);
++	if (!listing) return;
++	struct dirent *entry;
++	while ((entry = readdir(listing))) {
++		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
++		char child[PATH_MAX];
++		if (snprintf(child, sizeof(child), "%s/%s", directory, entry->d_name) >= (int)sizeof(child))
++			continue;
++		struct stat info;
++		if (lstat(child, &info) == 0 && S_ISDIR(info.st_mode))
++			watch_tree(watch, child, budget);
++	}
++	closedir(listing);
++}
++
++static char *parent_path(const char *path)
++{
++	char *parent = copy_string(path);
++	size_t length = strlen(parent);
++	while (length > 1 && parent[length - 1] == '/') parent[--length] = 0;
++	char *slash = strrchr(parent, '/');
++	if (slash == parent) parent[1] = 0;
++	else if (slash) *slash = 0;
++	else { free(parent); parent = copy_string("."); }
++	return parent;
++}
++
++/* First path component of path below parent. */
++static char *component_below(const char *path, const char *parent)
++{
++	const char *relative = path;
++	if (strcmp(parent, ".")) relative += strlen(parent);
++	else if (!strncmp(relative, "./", 2)) relative += 2;
++	while (*relative == '/') ++relative;
++	size_t length = strcspn(relative, "/");
++	char *component = allocate(length + 1);
++	memcpy(component, relative, length);
++	return component;
++}
++
++/* Re-establish every descriptor for one watched path. */
++static void watch_rebuild(struct path_watch *watch)
++{
++	watch_release(watch);
++	watch->incomplete = false;
++	watch->dirty = false;
++
++	struct stat info;
++	if (stat(watch->path, &info) == 0) {
++		char resolved[PATH_MAX];
++		const char *target = realpath(watch->path, resolved) ? resolved : watch->path;
++		if (S_ISDIR(info.st_mode)) {
++			size_t budget = MAX_TREE_DIRECTORIES;
++			watch_tree(watch, target, &budget);
++		} else {
++			/* Never open() the target: a FIFO would block the agent. */
++			int wd = descriptor_acquire(target);
++			if (wd >= 0) tree_add(watch, wd);
++			else watch->incomplete = true;
++		}
++	}
++
++	/* The nearest existing ancestor reports creation, deletion and renames
++	 * of the path itself or of a missing ancestor.
++	 */
++	char *parent = parent_path(watch->path);
++	for (;;) {
++		struct stat parent_info;
++		if (stat(parent, &parent_info) == 0 && S_ISDIR(parent_info.st_mode)) break;
++		if (!strcmp(parent, "/") || !strcmp(parent, ".")) break;
++		char *next = parent_path(parent);
++		free(parent);
++		parent = next;
++	}
++	free(watch->parent);
++	free(watch->component);
++	watch->parent = parent;
++	watch->component = component_below(watch->path, parent);
++	{
++		char *own = parent_path(watch->path);
++		watch->component_is_path = !strcmp(own, parent);
++		free(own);
++	}
++	watch->parent_wd = descriptor_acquire(parent);
++	if (watch->parent_wd < 0) watch->incomplete = true;
++}
++
++static bool same_snapshot(const struct stat *a, const struct stat *b)
++{
++	return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
++		a->st_mode == b->st_mode && a->st_size == b->st_size &&
++		a->st_nlink == b->st_nlink &&
++		a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
++		a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
++		a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
++		a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
++}
++
++/* Returns whether the path changed since the last call. The stat snapshot
++ * also covers changes inotify cannot see (descriptor limits, other mounts).
++ */
++static bool refresh_path(struct path_watch *watch)
++{
++	struct stat info;
++	bool exists = stat(watch->path, &info) == 0;
++	bool changed = watch->changed || (watch->initialized &&
++		(exists != watch->existed || (exists && !same_snapshot(&info, &watch->previous))));
++	if (watch->initialized && (exists != watch->existed ||
++		(exists && (info.st_dev != watch->previous.st_dev || info.st_ino != watch->previous.st_ino))))
++		watch->dirty = true;
++	watch->changed = false;
++	if (exists) watch->previous = info;
++	watch->existed = exists;
++	watch->initialized = true;
++	if (watch->dirty) watch_rebuild(watch);
++	return changed;
++}
++
++static void handle_notification(const struct inotify_event *entry)
++{
++	for (struct event *event = events; event; event = event->next) {
++		for (struct path_watch *watch = event->paths; watch; watch = watch->next) {
++			if (entry->mask & IN_Q_OVERFLOW) {
++				watch->changed = watch->dirty = true;
++				continue;
++			}
++			if (tree_contains(watch, entry->wd)) {
++				if (!(entry->mask & IN_IGNORED)) watch->changed = true;
++				/* New or removed directories change the watched tree. */
++				if ((entry->mask & IN_ISDIR) &&
++					(entry->mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)))
++					watch->dirty = true;
++				if (entry->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
++					watch->dirty = true;
++			}
++			if (entry->wd == watch->parent_wd) {
++				/* An entry for the path itself is a change; one for a missing
++				 * ancestor only moves the watch closer (macOS ignores it).
++				 */
++				if (entry->len && watch->component && !strcmp(entry->name, watch->component)) {
++					watch->dirty = true;
++					if (watch->component_is_path) watch->changed = true;
++				}
++				if (entry->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
++					watch->dirty = true;
++			}
++		}
++	}
++}
++
++static void drain_notifications(void)
++{
++	union { struct inotify_event alignment; char bytes[16384]; } buffer;
++	for (;;) {
++		ssize_t count = read(notify, buffer.bytes, sizeof(buffer.bytes));
++		if (count < 0 && errno == EINTR) continue;
++		if (count <= 0) break;
++		for (size_t offset = 0; offset + sizeof(struct inotify_event) <= (size_t)count;) {
++			const struct inotify_event *entry = (const void *)(buffer.bytes + offset);
++			size_t size = sizeof(*entry) + entry->len;
++			if (size > (size_t)count - offset) break;
++			handle_notification(entry);
++			offset += size;
++		}
++	}
++}
++
++/* ---- events ------------------------------------------------------------ */
 +
 +static bool directory_nonempty(const char *path)
 +{
@@ -15269,172 +15616,16 @@ index 00000000..d114160c
 +	return exists == xpc_bool_get_value(wanted);
 +}
 +
-+static int watch_path(const char *path, struct path_watch *watch)
-+{
-+	int fd = open(path, O_EVTONLY | O_CLOEXEC);
-+	if (fd < 0) return -1;
-+	struct kevent change;
-+	EV_SET(&change, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
-+		NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK |
-+		NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE, 0, watch);
-+	if (kevent(queue, &change, 1, NULL, 0, NULL) == -1) {
-+		close(fd);
-+		return -1;
-+	}
-+	return fd;
-+}
-+
-+/* Darling libkqueue does not automatically remove vnode filters on close.
-+ * Delete the knote before releasing its fd or the udata owner.
-+ */
-+static void close_watch(int fd)
-+{
-+	if (fd < 0) return;
-+	struct kevent change;
-+	EV_SET(&change, fd, EVFILT_VNODE, EV_DELETE, 0, 0, NULL);
-+	(void)kevent(queue, &change, 1, NULL, 0, NULL);
-+	close(fd);
-+}
-+
-+/* libkqueue's vnode backend omits named directory-entry events. Use Darling's
-+ * path-translating inotify wrappers for parents, retaining vnode target watches.
-+ */
-+static int watch_parent(const char *path, struct path_watch *watch)
-+{
-+	int fd = inotify_init1(IN_NONBLOCK);
-+	if (fd < 0) return -1;
-+	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
-+		inotify_add_watch(fd, path, IN_CREATE | IN_DELETE | IN_MOVED_FROM |
-+			IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR) < 0) {
-+		close(fd);
-+		return -1;
-+	}
-+	struct kevent change;
-+	EV_SET(&change, fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, watch);
-+	if (kevent(queue, &change, 1, NULL, 0, NULL) < 0) {
-+		close(fd);
-+		return -1;
-+	}
-+	return fd;
-+}
-+
-+static void close_parent_watch(int fd)
-+{
-+	struct kevent change;
-+	EV_SET(&change, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-+	(void)kevent(queue, &change, 1, NULL, 0, NULL);
-+	close(fd);
-+}
-+
-+static bool parent_affects_path(struct path_watch *watch, const char *name)
-+{
-+	const char *relative = watch->path;
-+	if (strcmp(watch->parent, ".")) relative += strlen(watch->parent);
-+	else if (!strncmp(relative, "./", 2)) relative += 2;
-+	while (*relative == '/') ++relative;
-+	size_t length = strcspn(relative, "/");
-+	return length && strlen(name) == length && !strncmp(relative, name, length);
-+}
-+
-+static void drain_parent(struct path_watch *watch)
-+{
-+	union { struct inotify_event alignment; char bytes[8192]; } buffer;
-+	for (;;) {
-+		ssize_t count = read(watch->parent_fd, buffer.bytes, sizeof(buffer.bytes));
-+		if (count < 0 && errno == EINTR) continue;
-+		if (count <= 0) break;
-+		for (size_t offset = 0; offset + sizeof(struct inotify_event) <= (size_t)count;) {
-+			struct inotify_event *entry = (void *)(buffer.bytes + offset);
-+			size_t size = sizeof(*entry) + entry->len;
-+			if (size > (size_t)count - offset) break;
-+			if ((entry->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF)) ||
-+				(entry->len && parent_affects_path(watch, entry->name)))
-+				watch->changed = true;
-+			offset += size;
-+		}
-+	}
-+}
-+
-+static char *parent_path(const char *path)
-+{
-+	char *parent = copy_string(path);
-+	size_t length = strlen(parent);
-+	while (length > 1 && parent[length - 1] == '/') parent[--length] = 0;
-+	char *slash = strrchr(parent, '/');
-+	if (slash == parent) parent[1] = 0;
-+	else if (slash) *slash = 0;
-+	else { free(parent); parent = copy_string("."); }
-+	return parent;
-+}
-+
-+static bool same_node(const struct stat *a, const struct stat *b)
-+{
-+	return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
-+}
-+
-+static bool same_snapshot(const struct stat *a, const struct stat *b)
-+{
-+	return same_node(a, b) && a->st_mode == b->st_mode &&
-+		a->st_size == b->st_size && a->st_nlink == b->st_nlink &&
-+		a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
-+		a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
-+		a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
-+		a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
-+}
-+
-+static bool refresh_path(struct path_watch *watch)
-+{
-+	struct stat info;
-+	bool exists = stat(watch->path, &info) == 0;
-+	bool changed = watch->changed || (watch->initialized &&
-+		(exists != watch->existed || (exists && !same_snapshot(&info, &watch->previous))));
-+	watch->changed = false;
-+	if (watch->fd >= 0 && (!exists || !same_node(&info, &watch->previous))) {
-+		close_watch(watch->fd);
-+		watch->fd = -1;
-+	}
-+	if (exists && watch->fd < 0) watch->fd = watch_path(watch->path, watch);
-+	if (exists) watch->previous = info;
-+	watch->existed = exists;
-+	watch->initialized = true;
-+
-+	/* Follow the nearest existing directory, including missing ancestors.
-+	 * Preserve unchanged parent watches so queued directory entries survive
-+	 * periodic scans and notification batches larger than the kevent buffer.
-+	 */
-+	char *parent = parent_path(watch->path);
-+	struct stat parent_info;
-+	bool found;
-+	for (;;) {
-+		found = stat(parent, &parent_info) == 0 && S_ISDIR(parent_info.st_mode);
-+		if (found || !strcmp(parent, "/") || !strcmp(parent, ".")) break;
-+		char *next = parent_path(parent);
-+		free(parent);
-+		parent = next;
-+	}
-+	if (watch->parent_fd >= 0 && (!found || !watch->parent ||
-+		strcmp(parent, watch->parent) || !same_node(&parent_info, &watch->parent_info))) {
-+		close_parent_watch(watch->parent_fd);
-+		watch->parent_fd = -1;
-+	}
-+	free(watch->parent);
-+	watch->parent = parent;
-+	if (found && watch->parent_fd < 0) {
-+		watch->parent_fd = watch_parent(parent, watch);
-+		watch->parent_info = parent_info;
-+	}
-+	return changed;
-+}
-+
 +static void add_path(struct event *event, const char *path)
 +{
 +	if (!path || !*path) return;
 +	struct path_watch *watch = allocate(sizeof(*watch));
 +	watch->path = copy_string(path);
-+	watch->fd = watch->parent_fd = -1;
++	watch->parent_wd = -1;
 +	watch->next = event->paths;
 +	event->paths = watch;
-+	refresh_path(watch); /* Establish baseline without pulsing newly loaded jobs. */
++	watch_rebuild(watch);
++	(void)refresh_path(watch); /* Baseline; launchd runs a first registration itself. */
 +}
 +
 +static struct event *new_event(uint64_t token, xpc_object_t description)
@@ -15443,14 +15634,14 @@ index 00000000..d114160c
 +	event->token = token;
 +	event->description = xpc_retain(description);
 +	xpc_object_t paths = xpc_dictionary_get_value(description, "WatchPaths");
-+	event->watchpaths = xpc_get_type(paths) == XPC_TYPE_ARRAY;
++	event->watchpaths = paths && xpc_get_type(paths) == XPC_TYPE_ARRAY;
 +	if (!event->watchpaths) paths = xpc_dictionary_get_value(description, "QueueDirectories");
-+	if (xpc_get_type(paths) == XPC_TYPE_ARRAY) {
++	if (paths && xpc_get_type(paths) == XPC_TYPE_ARRAY) {
 +		for (size_t i = 0; i < xpc_array_get_count(paths); ++i)
 +			add_path(event, xpc_array_get_string(paths, i));
 +	}
 +	xpc_object_t states = xpc_dictionary_get_value(description, "PathState");
-+	if (xpc_get_type(states) == XPC_TYPE_DICTIONARY) {
++	if (states && xpc_get_type(states) == XPC_TYPE_DICTIONARY) {
 +		xpc_dictionary_apply(states, ^bool(const char *path, xpc_object_t value) {
 +			if (xpc_get_type(value) == XPC_TYPE_BOOL) add_path(event, path);
 +			return true;
@@ -15464,10 +15655,11 @@ index 00000000..d114160c
 +	while (event->paths) {
 +		struct path_watch *watch = event->paths;
 +		event->paths = watch->next;
-+		if (watch->fd >= 0) close_watch(watch->fd);
-+		if (watch->parent_fd >= 0) close_parent_watch(watch->parent_fd);
++		watch_release(watch);
++		free(watch->tree);
 +		free(watch->path);
 +		free(watch->parent);
++		free(watch->component);
 +		free(watch);
 +	}
 +	xpc_release(event->description);
@@ -15476,13 +15668,18 @@ index 00000000..d114160c
 +
 +static void reconcile_events(xpc_object_t registrations)
 +{
++	/* Deliver queued notifications to the existing watches first: a new watch
++	 * can share a descriptor and must not inherit changes from before it was
++	 * registered.
++	 */
++	drain_notifications();
 +	struct event *old = events;
 +	events = NULL;
 +	/* CHECK_IN supplies a flat [token, dictionary, token, dictionary, ...]. */
 +	for (size_t i = 0; i + 1 < xpc_array_get_count(registrations); i += 2) {
 +		uint64_t token = xpc_array_get_uint64(registrations, i);
 +		xpc_object_t description = xpc_array_get_value(registrations, i + 1);
-+		if (!token || xpc_get_type(description) != XPC_TYPE_DICTIONARY) continue;
++		if (!token || !description || xpc_get_type(description) != XPC_TYPE_DICTIONARY) continue;
 +		struct event **slot = &old;
 +		while (*slot && (*slot)->token != token) slot = &(*slot)->next;
 +		struct event *event = *slot;
@@ -15499,7 +15696,7 @@ index 00000000..d114160c
 +	}
 +	while (old) {
 +		struct event *next = old->next;
-+		free_event(old); /* Closing fds removes watches for unloaded tokens. */
++		free_event(old);
 +		old = next;
 +	}
 +}
@@ -15508,7 +15705,8 @@ index 00000000..d114160c
 +{
 +	xpc_object_t reply = routine(request(XPC_EVENT_PROVIDER_CHECK_IN));
 +	xpc_object_t registrations = xpc_dictionary_get_value(reply, XPC_EVENT_ROUTINE_KEY_EVENTS);
-+	if (xpc_get_type(registrations) != XPC_TYPE_ARRAY || xpc_array_get_count(registrations) % 2) {
++	if (!registrations || xpc_get_type(registrations) != XPC_TYPE_ARRAY ||
++		xpc_array_get_count(registrations) % 2) {
 +		fprintf(stderr, "UserEventAgent: malformed event registration reply\n");
 +		exit(1);
 +	}
@@ -15516,30 +15714,29 @@ index 00000000..d114160c
 +	xpc_release(reply);
 +}
 +
-+static void evaluate_events(void)
++static void evaluate_events(double time, bool retry)
 +{
-+	double time = now();
 +	for (struct event *event = events; event; event = event->next) {
 +		bool changed = false, state = false;
-+		for (struct path_watch *watch = event->paths; watch; watch = watch->next)
++		for (struct path_watch *watch = event->paths; watch; watch = watch->next) {
++			if (retry && watch->incomplete) watch->dirty = true;
 +			changed |= refresh_path(watch);
++		}
 +		if (event->watchpaths) {
-+			if (!event->state_known) {
-+				event->state_known = set_state(event->token, false);
-+			}
-+			if (changed && !event->pending) event->pending = time + 1.0;
++			if (!event->state_known) event->state_known = set_state(event->token, false);
++			if (changed && !event->pending) event->pending = time + COALESCE_SECONDS;
 +			if (event->pending && time >= event->pending) pulse_watchpaths(event);
 +			continue;
 +		}
 +		xpc_object_t paths = xpc_dictionary_get_value(event->description, "QueueDirectories");
-+		if (xpc_get_type(paths) == XPC_TYPE_ARRAY) {
++		if (paths && xpc_get_type(paths) == XPC_TYPE_ARRAY) {
 +			for (size_t i = 0; i < xpc_array_get_count(paths); ++i) {
 +				const char *path = xpc_array_get_string(paths, i);
 +				if (path) state |= directory_nonempty(path);
 +			}
 +		}
 +		xpc_object_t states = xpc_dictionary_get_value(event->description, "PathState");
-+		if (xpc_get_type(states) == XPC_TYPE_DICTIONARY) {
++		if (states && xpc_get_type(states) == XPC_TYPE_DICTIONARY) {
 +			__block bool matches = false;
 +			xpc_dictionary_apply(states, ^bool(const char *path, xpc_object_t wanted) {
 +				matches |= pathstate_matches(path, wanted);
@@ -15554,52 +15751,74 @@ index 00000000..d114160c
 +	}
 +}
 +
++/* Sleep until the earliest pending pulse, but at most one second so the stat
++ * snapshots still catch changes inotify cannot report.
++ */
++static struct timespec next_timeout(double time)
++{
++	double wait = 1.0;
++	for (struct event *event = events; event; event = event->next) {
++		if (event->pending && event->pending - time < wait)
++			wait = event->pending - time;
++	}
++	if (wait < 0.01) wait = 0.01;
++	struct timespec timeout = { (time_t)wait, (long)((wait - (time_t)wait) * 1e9) };
++	return timeout;
++}
++
 +int main(void)
 +{
 +	queue = kqueue();
 +	if (queue < 0) { perror("UserEventAgent: kqueue"); return 1; }
++	notify = inotify_init1(IN_NONBLOCK);
++	if (notify < 0) { perror("UserEventAgent: inotify"); return 1; }
++	(void)fcntl(notify, F_SETFD, FD_CLOEXEC);
++
 +	/* Install before CHECK_IN: launchd may send SIGUSR1 as soon as it replies. */
 +	signal(SIGUSR1, SIG_IGN);
-+	struct kevent change;
-+	EV_SET(&change, SIGUSR1, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
-+	if (kevent(queue, &change, 1, NULL, 0, NULL) < 0) {
-+		perror("UserEventAgent: SIGUSR1 registration"); return 1;
++	struct kevent changes[2];
++	EV_SET(&changes[0], SIGUSR1, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
++	EV_SET(&changes[1], notify, EVFILT_READ, EV_ADD, 0, 0, NULL);
++	if (kevent(queue, changes, 2, NULL, 0, NULL) < 0) {
++		perror("UserEventAgent: kevent registration"); return 1;
 +	}
-+	launchd_pipe = xpc_pipe_create_from_port(bootstrap_port, XPC_PIPE_USE_SYNC_IPC_OVERRIDE);
++
++	/* launchd serves event routines directly on the bootstrap port. */
++	launchd_pipe = xpc_pipe_create_from_port(bootstrap_port, 0);
 +	if (!launchd_pipe) return 1;
 +	provider_check_in();
++	double last_check_in = now(), last_retry = last_check_in;
++
 +	for (;;) {
-+		evaluate_events();
-+		if (registrations_changed) {
++		double time = now();
++		bool retry = time - last_retry >= RETRY_SECONDS;
++		if (retry) last_retry = time;
++		evaluate_events(time, retry);
++		if (registrations_changed || time - last_check_in >= RECHECK_SECONDS) {
 +			registrations_changed = false;
 +			provider_check_in();
++			last_check_in = now();
 +			continue;
 +		}
-+		/* Periodic reconciliation also recovers watch-limit/open errors, missed
-+		 * vnode notifications, and creation beneath initially missing parents.
-+		 */
-+		struct timespec timeout = { 1, 0 };
-+		struct kevent notifications[64];
-+		int count = kevent(queue, NULL, 0, notifications, 64, &timeout);
++
++		struct timespec timeout = next_timeout(time);
++		struct kevent notifications[16];
++		int count = kevent(queue, NULL, 0, notifications, 16, &timeout);
 +		if (count < 0) {
 +			if (errno == EINTR) continue;
 +			perror("UserEventAgent: kevent"); return 1;
 +		}
 +		bool recheck = false;
 +		for (int i = 0; i < count; ++i) {
-+			struct kevent *notification = &notifications[i];
-+			if (notification->filter == EVFILT_SIGNAL && notification->ident == SIGUSR1)
++			if (notifications[i].filter == EVFILT_SIGNAL && notifications[i].ident == SIGUSR1)
 +				recheck = true;
-+			else if (notification->filter == EVFILT_READ && !(notification->flags & EV_ERROR)) {
-+				struct path_watch *watch = notification->udata;
-+				if (watch) drain_parent(watch);
-+			} else if (notification->filter == EVFILT_VNODE && !(notification->flags & EV_ERROR)) {
-+				struct path_watch *watch = notification->udata;
-+				if (watch && notification->ident == (uintptr_t)watch->fd) watch->changed = true;
-+			}
++			else if (notifications[i].filter == EVFILT_READ && (int)notifications[i].ident == notify)
++				drain_notifications();
 +		}
-+		/* Process all udata before reconciliation can remove old registrations. */
-+		if (recheck) provider_check_in();
++		if (recheck) {
++			provider_check_in();
++			last_check_in = now();
++		}
 +	}
 +}
 diff --git a/src/launchd/CMakeLists.txt b/src/launchd/CMakeLists.txt
@@ -15618,7 +15837,7 @@ index 2fa56277..202636dd 100644
 +install(DIRECTORY DESTINATION libexec/darling/private/var/db/launchd.db/com.apple.launchd
 +	DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
 diff --git a/src/startup/darling.c b/src/startup/darling.c
-index a3f27fbf..5927ea0c 100644
+index a3f27fbf..e2b45856 100644
 --- a/src/startup/darling.c
 +++ b/src/startup/darling.c
 @@ -51,6 +51,8 @@ uid_t g_originalUid, g_originalGid;
@@ -15639,10 +15858,49 @@ index a3f27fbf..5927ea0c 100644
  		char socketPath[4096];
  		
  		snprintf(socketPath, sizeof(socketPath), "%s"  SHELLSPAWN_SOCKPATH, prefix);
-@@ -938,6 +942,40 @@ void createDir(const char* path)
+@@ -938,6 +942,79 @@ void createDir(const char* path)
  	}
  }
  
++// Like mkdir -p, but only warns: launchd runs without its database (it only
++// loses overrides and WatchPaths registration records), so a prefix with an
++// unexpected entry here must still start.
++static void createLaunchdStateDir(const char* path)
++{
++	char partial[4096];
++	size_t length = strlen(path);
++
++	if (length >= sizeof(partial))
++		return;
++	memcpy(partial, path, length + 1);
++
++	for (size_t i = 1; i <= length; i++)
++	{
++		if (partial[i] != '/' && partial[i] != '\0')
++			continue;
++
++		const char saved = partial[i];
++		partial[i] = '\0';
++
++		struct stat st;
++		if (stat(partial, &st) == 0)
++		{
++			if (!S_ISDIR(st.st_mode))
++			{
++				fprintf(stderr, "Warning: %s is not a directory; launchd state is not persisted.\n", partial);
++				return;
++			}
++		}
++		else if (errno != ENOENT || mkdir(partial, 0755) != 0)
++		{
++			fprintf(stderr, "Warning: cannot create %s: %s; launchd state is not persisted.\n", partial, strerror(errno));
++			return;
++		}
++
++		partial[i] = saved;
++	}
++}
++
 +static void setupLaunchdState(void)
 +{
 +	char path[4096];
@@ -15665,7 +15923,7 @@ index a3f27fbf..5927ea0c 100644
 +	for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); i++)
 +	{
 +		snprintf(path, sizeof(path), "%s%s", prefix, dirs[i]);
-+		createDir(path);
++		createLaunchdStateDir(path);
 +	}
 +
 +	umask(saved_mask);

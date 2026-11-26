@@ -18,17 +18,24 @@ def added_pipe():
 
 
 class XPCPipeBootstrapTests(unittest.TestCase):
-    def test_sync_override_uses_the_retained_destination_without_checkin(self):
+    def test_bootstrap_destination_uses_the_retained_port_without_checkin(self):
         code = added_pipe()
-        branch = re.search(r'if \(flags & XPC_PIPE_USE_SYNC_IPC_OVERRIDE\) \{(.*?)\n\s*\}',
+        branch = re.search(r'if \(MACH_PORT_VALID\(bootstrap_port\) && port == bootstrap_port\) \{(.*?)\n\s*\}',
                            code, re.S)
-        self.assertIsNotNone(branch, 'bootstrap pipes must not require a connection CHECKIN')
+        self.assertIsNotNone(branch, 'pipes to launchd must not require a connection CHECKIN')
         direct = branch.group(1)
         self.assertIn('this->send_port = port;', direct)
         self.assertIn('this->state = xpc_pipe_state_active;', direct)
         self.assertIn('return self;', direct)
         self.assertNotIn('this->checkin_port = port;', direct)
         self.assertNotIn('xpc_mach_port_create_', direct)
+
+    def test_apple_sync_ipc_override_flag_keeps_its_meaning(self):
+        # XPC_PIPE_USE_SYNC_IPC_OVERRIDE is Apple's QoS flag; Libinfo and the
+        # syslog shim pass it for ordinary named services that still need the
+        # connection handshake, so it must not select the direct mode.
+        code = added_pipe()
+        self.assertNotRegex(code, r'if\s*\(\s*flags\s*&\s*XPC_PIPE_USE_SYNC_IPC_OVERRIDE')
 
     def test_all_three_pipe_decode_paths_attach_the_kernel_audit_token(self):
         code = added_pipe()
