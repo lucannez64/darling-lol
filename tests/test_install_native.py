@@ -682,6 +682,35 @@ class PreflightTests(unittest.TestCase):
         self.assertIn('sudo is required', result.stderr)
 
 
+class SudoKeepAliveTests(unittest.TestCase):
+    """keep_sudo_alive accepts passwordless sudo without `sudo -v`."""
+
+    def run_keep_alive(self, sudo_body):
+        snippet = f'''
+source "$INSTALLER"
+sudo() {{ {sudo_body} }}
+fail() {{ printf 'fail:%s\\n' "$1"; exit 1; }}
+keep_sudo_alive
+printf 'pid:%s\\n' "${{SUDO_PID:-none}}"
+'''
+        return run_sourced(snippet)
+
+    def test_passwordless_runas_root_skips_validate(self):
+        # distrobox: `sudo -n true` works, but `sudo -v` wants a password
+        # because only the root runas rule is NOPASSWD.
+        result = self.run_keep_alive(
+            'if [ "$1" = -v ]; then echo "sudo: A terminal is required" >&2; return 1; fi; return 0;')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pid:none', result.stdout)
+        self.assertNotIn('fail:', result.stdout)
+
+    def test_password_sudo_still_validates(self):
+        result = self.run_keep_alive(
+            'if [ "$1" = -n ]; then return 1; fi; if [ "$1" = -v ]; then return 1; fi; return 0;')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('fail:sudo authentication failed.', result.stdout)
+
+
 class DiskSpaceTests(unittest.TestCase):
     """Existing Darling data counts toward the required install footprint."""
 

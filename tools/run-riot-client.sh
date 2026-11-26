@@ -456,6 +456,10 @@ fi
 # On affected setups Chromium's default temp directory is unusable. Electron
 # can copy app.asar entries to temporary files for async reads and report a
 # failed copy as "not found". Use a writable guest directory by default.
+# Riot's CheckInstalls agent writes its launchd plist here without creating the
+# folder. Provide the user-owned directory with the permissions macOS uses.
+mkdir -p -m 755 "$prefix_dir$guest_path/Library/LaunchAgents" 2>/dev/null ||
+ echo 'run-riot-client: could not create the LaunchAgents folder' >&2
 # Discord Rich Presence: the client's Discord SDK looks for discord-ipc-N in the guest's
 # $XDG_RUNTIME_DIR (else TMPDIR, which Darling sets to /private/tmp). Those paths resolve
 # inside the prefix, so link them to the host sockets; vchroot follows /Volumes/SystemRoot
@@ -464,6 +468,13 @@ fi
 # RCLOL_DISCORD_RPC=0 removes links left by an earlier launch instead.
 guest_ipc="$prefix${XDG_RUNTIME_DIR:-/private/tmp}"
 if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
+ # The Discord SDK registers each Riot product's launch command by writing
+ # ~/Library/Application Support/discord/games/<application id>.json. That folder
+ # exists on a Mac where Discord was installed and the SDK does not create it, so
+ # in a fresh prefix every registration failed ("Discord failed to register launch
+ # command"). With the host Discord linked in, keep it as Discord would leave it.
+ mkdir -p "$prefix_dir$guest_path/Library/Application Support/discord/games" 2>/dev/null ||
+  echo 'discord-rpc: could not create the Discord games folder' >&2
  host_ipc=${XDG_RUNTIME_DIR:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}}
  discord_found=0
  for dir in "$host_ipc" "$host_ipc/app/com.discordapp.Discord" "$host_ipc/app/dev.vencord.Vesktop" "$host_ipc/snap.discord"; do

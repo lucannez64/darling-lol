@@ -863,6 +863,88 @@ class LeagueLoadWatch(LeagueLogTail):
         return True
 
 
+PCORE_CPUS = Path('/sys/devices/cpu_core/cpus')
+
+
+def performance_cores(path=PCORE_CPUS):
+    """The performance cores of a hybrid Intel CPU as a set, or None.
+
+    The kernel lists them in /sys/devices/cpu_core/cpus (the file darlingserver's
+    DSERVER_PCORE_AFFINITY reads); a CPU without efficiency cores has no file.
+    """
+    try:
+        text = Path(path).read_text().strip()
+    except OSError:
+        return None
+    cpus = set()
+    try:
+        for part in text.split(','):
+            first, _, last = part.partition('-')
+            start, end = int(first), int(last or first)
+            if start < 0 or end < start:
+                return None
+            cpus.update(range(start, end + 1))
+    except ValueError:
+        return None
+    return cpus or None
+
+
+class GamePinner:
+    """Keep the League game's threads on the performance cores.
+
+    On a hybrid CPU the Linux scheduler moves the game's main thread, which
+    bounds the frame rate, across efficiency cores and between cores; Windows
+    keeps a foreground game on the performance cores. Each poll pins the
+    threads it has not pinned yet: threads inherit their creator's mask, and a
+    thread created while the first pass ran is caught on the next poll. Only
+    the game is pinned, never the clients, and the process is identified by its
+    start time so a reused PID is pinned afresh.
+    """
+
+    def __init__(self, cpus, setaffinity=os.sched_setaffinity, out=sys.stdout):
+        self.cpus = set(cpus)
+        self.setaffinity = setaffinity
+        self.out = out
+        self.pinned = {}
+
+    def poll(self, members):
+        for pid, proc in members:
+            if GAME_NAME not in command_names(proc):
+                continue
+            info = process_info(proc)
+            if info is None:
+                continue
+            key = (pid, info[2])
+            seen = self.pinned.setdefault(key, set())
+            first = not seen
+            try:
+                tids = [int(task.name) for task in (proc / 'task').iterdir() if task.name.isdigit()]
+            except OSError:
+                continue
+            for tid in tids:
+                if tid in seen:
+                    continue
+                try:
+                    self.setaffinity(tid, self.cpus)
+                except OSError:
+                    continue
+                seen.add(tid)
+            if first and seen:
+                log('pinned the League game (%d threads) to performance cores %s'
+                    % (len(seen), cpu_list(self.cpus)), self.out)
+
+
+def cpu_list(cpus):
+    """1,2,3,5 -> '1-3,5'."""
+    ranges, ordered = [], sorted(cpus)
+    for cpu in ordered:
+        if ranges and cpu == ranges[-1][1] + 1:
+            ranges[-1][1] = cpu
+        else:
+            ranges.append([cpu, cpu])
+    return ','.join('%d' % a if a == b else '%d-%d' % (a, b) for a, b in ranges)
+
+
 def league_client_processes(prefix, namespace, proc_root=Path('/proc'), own_namespace=None):
     """League client processes of this session, never the game itself."""
     return [(pid, proc) for pid, proc in session_members(prefix, namespace, proc_root, own_namespace)
@@ -993,7 +1075,7 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                    sleep=time.sleep, out=sys.stdout, poll=POLL_SECONDS,
                    own_namespace=None, runtime_at_start=None, guest_log=None,
                    league_exit=None, league_load=None, container=None,
-                   stoppable=True, session_base=None):
+                   stoppable=True, session_base=None, pin_game=None, pcore_cpus=PCORE_CPUS):
     """Run command, forward termination signals, then clean the session.
 
     Cleanup only runs when this launcher started the runtime. A second launch
@@ -1051,6 +1133,16 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
     if league_load is None:
         league_load = os.environ.get('RCLOL_FINISH_LEAGUE_LOAD', '1') != '0'
     load_watch = LeagueLoadWatch(prefix) if league_load else None
+    pinner = None
+    if pin_game is None:
+        pin_game = os.environ.get('RCLOL_GAME_PCORE_AFFINITY', '0') == '1'
+    if pin_game:
+        cpus = performance_cores(pcore_cpus)
+        if cpus:
+            pinner = GamePinner(cpus, out=out)
+        else:
+            log('RCLOL_GAME_PCORE_AFFINITY=1, but this CPU reports no performance cores; '
+                'not pinning the game', out)
     following = []
 
     def session_running():
@@ -1081,6 +1173,8 @@ def run_supervised(command, prefix, darling, stop_after=0, clean=True,
                                    sleep=sleep, out=out, own_namespace=own_namespace)
             if load_watch is not None and load_watch.poll():
                 report_league_load(prefix, out=out)
+            if pinner is not None:
+                pinner.poll(session_members(prefix, namespace, proc_root, own_namespace))
             if stop_after > 0:
                 now = time.monotonic()
                 seen_client, idle_since, stop_now = idle_decision(

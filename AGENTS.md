@@ -186,6 +186,7 @@ guest probes; do not run the guest probes on your own.
 | `RCLOL_GUEST_LOCALE` | `en_US.UTF-8` | guest `LANG`/`LC_ALL` |
 | `RCLOL_REFRESH_HZ` | detected (60 fallback) | display link and frame pacing |
 | `RCLOL_CORE_DUMPS` | `0` | `1` keeps core dumps |
+| `RCLOL_GAME_PCORE_AFFINITY` | `0` | `1` keeps the League game's threads on the performance cores |
 | `DSERVER_PCORE_AFFINITY` | unset | `1` pins darlingserver threads to performance cores |
 
 ## Project invariants

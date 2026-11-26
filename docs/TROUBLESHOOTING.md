@@ -1014,6 +1014,15 @@ they have not been remeasured after integration with current `main`. On `bcb3245
 
 Also on NVIDIA, check the CPU that takes the GPU interrupt. `/proc/interrupts` shows which one on its `nvidia` line; read that CPU's `hi` share in `top` (press `1` for per-CPU lines) or the sixth value of its line in `/proc/stat`. A CPU that spends most of a match in hard interrupts means the handler's list of semaphore listeners has grown with the textures loaded. Since 2026-11-24 NVIDIA devices run without texture timelines for that reason, and `/tmp/metal-texture-timelines` brings them back for a comparison ([setup](SETUP.md#game-process-switches)).
 
+On a hybrid Intel CPU (12th generation and later), check where the game's main
+thread runs. In a Swiftplay match on an i9-12900KF (2026-11-26) it spent 24% of
+100 samples on efficiency cores and visited 21 of the 24 CPUs, while Windows keeps
+a foreground game on the performance cores. `RCLOL_GAME_PCORE_AFFINITY=1` has the
+session supervisor pin every game thread to the performance cores the kernel lists
+in `/sys/devices/cpu_core/cpus` when the game starts; the clients keep every core.
+On a CPU without that file it logs that it has nothing to pin. Its FPS effect has
+not been measured over a whole match yet.
+
 ## darlingserver message loop and idle-wait switches
 
 darlingserver runs its message loop on io_uring when the build target's kernel
@@ -1028,6 +1037,7 @@ it uses the epoll loop instead.
 |---|---|
 | `DSERVER_IO_URING=0` | use the previous epoll loop and worker thread |
 | `DSERVER_PCORE_AFFINITY=1` | keep the server's threads on the performance cores of a hybrid Intel CPU |
+| `RCLOL_GAME_PCORE_AFFINITY=1` | keep the League game's threads on the performance cores of a hybrid Intel CPU; the session supervisor pins each game thread when it appears and leaves the clients alone |
 | `DSERVER_CALL_STATS=<file>` | every 5 s, append request counts per call, per thread, and (`kinds:` blocks) per message id, wait type, timer distance and busiest object; costs a few percent of one core and a short stall of the loop per flush, so not for normal play |
 
 AppKit retains the port wait already shipped on main (`RCLOL_APPKIT_PORT_WAIT=0`

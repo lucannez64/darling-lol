@@ -136,11 +136,24 @@ with open({str(log)!r}, "a") as output:
         # Discord Rich Presence: the guest's XDG_RUNTIME_DIR must lead out to the host socket.
         assert os.readlink(prefix / "run/user/offline-check/discord-ipc-0") == \
             "/Volumes/SystemRoot/run/user/offline-check/discord-ipc-0", "Discord IPC link missing"
+        # The Discord SDK writes launch commands into this folder, which it does not create.
+        assert (prefix / "Users/offline-check/Library/Application Support/discord/games").is_dir(), \
+            "Discord games folder missing"
+        # Riot's CheckInstalls agent writes its plist here without creating the folder.
+        launch_agents = prefix / "Users/offline-check/Library/LaunchAgents"
+        assert launch_agents.is_dir(), "LaunchAgents folder missing"
+        assert launch_agents.stat().st_mode & 0o777 == 0o755, "LaunchAgents mode is not 755"
+        assert launch_agents.stat().st_uid == os.getuid(), "LaunchAgents is not owned by the user"
         # Opting out removes the links an earlier launch left behind, including the TMPDIR
         # fallback (/private/tmp) left by a launch without XDG_RUNTIME_DIR.
         (prefix / "private/tmp").mkdir(parents=True)
         (prefix / "private/tmp/discord-ipc-0").symlink_to("/Volumes/SystemRoot/tmp/discord-ipc-0")
-        subprocess.run(["sh", str(launcher)], env={**env, "RCLOL_DISCORD_RPC": "0"}, check=True, capture_output=True, text=True)
+        # LaunchAgents must also be created with Discord off, even under a restrictive umask.
+        launch_agents.rmdir()
+        subprocess.run(["sh", str(launcher)], env={**env, "RCLOL_DISCORD_RPC": "0"}, check=True, capture_output=True, text=True, umask=0o077)
+        assert launch_agents.is_dir(), "LaunchAgents folder missing with Discord disabled"
+        assert launch_agents.stat().st_mode & 0o777 == 0o755, "LaunchAgents mode depends on the umask"
+        assert launch_agents.stat().st_uid == os.getuid(), "LaunchAgents is not owned by the user"
         assert not any(os.path.lexists(prefix / directory / f"discord-ipc-{n}")
                        for directory in ("run/user/offline-check", "private/tmp") for n in range(10)), \
             "stale Discord IPC link kept"

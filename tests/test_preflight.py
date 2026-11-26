@@ -173,6 +173,13 @@ esac'''.replace('LLVM_BINDIR', str(self.llvm_bindir)))
         self.assertIn('Vulkan 1.3 or newer', result.stdout)
         self.assertIn('Old GPU 1.2', result.stdout)
 
+    def test_vulkan_accepts_packed_version_with_dotted_value(self):
+        self.vulkan([('4211017 (1.4.329)', 'GeForce RTX 3070', True)])
+        result = self.preflight()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ok   vulkan', result.stdout)
+        self.assertIn('GeForce RTX 3070 1.4', result.stdout)
+
 
     def test_missing_vulkaninfo_only_warns(self):
         (self.bin / 'vulkaninfo').unlink()

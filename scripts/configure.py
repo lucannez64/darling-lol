@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Render local paths into ignored runtime tools; never alter the source snapshot."""
-import argparse,contextlib,json,os,re,shutil,sys,tempfile
+import argparse,contextlib,json,os,re,shutil,stat,sys,tempfile
 from pathlib import Path
 from common import LOCALES,REGIONS,ROOT,configuration,render
 
@@ -33,8 +33,8 @@ def publish(target,data,mode):
     the entry with one rename. The rename replaces a symlink or dangling symlink itself, never
     its target, and a directory in the way makes the rename fail instead of being followed."""
     try:
-        if not target.is_symlink() and target.is_file() and \
-           (target.stat().st_mode & 0o777)==mode and target.read_bytes()==data:
+        existing_mode=target.lstat().st_mode
+        if stat.S_ISREG(existing_mode) and (existing_mode & 0o777)==mode and target.read_bytes()==data:
             return False
     except OSError:pass
     fd,temporary=tempfile.mkstemp(dir=target.parent,prefix='.'+target.name+'.',suffix='.tmp')
