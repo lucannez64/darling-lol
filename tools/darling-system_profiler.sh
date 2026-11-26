@@ -1,6 +1,6 @@
 #!/bin/sh
-# system_profiler for the Darling prefix: reports the host's real display and
-# network hardware for the data types applications query at startup. The hardware
+# system_profiler for the Darling prefix: reports the selected GPU presentation
+# and host-backed screens/network for the data types queried at startup. The hardware
 # and software overviews come from the guest's own IOKit, sysctl and sw_vers, so they
 # match what other APIs report (including a configure-darling-platform.py override).
 # Installed as /usr/sbin/system_profiler by tools/install-darling-system-profiler.py.
@@ -73,14 +73,14 @@ presented_as_integrated() {
  return 1
 }
 
-displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
+displays() { # vendor|device|vram MB or empty|name|bus|mac identity|display owner
  # HOST reports the host card. COMPAT is the default MacBookPro16,1 presentation,
  # selected by tools/system.prop; it only changes the reported identity, never
  # the host, the driver, or the GPU that actually presents frames. The mac name
  # presents Intel, and an AMD card beside the discrete GPU, as the
  # MacBookPro16,1's UHD Graphics 630 and the discrete
  # vendors (AMD, NVIDIA) as its Radeon Pro 5500M, like iokitd and Metal do: no
- # Mac that runs macOS 14 has an NVIDIA GPU.
+ # Mac that runs macOS 15 has an NVIDIA GPU.
  # Run outside the launcher, nothing is handed over: read the installed profile.
  prop=${RCLOL_SYSTEM_PROP:-/private/etc/darling-system.prop}
  if [ -z "${RCLOL_PLATFORM_PROFILE:-}" ] && [ -r "$prop" ]; then
@@ -103,6 +103,33 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
  valid_vram "$profile_vram" || profile_vram=
  host_vram=${RCLOL_HOST_GPU_VRAM_MB:-}
  valid_vram "$host_vram" || host_vram=
+ if [ "$profile" = compat ] && [ "$mac_gpu_profile" = 1 ]; then
+  load_platform
+  if [ "$(platform model)" = MacBookPro16,1 ]; then
+   # The overview describes the complete model, unlike Metal/IOKit's list of
+   # available rendering devices. Do not add this pair to host-name overrides
+   # or to other models. The discrete GPU owns the compatibility display tree;
+   # this is a presentation relationship, not a claim about host connector wiring.
+   pair_vram=$profile_vram
+   if [ -z "$pair_vram" ]; then
+    # Preserve gpu.vram=host / DARLING_METAL_VRAM_MB behaviour: use the largest
+    # dedicated host heap, not a small APU carve-out, when no size is configured.
+    pair_vram=0
+    for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
+     card_vendor=$(sed 's/^0x//' "$card/device/vendor" 2>/dev/null)
+     case "$card_vendor" in 1002|10de) ;; *) continue;; esac
+     candidate=$(card_vram_bytes "$card" | awk '{ printf "%d", $1 / 1048576 }')
+     if [ "$card_vendor" = 10de ] && ! valid_vram "$candidate"; then candidate=$host_vram; fi
+     if valid_vram "$candidate" && [ "$candidate" -gt "$pair_vram" ]; then pair_vram=$candidate; fi
+    done
+    valid_vram "$pair_vram" || pair_vram=4096
+   fi
+   echo '8086|3e9b||Intel UHD Graphics 630|builtin|1|none'
+   echo "1002|7340|$pair_vram|AMD Radeon Pro 5500M|pcie|1|all"
+   return
+  fi
+ fi
+ first_card=
  for card in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
   [ -r "$card/device/vendor" ] || continue
   vendor=$(sed 's/^0x//' "$card/device/vendor"); device=$(sed 's/^0x//' "$card/device/device")
@@ -123,19 +150,201 @@ displays() { # one line per GPU: vendor|device|vram MB or empty|name|bus
    fi
   fi
   [ -n "$name" ] || name=$(pci_name "$vendor" "$device"); [ -n "$name" ] || name="Display"
+  mac_identity=0
   if [ "$mac_gpu_profile" = 1 ]; then
    [ "$vendor" = 1002 ] && presented_as_integrated "$card" && vendor=8086
    case "$vendor" in
     1002|10de) vendor=1002; device=7340; name='AMD Radeon Pro 5500M'
           valid_vram "$vram" || vram=4096
-          bus=pcie;;
+          bus=pcie; mac_identity=1;;
     8086) vendor=8086; device=3e9b; name='Intel UHD Graphics 630'
-          vram=; bus=builtin;;
+          vram=; bus=builtin; mac_identity=1;;
    esac
   elif [ "$gpu_mode" != host ]; then
    name=$gpu_mode
   fi
-  echo "$vendor|$device|$vram|$name|$bus"
+  owner=${card##*/}
+  if [ -z "$first_card" ]; then first_card=$card; owner=first:$owner; fi
+  echo "$vendor|$device|$vram|$name|$bus|$mac_identity|$owner"
+ done
+}
+
+vram_text() {
+ # macOS prints dedicated 4096 MB as "4 GB", but shared 1536 MB stays in MB.
+ awk -v mb="$1" 'BEGIN { if (mb >= 1024 && mb % 1024 == 0) printf "%d GB", mb / 1024; else printf "%d MB", mb }'
+}
+
+gpu_fields() { # label|XML key|value; the enclosing loop supplies the GPU row
+ echo "Chipset Model|sppci_model|$name"
+ echo 'Type|sppci_device_type|spdisplays_gpu'
+ echo "Bus|sppci_bus|spdisplays_$bus"
+ if [ "$mac_identity" = 1 ] && [ "$vendor" = 1002 ]; then
+  echo 'PCIe Lane Width|spdisplays_pcie_width|x16'
+ fi
+ if [ "$mac_identity" = 1 ] && [ "$vendor" = 8086 ]; then
+  echo 'VRAM (Dynamic, Max)|spdisplays_vram_shared|1536 MB'
+ elif [ -n "$vram" ]; then
+  echo "VRAM (Total)|spdisplays_vram|$(vram_text "$vram")"
+ fi
+ echo "Vendor|spdisplays_vendor|${name%% *} (0x$vendor)"
+ echo "Device ID|spdisplays_device-id|0x$device"
+ if [ "$mac_identity" = 1 ]; then
+  [ "$vendor" = 8086 ] && revision=0002 || revision=0040
+  echo "Revision ID|spdisplays_revision-id|0x$revision"
+  echo 'Automatic Graphics Switching|spdisplays_automatic_graphics_switching|spdisplays_supported'
+  echo 'gMux Version|spdisplays_gmux-version|5.0.0'
+ fi
+ echo 'Metal Support|spdisplays_mtlgpufamilysupport|spdisplays_metal3'
+}
+
+screens() { # display ID|connector|width|height|main|mirror|internal|name
+ # X11Display.m builds NSScreen from active XRandR CRTC geometry, primary first;
+ # CGDisplayPixelsWide/High use that frame and backingScaleFactor is 1.0. Query
+ # the same server, not the MacBook's nominal 3072x1920 Retina panel or sysfs
+ # "modes" (supported, not current sizes). Match NSScreen's output-index IDs,
+ # including gaps for inactive outputs. The separate
+ # process cannot observe an application's private emulated fullscreen mode.
+ # Darling execve dispatches host ELF tools directly; no guest probe is needed.
+ # Missing xrandr / an inaccessible X server means unknown geometry: omit it,
+ # rather than invent a panel, a Retina scale or automatic brightness support.
+ # macOS names a display after the EDID monitor name descriptor (0xFC), e.g.
+ # "PL3466WQ"; --verbose carries each output's EDID, also for connectors whose
+ # X name differs from the DRM one. Without a name, keep "Display N".
+ randr="$host/usr/bin/xrandr"
+ [ -x "$randr" ] || randr="$host/run/current-system/sw/bin/xrandr"
+ [ -x "$randr" ] || return 0
+ # X11Display also retries :0 when the inherited DISPLAY cannot be opened.
+ geometry=$("$randr" --verbose --current 2>/dev/null) ||
+  geometry=$(DISPLAY=:0 "$randr" --verbose --current 2>/dev/null) || return 0
+ printf '%s\n' "$geometry" | awk '
+  function edid_name(hex,   d, k, b, j, c, out) {
+   for (k = 0; k + 1 < length(hex); k += 2)
+    b[k / 2] = (index("0123456789abcdef", substr(hex, k + 1, 1)) - 1) * 16 + index("0123456789abcdef", substr(hex, k + 2, 1)) - 1
+   for (d = 54; d <= 108; d += 18) {
+    if (b[d] != 0 || b[d + 1] != 0 || b[d + 2] != 0 || b[d + 3] != 252) continue
+    out = ""
+    for (j = d + 5; j < d + 18; j++) {
+     c = b[j]
+     if (c == 10 || c < 32 || c > 126) break
+     out = out sprintf("%c", c)
+    }
+    sub(/ +$/, "", out); gsub(/[|]/, "", out)
+    return out
+   }
+   return ""
+  }
+  inedid && NF == 1 && $1 ~ /^[0-9a-fA-F]+$/ { edid[id] = edid[id] tolower($1); next }
+  { inedid = 0 }
+  $1 == "EDID:" { inedid = 1; next }
+  $2 == "connected" || $2 == "disconnected" {
+   id++
+   for (i = 3; i <= NF; i++) {
+    if ($i ~ /^[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+$/) {
+     n++; ids[n] = id; ports[n] = $1; rect[n] = $i
+     split($i, size, /[x+-]/); widths[n] = size[1]; heights[n] = size[2]
+     if ($3 == "primary") primary = n
+     break
+    }
+   }
+  }
+  END {
+   if (!primary) primary = 1
+   for (pass = 1; pass <= 2; pass++) for (i = 1; i <= n; i++) {
+    if ((pass == 1) != (i == primary)) continue
+    mirror = "off"
+    for (j = 1; j <= n; j++) if (i != j && rect[i] == rect[j]) mirror = "on"
+    internal = (ports[i] ~ /^(eDP|LVDS|DSI)(-|[0-9]|$)/) ? "internal" : ""
+    name = edid_name(edid[ids[i]])
+    if (name == "") name = "Display " ids[i]
+    printf "%d|%s|%d|%d|%s|%s|%s|%s\n", ids[i], ports[i], widths[i], heights[i], (i == primary) ? "yes" : "no", mirror, internal, name
+   }
+  }'
+}
+
+screens_for_gpu() {
+ [ "$owner" != none ] || return 0
+ printf '%s\n' "$screen_rows" | while IFS='|' read -r sid connector width height main mirror internal sname; do
+  [ -n "$sid" ] || continue
+  if [ "$owner" != all ]; then
+   # Attribute connectors to their DRM card when the names agree. Xwayland and
+   # proprietary drivers can expose logical names with no DRM match; keep those
+   # on the first card only instead of duplicating every display on every GPU.
+   screen_card=
+   for gpu in "$host"/sys/class/drm/card[0-9] "$host"/sys/class/drm/card[0-9][0-9]; do
+    if [ -e "$gpu-$connector" ]; then screen_card=${gpu##*/}; break; fi
+   done
+   case "$owner" in
+    first:*) [ -z "$screen_card" ] || [ "$screen_card" = "${owner#first:}" ] || continue;;
+    *) [ "$screen_card" = "$owner" ] || continue;;
+   esac
+  fi
+  echo "$sid|$connector|$width|$height|$main|$mirror|$internal|$sname"
+ done
+}
+
+screen_fields() {
+ [ "$internal" != internal ] || echo 'Display Type|spdisplays_display_type|spdisplays_LCD'
+ echo "Resolution|spdisplays_pixelresolution|$width x $height"
+ [ "$main" != yes ] || echo 'Main Display|spdisplays_main|spdisplays_yes'
+ echo "Mirror|spdisplays_mirror|spdisplays_$mirror"
+ echo 'Online|spdisplays_online|spdisplays_yes'
+ [ "$internal" != internal ] || echo 'Connection Type|spdisplays_connection_type|spdisplays_internal'
+}
+
+fields_xml() {
+ while IFS='|' read -r label key value; do
+  printf '    <key>%s</key><string>%s</string>\n' "$key" "$(printf '%s' "$value" | escape)"
+ done
+}
+
+fields_text() {
+ while IFS='|' read -r label key value; do
+  case "$value" in
+   spdisplays_gpu) value=GPU;; spdisplays_pcie) value=PCIe;; spdisplays_builtin) value=Built-In;;
+   spdisplays_supported) value=Supported;; spdisplays_metal3) value='Metal 3';;
+   spdisplays_LCD) value=LCD;; spdisplays_yes) value=Yes;; spdisplays_off) value=Off;;
+   spdisplays_on) value=On;; spdisplays_internal) value=Internal;;
+  esac
+  # macOS localizes the known integrated vendor as Intel without a PCI suffix.
+  if [ "$key" = spdisplays_vendor ] && [ "$value" = 'Intel (0x8086)' ] && [ "$mac_identity" = 1 ]; then value=Intel; fi
+  printf '%s%s: %s\n' "$1" "$label" "$value"
+ done
+}
+
+display_report() { # text|xml
+ screen_rows=$(screens)
+ displays | while IFS='|' read -r vendor device vram name bus mac_identity owner; do
+  panels=$(screens_for_gpu)
+  if [ "$1" = xml ]; then
+   echo '   <dict>'
+   printf '    <key>_name</key><string>%s</string>\n' "$(printf '%s' "$name" | escape)"
+   # Keep the old shim alias for existing consumers, alongside macOS sppci_bus.
+   echo "    <key>spdisplays_bus</key><string>spdisplays_$bus</string>"
+   gpu_fields | fields_xml
+   if [ -n "$panels" ]; then
+    echo '    <key>spdisplays_ndrvs</key><array>'
+    printf '%s\n' "$panels" | while IFS='|' read -r sid connector width height main mirror internal sname; do
+     echo '     <dict>'
+     printf '      <key>_name</key><string>%s</string>\n' "$(printf '%s' "$sname" | escape)"
+     echo "      <key>_spdisplays_displayID</key><string>$sid</string>"
+     screen_fields | fields_xml
+     echo '     </dict>'
+    done
+    echo '    </array>'
+   fi
+   echo '   </dict>'
+  else
+   printf '    %s:\n\n' "$name"
+   gpu_fields | fields_text '      '
+   if [ -n "$panels" ]; then
+    echo '      Displays:'
+    printf '%s\n' "$panels" | while IFS='|' read -r sid connector width height main mirror internal sname; do
+     printf '        %s:\n' "$sname"
+     screen_fields | fields_text '          '
+    done
+   fi
+   echo
+  fi
  done
 }
 
@@ -234,19 +443,7 @@ if [ "$xml" = 1 ]; then
   case "$type" in
    SPHardwareDataType) hardware | overview_xml hardware_overview;;
    SPSoftwareDataType) software | overview_xml os_overview;;
-   SPDisplaysDataType)
-    displays | while IFS='|' read -r vendor device vram name bus; do
-     name=$(printf '%s' "$name" | escape)
-     echo '   <dict>'
-     echo "    <key>_name</key><string>$name</string>"
-     echo "    <key>spdisplays_bus</key><string>spdisplays_$bus</string>"
-     echo "    <key>spdisplays_device-id</key><string>0x$device</string>"
-     echo "    <key>spdisplays_vendor</key><string>${name%% *} (0x$vendor)</string>"
-     [ -z "$vram" ] || echo "    <key>spdisplays_vram</key><string>$vram MB</string>"
-     echo "    <key>sppci_model</key><string>$name</string>"
-     echo '    <key>sppci_device_type</key><string>spdisplays_gpu</string>'
-     echo '   </dict>'
-    done;;
+   SPDisplaysDataType) display_report xml;;
    SPEthernetDataType)
     interfaces wired | while read -r name; do
      echo '   <dict>'
@@ -281,12 +478,7 @@ for type in $types; do
   SPSoftwareDataType) software | overview_text Software 'System Software Overview';;
   SPDisplaysDataType)
    printf 'Graphics/Displays:\n\n'
-   displays | while IFS='|' read -r vendor device vram name bus; do
-    [ "$bus" = pcie ] && bus_text=PCIe || bus_text='Built-In'
-    printf '    %s:\n\n      Chipset Model: %s\n      Type: GPU\n      Bus: %s\n' "$name" "$name" "$bus_text"
-    [ -z "$vram" ] || printf '      VRAM (Total): %s MB\n' "$vram"
-    printf '      Vendor: %s (0x%s)\n      Device ID: 0x%s\n\n' "${name%% *}" "$vendor" "$device"
-   done;;
+   display_report text;;
   SPEthernetDataType)
    printf 'Ethernet Cards:\n\n'
    interfaces wired | while read -r name; do

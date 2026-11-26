@@ -209,7 +209,7 @@ index a328f80..b54e92b 100644
 +    return result;
 +}
 diff --git a/src/common/kqueue.c b/src/common/kqueue.c
-index 61cc9dc..1788ae3 100644
+index 61cc9dc..dff83e2 100644
 --- a/src/common/kqueue.c
 +++ b/src/common/kqueue.c
 @@ -23,6 +23,8 @@
@@ -221,7 +221,24 @@ index 61cc9dc..1788ae3 100644
  
  #ifdef DARLING
  #include "../darling/listenregistry.h"
-@@ -113,6 +115,7 @@ kqueue_cmp(struct kqueue *a, struct kqueue *b)
+@@ -49,6 +51,16 @@ get_fd_limit(void)
+        the provided number of kqueue fds.
+        */
+     return 65536;
++#elif defined(DARLING)
++    /* darling-lol: the map is indexed by Linux descriptor numbers, which reach the real Linux
++     * limit (Darling keeps its own descriptors just below it). getrlimit(2) reports the guest's
++     * macOS limit instead (256 soft / unlimited hard, as launchd sets it), so ask Linux. */
++    struct { unsigned long long cur, max; } lim;
++
++    if (__linux_syscall(302 /* __NR_prlimit64 */, 0, 7 /* Linux RLIMIT_NOFILE */, 0, &lim) < 0 ||
++        lim.max == 0 || lim.max > 0x7fffffffULL)
++        return (65536);
++    return ((unsigned int) lim.max);
+ #else
+     struct rlimit rlim;
+     
+@@ -113,6 +125,7 @@ kqueue_cmp(struct kqueue *a, struct kqueue *b)
  void kqueue_cleanup(struct kqueue* kq)
  {
      struct knote *next, *tmp;
@@ -229,7 +246,7 @@ index 61cc9dc..1788ae3 100644
      for (next = kq->kq_tofree.lh_first; next != NULL; next = tmp)
      {
          tmp = next->kn_entries2free.le_next;
-@@ -135,6 +138,7 @@ kqueue_free(struct kqueue *kq)
+@@ -135,6 +148,7 @@ kqueue_free(struct kqueue *kq)
  	// XXX: we should be doing this more efficiently (i.e. without walking through all open kqueues)
  	map_foreach(kqmap, kqueue_free_cb, kq);
      filter_unregister_all(kq);
@@ -237,29 +254,29 @@ index 61cc9dc..1788ae3 100644
      kqops.kqueue_free(kq);
      free(kq);
  }
-@@ -297,19 +301,37 @@ kqueue_dup(int oldfd, int newfd)
+@@ -297,19 +311,37 @@ kqueue_dup(int oldfd, int newfd)
  static void _kqueue_close_atfork_cb(int kqfd, void* kqptr, void* private)
  {
  	struct kqueue* kq = (struct kqueue*) kqptr;
 +	int i;
- 
--    // Mutexes are not valid after a fork, reset it to unlocked state
--    tracing_mutex_init(&kq->kq_mtx, NULL);
++
 +	(void) kqfd;
 +	(void) private;
- 
--    kqueue_delref(kq);
++
 +	/* Drop all kqmap slots pointing to this kqueue in the child, even when a
 +	 * parent thread held an active kevent64_impl reference across fork(). */
 +	map_foreach(kqmap, kqueue_free_cb, kq);
-+
+ 
+-    // Mutexes are not valid after a fork, reset it to unlocked state
+-    tracing_mutex_init(&kq->kq_mtx, NULL);
 +	for (i = 0; i < EVFILT_SYSCOUNT; i++) {
 +		if (kq->kq_filt[i].kf_id == 0)
 +			continue;
 +		knote_free_all_atfork(&kq->kq_filt[i]);
 +	}
 +	memset(&kq->kq_filt[0], 0, sizeof(kq->kq_filt));
-+
+ 
+-    kqueue_delref(kq);
 +	kq->kq_waiters = 0;
 +	kqueue_cleanup(kq);
 +	kqops.kqueue_free(kq);
@@ -280,7 +297,7 @@ index 61cc9dc..1788ae3 100644
          map_foreach(kqmap, _kqueue_close_atfork_cb, NULL);
      }
  }
-@@ -329,6 +351,7 @@ void kqueue_delref(struct kqueue *kq)
+@@ -329,6 +361,7 @@ void kqueue_delref(struct kqueue *kq)
  int VISIBLE
  kqueue_impl(void)
  {

@@ -71,6 +71,15 @@ python3 build/runtime/tools/validate-riot-runtime.py
 # Mirror per-user overlays to canonical prefix paths (/System/Library/Frameworks,
 # /usr/lib) so the launcher can run without DYLD_LIBRARY_PATH/DYLD_FRAMEWORK_PATH.
 python3 "$repo/tools/sync-canonical-runtime-overlays.py" --prefix "$prefix_dir" --guest-home "$guest_home"
+# Framework bundle versions must describe the same macOS as SystemVersion.plist.
+# Run after every step that copies framework bundles into the prefix (they ship
+# Darling's own Info.plist) and before signing seals the bundles.
+framework_runtime_root=$(python3 -c 'import json; print(json.load(open("build/config.json"))["sdk"])')
+python3 "$repo/tools/provision-framework-info.py" --prefix "$prefix_dir" --runtime-root "$framework_runtime_root" --write || \
+  echo "Framework metadata not provisioned; run tools/provision-framework-info.py --prefix \"$prefix_dir\" --runtime-root \"$framework_runtime_root\" --write" >&2
+# Language preferences live in the global domain on macOS, not in each application's.
+python3 "$repo/tools/provision-user-locale.py" --prefix "$prefix_dir" --write || \
+  echo "Language preferences not provisioned; run tools/provision-user-locale.py --prefix \"$prefix_dir\" --write" >&2
 # Sign the installed runtime and populate the local trust store. The base SDK
 # is signed only when this process can actually write it; the per-user
 # RuntimeLibraries/RuntimeFrameworks overlays are always signed.

@@ -15938,3 +15938,131 @@ index a3f27fbf..e2b45856 100644
  void setupWorkdir()
  {
  	char* workdir;
+diff --git a/src/tools/sw_vers.c b/src/tools/sw_vers.c
+index 97a43cdc..1b38dca9 100644
+--- a/src/tools/sw_vers.c
++++ b/src/tools/sw_vers.c
+@@ -29,57 +29,81 @@
+ 
+ #include <CoreFoundation/CoreFoundation.h>
+ #include <CoreFoundation/CFPriv.h>
++#include <getopt.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+-void usage(char *progname) {
+-	fprintf(stderr, "Usage: %s [-productName|-productVersion|-buildVersion]\n", progname);
+-	exit(1);
++/*
++ * darling-lol: match the macOS 11+ sw_vers interface measured on macOS 15.5:
++ * tab-separated default output, single- and double-dash options
++ * (getopt_long_only), --help on stdout with status 0, an unknown option
++ * reported by getopt with the usage on stdout and status 1, the last option
++ * wins, and --productVersionExtra prints nothing when the key is absent.
++ */
++static const char *usage_text =
++	"Usage: sw_vers [--help|--productName|--productVersion|--productVersionExtra|--buildVersion]\n";
++
++enum { SHOW_ALL, SHOW_NAME, SHOW_VERSION, SHOW_EXTRA, SHOW_BUILD, SHOW_HELP };
++
++static int print_value(CFStringRef str, const char *suffix) {
++	char cstr[256];
++	if (str == NULL || CFGetTypeID(str) != CFStringGetTypeID())
++		return 0;
++	if (!CFStringGetCString(str, cstr, sizeof(cstr), kCFStringEncodingUTF8))
++		return -1;
++	printf("%s%s", cstr, suffix);
++	return 0;
+ }
+ 
+ int main(int argc, char *argv[]) {
+-	CFDictionaryRef dict= NULL;
+-	CFStringRef str = NULL;
+-	char cstr[256];
+-	
++	static const struct option options[] = {
++		{ "help", no_argument, NULL, SHOW_HELP },
++		{ "productName", no_argument, NULL, SHOW_NAME },
++		{ "productVersion", no_argument, NULL, SHOW_VERSION },
++		{ "productVersionExtra", no_argument, NULL, SHOW_EXTRA },
++		{ "buildVersion", no_argument, NULL, SHOW_BUILD },
++		{ NULL, 0, NULL, 0 }
++	};
++	int show = SHOW_ALL, ch, status = 0;
++	CFDictionaryRef dict;
++
++	while ((ch = getopt_long_only(argc, argv, "", options, NULL)) != -1) {
++		if (ch == '?') {
++			fputs(usage_text, stdout);
++			return 1;
++		}
++		show = ch;
++	}
++	if (show == SHOW_HELP) {
++		fputs(usage_text, stdout);
++		return 0;
++	}
++
+ 	dict = _CFCopyServerVersionDictionary();
+ 	if (dict == NULL)
+ 		dict = _CFCopySystemVersionDictionary();
+ 	if (dict == NULL)
+-		exit(1);
+-	
+-	if (argc == 2) {
+-		if (!strcmp(argv[1], "-productName"))
+-			str = CFDictionaryGetValue(dict, _kCFSystemVersionProductNameKey);
+-		else if (!strcmp(argv[1], "-productVersion")) {
+-			/* On Darwin, we set MacOSXProductVersion to the corresponding OS X release.
+-			   This is for compatibility with scripts that set MACOSX_DEPLOYMENT_TARGET
+-			   based on sw_vers -productVersion */
+-			str = CFDictionaryGetValue(dict, CFSTR("MacOSXProductVersion"));
+-			if (str == NULL)
+-				str = CFDictionaryGetValue(dict, _kCFSystemVersionProductVersionKey);
++		return 1;
++
++	CFStringRef name = CFDictionaryGetValue(dict, _kCFSystemVersionProductNameKey);
++	CFStringRef version = CFDictionaryGetValue(dict, _kCFSystemVersionProductVersionKey);
++	CFStringRef extra = CFDictionaryGetValue(dict, CFSTR("ProductVersionExtra"));
++	CFStringRef build = CFDictionaryGetValue(dict, _kCFSystemVersionBuildVersionKey);
++
++	switch (show) {
++	case SHOW_NAME: status = print_value(name, "\n"); break;
++	case SHOW_VERSION: status = print_value(version, "\n"); break;
++	case SHOW_EXTRA: status = print_value(extra, "\n"); break;
++	case SHOW_BUILD: status = print_value(build, "\n"); break;
++	default:
++		fputs("ProductName:\t\t", stdout); status |= print_value(name, "\n");
++		fputs("ProductVersion:\t\t", stdout); status |= print_value(version, "\n");
++		if (extra != NULL) {
++			fputs("ProductVersionExtra:\t", stdout); status |= print_value(extra, "\n");
+ 		}
+-		else if (!strcmp(argv[1], "-buildVersion"))
+-			str = CFDictionaryGetValue(dict, _kCFSystemVersionBuildVersionKey);
+-		else
+-			usage(argv[0]);
+-		CFRetain(str);
+-	} else if (argc == 1) {
+-		str = CFStringCreateWithFormat(NULL, NULL, 
+-			CFSTR("ProductName:    %@\n"
+-				  "ProductVersion: %@\n"
+-				  "BuildVersion:   %@"), 
+-			CFDictionaryGetValue(dict, _kCFSystemVersionProductNameKey),
+-			CFDictionaryGetValue(dict, _kCFSystemVersionProductVersionKey),
+-			CFDictionaryGetValue(dict, _kCFSystemVersionBuildVersionKey));
+-	}  else {
+-		usage(argv[0]);
++		fputs("BuildVersion:\t\t", stdout); status |= print_value(build, "\n");
++		break;
+ 	}
+-	
+-	if (!CFStringGetCString(str, cstr, sizeof(cstr), CFStringGetSystemEncoding()))
+-		exit(1);
+-		
+-	printf("%s\n", cstr);
+-	
+-	CFRelease(str);
+ 	CFRelease(dict);
+-	return 0;
++	return status ? 1 : 0;
+ }

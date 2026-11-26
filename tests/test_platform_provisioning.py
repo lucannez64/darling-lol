@@ -63,7 +63,10 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(out['ProductBuildVersion'], platform.EMULATED_BUILD_VERSION)
         self.assertNotIn('Darling', out['ProductBuildVersion'])
         # Unrelated keys survive; the Darling copyright is replaced.
-        self.assertEqual(out['iOSSupportVersion'], '17.7')
+        self.assertEqual(out['iOSSupportVersion'], '18.5')
+        self.assertEqual(out['ProductVersion'], '15.5')
+        self.assertEqual(out['ProductBuildVersion'], '24F74')
+        self.assertEqual(out['ProductCopyright'], '1983-2025 Apple Inc.')
         self.assertNotIn('Dolezel', out['ProductCopyright'])
         self.assertIn('Apple', out['ProductCopyright'])
 
@@ -90,6 +93,15 @@ class ProvisioningChecks(unittest.TestCase):
         self.assertEqual(snapshot, [(f.read_bytes(), f.stat().st_mtime_ns) for f in files])
         for f in [canonical, legacy]:
             self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+        # macOS installs SystemVersion.plist world-readable (rw-r--r--).
+        self.assertEqual(version.stat().st_mode & 0o777, 0o644)
+
+    def test_unchanged_private_system_version_gets_macos_mode(self):
+        self.run_cli('--write')
+        version = self.prefix / 'System/Library/CoreServices/SystemVersion.plist'
+        os.chmod(version, 0o600)
+        platform.save_system_version(self.prefix, self.runtime)
+        self.assertEqual(version.stat().st_mode & 0o777, 0o644)
 
     def test_known_defaults_replaced_and_custom_values_preserved(self):
         legacy = self.prefix / 'private/etc/darling-smbios.conf'

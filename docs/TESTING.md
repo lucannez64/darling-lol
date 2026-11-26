@@ -273,7 +273,7 @@ It prints `PASS` or `FAIL` for seven cases: a drop onto a destination without `p
 python3 build/runtime/tools/build-riot-carboncore-runtime.py
 ```
 
-After installing and activating CarbonCore, run the independent `build/riot-gestalt-version-check` through Darling with the normal framework/library overrides. Expected on the current kernel: `GESTALT_VERSION product=14.7 version=14.7.0 packed=0x1470 architecture=10 pass=1`. It compares the separate version selectors against `kern.osproductversion`, checks packed BCD, confirms architecture remains a separate result, and covers null outputs and unknown selectors. The previous implementation returned 10 for every version component and the packed selector. The probe does not launch or contact Riot. Passing it establishes the API correction, not Vanguard compatibility.
+After installing and activating CarbonCore, run the independent `build/riot-gestalt-version-check` through Darling with the normal framework/library overrides. Expected on the current kernel: `GESTALT_VERSION product=15.5 version=15.5.0 packed=0x1550 architecture=10 pass=1`. It compares the separate version selectors against `kern.osproductversion`, checks packed BCD, confirms architecture remains a separate result, and covers null outputs and unknown selectors. The previous implementation returned 10 for every version component and the packed selector. The probe does not launch or contact Riot. Passing it establishes the API correction, not Vanguard compatibility.
 
 ## Standalone guest probes
 

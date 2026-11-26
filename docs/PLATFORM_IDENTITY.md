@@ -166,10 +166,35 @@ order. It writes:
 - `private/etc/darling-smbios.conf`: matching shell-quoted `SMBIOS_*` values,
   including `SMBIOS_PROVISIONING_UDID`; unrelated legacy settings are not exported.
 - `System/Library/CoreServices/SystemVersion.plist`: metadata normalized to the
-  emulated macOS version and build reported by the patched kernel (14.7 /
-  23H124). This does not install macOS. The source runtime root defaults to the
+  emulated macOS version and build reported by the patched kernel (15.5 /
+  24F74, Darwin 24.5.0), the release of the macOS reference machine used for
+  parity checks. This does not install macOS. The source runtime root defaults to the
   saved SDK path or `/usr/local/libexec/darling`; override with
   `--runtime-root /path/to/runtime`.
+
+Framework bundle metadata describes the same macOS release. Darling's runtime
+ships an `Info.plist` in only a few of its system frameworks, so readers such
+as the client's WebView check (WebKit's `CFBundleVersion`) found no version.
+`tools/provision-framework-info.py` writes the factual bundle fields measured
+on macOS 15.5 (24F74) for every framework that both that release and the
+installed runtime have (`tools/data/macos-15.5-framework-info.json`); WebKit
+reports `20621.2.5.11.8`. It writes XML plists only into the prefix overlay,
+never the runtime root, follows each bundle's versioned or shallow layout, and
+adds a missing `Resources` alias for versioned bundles. `install-runtime.sh`
+and identity-regenerating `clean-prefix.sh` runs call it; writes need a stopped
+prefix, are idempotent, and `--check` reports missing or differing metadata.
+
+For a MacBookPro16,1 identity under the compat GPU presentation,
+`system_profiler SPDisplaysDataType` describes that model's Intel UHD Graphics
+630 and AMD Radeon Pro 5500M, with their VRAM, revision IDs, automatic graphics
+switching, gMux and `Metal Support: Metal 3` fields. It describes the model; it
+does not add Metal devices or change host drivers. Displays appear under the
+discrete GPU and use the active XRandR geometry Darling's NSScreen backend
+exposes (scale 1.0) rather than an invented Retina panel; unavailable
+geometry is omitted. Each display is named, as on macOS, after the monitor name
+in its EDID (for example `PL3466WQ`); a display without one keeps the
+`Display N` name. The host presentation keeps the physical GPU
+list. Text and XML output carry the same fields.
 
 A valid runtime version file is required. The command checks all destinations
 before changing identity files, rejects live prefixes and escaping symlinks,
@@ -276,7 +301,7 @@ host-root override.
 `KextManagerCopyLoadedKextInfo` and `kextstat`. darlingserver answers its
 read-only predicates (`Get Loaded Kext Info`, `... By UUID`, `Get Kexts in
 Collection`, `Get Kext UUID by Address`, `Get All Load Requests`) from a fixed
-list of the Apple kexts a MacBookPro16,1 loads on macOS 14.7 (23H124): the
+list of the Apple kexts a MacBookPro16,1 loads on macOS 15.5 (24F74): the
 kernel, its KPI interfaces and drivers such as the Intel CPU power management,
 `AMDRadeonX6000` and the Broadcom Wi-Fi driver. Predicates that load, start,
 stop or unload a kext, `Daemon Ready` included, are refused like on macOS
@@ -294,6 +319,33 @@ before the list existed.
 The values are fixed for the OS build, not salted per prefix like the serial
 number and UUID above. A kext's UUID and the unslid load address `kext_request`
 reports come from that macOS build's kernel collection, so every Mac running
-23H124 reports the same ones; a per-prefix value would describe no real build.
+24F74 reports the same ones; a per-prefix value would describe no real build.
+Kexts that also ship on Apple silicon carry the versions read from a macOS 15.5
+system; AppleHDA and IONDRVSupport follow IOAudioFamily and IOGraphicsFamily,
+and the remaining Intel-only drivers keep their last measured versions.
 `python3 -m unittest tests.test_kext_request` checks the list and the request
 handling without starting Darling.
+
+## Process view: descriptors, limits and language
+
+A guest process sees its own descriptors and limits as a macOS 15.5 application
+does (measured on the reference Mac, 2026-11-26):
+
+- `/dev/fd` and `proc_pidinfo(PROC_PIDLISTFDS)` list only the program's own
+  files, sockets, pipes and kqueues. Darling's per-thread darlingserver sockets
+  and lifetime pipe, the GPU driver's `/dev/nvidia*` and `/dev/dri/*` handles
+  and the eventfd/timerfd/perf_event helpers behind Darling's kqueue and timers
+  have no macOS counterpart and are not listed. The rule lives in
+  `fd_view.c` of the xnu patch.
+- `getrlimit(RLIMIT_NOFILE)` starts at 256 soft / unlimited hard, as launchd
+  sets for applications; `setrlimit` stores the guest's pair (soft ≤ hard,
+  raising the hard limit needs root) without lowering the real Linux limit
+  Darling's own descriptors depend on. The soft value is inherited across
+  `fork` and `exec` like a real limit. `getdtablesize()` is
+  `MIN(soft limit, kern.maxfilesperproc)`.
+- `AppleLanguages` and `AppleLocale` live in the global domain
+  (`.GlobalPreferences.plist`), filled from the configured locale by
+  `tools/provision-user-locale.py`; Darling's Foundation no longer copies them
+  into every application's own preferences.
+- The launcher passes the environment launchd gives an application (see
+  `RCLOL_FILTER_HOST_ENV` in `docs/SETUP.md`).

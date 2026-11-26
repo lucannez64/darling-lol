@@ -1,4 +1,4 @@
-"""exec-guest.py: inherited descriptors and the opt-in host environment filter."""
+"""exec-guest.py: inherited descriptors and the macOS session environment (host filter on by default)."""
 import importlib.util
 import json
 import os
@@ -41,7 +41,14 @@ SESSION = {
     'FLATPAK_ID': 'x', 'SNAP': '/snap/x', 'APPIMAGE': '/x.AppImage', 'VIRTUAL_ENV': '/home/u/.venv',
     'COLORTERM': 'truecolor', 'VTE_VERSION': '7600', 'WINDOWID': '1', 'TERM_PROGRAM': 'vscode',
     'LS_COLORS': 'di=01;34', 'SHLVL': '2', 'BASH_FUNC_f%%': '() { :; }',
+    # Measured in the game process under distrobox (2026-11-26); none exists on a Mac.
+    'container': 'podman', 'CONTAINER_ID': 'darling-lol', 'DISTROBOX_ENTER_PATH': '/usr/local/bin/distrobox-enter',
+    'HOSTNAME': 'host', 'CLAUDE_AGENT_SDK_VERSION': '1', 'GIT_CONFIG_PARAMETERS': "'a.b=c'",
+    'LC_TIME': 'pl_PL.UTF-8', 'LC_NUMERIC': 'pl_PL.UTF-8', 'BUN_INSTALL': '/home/u/.bun', 'GOPATH': '/home/u/go',
+    'PKG_CONFIG_PATH': '/usr/lib/pkgconfig', 'USERNAME': 'u', 'PWD': '/home/u', 'RIOT_GUEST_HOME': '/home/u/.darling/Users/u',
 }
+LAUNCHD = {'COMMAND_MODE': 'unix2003', 'XPC_FLAGS': '0x0', 'XPC_SERVICE_NAME': '0',
+           '__CF_USER_TEXT_ENCODING': '0x%X:0x0:0x0' % os.getuid()}
 
 
 class FilterTests(unittest.TestCase):
@@ -49,13 +56,21 @@ class FilterTests(unittest.TestCase):
         environ = {**REQUIRED, **SESSION, 'SHELL': '/bin/fish'}
         removed = exec_guest.filter_host_environment(environ)
         self.assertEqual(set(removed), set(SESSION))
-        self.assertEqual(environ, {**REQUIRED, 'SHELL': '/bin/zsh', 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})
+        self.assertEqual(environ, {**REQUIRED, **LAUNCHD, 'SHELL': '/bin/zsh', 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})
+
+    def test_guest_locale_and_existing_launchd_values_are_kept(self):
+        environ = {'LC_ALL': 'en_US.UTF-8', 'LANG': 'en_US.UTF-8', 'LC_TIME': 'pl_PL.UTF-8', 'XPC_FLAGS': '0x1'}
+        exec_guest.filter_host_environment(environ)
+        self.assertEqual(environ['LC_ALL'], 'en_US.UTF-8')
+        self.assertNotIn('LC_TIME', environ)
+        self.assertEqual(environ['XPC_FLAGS'], '0x1')
+        self.assertEqual(environ['COMMAND_MODE'], 'unix2003')
 
     def test_explicit_keep_preserves_host_path_and_terminal(self):
         environ = {'PATH': '/custom/bin', 'TERM': 'xterm',
                    'RCLOL_KEEP_HOST_ENV': 'PATH TERM', 'RCLOL_FILTER_HOST_ENV': '1'}
         self.assertEqual(exec_guest.filter_host_environment(environ), [])
-        self.assertEqual(environ, {'PATH': '/custom/bin', 'TERM': 'xterm', 'SHELL': '/bin/zsh'})
+        self.assertEqual(environ, {'PATH': '/custom/bin', 'TERM': 'xterm', 'SHELL': '/bin/zsh', **LAUNCHD})
 
     def test_experimental_wayland_names_reach_the_guest_under_the_filter(self):
         # The launcher sets these itself (run-riot-client.sh), so the host filter must not drop them.
@@ -93,14 +108,23 @@ class ExecTests(unittest.TestCase):
                 os.close(fd)
         return json.loads(result.stdout)
 
-    def test_closes_descriptors_and_keeps_environment_by_default(self):
-        environ = {**REQUIRED, **SESSION, 'SHELL': '/bin/fish'}
+    def test_opt_out_closes_descriptors_and_keeps_environment(self):
+        environ = {**REQUIRED, **SESSION, 'SHELL': '/bin/fish', 'RCLOL_FILTER_HOST_ENV': '0'}
         child = self.run_helper(environ)
         self.assertEqual(child['fds'], [0, 1, 2])
         for name, value in environ.items():
+            if name != 'RCLOL_FILTER_HOST_ENV':
+                self.assertEqual(child['env'].get(name), value, name)
+        self.assertNotIn('RCLOL_FILTER_HOST_ENV', child['env'])
+        self.assertNotIn('COMMAND_MODE', child['env'])
+
+    def test_filter_is_on_by_default(self):
+        child = self.run_helper({**REQUIRED, **SESSION, 'SHELL': '/bin/fish'})
+        self.assertFalse(set(SESSION) & set(child['env']))
+        for name, value in LAUNCHD.items():
             self.assertEqual(child['env'].get(name), value, name)
 
-    def test_opt_in_filter(self):
+    def test_explicit_filter(self):
         child = self.run_helper({**REQUIRED, **SESSION, 'SHELL': '/bin/fish', 'RCLOL_FILTER_HOST_ENV': '1'})
         self.assertEqual(child['fds'], [0, 1, 2])
         self.assertFalse(set(SESSION) & set(child['env']))
@@ -110,6 +134,10 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(child['env']['SHELL'], '/bin/zsh')
         self.assertNotIn('RCLOL_FILTER_HOST_ENV', child['env'])
         self.assertNotIn('RCLOL_KEEP_HOST_ENV', child['env'])
+
+    def test_launcher_names_the_client_bundle_like_launchservices(self):
+        launcher = (ROOT / 'tools/run-riot-client.sh').read_text()
+        self.assertIn('__CFBundleIdentifier=com.riotgames.RiotGames.RiotClient \\\n', launcher)
 
 
 if __name__ == '__main__':

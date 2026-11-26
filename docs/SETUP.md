@@ -268,11 +268,18 @@ unchanged except the `pid` argument of `SET_ACTIVITY`, replaced with the
 client's host PID. It logs nothing and exits with the session.
 `RCLOL_DISCORD_PID_RELAY=0` links straight to the Discord sockets instead.
 
-`RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
-the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
+The guest starts with the environment a macOS application gets from launchd. Host
+desktop-session variables are removed: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
 GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),
-Flatpak/Snap/AppImage and exported shell functions, and `SHELL` becomes `/bin/zsh`.
-It is off by default. Variables that Darling or the host graphics and audio libraries read
+Flatpak/Snap/AppImage, container markers (`container`, `CONTAINER_ID`, `DISTROBOX_*`,
+`HOSTNAME`), per-category `LC_*` values, host developer tools and exported shell functions.
+`SHELL` becomes `/bin/zsh`, `PATH` becomes `/usr/bin:/bin:/usr/sbin:/sbin`, and launchd's
+`COMMAND_MODE=unix2003`, `XPC_FLAGS=0x0`, `XPC_SERVICE_NAME=0` and
+`__CF_USER_TEXT_ENCODING=0x<uid>:0x0:0x0` are added, with
+`__CFBundleIdentifier=com.riotgames.RiotGames.RiotClient` as LaunchServices sets it for the
+launched client (measured on macOS 15.5). Before 2026-11 this was opt-in; set
+`RCLOL_FILTER_HOST_ENV=0` to pass the host environment through unchanged. Darling's own
+`RCLOL_*` and `DARLING_*` settings stay, since its runtime reads them in the guest. Variables that Darling or the host graphics and audio libraries read
 are always kept: `DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and the XDG base directories,
 D-Bus, PulseAudio/PipeWire/ALSA, `DRI_PRIME`, `MESA_*`, `__GL_*`, `__NV_*`, `VK_*`,
 `LD_PRELOAD` and `LD_LIBRARY_PATH`. List names to keep anyway in `RCLOL_KEEP_HOST_ENV`,

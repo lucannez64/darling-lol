@@ -34,11 +34,14 @@ if alias.resolve() != headers.resolve():
 #define CTLTYPE_QUAD   4
 #define CTLTYPE_OPAQUE 5
 #define CTLTYPE_STRUCT 6
+#define CTL_UNSPEC     0
 #define CTL_HW         6
 #define HW_MACHINE     1
 #define HW_MODEL       2
 #define HW_NCPU        3
+#define HW_BYTEORDER   4
 #define HW_PAGESIZE    7
+#define HW_CACHELINE   16
 #define HW_MEMSIZE     24
 #define HW_AVAILCPU    25
 #endif
@@ -50,6 +53,17 @@ if alias.resolve() != headers.resolve():
 typedef int cpu_type_t;
 typedef int cpu_subtype_t;
 typedef int cpu_threadtype_t;
+#define CPUFAMILY_UNKNOWN           0
+#define CPUFAMILY_INTEL_PENRYN      0x78ea4fbc
+#define CPUFAMILY_INTEL_NEHALEM     0x6b5a4cd2
+#define CPUFAMILY_INTEL_WESTMERE    0x573b5eec
+#define CPUFAMILY_INTEL_SANDYBRIDGE 0x5490b78c
+#define CPUFAMILY_INTEL_IVYBRIDGE   0x1f65e835
+#define CPUFAMILY_INTEL_HASWELL     0x10b282dc
+#define CPUFAMILY_INTEL_BROADWELL   0x582ed09c
+#define CPUFAMILY_INTEL_SKYLAKE     0x37fc219f
+#define CPUFAMILY_INTEL_KABYLAKE    0x0f817246
+#define CPUFAMILY_INTEL_ICELAKE     0x38435547
 #endif
 """)
 (folder / "include/mach/mach_init.h").write_text("""\

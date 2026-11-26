@@ -8187,10 +8187,10 @@ index 26bbb8f..6da6249 100644
  		};
 diff --git a/duct-tape/src/kext_info.c b/duct-tape/src/kext_info.c
 new file mode 100644
-index 0000000..6dd46c4
+index 0000000..543c890
 --- /dev/null
 +++ b/duct-tape/src/kext_info.c
-@@ -0,0 +1,2035 @@
+@@ -0,0 +1,2039 @@
 +/*
 + * darling-lol: kext_request() Mach server implementation for darlingserver
 + * duct-tape.
@@ -8198,8 +8198,8 @@ index 0000000..6dd46c4
 + * Serves read-only OSKext query predicates ("Get Loaded Kext Info",
 + * "Get Loaded Kext Info By UUID", "Get Kexts in Collection",
 + * "Get Kext UUID by Address", "Get All Load Requests") using the standard
-+ * Apple kext set matching the emulated MacBookPro16,1 / macOS 14.7 (23H124,
-+ * Darwin 23.6.0, x86_64) platform identity. The catalog is served only under
++ * Apple kext set matching the emulated MacBookPro16,1 / macOS 15.5 (24F74,
++ * Darwin 24.5.0, x86_64) platform identity. The catalog is served only under
 + * the compat hardware presentation profile (RCLOL_PLATFORM_PROFILE=compat);
 + * otherwise kext_request() stays unsupported, see dtape_kext_catalog_enabled().
 + *
@@ -8284,7 +8284,11 @@ index 0000000..6dd46c4
 +/*
 + * Standard Apple loaded kext catalog for MacBookPro16,1 (Intel Core i7-9750H
 + * Coffee Lake-H, UHD 630 + AMD Radeon Pro 5500M, Apple T2, Broadcom Wi-Fi,
-+ * Apple NVMe, Thunderbolt 3) running macOS 14.7 (23H124, Darwin 23.6.0, x86_64).
++ * Apple NVMe, Thunderbolt 3) running macOS 15.5 (24F74, Darwin 24.5.0, x86_64).
++ *
++ * Versions of kexts that also ship on Apple silicon were read from a macOS
++ * 15.5 (24F74) system; AppleHDA and IONDRVSupport track IOAudioFamily and
++ * IOGraphicsFamily. Other Intel-only kexts keep their last measured values.
 + *
 + * Invariants:
 + *  - load_tag values are strictly sequential starting at 0 (__kernel__).
@@ -8293,9 +8297,9 @@ index 0000000..6dd46c4
 + *    and every referenced dependency has a strictly smaller load_tag.
 + *  - load_size and exec_size are page-aligned (0x1000) for non-interface kexts.
 + */
-+static const dtape_kext_entry_t k_macos_14_7_mbp16_1_kexts[] = {
++static const dtape_kext_entry_t k_macos_15_5_mbp16_1_kexts[] = {
 +	{
-+		0, "__kernel__", "23.6.0", "23.6.0",
++		0, "__kernel__", "24.5.0", "24.5.0",
 +		NULL, NULL,
 +		0x1000000u, 0x0c00000u, 1u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_KEXTS_IN_KTEXT,
@@ -8303,49 +8307,49 @@ index 0000000..6dd46c4
 +	},
 +	/* KPI interface pseudo-kexts (tags 1..7) */
 +	{
-+		1, "com.apple.kpi.bsd", "23.6.0", "23.6.0",
++		1, "com.apple.kpi.bsd", "24.5.0", "24.5.0",
 +		"/System/Library/Extensions/System.kext/PlugIns/BSDKernel.kext", NULL,
 +		0u, 0u, 48u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
 +		0, { 0 }
 +	},
 +	{
-+		2, "com.apple.kpi.dsep", "23.6.0", "23.6.0",
++		2, "com.apple.kpi.dsep", "24.5.0", "24.5.0",
 +		"/System/Library/Extensions/System.kext/PlugIns/MACFramework.kext", NULL,
 +		0u, 0u, 14u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
 +		0, { 0 }
 +	},
 +	{
-+		3, "com.apple.kpi.iokit", "23.6.0", "23.6.0",
++		3, "com.apple.kpi.iokit", "24.5.0", "24.5.0",
 +		"/System/Library/Extensions/System.kext/PlugIns/IOKit.kext", NULL,
 +		0u, 0u, 46u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
 +		0, { 0 }
 +	},
 +	{
-+		4, "com.apple.kpi.libkern", "23.6.0", "23.6.0",
++		4, "com.apple.kpi.libkern", "24.5.0", "24.5.0",
 +		"/System/Library/Extensions/System.kext/PlugIns/Libkern.kext", NULL,
 +		0u, 0u, 52u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
 +		0, { 0 }
 +	},
 +	{
-+		5, "com.apple.kpi.mach", "23.6.0", "23.6.0",
++		5, "com.apple.kpi.mach", "24.5.0", "24.5.0",
 +		"/System/Library/Extensions/System.kext/PlugIns/Mach.kext", NULL,
 +		0u, 0u, 44u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
 +		0, { 0 }
 +	},
 +	{
-+		6, "com.apple.kpi.private", "23.6.0", "23.6.0",
++		6, "com.apple.kpi.private", "24.5.0", "24.5.0",
 +		"/System/Library/Extensions/System.kext/PlugIns/Private.kext", NULL,
 +		0u, 0u, 40u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
 +		0, { 0 }
 +	},
 +	{
-+		7, "com.apple.kpi.unsupported", "23.6.0", "23.6.0",
++		7, "com.apple.kpi.unsupported", "24.5.0", "24.5.0",
 +		"/System/Library/Extensions/System.kext/PlugIns/Unsupported.kext", NULL,
 +		0u, 0u, 32u,
 +		DTAPE_KEXT_FLAG_KERNEL_RESOURCE | DTAPE_KEXT_FLAG_INTERFACE | DTAPE_KEXT_FLAG_PRELINKED,
@@ -8572,14 +8576,14 @@ index 0000000..6dd46c4
 +		4, { 6, 5, 4, 1 }
 +	},
 +	{
-+		39, "com.apple.filesystems.apfs", "2236.141.1", "2236.141.1",
++		39, "com.apple.filesystems.apfs", "2332.120.31", "2332.120.31",
 +		"/System/Library/Extensions/apfs.kext", "Contents/MacOS/apfs",
 +		0x18c000u, 0x138000u, 4u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
 +		8, { 38, 37, 35, 18, 8, 6, 4, 1 }
 +	},
 +	{
-+		40, "com.apple.filesystems.hfs.kext", "650.140.2", "650.140.2",
++		40, "com.apple.filesystems.hfs.kext", "683.120.3", "683.120.3",
 +		"/System/Library/Extensions/HFS.kext", "Contents/MacOS/HFS",
 +		0x074000u, 0x058000u, 2u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
@@ -8608,21 +8612,21 @@ index 0000000..6dd46c4
 +	},
 +	/* Graphics & display: Intel UHD 630 (CFL/KBL) + AMD Radeon Pro 5500M (X6000) (tags 44..54) */
 +	{
-+		44, "com.apple.iokit.IOSurface", "352.50.1", "352.50.1",
++		44, "com.apple.iokit.IOSurface", "372.5.2", "372.5.2",
 +		"/System/Library/Extensions/IOSurface.kext", "Contents/MacOS/IOSurface",
 +		0x03c000u, 0x02c000u, 12u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
 +		5, { 6, 5, 4, 3, 1 }
 +	},
 +	{
-+		45, "com.apple.iokit.IOGraphicsFamily", "598", "598",
++		45, "com.apple.iokit.IOGraphicsFamily", "599", "599",
 +		"/System/Library/Extensions/IOGraphicsFamily.kext", "Contents/MacOS/IOGraphicsFamily",
 +		0x058000u, 0x040000u, 10u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
 +		6, { 22, 7, 6, 5, 4, 3 }
 +	},
 +	{
-+		46, "com.apple.iokit.IONDRVSupport", "598", "598",
++		46, "com.apple.iokit.IONDRVSupport", "599", "599",
 +		"/System/Library/Extensions/IONDRVSupport.kext", "Contents/MacOS/IONDRVSupport",
 +		0x018000u, 0x010000u, 6u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
@@ -8721,7 +8725,7 @@ index 0000000..6dd46c4
 +		5, { 6, 5, 4, 3, 1 }
 +	},
 +	{
-+		60, "com.apple.driver.AppleHIDTransport", "7440.1", "7440.1",
++		60, "com.apple.driver.AppleHIDTransport", "8440.2", "8440.2",
 +		"/System/Library/Extensions/AppleHIDTransport.kext", "Contents/MacOS/AppleHIDTransport",
 +		0x048000u, 0x034000u, 3u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
@@ -8742,7 +8746,7 @@ index 0000000..6dd46c4
 +		6, { 61, 6, 5, 4, 3, 1 }
 +	},
 +	{
-+		63, "com.apple.iokit.IO80211Family", "1200.13.0", "1200.13.0",
++		63, "com.apple.iokit.IO80211Family", "1200.13.1", "1200.13.1",
 +		"/System/Library/Extensions/IO80211Family.kext", "Contents/MacOS/IO80211Family",
 +		0x150000u, 0x104000u, 4u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
@@ -8763,14 +8767,14 @@ index 0000000..6dd46c4
 +		6, { 55, 6, 5, 4, 3, 1 }
 +	},
 +	{
-+		66, "com.apple.iokit.IOAudioFamily", "540.3", "540.3",
++		66, "com.apple.iokit.IOAudioFamily", "600.2", "600.2",
 +		"/System/Library/Extensions/IOAudioFamily.kext", "Contents/MacOS/IOAudioFamily",
 +		0x040000u, 0x030000u, 4u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
 +		5, { 9, 5, 4, 3, 1 }
 +	},
 +	{
-+		67, "com.apple.driver.AppleHDA", "540.3", "540.3",
++		67, "com.apple.driver.AppleHDA", "600.2", "600.2",
 +		"/System/Library/Extensions/AppleHDA.kext", "Contents/MacOS/AppleHDA",
 +		0x110000u, 0x0cc000u, 2u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
@@ -8784,7 +8788,7 @@ index 0000000..6dd46c4
 +		6, { 66, 57, 33, 5, 4, 3 }
 +	},
 +	{
-+		69, "com.apple.iokit.IOTimeSyncFamily", "1240.15", "1240.15",
++		69, "com.apple.iokit.IOTimeSyncFamily", "1340.12", "1340.12",
 +		"/System/Library/Extensions/IOTimeSyncFamily.kext", "Contents/MacOS/IOTimeSyncFamily",
 +		0x058000u, 0x040000u, 2u,
 +		DTAPE_KEXT_FLAG_PRELINKED,
@@ -8799,7 +8803,7 @@ index 0000000..6dd46c4
 +	},
 +};
 +
-+#define DTAPE_KEXT_COUNT (sizeof(k_macos_14_7_mbp16_1_kexts) / sizeof(k_macos_14_7_mbp16_1_kexts[0]))
++#define DTAPE_KEXT_COUNT (sizeof(k_macos_15_5_mbp16_1_kexts) / sizeof(k_macos_15_5_mbp16_1_kexts[0]))
 +
 +/* --- Deterministic 16-byte UUID & load address helpers --- */
 +
@@ -8818,15 +8822,15 @@ index 0000000..6dd46c4
 +static void dtape_kext_uuid_bytes(const dtape_kext_entry_t* kext, uint8_t out[16]) {
 +	/* KPI interface kexts inherit the kernel UUID in XNU (OSKext.cpp). */
 +	const dtape_kext_entry_t* src = (kext->flags & DTAPE_KEXT_FLAG_INTERFACE)
-+		? &k_macos_14_7_mbp16_1_kexts[0]
++		? &k_macos_15_5_mbp16_1_kexts[0]
 +		: kext;
 +
-+	uint64_t h1 = dtape_fnv1a_64(0xcbf29ce484222325ULL, "macOS-14.7-23H124-x86_64:hi:");
++	uint64_t h1 = dtape_fnv1a_64(0xcbf29ce484222325ULL, "macOS-15.5-24F74-x86_64:hi:");
 +	h1 = dtape_fnv1a_64(h1, src->bundle_id);
 +	h1 = dtape_fnv1a_64(h1, ":");
 +	h1 = dtape_fnv1a_64(h1, src->version);
 +
-+	uint64_t h2 = dtape_fnv1a_64(0x84222325cbf29ce4ULL, "macOS-14.7-23H124-x86_64:lo:");
++	uint64_t h2 = dtape_fnv1a_64(0x84222325cbf29ce4ULL, "macOS-15.5-24F74-x86_64:lo:");
 +	h2 = dtape_fnv1a_64(h2, src->version);
 +	h2 = dtape_fnv1a_64(h2, ":");
 +	h2 = dtape_fnv1a_64(h2, src->bundle_id);
@@ -8875,7 +8879,7 @@ index 0000000..6dd46c4
 +}
 +
 +static uint64_t dtape_kext_load_address(size_t index) {
-+	const dtape_kext_entry_t* kext = &k_macos_14_7_mbp16_1_kexts[index];
++	const dtape_kext_entry_t* kext = &k_macos_15_5_mbp16_1_kexts[index];
 +	if (kext->flags & DTAPE_KEXT_FLAG_INTERFACE) {
 +		return 0ULL;
 +	}
@@ -8884,8 +8888,8 @@ index 0000000..6dd46c4
 +	}
 +	uint64_t addr = DTAPE_KEXT_FIRST_KEXT_ADDR;
 +	for (size_t i = 1; i < index; i++) {
-+		if (!(k_macos_14_7_mbp16_1_kexts[i].flags & DTAPE_KEXT_FLAG_INTERFACE)) {
-+			addr += (uint64_t)k_macos_14_7_mbp16_1_kexts[i].load_size;
++		if (!(k_macos_15_5_mbp16_1_kexts[i].flags & DTAPE_KEXT_FLAG_INTERFACE)) {
++			addr += (uint64_t)k_macos_15_5_mbp16_1_kexts[i].load_size;
 +		}
 +	}
 +	return addr;
@@ -9814,7 +9818,7 @@ index 0000000..6dd46c4
 +}
 +
 +static void dtape_serialize_kext_dict(dtape_xml_buf_t* b, size_t index, const dtape_str_list_t* info_keys) {
-+	const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[index];
++	const dtape_kext_entry_t* k = &k_macos_15_5_mbp16_1_kexts[index];
 +	bool is_interface = (k->flags & DTAPE_KEXT_FLAG_INTERFACE) != 0;
 +	bool is_kernel_resource = (k->flags & DTAPE_KEXT_FLAG_KERNEL_RESOURCE) != 0;
 +	bool is_prelinked = (k->flags & DTAPE_KEXT_FLAG_PRELINKED) != 0;
@@ -9928,7 +9932,7 @@ index 0000000..6dd46c4
 +	}
 +	dtape_buf_append_str(out, "<dict>");
 +	for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
-+		const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++		const dtape_kext_entry_t* k = &k_macos_15_5_mbp16_1_kexts[i];
 +		if (req->bundle_ids.count > 0 && !dtape_str_list_contains(&req->bundle_ids, k->bundle_id)) {
 +			continue;
 +		}
@@ -9948,7 +9952,7 @@ index 0000000..6dd46c4
 +	bool emitted_kernel_uuid = false;
 +	dtape_buf_append_str(out, "<dict>");
 +	for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
-+		const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++		const dtape_kext_entry_t* k = &k_macos_15_5_mbp16_1_kexts[i];
 +		if ((k->flags & DTAPE_KEXT_FLAG_INTERFACE) && emitted_kernel_uuid) {
 +			/* KPI interfaces share __kernel__'s UUID; avoid duplicate dictionary keys. */
 +			continue;
@@ -10013,7 +10017,7 @@ index 0000000..6dd46c4
 +	dtape_buf_append_str(out, "<dict>");
 +	if (want_primary && !only_unloaded) {
 +		for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
-+			const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++			const dtape_kext_entry_t* k = &k_macos_15_5_mbp16_1_kexts[i];
 +			dtape_buf_append_str(out, "<key>");
 +			dtape_buf_append_escaped(out, k->bundle_id);
 +			dtape_buf_append_str(out, "</key>");
@@ -10029,7 +10033,7 @@ index 0000000..6dd46c4
 +		return kOSKextReturnInvalidArgument;
 +	}
 +	for (size_t i = 0; i < DTAPE_KEXT_COUNT; i++) {
-+		const dtape_kext_entry_t* k = &k_macos_14_7_mbp16_1_kexts[i];
++		const dtape_kext_entry_t* k = &k_macos_15_5_mbp16_1_kexts[i];
 +		if (k->flags & DTAPE_KEXT_FLAG_INTERFACE) {
 +			continue;
 +		}

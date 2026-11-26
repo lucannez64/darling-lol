@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 123,
+      "modified_files": 124,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -177,7 +177,7 @@
       "revision": "55a4341b470c2a56fea667c1d2167fb074226f04",
       "repository": "https://github.com/darlinghq/darling-foundation.git",
       "patch": "patches/foundation.patch",
-      "modified_files": 11,
+      "modified_files": 12,
       "new_files": [
         "src/NSConstantNumber.m"
       ]
@@ -237,7 +237,7 @@
       "revision": "b0795a2e1dab5331116770139bfea8d832478f5f",
       "repository": "https://github.com/darlinghq/darling-libkqueue.git",
       "patch": "patches/libkqueue.patch",
-      "modified_files": 13,
+      "modified_files": 15,
       "new_files": []
     },
     {
@@ -354,7 +354,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 100,
+      "modified_files": 106,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
@@ -375,7 +375,9 @@
         "darling/src/libsystem_kernel/emulation/include/common/cpu_identity.h",
         "darling/src/libsystem_kernel/emulation/src/common/cpu_identity.c",
         "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/thread_selfusage.h",
-        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c"
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/thread_selfusage.c",
+        "darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/fd_view.h",
+        "darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/fd_view.c"
       ]
     },
     {

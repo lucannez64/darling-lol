@@ -237,7 +237,7 @@ class KextRequestTests(unittest.TestCase):
         self.assertIsInstance(info, dict)
         self.assertGreaterEqual(len(info), 65)
 
-        # Expected MacBookPro16,1 / macOS 14.7 (Darwin 23.6.0) standard Apple kexts.
+        # Expected MacBookPro16,1 / macOS 15.5 (Darwin 24.5.0) standard Apple kexts.
         for required in (
             '__kernel__',
             'com.apple.kpi.bsd',
@@ -260,7 +260,10 @@ class KextRequestTests(unittest.TestCase):
 
         kernel_uuid = info['__kernel__']['OSBundleUUID']
         self.assertEqual(len(kernel_uuid), 16)
-        self.assertEqual(info['__kernel__']['CFBundleVersion'], '23.6.0')
+        self.assertEqual(info['__kernel__']['CFBundleVersion'], '24.5.0')
+        # Shared with Apple silicon: versions measured on macOS 15.5 (24F74).
+        self.assertEqual(info['com.apple.filesystems.apfs']['CFBundleVersion'], '2332.120.31')
+        self.assertEqual(info['com.apple.iokit.IOSurface']['CFBundleVersion'], '372.5.2')
         self.assertTrue(info['__kernel__']['OSBundleKextsInKernelText'])
 
         tags = set()
@@ -284,7 +287,7 @@ class KextRequestTests(unittest.TestCase):
 
             if entry['OSBundleIsInterface']:
                 self.assertTrue(entry['OSKernelResource'])
-                self.assertEqual(entry['CFBundleVersion'], '23.6.0')
+                self.assertEqual(entry['CFBundleVersion'], '24.5.0')
                 self.assertEqual(entry['OSBundleLoadAddress'], 0)
                 self.assertEqual(entry['OSBundleLoadSize'], 0)
                 self.assertEqual(entry['OSBundleUUID'], kernel_uuid)
@@ -362,7 +365,7 @@ class KextRequestTests(unittest.TestCase):
             set(apfs.keys()),
             {'CFBundleIdentifier', 'CFBundlePackageType', 'CFBundleVersion', 'OSBundleLoadTag'},
         )
-        self.assertEqual(apfs['CFBundleVersion'], '2236.141.1')
+        self.assertEqual(apfs['CFBundleVersion'], '2332.120.31')
 
         # Unknown bundle identifier returns empty dict.
         miss_req = (

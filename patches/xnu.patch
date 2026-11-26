@@ -29,7 +29,7 @@ index e14e7ea..024981b 100644
  #target_link_libraries(system_kernel system_duct platform_static32 platform_static64)
  make_fat(system_kernel)
 diff --git a/darling/src/libsystem_kernel/emulation/CMakeLists.txt b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
-index 5b2e765..e86a749 100644
+index 5b2e765..1b1c6b6 100644
 --- a/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 +++ b/darling/src/libsystem_kernel/emulation/CMakeLists.txt
 @@ -6,13 +6,12 @@ enable_language(ASM)
@@ -48,7 +48,7 @@ index 5b2e765..e86a749 100644
 +# Quoted values are kept off the directory-wide definitions: those are pasted unescaped
 +# into the mig command lines, which breaks the shell quoting.
 +set_source_files_properties(src/xnu_syscall/bsd/helper/misc/sysctl_kern.c PROPERTIES COMPILE_DEFINITIONS
-+	"EMULATED_SYSNAME=\"Darwin\";EMULATED_RELEASE=\"23.6.0\";EMULATED_VERSION=\"Darwin Kernel Version 23.6.0: Mon Jul 29 21:14:30 PDT 2024\\; root:xnu-10063.141.2~1/RELEASE_X86_64\";EMULATED_OSVERSION=\"23H124\";EMULATED_OSPRODUCTVERSION=\"14.7\"")
++	"EMULATED_SYSNAME=\"Darwin\";EMULATED_RELEASE=\"24.5.0\";EMULATED_VERSION=\"Darwin Kernel Version 24.5.0: Tue Apr 22 19:53:26 PDT 2025\\; root:xnu-11417.121.6~2/RELEASE_X86_64\";EMULATED_OSVERSION=\"24F74\";EMULATED_OSPRODUCTVERSION=\"15.5\"")
  
  # include src/startup for rtsig.h
  include_directories(
@@ -84,15 +84,17 @@ index 5b2e765..e86a749 100644
  	src/xnu_syscall/bsd/impl/misc/fileport_makefd.c
  	src/xnu_syscall/bsd/impl/misc/fileport_makeport.c
  	src/xnu_syscall/bsd/impl/misc/fsgetpath.c
-@@ -153,6 +156,7 @@ set(xnu_syscall_bsd_sources
+@@ -153,7 +156,9 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/getrlimit.c
  	src/xnu_syscall/bsd/impl/misc/getrusage.c
  	src/xnu_syscall/bsd/impl/misc/iopolicysys.c
 +	src/xnu_syscall/bsd/impl/misc/mac_syscall.c
  	src/xnu_syscall/bsd/impl/misc/proc_info.c
++	src/xnu_syscall/bsd/impl/misc/fd_view.c
  	src/xnu_syscall/bsd/impl/misc/ptrace.c
  	src/xnu_syscall/bsd/impl/misc/reboot.c
-@@ -162,6 +166,7 @@ set(xnu_syscall_bsd_sources
+ 	src/xnu_syscall/bsd/impl/misc/setlogin.c
+@@ -162,6 +167,7 @@ set(xnu_syscall_bsd_sources
  	src/xnu_syscall/bsd/impl/misc/syscall.c
  	src/xnu_syscall/bsd/impl/misc/sysctl.c
  	src/xnu_syscall/bsd/impl/misc/thread_selfid.c
@@ -100,7 +102,7 @@ index 5b2e765..e86a749 100644
  	src/xnu_syscall/bsd/impl/mman/madvise.c
  	src/xnu_syscall/bsd/impl/mman/mman.c
  	src/xnu_syscall/bsd/impl/mman/msync.c
-@@ -359,6 +364,11 @@ set(emulation_sources
+@@ -359,6 +365,11 @@ set(emulation_sources
  	${CMAKE_BINARY_DIR}/src/external/darlingserver/src/rpc.c
  )
  
@@ -3191,7 +3193,7 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..7ecb675 100644
+index f273989..d3b372f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,13 +9,19 @@
@@ -3215,7 +3217,7 @@ index f273989..7ecb675 100644
  	_HW_PHYSICAL_CPU = 1000,
  	_HW_PHYSICAL_CPU_MAX,
  	_HW_LOGICAL_CPU,
-@@ -24,10 +30,17 @@ enum {
+@@ -24,10 +30,20 @@ enum {
  	_HW_CPUSUBTYPE,
  	_HW_CPUTHREADTYPE,
  	_HW_64BITCAPABLE,
@@ -3227,6 +3229,9 @@ index f273989..7ecb675 100644
 +	_HW_L2CACHESIZE,
 +	_HW_L3CACHESIZE,
 +	_HW_PACKAGES,
++	/* darling-lol: OID_AUTO keys an Intel Mac on macOS 15.5 has */
++	_HW_CACHELINESIZE,
++	_HW_CPUFAMILY,
  };
  
  static sysctl_handler(handle_availcpu);
@@ -3234,7 +3239,7 @@ index f273989..7ecb675 100644
  static sysctl_handler(handle_physicalcpu);
  static sysctl_handler(handle_physicalcpu_max);
  static sysctl_handler(handle_logicalcpu);
-@@ -39,11 +52,97 @@ static sysctl_handler(handle_cpusubtype);
+@@ -39,11 +55,101 @@ static sysctl_handler(handle_cpusubtype);
  static sysctl_handler(handle_cputhreadtype);
  static sysctl_handler(handle_cpu64bitcapable);
  static sysctl_handler(handle_machine);
@@ -3246,6 +3251,10 @@ index f273989..7ecb675 100644
 +static sysctl_handler(handle_l2cachesize);
 +static sysctl_handler(handle_l3cachesize);
 +static sysctl_handler(handle_packages);
++static sysctl_handler(handle_byteorder);
++static sysctl_handler(handle_cachelinesize);
++static sysctl_handler(handle_cachelinesize_compat);
++static sysctl_handler(handle_cpufamily);
 +
 +static int compat_optional_feature(unsigned int leaf, int reg, int bit, unsigned int host_word)
 +{
@@ -3333,7 +3342,7 @@ index f273989..7ecb675 100644
  	{ .oid = _HW_PHYSICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu", .handler = handle_physicalcpu },
  	{ .oid = _HW_PHYSICAL_CPU_MAX, .type = CTLTYPE_INT, .exttype = "", .name = "physicalcpu_max", .handler = handle_physicalcpu_max },
  	{ .oid = _HW_LOGICAL_CPU, .type = CTLTYPE_INT, .exttype = "", .name = "logicalcpu", .handler = handle_logicalcpu },
-@@ -55,27 +154,101 @@ const struct known_sysctl sysctls_hw[] = {
+@@ -55,27 +161,106 @@ const struct known_sysctl sysctls_hw[] = {
  	{ .oid = _HW_CPUTHREADTYPE, .type = CTLTYPE_INT, .exttype = "", .name = "cputhreadtype", .handler = handle_cputhreadtype },
  	{ .oid = _HW_64BITCAPABLE, .type = CTLTYPE_INT, .exttype = "", .name = "cpu64bit_capable", .handler = handle_cpu64bitcapable },
  	{ .oid = HW_MACHINE, .type = CTLTYPE_STRING, .exttype = "S", .name = "machine", .handler = handle_machine },
@@ -3347,6 +3356,11 @@ index f273989..7ecb675 100644
 +	{ .oid = _HW_L2CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l2cachesize", .handler = handle_l2cachesize },
 +	{ .oid = _HW_L3CACHESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "l3cachesize", .handler = handle_l3cachesize },
 +	{ .oid = _HW_PACKAGES, .type = CTLTYPE_INT, .exttype = "I", .name = "packages", .handler = handle_packages },
++	/* darling-lol: present on an Intel Mac on macOS 15.5 */
++	{ .oid = HW_BYTEORDER, .type = CTLTYPE_INT, .exttype = "I", .name = "byteorder", .handler = handle_byteorder },
++	{ .oid = _HW_CACHELINESIZE, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "cachelinesize", .handler = handle_cachelinesize },
++	{ .oid = HW_CACHELINE, .type = CTLTYPE_INT, .exttype = "I", .name = "cachelinesize_compat", .handler = handle_cachelinesize_compat },
++	{ .oid = _HW_CPUFAMILY, .type = CTLTYPE_INT, .exttype = "I", .name = "cpufamily", .handler = handle_cpufamily },
  	{ .oid = -1 }
  };
  
@@ -3438,7 +3452,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_availcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -83,6 +247,13 @@ sysctl_handler(handle_availcpu)
+@@ -83,6 +268,13 @@ sysctl_handler(handle_availcpu)
  	return 0;
  }
  
@@ -3452,7 +3466,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_physicalcpu)
  {
  	sysctl_handle_size(sizeof(int));
-@@ -111,6 +282,17 @@ sysctl_handler(handle_logicalcpu_max)
+@@ -111,6 +303,17 @@ sysctl_handler(handle_logicalcpu_max)
  	return 0;
  }
  
@@ -3470,7 +3484,7 @@ index f273989..7ecb675 100644
  sysctl_handler(handle_memsize)
  {
  
-@@ -169,16 +351,57 @@ sysctl_handler(handle_cputhreadtype)
+@@ -169,16 +372,57 @@ sysctl_handler(handle_cputhreadtype)
  	return 0;
  }
  
@@ -3535,7 +3549,7 @@ index f273989..7ecb675 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +425,159 @@ sysctl_handler(handle_machine)
+@@ -193,3 +437,248 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -3695,48 +3709,195 @@ index f273989..7ecb675 100644
 +	*((int*) old) = 1;
 +	return 0;
 +}
++
++// darling-lol: 1234 (little endian), as hw.byteorder reports on macOS 15.5
++sysctl_handler(handle_byteorder)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 1234;
++	return 0;
++}
++
++// darling-lol: the 64-byte cache line of every Intel Mac CPU. macOS 15.5 has
++// hw.cachelinesize (a quad) and, for the CTL_HW/HW_CACHELINE MIB, the masked
++// int hw.cachelinesize_compat.
++#define INTEL_CACHE_LINE_SIZE 64
++
++sysctl_handler(handle_cachelinesize)
++{
++	sysctl_handle_size(sizeof(unsigned long long));
++	*((unsigned long long*) old) = INTEL_CACHE_LINE_SIZE;
++	return 0;
++}
++
++sysctl_handler(handle_cachelinesize_compat)
++{
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = INTEL_CACHE_LINE_SIZE;
++	return 0;
++}
++
++// darling-lol: hw.cpufamily. The compat profile's i7-9750H (Coffee Lake,
++// family 6 model 0x9E) reports CPUFAMILY_INTEL_KABYLAKE on macOS. Under the host
++// profile it follows XNU's cpuid_set_cpufamily() (osfmk/i386/cpuid.c) on the
++// host CPU's family and model; CPUs macOS does not know (and non-Intel ones)
++// report CPUFAMILY_UNKNOWN as XNU does.
++static unsigned int host_cpufamily(void)
++{
++#if defined(__i386__) || defined(__x86_64__)
++	unsigned int eax = 0, ebx, ecx = 0, edx;
++
++	// vendor "GenuineIntel" in EBX, EDX, ECX
++	__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
++	if (ebx != 0x756e6547 || edx != 0x49656e69 || ecx != 0x6c65746e)
++		return CPUFAMILY_UNKNOWN;
++
++	eax = 1;
++	ecx = 0;
++	__asm__ ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
++	unsigned int family = (eax >> 8) & 0xf;
++	unsigned int model = (eax >> 4) & 0xf;
++	if (family == 6 || family == 0xf)
++		model |= ((eax >> 16) & 0xf) << 4;
++	if (family != 6)
++		return CPUFAMILY_UNKNOWN;
++
++	switch (model)
++	{
++		case 0x17:
++			return CPUFAMILY_INTEL_PENRYN;
++		case 0x1a: case 0x1e: case 0x1f: case 0x2e:
++			return CPUFAMILY_INTEL_NEHALEM;
++		case 0x25: case 0x2c: case 0x2f:
++			return CPUFAMILY_INTEL_WESTMERE;
++		case 0x2a: case 0x2d:
++			return CPUFAMILY_INTEL_SANDYBRIDGE;
++		case 0x3a: case 0x3e:
++			return CPUFAMILY_INTEL_IVYBRIDGE;
++		case 0x3c: case 0x3f: case 0x45: case 0x46:
++			return CPUFAMILY_INTEL_HASWELL;
++		case 0x3d: case 0x47:
++			return CPUFAMILY_INTEL_BROADWELL;
++		case 0x4e: case 0x5e: case 0x55:
++			return CPUFAMILY_INTEL_SKYLAKE;
++		case 0x8e: case 0x9e:
++			return CPUFAMILY_INTEL_KABYLAKE;
++		case 0x7e: case 0x7d: case 0x9f:
++			return CPUFAMILY_INTEL_ICELAKE;
++	}
++#endif
++	return CPUFAMILY_UNKNOWN;
++}
++
++sysctl_handler(handle_cpufamily)
++{
++	sysctl_handle_size(sizeof(int));
++	if (darling_compat_profile_enabled())
++		*((unsigned int*) old) = CPUFAMILY_INTEL_KABYLAKE;
++	else
++		*((unsigned int*) old) = host_cpufamily();
++	return 0;
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-index bd9cdc2..61fe056 100644
+index bd9cdc2..03443cf 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
-@@ -14,5 +14,6 @@
+@@ -3,6 +3,7 @@
+ #include <sys/errno.h>
+ 
+ #include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_proc.h>
++#include <darling/emulation/xnu_syscall/bsd/helper/misc/sysctl_hw.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/misc/getrlimit.h>
+ #include <darling/emulation/linux_premigration/ext/sysinfo.h>
+ #include <darling/emulation/linux_premigration/ext/syslog.h>
+@@ -13,6 +14,7 @@
+ #include <darling/emulation/conversion/errno.h>
  #include <darling/emulation/conversion/fcntl/open.h>
  #include <darling/emulation/common/simple.h>
 +#include <darling/emulation/common/cpu_identity.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/fcntl/open.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/read.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/unistd/close.h>
-@@ -23,6 +24,9 @@
+@@ -23,6 +25,19 @@
  enum {
  	_KERN_MSGBUF = 1000,
  	_KERN_OSPRODUCTVERSION,
 +	_KERN_HV_VMM_PRESENT,
 +	_KERN_OSVARIANT_STATUS,
 +	_KERN_OSRELEASETYPE,
++	/* darling-lol: OID_AUTO keys macOS 15.5 has; any unused number works */
++	_KERN_OSPRODUCTVERSIONCOMPAT,
++	_KERN_IOSSUPPORTVERSION,
++	_KERN_HV_SUPPORT,
++	_KERN_SECURE_KERNEL,
++	_KERN_BOOTARGS,
++	_KERN_NUM_TASKS,
++	_KERN_NUM_THREADS,
++	_KERN_NUM_TASKTHREADS,
++	_KERN_DEVELOPMENT,
  
  	_KERN_SEMMNS = 1000,
  };
-@@ -46,6 +50,9 @@ static sysctl_handler(handle_usrstack64);
+@@ -38,7 +53,6 @@ static sysctl_handler(handle_domainname);
+ static sysctl_handler(handle_osrelease);
+ static sysctl_handler(handle_version);
+ static sysctl_handler(handle_osversion);
+-static sysctl_handler(handle_maxproc);
+ static sysctl_handler(handle_netboot);
+ static sysctl_handler(handle_safeboot);
+ static sysctl_handler(handle_usrstack32);
+@@ -46,6 +60,24 @@ static sysctl_handler(handle_usrstack64);
  static sysctl_handler(handle_sysv_semmns);
  static sysctl_handler(handle_osproductversion);
  static sysctl_handler(handle_osrevision);
 +static sysctl_handler(handle_hv_vmm_present);
 +static sysctl_handler(handle_osvariant_status);
 +static sysctl_handler(handle_osreleasetype);
++static sysctl_handler(handle_maxproc);
++static sysctl_handler(handle_maxprocperuid);
++static sysctl_handler(handle_maxfiles);
++static sysctl_handler(handle_maxfilesperproc);
++static sysctl_handler(handle_num_tasks);
++static sysctl_handler(handle_num_threads);
++static sysctl_handler(handle_num_taskthreads);
++static sysctl_handler(handle_ngroups);
++static sysctl_handler(handle_securelevel);
++static sysctl_handler(handle_secure_kernel);
++static sysctl_handler(handle_development);
++static sysctl_handler(handle_hv_support);
++static sysctl_handler(handle_bootargs);
++static sysctl_handler(handle_osproductversioncompat);
++static sysctl_handler(handle_iossupportversion);
  
  extern int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen);
  extern int _sysctl_procargs(int pid, char* buf, unsigned long* buflen);
-@@ -76,6 +82,9 @@ const struct known_sysctl sysctls_kern[] = {
+@@ -76,6 +108,25 @@ const struct known_sysctl sysctls_kern[] = {
  	{ .oid = KERN_USRSTACK64, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "usrstack64", .handler = handle_usrstack64 },
  	{ .oid = _KERN_OSPRODUCTVERSION, .type = CTLTYPE_STRING, .exttype = "S", .name = "osproductversion", .handler = handle_osproductversion },
  	{ .oid = KERN_OSREV, .type = CTLTYPE_INT, .exttype = "I", .name = "osrevision", .handler = handle_osrevision },
 +	{ .oid = _KERN_HV_VMM_PRESENT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_vmm_present", .handler = handle_hv_vmm_present },
 +	{ .oid = _KERN_OSVARIANT_STATUS, .type = CTLTYPE_QUAD, .exttype = "Q", .name = "osvariant_status", .handler = handle_osvariant_status },
 +	{ .oid = _KERN_OSRELEASETYPE, .type = CTLTYPE_STRING, .exttype = "S", .name = "osreleasetype", .handler = handle_osreleasetype },
++	/* darling-lol: keys present on macOS 15.5 (24F74); values measured there or
++	 * computed with XNU's formulas for the emulated 16 GB MacBookPro16,1 */
++	{ .oid = KERN_MAXPROCPERUID, .type = CTLTYPE_INT, .exttype = "I", .name = "maxprocperuid", .handler = handle_maxprocperuid },
++	{ .oid = KERN_MAXFILES, .type = CTLTYPE_INT, .exttype = "I", .name = "maxfiles", .handler = handle_maxfiles },
++	{ .oid = KERN_MAXFILESPERPROC, .type = CTLTYPE_INT, .exttype = "I", .name = "maxfilesperproc", .handler = handle_maxfilesperproc },
++	{ .oid = _KERN_NUM_TASKS, .type = CTLTYPE_INT, .exttype = "I", .name = "num_tasks", .handler = handle_num_tasks },
++	{ .oid = _KERN_NUM_THREADS, .type = CTLTYPE_INT, .exttype = "I", .name = "num_threads", .handler = handle_num_threads },
++	{ .oid = _KERN_NUM_TASKTHREADS, .type = CTLTYPE_INT, .exttype = "I", .name = "num_taskthreads", .handler = handle_num_taskthreads },
++	{ .oid = KERN_NGROUPS, .type = CTLTYPE_INT, .exttype = "I", .name = "ngroups", .handler = handle_ngroups },
++	{ .oid = KERN_SECURELVL, .type = CTLTYPE_INT, .exttype = "I", .name = "securelevel", .handler = handle_securelevel },
++	{ .oid = _KERN_SECURE_KERNEL, .type = CTLTYPE_INT, .exttype = "I", .name = "secure_kernel", .handler = handle_secure_kernel },
++	{ .oid = _KERN_DEVELOPMENT, .type = CTLTYPE_INT, .exttype = "I", .name = "development", .handler = handle_development },
++	{ .oid = _KERN_HV_SUPPORT, .type = CTLTYPE_INT, .exttype = "I", .name = "hv_support", .handler = handle_hv_support },
++	{ .oid = _KERN_BOOTARGS, .type = CTLTYPE_STRING, .exttype = "A", .name = "bootargs", .handler = handle_bootargs },
++	{ .oid = _KERN_OSPRODUCTVERSIONCOMPAT, .type = CTLTYPE_STRING, .exttype = "A", .name = "osproductversioncompat", .handler = handle_osproductversioncompat },
++	{ .oid = _KERN_IOSSUPPORTVERSION, .type = CTLTYPE_STRING, .exttype = "A", .name = "iossupportversion", .handler = handle_iossupportversion },
  	{ .oid = KERN_SYSV, .type = CTLTYPE_NODE, .exttype = "", .name = "sysv", .subctls = sysctls_kern_sysv },
  	{ .oid = -1 }
  };
-@@ -139,18 +142,23 @@ sysctl_handler(handle_boottime)
+@@ -139,18 +190,23 @@ sysctl_handler(handle_boottime)
  	// Fill in struct timeval { tv_sec, tv_usec }
  	struct sysinfo info;
  	struct bsd_timeval* tv;
@@ -3766,7 +3927,160 @@ index bd9cdc2..61fe056 100644
  
  		// we don't want the microseconds to be constantly jumping around
  		// (that actually causes an infinite loop in `_mach_boottime_usec` in libc)
-@@ -342,3 +357,35 @@ static sysctl_handler(handle_osrevision) {
+@@ -242,32 +298,131 @@ sysctl_handler(handle_domainname)
+ 	return rv;
+ }
+ 
+-sysctl_handler(handle_maxproc)
++/* darling-lol: XNU sizes its process, file, task and thread limits from the
++ * machine's memory at boot: scale_setup() (osfmk/kern/startup.c) and
++ * bsd_scale_setup() (bsd/dev/unix_startup.c) over the defaults in
++ * bsd/conf/param.c (x86_64: NPROC 20 + 32 * 32, MAXFILES OPEN_MAX + 2048),
++ * kern_resource.c (maxfilesperproc OPEN_MAX) and config/MASTER
++ * (CONFIG_TASK_MAX 1024, CONFIG_THREAD_MAX 2560). The memory size is the one
++ * hw.memsize reports, so the emulated 16 GB MacBookPro16,1 (scale 4) gets what
++ * a 16 GB Intel Mac on macOS 15.5 reports: maxproc 4176, maxprocperuid 2784,
++ * maxfiles 49152, maxfilesperproc 24576, num_tasks 4096, num_threads 20480,
++ * num_taskthreads 4096. Darling used to report the host's pid_max here. */
++struct scaled_limits
+ {
+-	char buf[16];
+-	int fd = sys_open("/proc/sys/kernel/pid_max", BSD_O_RDONLY, 0);
+-	int value = 1024;
+-	int* ovalue = (int*) old;
+-	
+-	if (!oldlen)
+-		return -EINVAL;
+-	
+-	if (fd >= 0)
++	int maxproc;
++	int maxprocperuid;
++	int maxfiles;
++	int maxfilesperproc;
++	int task_max;
++	int thread_max;
++	int task_threadmax;
++};
++
++#define XNU_X86_64_NPROC (20 + 32 * 32)
++#define XNU_OPEN_MAX 10240
++#define XNU_CONFIG_TASK_MAX 1024
++#define XNU_CONFIG_THREAD_MAX 2560
++#define GIB (1024ULL * 1024ULL * 1024ULL)
++
++static void get_scaled_limits(struct scaled_limits* out)
++{
++	unsigned long long memory = 0, host_real = 0;
++	int scale = 0;
++
++	darling_hw_memsize(&memory, &host_real);
++
++	/* scale_setup(), non-server branch */
++	if (memory >= 3 * GIB)
+ 	{
+-		int rd = sys_read(fd, buf, sizeof(buf) - 1);
+-		close_internal(fd);
+-		
+-		if (rd > 0)
++		if (memory < 8 * GIB)
++			scale = 2;
++		else
+ 		{
+-			buf[rd] = '\0';
+-			value = __simple_atoi(buf, NULL);
++			unsigned long long s = memory / (4 * GIB);
++			scale = (s > 16) ? 16 : (int) s;
+ 		}
+ 	}
+-	
+-	if (ovalue != NULL)
+-		*ovalue = value;
+-	*oldlen = sizeof(int);
+-	
++
++	out->maxproc = XNU_X86_64_NPROC;
++	out->maxprocperuid = XNU_X86_64_NPROC / 2;
++	out->maxfiles = XNU_OPEN_MAX + 2048;
++	out->maxfilesperproc = XNU_OPEN_MAX;
++	out->task_max = XNU_CONFIG_TASK_MAX;
++	out->thread_max = XNU_CONFIG_THREAD_MAX;
++	out->task_threadmax = XNU_CONFIG_THREAD_MAX;
++
++	if (scale > 0)
++	{
++		/* bsd_scale_setup(), serverperfmode == 0 */
++		out->maxproc *= scale;
++		out->maxprocperuid = (out->maxproc * 2) / 3;
++		if (scale > 2)
++		{
++			out->maxfiles *= scale;
++			out->maxfilesperproc = out->maxfiles / 2;
++		}
++
++		/* scale_setup(): task_max = MAX(task_max, task_max * scale) */
++		out->task_max = XNU_CONFIG_TASK_MAX * scale;
++		out->task_threadmax = out->task_max;
++		out->thread_max = out->task_max * 5;
++	}
++}
++
++static long copyout_int(int value, void* old, unsigned long* oldlen)
++{
++	if (!oldlen)
++		return -EINVAL;
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = value;
++	return 0;
++}
++
++#define scaled_limit_handler(_hname, _field) \
++	static sysctl_handler(_hname) { \
++		struct scaled_limits limits; \
++		get_scaled_limits(&limits); \
++		return copyout_int(limits._field, old, oldlen); \
++	}
++
++scaled_limit_handler(handle_maxproc, maxproc)
++scaled_limit_handler(handle_maxprocperuid, maxprocperuid)
++scaled_limit_handler(handle_maxfiles, maxfiles)
++scaled_limit_handler(handle_maxfilesperproc, maxfilesperproc)
++scaled_limit_handler(handle_num_tasks, task_max)
++scaled_limit_handler(handle_num_threads, thread_max)
++scaled_limit_handler(handle_num_taskthreads, task_threadmax)
++
++// darling-lol: NGROUPS_MAX, as kern.ngroups reports on macOS 15.5
++static sysctl_handler(handle_ngroups) { return copyout_int(16, old, oldlen); }
++
++// darling-lol: 0 on macOS 15.5 (no securelevel raised, release kernel)
++static sysctl_handler(handle_securelevel) { return copyout_int(0, old, oldlen); }
++static sysctl_handler(handle_secure_kernel) { return copyout_int(0, old, oldlen); }
++static sysctl_handler(handle_development) { return copyout_int(0, old, oldlen); }
++
++// darling-lol: 1 on macOS 15.5; a MacBookPro16,1 (VT-x) supports Hypervisor.framework
++static sysctl_handler(handle_hv_support) { return copyout_int(1, old, oldlen); }
++
++// darling-lol: empty on macOS 15.5 without boot-args (the reported length is 1, the NUL)
++static sysctl_handler(handle_bootargs)
++{
++	copyout_string("", (char*) old, oldlen);
++	return 0;
++}
++
++// darling-lol: the SystemVersionCompat.plist ProductVersion, measured on macOS 15.5
++static sysctl_handler(handle_osproductversioncompat)
++{
++	copyout_string("10.16", (char*) old, oldlen);
++	return 0;
++}
++
++// darling-lol: the SystemVersion.plist iOSSupportVersion, measured on macOS 15.5
++static sysctl_handler(handle_iossupportversion)
++{
++	copyout_string("18.5", (char*) old, oldlen);
+ 	return 0;
+ }
+ 
+@@ -342,3 +497,38 @@ static sysctl_handler(handle_osrevision) {
  	*oldlen = sizeof(*ovalue);
  	return 0;
  }
@@ -3790,11 +4104,14 @@ index bd9cdc2..61fe056 100644
 +}
 +
 +static sysctl_handler(handle_osvariant_status) {
-+	/* STATUS_INITIAL_BITS (0x70000000f0000000) | S_NO (2) at every macOS
-+	 * status_flags_positions slot (0, 1, 3, 4, 7, 9, 11, 12) so libdarwin's
-+	 * status2bool() never sees S_UNKNOWN and traps in launchd. */
++	/* darling-lol: the value measured on macOS 15.5 (24F74):
++	 * STATUS_INITIAL_BITS (0x70000000f0000000), S_NO (2) at the macOS
++	 * status_flags_positions slots 0, 1, 3, 4, 7, 9 and 11, S_YES (3) at
++	 * slot 12 (SFP_FULL_LOGGING) and boot mode 1 (BOOTMODE_NONE, a normal
++	 * boot) at bit 48. No slot is S_UNKNOWN, so libdarwin's status2bool()
++	 * never traps in launchd. */
 +	sysctl_handle_size(sizeof(unsigned long long));
-+	*((unsigned long long*) old) = 0x70000000f288828aULL;
++	*((unsigned long long*) old) = 0x70010000f388828aULL;
 +	return 0;
 +}
 +
@@ -4437,26 +4754,29 @@ index 8fabdda..c472a3f 100644
  			old_ptr += ifm_length;
  		}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
-index 5a49882..5dc5fa7 100644
+index 5a49882..84fec26 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_sysctl.c
-@@ -7,12 +7,15 @@
+@@ -7,12 +7,18 @@
  
  enum {
  	_PROC_CPUTYPE = 1000,
 +	_PROC_TRANSLATED,
++	_PROC_NATIVE, // darling-lol
  };
  
  static sysctl_handler(handle_proc_cputype);
 +static sysctl_handler(handle_proc_translated);
++static sysctl_handler(handle_proc_native);
  
  const struct known_sysctl sysctls_sysctl[] = {
  	{ .oid = _PROC_CPUTYPE, .type = CTLTYPE_INT, .exttype = "I", .name = "proc_cputype", .handler = handle_proc_cputype },
 +	{ .oid = _PROC_TRANSLATED, .type = CTLTYPE_INT, .exttype = "I", .name = "proc_translated", .handler = handle_proc_translated },
++	{ .oid = _PROC_NATIVE, .type = CTLTYPE_INT, .exttype = "I", .name = "proc_native", .handler = handle_proc_native },
  	{ .oid = -1 }
  };
  
-@@ -44,3 +47,11 @@ sysctl_handler(handle_proc_cputype)
+@@ -44,3 +50,32 @@ sysctl_handler(handle_proc_cputype)
  
  	return 0;
  }
@@ -4466,6 +4786,27 @@ index 5a49882..5dc5fa7 100644
 +	// guest code runs natively on the host CPU, never under binary translation
 +	sysctl_handle_size(sizeof(int));
 +	*((int*) old) = 0;
++	return 0;
++}
++
++// darling-lol: sysctl.proc_native, present on macOS 15.5. XNU reports 1 when
++// the process's CPU type (without the ABI bits) is the machine's. Guest code
++// always runs natively on the x86 host, so it is 1 for the caller (no pid) and
++// for any existing pid; as in XNU's fetch_process_cputype(), an unknown pid
++// or extra name components are EINVAL.
++sysctl_handler(handle_proc_native)
++{
++	if (nlen > 3)
++		return -EINVAL;
++	if (nlen == 3)
++	{
++		bool is64bit;
++		if (dserver_rpc_task_is_64_bit(name[2], &is64bit) < 0)
++			return -EINVAL;
++	}
++
++	sysctl_handle_size(sizeof(int));
++	*((int*) old) = 1;
 +	return 0;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/audit/audit_addr.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/audit/audit_addr.c
@@ -5272,7 +5613,7 @@ index 0000000..dec5552
 +	return -ENOSYS;
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
-index c2f70fb..136171b 100644
+index c2f70fb..9f07624 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/proc_info.c
 @@ -7,6 +7,7 @@
@@ -5283,7 +5624,12 @@ index c2f70fb..136171b 100644
  #include <stddef.h>
  
  #include <darling/emulation/common/base.h>
-@@ -35,6 +36,10 @@
+@@ -31,10 +32,15 @@
+ #include <darling/emulation/xnu_syscall/bsd/helper/misc/readline.h>
+ 
+ #include <darlingserver/rpc.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/fd_view.h>
+ 
  #define LINUX_PR_SET_NAME 15
  
  static long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize);
@@ -5294,7 +5640,7 @@ index c2f70fb..136171b 100644
  
  extern __SIZE_TYPE__ strlen(const char *s);
  extern void *memset(void *s, int c, __SIZE_TYPE__ n);
-@@ -83,7 +88,40 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+@@ -83,7 +89,40 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
  		case 2: // proc_pidinfo
  			return _proc_pidinfo(pid, flavor, arg, buffer, bufsize);
  		case 3: // proc_pidfdinfo
@@ -5336,7 +5682,7 @@ index c2f70fb..136171b 100644
  		default:
  			__simple_printf("sys_proc_info(): Unsupported callnum: %d\n",
  					callnum);
-@@ -91,6 +129,94 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
+@@ -91,6 +130,94 @@ long sys_proc_info(uint32_t callnum, int32_t pid, uint32_t flavor,
  	}
  }
  
@@ -5431,7 +5777,26 @@ index c2f70fb..136171b 100644
  static bool parse_smaps_firstline(
  	const char* line,
  	uint64_t* pri_address,
-@@ -328,6 +454,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
+@@ -112,6 +239,7 @@ static long _proc_pidinfo_regionpath(int32_t pid, uint64_t arg, void* buffer, in
+ static long _proc_pidinfo_taskinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_taskallinfo(int32_t pid, void* buffer, int32_t bufsize);
+ static long _proc_pidinfo_listthreads(int32_t pid, void* buffer, int32_t bufsize);
++static long _proc_pidinfo_listfds(int32_t pid, void* buffer, int32_t bufsize);
+ 
+ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int32_t bufsize)
+ {
+@@ -161,6 +289,10 @@ long _proc_pidinfo(int32_t pid, uint32_t flavor, uint64_t arg, void* buffer, int
+ 		{
+ 			return _proc_pidinfo_listthreads(pid, buffer, bufsize);
+ 		}
++		case PROC_PIDLISTFDS:
++		{
++			return _proc_pidinfo_listfds(pid, buffer, bufsize);
++		}
+ 		default:
+ 		{
+ 			__simple_printf("sys_proc_info(): Unsupported pidinfo flavor: %d\n",
+@@ -328,6 +460,8 @@ static long _proc_pidinfo_tbsdinfo(int32_t pid, void* buffer, int32_t bufsize)
  	info->pbi_start_tvusec = starttime_usecs;
  
  	memcpy(info->pbi_comm, shortinfo.pbsi_comm, sizeof(info->pbi_comm));
@@ -5440,7 +5805,7 @@ index c2f70fb..136171b 100644
  
  	return sizeof(struct proc_bsdinfo);
  reterr:
-@@ -390,7 +518,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -390,7 +524,9 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  
  	// comm
  	READELEM();
@@ -5451,7 +5816,7 @@ index c2f70fb..136171b 100644
  
  	// process state
  	READELEM();
-@@ -437,7 +567,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
+@@ -437,7 +573,8 @@ static long _proc_pidinfo_shortbsdinfo(int32_t pid, void* buffer, int32_t bufsiz
  	if (is_64_bit)
  		info->pbsi_flags |= P_LP64;
  
@@ -5461,6 +5826,71 @@ index c2f70fb..136171b 100644
  reterr:
  	return -EINVAL;
  }
+@@ -827,3 +964,64 @@ bail:
+ 	close_internal(fd);
+ 	return count * sizeof(uint64_t);
+ }
++
++/* darling-lol: PROC_PIDLISTFDS, which lsof and libproc's proc_pidinfo use, as XNU's
++ * proc_pidfdlist answers it: with no buffer, a size hint of (table size + 20) entries;
++ * otherwise one proc_fdinfo per open descriptor, in ascending order, up to bufsize.
++ * Only descriptors a macOS program would have are listed (fd_view.c). */
++struct linux_dirent64_lfd {
++	unsigned long long d_ino;
++	long long d_off;
++	unsigned short d_reclen;
++	unsigned char d_type;
++	char d_name[];
++};
++
++static long _proc_pidinfo_listfds(int32_t pid, void* buffer, int32_t bufsize)
++{
++	char path[64], dents[2048];
++	int self = (int) LINUX_SYSCALL(__NR_getpid);
++	int dir, highest = -1;
++	long got, written = 0;
++	struct proc_fdinfo* out = (struct proc_fdinfo*) buffer;
++	int capacity = buffer ? bufsize / (int) sizeof(struct proc_fdinfo) : 0;
++
++	if (pid <= 0)
++		pid = self;
++	__simple_sprintf(path, "/proc/%d/fd", pid);
++	dir = LINUX_SYSCALL(__NR_open, path, 0200000 /* O_RDONLY|O_DIRECTORY */ | 02000000 /* O_CLOEXEC */, 0);
++	if (dir < 0)
++		return dir == -2 /* ENOENT */ ? -ESRCH : errno_linux_to_bsd(dir);
++
++	while ((got = LINUX_SYSCALL(__NR_getdents64, dir, dents, sizeof(dents))) > 0) {
++		for (long pos = 0; pos < got;) {
++			struct linux_dirent64_lfd* d = (struct linux_dirent64_lfd*) (dents + pos);
++			const char* name = d->d_name;
++			int fd = 0, type;
++			pos += d->d_reclen;
++			if (*name < '0' || *name > '9')
++				continue;
++			for (; *name >= '0' && *name <= '9'; ++name)
++				fd = fd * 10 + (*name - '0');
++			if (*name || (pid == self && fd == dir))
++				continue;
++			type = darling_fd_view_type(pid, fd);
++			if (type < 0)
++				continue;
++			if (fd > highest)
++				highest = fd;
++			if (buffer && written < capacity) {
++				/* /proc lists descriptors in ascending order, as proc_fdlist_internal does. */
++				out[written].proc_fd = fd;
++				out[written].proc_fdtype = (uint32_t) type;
++				++written;
++			}
++		}
++	}
++	close_internal(dir);
++	if (got < 0)
++		return errno_linux_to_bsd(got);
++	if (!buffer)
++		return (long) (highest + 1 + 20) * (long) sizeof(struct proc_fdinfo);
++	return written * (long) sizeof(struct proc_fdinfo);
++}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
 index 0a8f1e4..9651453 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/ptrace.c
@@ -7201,7 +7631,7 @@ index c1b2d50..fa6f707 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
-index b998456..45f8b40 100644
+index b998456..82f983e 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 @@ -12,9 +12,29 @@
@@ -7257,7 +7687,7 @@ index b998456..45f8b40 100644
  
  	if (code < 0) {
  		if (code == -LINUX_EINTR) {
-@@ -92,33 +118,860 @@ retry:
+@@ -92,33 +118,884 @@ retry:
  			}
  		}
  		__simple_printf("mach_msg_overwrite failed (internally): %d\n", code);
@@ -7939,6 +8369,7 @@ index b998456..45f8b40 100644
 +static volatile int lregion_refresh;
 +static volatile int lregion_maps_fd = -1;
 +static volatile int lregion_maps_pid;
++static volatile int lregion_unsupported; /* the kernel has no PROCMAP_QUERY (before Linux 6.11): every call goes to the server */
 +_Static_assert(sizeof(struct lregion_query) == 104, "PROCMAP_QUERY ABI");
 +_Static_assert(sizeof(struct lregion_short_info) == 48, "short region reply ABI");
 +
@@ -8015,10 +8446,14 @@ index b998456..45f8b40 100644
 +		 * (~9,000 times a second), which churned the low descriptor numbers the rest of the process hands out.
 +		 * After a fork the inherited descriptor still names the parent's address space, so it is tied to the pid;
 +		 * if the application closed or replaced it, the ioctl fails and the call goes to the server. */
-+		lregion_pace();
-+		int fd = __atomic_load_n(&lregion_maps_fd, __ATOMIC_ACQUIRE);
++		int fd = -1;
 +		int self = (int) LINUX_SYSCALL(__NR_getpid);
-+		if (fd < 0 || __atomic_load_n(&lregion_maps_pid, __ATOMIC_ACQUIRE) != self) {
++		if (!__atomic_load_n(&lregion_unsupported, __ATOMIC_ACQUIRE)) {
++			lregion_pace();
++			fd = __atomic_load_n(&lregion_maps_fd, __ATOMIC_ACQUIRE);
++		}
++		if (!__atomic_load_n(&lregion_unsupported, __ATOMIC_ACQUIRE) &&
++		    (fd < 0 || __atomic_load_n(&lregion_maps_pid, __ATOMIC_ACQUIRE) != self)) {
 +			int low = LINUX_SYSCALL(__NR_open, "/proc/self/maps", 02000000 /* O_RDONLY | O_CLOEXEC */, 0);
 +			fd = -1;
 +			if (low >= 0) {
@@ -8027,19 +8462,38 @@ index b998456..45f8b40 100644
 +					LINUX_SYSCALL(__NR_close, low);
 +				else
 +					fd = low;
-+				__atomic_store_n(&lregion_maps_pid, self, __ATOMIC_RELEASE);
-+				__atomic_store_n(&lregion_maps_fd, fd, __ATOMIC_RELEASE);
++				/* Publish only if no other thread did meanwhile; a loser keeps using its own descriptor for this
++				 * call and closes it afterwards, so racing first calls cannot leave descriptors behind. */
++				int expected = __atomic_load_n(&lregion_maps_fd, __ATOMIC_ACQUIRE);
++				if (expected < 0 || __atomic_load_n(&lregion_maps_pid, __ATOMIC_ACQUIRE) != self) {
++					if (__atomic_compare_exchange_n(&lregion_maps_fd, &expected, fd, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++						__atomic_store_n(&lregion_maps_pid, self, __ATOMIC_RELEASE);
++				}
 +			}
 +		}
 +		if (fd >= 0) {
++			int shared = __atomic_load_n(&lregion_maps_fd, __ATOMIC_ACQUIRE) == fd;
 +			struct lregion_query q;
 +			for (unsigned long i = 0; i < sizeof(q); ++i) ((char*) &q)[i] = 0;
 +			q.size = sizeof(q);
 +			q.query_flags = 0x10; /* PROCMAP_QUERY_COVERING_OR_NEXT_VMA */
 +			q.query_addr = *address;
 +			long rv = LINUX_SYSCALL(__NR_ioctl, fd, LREGION_IOCTL, &q);
-+			if (rv < 0 && rv != -LINUX_ENOENT)
-+				__atomic_store_n(&lregion_maps_fd, -1, __ATOMIC_RELEASE); /* not ours any more: reopen on the next call */
++			if (rv < 0 && rv != -LINUX_ENOENT) {
++				/* Kernels before 6.11 have no PROCMAP_QUERY: stop trying, as darlingserver does
++				 * (procmapQueryUnsupported). Any other failure means the descriptor is stale: reopen next time.
++				 * Either way the descriptor is closed here; it used to be forgotten while still open, one leaked
++				 * descriptor per region query (2,604 in one match on a 6.8 kernel, 2026-11-26). */
++				if (rv == -LINUX_ENOTTY || rv == -LINUX_EINVAL)
++					__atomic_store_n(&lregion_unsupported, 1, __ATOMIC_RELEASE);
++				int mine = fd;
++				if (!shared || __atomic_compare_exchange_n(&lregion_maps_fd, &mine, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++					LINUX_SYSCALL(__NR_close, fd);
++				fd = -1;
++				shared = 1;
++			} else if (!shared) {
++				LINUX_SYSCALL(__NR_close, fd);
++			}
 +			if (rv == -LINUX_ENOENT)
 +				return KERN_NO_SPACE; /* MIG leaves all caller outputs untouched on failure. */
 +			if (rv == 0 && *infoCnt != LREGION_SHORT_INFO_COUNT) {
@@ -8121,7 +8575,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -128,21 +981,33 @@ kern_return_t semaphore_signal_thread_trap_impl(
+@@ -128,21 +1005,33 @@ kern_return_t semaphore_signal_thread_trap_impl(
  				mach_port_name_t signal_name,
  				mach_port_name_t thread_name)
  {
@@ -8156,7 +8610,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -152,14 +1017,33 @@ kern_return_t semaphore_wait_signal_trap_impl(
+@@ -152,14 +1041,33 @@ kern_return_t semaphore_wait_signal_trap_impl(
  				mach_port_name_t wait_name,
  				mach_port_name_t signal_name)
  {
@@ -8191,7 +8645,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -170,14 +1054,24 @@ kern_return_t semaphore_timedwait_trap_impl(
+@@ -170,14 +1078,24 @@ kern_return_t semaphore_timedwait_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
@@ -8217,7 +8671,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -189,14 +1083,32 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
+@@ -189,14 +1107,32 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
@@ -8251,7 +8705,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -514,6 +1426,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
+@@ -514,6 +1450,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
  		__simple_printf("mach_port_construct failed (internally): %d\n", code);
  		__simple_abort();
  	}
@@ -8264,7 +8718,7 @@ index b998456..45f8b40 100644
  
  	return code;
  }
-@@ -673,16 +1591,16 @@ kern_return_t macx_backing_store_recovery_impl(
+@@ -673,16 +1615,16 @@ kern_return_t macx_backing_store_recovery_impl(
  	return KERN_FAILURE;
  }
  
@@ -8284,7 +8738,7 @@ index b998456..45f8b40 100644
  	return 0;
  }
  
-@@ -692,12 +1610,53 @@ kern_return_t syscall_thread_switch_impl(
+@@ -692,12 +1634,53 @@ kern_return_t syscall_thread_switch_impl(
  				int option,
  				mach_msg_timeout_t option_time)
  {
@@ -8342,7 +8796,7 @@ index b998456..45f8b40 100644
  
  	// TODO: we could implement this with yield_to() in LKM
  	return KERN_SUCCESS;
-@@ -721,7 +1680,11 @@ kern_return_t task_for_pid_impl(
+@@ -721,7 +1704,11 @@ kern_return_t task_for_pid_impl(
  				int pid,
  				mach_port_name_t *t)
  {
@@ -10275,7 +10729,7 @@ index f890ab2..43e708d 100644
  	return IOCTL_PASS;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
-index 24a5f01..f92c575 100644
+index 24a5f01..f9130a2 100644
 --- a/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
 +++ b/darling/src/libsystem_kernel/emulation/include/conversion/misc/getrlimit.h
 @@ -8,6 +8,28 @@ struct xnu_rlimit
@@ -10307,11 +10761,87 @@ index 24a5f01..f92c575 100644
  enum {
  	LINUX_RLIMIT_CPU = 0,
  	LINUX_RLIMIT_FSIZE,
+@@ -41,5 +63,8 @@ enum {
+ };
+ 
+ unsigned int rlimit_bsd_to_linux(unsigned int which);
++/* darling-lol: the guest's RLIMIT_NOFILE pair (macOS 256 / unlimited), see getrlimit.c. */
++int darling_nofile_get(struct xnu_rlimit* rlp);
++int darling_nofile_set(const struct xnu_rlimit* rlp);
+ 
+ #endif // DARLING_CONVERSION_MISC_GETRLIMIT
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
-index 01d4670..2fccfce 100644
+index 01d4670..279a6f0 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/getrlimit.c
-@@ -16,12 +16,22 @@ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+@@ -6,6 +6,61 @@
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ 
++/* darling-lol: the descriptor limit a guest sees is the one a macOS application has.
++ *
++ * Darling keeps its own descriptors (per-thread darlingserver sockets) just below the real Linux
++ * limit, so the real limit stays at the host maximum (1048576) and the guest used to see it. A
++ * macOS 15.5 application started by launchd gets 256 soft / unlimited hard (launchctl limit
++ * maxfiles), and XNU stores whatever soft <= hard pair it is given (kern_resource.c dosetrlimit;
++ * the kernel enforces MIN(soft, maxfilesperproc)). The guest's pair is kept here and never applied
++ * to the real limit. The soft value is inherited across fork and exec like a real limit: it is
++ * carried in the soft RLIMIT_MSGQUEUE value, a Linux-only resource no Darwin program can name and
++ * nothing in Darling uses. With hard limit M, soft == M means "never set" (256), M - 1 means
++ * unlimited, anything else is the value itself (clamped to M - 2). The hard value lasts for the
++ * process only; macOS applications do not lower it. */
++#define DARLING_NOFILE_DEFAULT_SOFT 256ULL
++static unsigned long long nofile_hard = XNU_RLIM_INFINITY;
++
++struct linux_rlimit64 { unsigned long long cur, max; };
++
++int darling_nofile_get(struct xnu_rlimit* rlp)
++{
++	struct linux_rlimit64 carrier;
++	unsigned long long soft = DARLING_NOFILE_DEFAULT_SOFT;
++	if (LINUX_SYSCALL(__NR_prlimit64, 0, LINUX_RLIMIT_MSGQUEUE, 0, &carrier) == 0 && carrier.max >= 4 &&
++	    carrier.max != LINUX_RLIM_INFINITY && carrier.cur < carrier.max)
++		soft = carrier.cur == carrier.max - 1 ? XNU_RLIM_INFINITY : carrier.cur;
++	rlp->rlim_cur = soft;
++	rlp->rlim_max = nofile_hard;
++	if (rlp->rlim_cur > rlp->rlim_max)
++		rlp->rlim_cur = rlp->rlim_max;
++	return 0;
++}
++
++int darling_nofile_set(const struct xnu_rlimit* rlp)
++{
++	struct xnu_rlimit current;
++	struct linux_rlimit64 carrier;
++	darling_nofile_get(&current);
++	if (rlp->rlim_cur > rlp->rlim_max)
++		return -EINVAL;
++	/* Raising the hard limit needs privilege on macOS, as for every resource. */
++	if (rlp->rlim_max > current.rlim_max && LINUX_SYSCALL(__NR_geteuid) != 0)
++		return -EPERM;
++	if (LINUX_SYSCALL(__NR_prlimit64, 0, LINUX_RLIMIT_MSGQUEUE, 0, &carrier) == 0 && carrier.max >= 4 &&
++	    carrier.max != LINUX_RLIM_INFINITY) {
++		unsigned long long code;
++		if (rlimit_is_infinity(rlp->rlim_cur))
++			code = carrier.max - 1;
++		else
++			code = rlp->rlim_cur > carrier.max - 2 ? carrier.max - 2 : rlp->rlim_cur;
++		carrier.cur = code;
++		LINUX_SYSCALL(__NR_prlimit64, 0, LINUX_RLIMIT_MSGQUEUE, &carrier, 0);
++	}
++	nofile_hard = rlp->rlim_max;
++	return 0;
++}
++
+ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+ {
+ 	int ret;
+@@ -13,15 +68,27 @@ long sys_getrlimit(unsigned int which, struct xnu_rlimit* rlp)
+ 	which = rlimit_bsd_to_linux(which);
+ 	if (which == -1)
+ 		return -EINVAL;
++	if (which == LINUX_RLIMIT_NOFILE)
++		return darling_nofile_get(rlp);
  
  	ret = LINUX_SYSCALL(__NR_prlimit64, 0, which, 0, rlp);
  	if (ret < 0)
@@ -10337,10 +10867,10 @@ index 01d4670..2fccfce 100644
  
  	return ret;
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
-index 352c739..31a7fc2 100644
+index 352c739..ff6d964 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/setrlimit.c
-@@ -9,16 +9,25 @@
+@@ -9,16 +9,29 @@
  long sys_setrlimit(unsigned int which, const struct xnu_rlimit* rlp)
  {
  	int ret;
@@ -10354,6 +10884,10 @@ index 352c739..31a7fc2 100644
 +	/* A guest cannot ask for more than Darwin's own RLIM_INFINITY. */
 +	if (rlp->rlim_cur > XNU_RLIM_INFINITY || rlp->rlim_max > XNU_RLIM_INFINITY)
 +		return -EINVAL;
++
++	/* darling-lol: the guest's descriptor limit is virtual (getrlimit.c, darling_nofile_get). */
++	if (which == LINUX_RLIMIT_NOFILE)
++		return darling_nofile_set(rlp);
 +
 +	lim.rlim_cur = rlimit_is_infinity(rlp->rlim_cur) ? LINUX_RLIM_INFINITY : rlp->rlim_cur;
 +	lim.rlim_max = rlimit_is_infinity(rlp->rlim_max) ? LINUX_RLIM_INFINITY : rlp->rlim_max;
@@ -11048,3 +11582,507 @@ index dd67573..b760391 100644
  
  no_fork:
  		if (desc && desc->attrp)
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_hw.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_hw.h
+index a16ca4e..38abba9 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_hw.h
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/helper/misc/sysctl_hw.h
+@@ -5,4 +5,9 @@
+ 
+ extern const struct known_sysctl sysctls_hw[];
+ 
++// darling-lol: the memory size hw.memsize reports (the profile's size under
++// compat) and the host's real memory size. kern.maxproc and the other
++// memory-scaled kern.* limits are computed from the reported size.
++void darling_hw_memsize(unsigned long long* reported, unsigned long long* host_real);
++
+ #endif // _SYSCTL_HW_H
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/fd_view.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/fd_view.h
+new file mode 100644
+index 0000000..844d3b1
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/misc/fd_view.h
+@@ -0,0 +1,12 @@
++#ifndef DARLING_EMULATION_FD_VIEW_H
++#define DARLING_EMULATION_FD_VIEW_H
++
++/* darling-lol: which of a process's Linux descriptors a macOS program can see, and as what.
++ * Returns a PROX_FDTYPE_* value, or -1 for a descriptor that belongs to Darling or to a host
++ * driver (it has no macOS counterpart and is hidden from /dev/fd and PROC_PIDLISTFDS). */
++int darling_fd_view_type(int pid, int fd);
++
++/* The pid whose descriptor directory (/proc/<pid>/fd) dirfd has open, or 0. */
++int darling_fd_view_directory_pid(int dirfd);
++
++#endif
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c
+index d127afc..5f874d1 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_unspec.c
+@@ -4,7 +4,7 @@
+ 
+ enum {
+ 	_OID_TO_NAME = 1,
+-	// TODO: implement 2 - for listing?
++	_NEXT = 2, // darling-lol: sysctl.next, the enumeration `sysctl -a` walks
+ 	_NAME_TO_OID = 3,
+ 	_GET_DATA_TYPE = 4,
+ };
+@@ -20,9 +20,11 @@ extern int strlcpy(char* dst, const char* src, __SIZE_TYPE__ n);
+ static sysctl_handler(handle_oid_to_name);
+ static sysctl_handler(handle_name_to_oid);
+ static sysctl_handler(handle_get_data_type);
++static sysctl_handler(handle_next);
+ 
+ const struct known_sysctl sysctls_unspec[] = {
+ 	{ .oid = _OID_TO_NAME, .type = CTLTYPE_STRING, .exttype = "S", .name = "oid_to_name", .handler = handle_oid_to_name },
++	{ .oid = _NEXT, .type = CTLTYPE_STRUCT, .exttype = "I,oid", .name = "next", .handler = handle_next },
+ 	{ .oid = _NAME_TO_OID, .type = CTLTYPE_STRUCT, .exttype = "I,oid", .name = "name_to_oid", .handler = handle_name_to_oid },
+ 	{ .oid = _GET_DATA_TYPE, .type = CTLTYPE_STRUCT, .exttype = "I,type", .name = "get_data_type", .handler = handle_get_data_type },
+ 	{ .oid = -1 }
+@@ -165,3 +167,93 @@ sysctl_handler(handle_get_data_type)
+ 	}
+ 	return 0;
+ }
++
++/* darling-lol: sysctl.next ({ 0, 2, <oid...> }) returns the OID of the first
++ * leaf after <oid> in OID order, as XNU's sysctl_sysctl_next() does; given a
++ * node, it returns the node's first leaf. ENOENT after the last leaf. Without
++ * it `sysctl -a` and `sysctl kern` listed nothing. The tables are not sorted by
++ * OID, so this keeps the smallest leaf path greater than <oid> over the whole
++ * tree (a few hundred entries). The CTL_UNSPEC (0) meta node is not listed. */
++#define NEXT_MAXNAME 12 // CTL_MAXNAME
++
++struct next_search
++{
++	const int* after;
++	int after_len;
++	int best[NEXT_MAXNAME];
++	int best_len;
++	int found;
++};
++
++// <0, 0, >0 like strcmp; a proper prefix sorts first
++static int compare_oids(const int* a, int alen, const int* b, int blen)
++{
++	int n = (alen < blen) ? alen : blen;
++
++	for (int i = 0; i < n; i++)
++	{
++		if (a[i] != b[i])
++			return (a[i] < b[i]) ? -1 : 1;
++	}
++	return (alen > blen) - (alen < blen);
++}
++
++static void next_walk(const struct known_sysctl* node, int* path, int depth, struct next_search* search)
++{
++	if (depth >= NEXT_MAXNAME)
++		return;
++
++	for (int i = 0; node->subctls[i].oid != -1; i++)
++	{
++		const struct known_sysctl* child = &node->subctls[i];
++
++		if (depth == 0 && child->oid == CTL_UNSPEC)
++			continue;
++
++		path[depth] = child->oid;
++		if (child->type == CTLTYPE_NODE)
++		{
++			if (child->subctls != NULL)
++				next_walk(child, path, depth + 1, search);
++			continue;
++		}
++
++		if (compare_oids(path, depth + 1, search->after, search->after_len) <= 0)
++			continue;
++		if (search->found && compare_oids(path, depth + 1, search->best, search->best_len) >= 0)
++			continue;
++
++		memcpy(search->best, path, (depth + 1) * sizeof(int));
++		search->best_len = depth + 1;
++		search->found = 1;
++	}
++}
++
++sysctl_handler(handle_next)
++{
++	struct next_search search;
++	int path[NEXT_MAXNAME];
++	unsigned long size;
++
++	if (name == NULL || nlen < 2)
++		return -EINVAL;
++
++	search.after = name + 2;
++	search.after_len = nlen - 2;
++	search.best_len = 0;
++	search.found = 0;
++	next_walk(&sysctls_root, path, 0, &search);
++
++	if (!search.found)
++		return -ENOENT;
++
++	size = search.best_len * sizeof(int);
++	if (old != NULL)
++	{
++		if (*oldlen < size)
++			return -ENOMEM;
++		memcpy(old, search.best, size);
++	}
++	*oldlen = size;
++	return 0;
++}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
+index fbd3263..990c9e8 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_vm.c
+@@ -20,10 +20,15 @@ enum {
+ 
+ static sysctl_handler(handle_page_purgeable_count);
+ static sysctl_handler(handle_page_pageable_internal_count);
++static sysctl_handler(handle_loadavg);
++static sysctl_handler(handle_swapusage);
+ 
+ const struct known_sysctl sysctls_vm[] = {
+ 	{ .oid = _VM_PAGE_PURGEABLE_COUNT, .type = CTLTYPE_INT, .exttype = "I", .name = "page_purgeable_count", .handler = handle_page_purgeable_count },
+ 	{ .oid = _VM_PAGE_PAGEABLE_INTERNAL_COUNT, .type = CTLTYPE_INT, .exttype = "IU", .name = "page_pageable_internal_count", .handler = handle_page_pageable_internal_count },
++	/* darling-lol: present on macOS 15.5 */
++	{ .oid = VM_LOADAVG, .type = CTLTYPE_STRUCT, .exttype = "S,loadavg", .name = "loadavg", .handler = handle_loadavg },
++	{ .oid = VM_SWAPUSAGE, .type = CTLTYPE_STRUCT, .exttype = "S,xsw_usage", .name = "swapusage", .handler = handle_swapusage },
+ 	{ .oid = -1 },
+ };
+ 
+@@ -36,6 +41,8 @@ struct meminfo {
+ 	uint64_t cached;
+ 	uint64_t slab_reclaimable;
+ 	uint64_t shmem;
++	uint64_t swap_total;
++	uint64_t swap_free;
+ };
+ 
+ static const char* find_first_not(const char* haystack, char needle) {
+@@ -92,6 +99,8 @@ static int read_meminfo(struct meminfo* out_info) {
+ 			else PARSE("Cached:", cached)
+ 			else PARSE("SReclaimable:", slab_reclaimable)
+ 			else PARSE("Shmem:", shmem)
++			else PARSE("SwapTotal:", swap_total)
++			else PARSE("SwapFree:", swap_free)
+ 			;
+ 
+ 		#undef PARSE
+@@ -143,3 +152,92 @@ static sysctl_handler(handle_page_pageable_internal_count) {
+ 
+ 	return 0;
+ };
++
++// darling-lol: struct loadavg from <sys/sysctl.h> (under __APPLE_API_PRIVATE
++// there): three fixpt_t averages scaled by fscale. XNU's fscale is
++// FSCALE (1 << FSHIFT, FSHIFT 11) = 2048.
++struct darling_loadavg {
++	uint32_t ldavg[3];
++	long fscale;
++};
++
++#define XNU_FSCALE 2048
++
++// "0.52" -> 0.52 * XNU_FSCALE; returns the position after the number
++static const char* parse_loadavg_value(const char* p, uint32_t* out) {
++	uint64_t whole = 0, frac = 0, frac_div = 1;
++
++	for (; *p >= '0' && *p <= '9'; ++p)
++		whole = whole * 10 + (*p - '0');
++	if (*p == '.') {
++		for (++p; *p >= '0' && *p <= '9'; ++p) {
++			if (frac_div < 1000000) {
++				frac = frac * 10 + (*p - '0');
++				frac_div *= 10;
++			}
++		}
++	}
++	*out = (uint32_t) (whole * XNU_FSCALE + (frac * XNU_FSCALE) / frac_div);
++	return p;
++}
++
++// vm.loadavg: the host's 1, 5 and 15 minute load averages from /proc/loadavg
++static sysctl_handler(handle_loadavg) {
++	struct darling_loadavg* avg = (struct darling_loadavg*) old;
++	struct rdline_buffer rbuf;
++	const char* line;
++	int fd;
++
++	sysctl_handle_size(sizeof(*avg));
++	memset(avg, 0, sizeof(*avg));
++	avg->fscale = XNU_FSCALE;
++
++	fd = sys_open_nocancel("/proc/loadavg", BSD_O_RDONLY, 0);
++	if (fd < 0)
++		return 0;
++
++	_readline_init(&rbuf);
++	line = _readline(fd, &rbuf);
++	if (line != NULL) {
++		for (int i = 0; i < 3; i++) {
++			const char* p = find_first_not(line, ' ');
++			if (p == NULL)
++				break;
++			line = parse_loadavg_value(p, &avg->ldavg[i]);
++		}
++	}
++	close_internal(fd);
++	return 0;
++}
++
++// darling-lol: struct xsw_usage from <sys/sysctl.h>
++struct darling_xsw_usage {
++	uint64_t xsu_total;
++	uint64_t xsu_avail;
++	uint64_t xsu_used;
++	uint32_t xsu_pagesize;
++	int xsu_encrypted; // boolean_t
++};
++
++// vm.swapusage: the host's swap from /proc/meminfo, in bytes. macOS 15.5
++// reports a 4096-byte swap page on Intel and always encrypts swap.
++static sysctl_handler(handle_swapusage) {
++	struct darling_xsw_usage* usage = (struct darling_xsw_usage*) old;
++	struct meminfo meminfo;
++
++	sysctl_handle_size(sizeof(*usage));
++	memset(usage, 0, sizeof(*usage));
++	usage->xsu_pagesize = 4096;
++	usage->xsu_encrypted = 1;
++
++	if (read_meminfo(&meminfo) == 0) {
++		uint64_t free_kib = meminfo.swap_free;
++
++		if (free_kib > meminfo.swap_total)
++			free_kib = meminfo.swap_total;
++		usage->xsu_total = meminfo.swap_total * 1024;
++		usage->xsu_avail = free_kib * 1024;
++		usage->xsu_used = (meminfo.swap_total - free_kib) * 1024;
++	}
++	return 0;
++}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
+index 0a7e492..e5e1af2 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
+@@ -6,6 +6,7 @@
+ #include <darling/emulation/conversion/dirent/getdirentries.h>
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/fd_view.h>
+ 
+ #define LINUX_SEEK_SET 0
+ #define LINUX_SEEK_CUR 1
+@@ -23,6 +24,18 @@ extern int strcmp(const char* str1, const char* str2);
+ #define BSD_DIRENT64_MIN_SIZE ALIGN(sizeof(struct bsd_dirent64) + 2, 4)
+ #define LINUX_DIRENT64_MIN_SIZE ALIGN(sizeof(struct linux_dirent64) + 2, 8)
+ 
++/* darling-lol: /dev/fd (and /proc/<pid>/fd) lists only the descriptors a macOS program
++ * would have; Darling's own and host driver descriptors are skipped (fd_view.c). */
++static int fd_entry_visible(int pid, const char* name)
++{
++	int fd = 0;
++	if (!pid || name[0] < '0' || name[0] > '9')
++		return 1;
++	for (; *name >= '0' && *name <= '9'; ++name)
++		fd = fd * 10 + (*name - '0');
++	return *name != 0 || darling_fd_view_type(pid, fd) >= 0;
++}
++
+ static inline void round_to_4(unsigned short* reclen)
+ {
+ 	if (*reclen & 3)
+@@ -48,6 +61,9 @@ long sys_getdirentries(int fd, char* ibuf, unsigned int len, long* basep)
+ 	if (basep)
+ 		*basep = 0;
+ 
++	int fd_dir_pid = darling_fd_view_directory_pid(fd);
++again:
++	bpos = 0;
+ 	ret = LINUX_SYSCALL(__NR_getdents64, fd, buf, sizeof(buf));
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+@@ -62,6 +78,12 @@ long sys_getdirentries(int fd, char* ibuf, unsigned int len, long* basep)
+ 		bsd = (struct bsd_dirent*) (ibuf + opos);
+ 		slen = strlen(l64->d_name);
+ 
++		if (!fd_entry_visible(fd_dir_pid, l64->d_name))
++		{
++			bpos += l64->d_reclen;
++			continue;
++		}
++
+ 		if (len-opos < sizeof(struct bsd_dirent) + slen + 1)
+ 			break;
+ 
+@@ -78,6 +100,10 @@ long sys_getdirentries(int fd, char* ibuf, unsigned int len, long* basep)
+ 		bpos += l64->d_reclen;
+ 	}
+ 
++	/* Every entry of this chunk was hidden: returning 0 would read as end of directory. */
++	if (opos == 0 && ret > 0)
++		goto again;
++
+ 	return opos;
+ }
+ 
+@@ -98,6 +124,9 @@ long sys_getdirentries64(int fd, char* ibuf, unsigned int len, long* basep)
+ 	if (basep)
+ 		*basep = 0;
+ 
++	int fd_dir_pid = darling_fd_view_directory_pid(fd);
++again:
++	bpos = 0;
+ 	ret = LINUX_SYSCALL(__NR_getdents64, fd, buf, sizeof(buf));
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+@@ -112,6 +141,12 @@ long sys_getdirentries64(int fd, char* ibuf, unsigned int len, long* basep)
+ 		bsd = (struct bsd_dirent64*) (ibuf + opos);
+ 		slen = strlen(l64->d_name);
+ 
++		if (!fd_entry_visible(fd_dir_pid, l64->d_name))
++		{
++			bpos += l64->d_reclen;
++			continue;
++		}
++
+ 		if (len-opos < sizeof(struct bsd_dirent64) + slen + 1)
+ 			break;
+ 
+@@ -129,6 +164,10 @@ long sys_getdirentries64(int fd, char* ibuf, unsigned int len, long* basep)
+ 		bpos += l64->d_reclen;
+ 	}
+ 
++	/* Every entry of this chunk was hidden: returning 0 would read as end of directory. */
++	if (opos == 0 && ret > 0)
++		goto again;
++
+ 	/*
+ 	if (bpos < ret) {
+ 		__simple_printf("bpos < ret; %d < %d", bpos, ret);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/fd_view.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/fd_view.c
+new file mode 100644
+index 0000000..6e54743
+--- /dev/null
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/misc/fd_view.c
+@@ -0,0 +1,97 @@
++#include <darling/emulation/xnu_syscall/bsd/impl/misc/fd_view.h>
++
++#include <darling/emulation/common/base.h>
++#include <darling/emulation/common/simple.h>
++#include <darling/emulation/common/guarded/table.h>
++#include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
++#include <darling/emulation/linux_premigration/vchroot_expand.h>
++
++/* darling-lol: a macOS program lists its own descriptors through /dev/fd and
++ * proc_pidinfo(PROC_PIDLISTFDS) and sees only what it opened. Under Darling the same
++ * Linux table also holds Darling's per-thread darlingserver sockets and lifetime pipe
++ * (kept just below the real descriptor limit, guarded against close), the GPU driver's
++ * /dev/nvidia* and /dev/dri/* handles (on a Mac, Metal talks to the GPU through IOKit
++ * Mach ports, not descriptors), and the eventfd/timerfd/perf_event descriptors behind
++ * Darling's own kqueue and timers. A League match held 202 Linux descriptors against
++ * 86 on macOS 15.5 (2026-11-26); these are the difference. The program's own files,
++ * sockets, pipes and kqueues are listed as before. */
++
++#define PROX_FDTYPE_VNODE 1
++#define PROX_FDTYPE_SOCKET 2
++#define PROX_FDTYPE_PSHM 3
++#define PROX_FDTYPE_KQUEUE 5
++#define PROX_FDTYPE_PIPE 6
++
++/* Darling places its per-thread sockets at the top of the 2^20 Linux table; no macOS
++ * program reaches these numbers (kern.maxfilesperproc is 10240). Used for processes
++ * other than the caller, whose guard tables are not visible here. */
++#define DARLING_INTERNAL_FD_FLOOR (1 << 19)
++
++static int starts_with(const char* s, const char* prefix)
++{
++	while (*prefix)
++		if (*s++ != *prefix++)
++			return 0;
++	return 1;
++}
++
++int darling_fd_view_type(int pid, int fd)
++{
++	char path[64], target[256];
++	long len;
++	int self = (int) LINUX_SYSCALL(__NR_getpid);
++
++	if (fd < 0)
++		return -1;
++	if (pid == self && guard_table_check(fd, guard_flag_prevent_close))
++		return -1;
++	__simple_sprintf(path, "/proc/%d/fd/%d", pid, fd);
++	len = LINUX_SYSCALL(__NR_readlink, path, target, sizeof(target) - 1);
++	if (len < 0)
++		return -1;
++	target[len] = 0;
++
++	if (starts_with(target, "socket:["))
++		return fd >= DARLING_INTERNAL_FD_FLOOR ? -1 : PROX_FDTYPE_SOCKET;
++	if (starts_with(target, "pipe:["))
++		return fd >= DARLING_INTERNAL_FD_FLOOR ? -1 : PROX_FDTYPE_PIPE;
++	if (starts_with(target, "anon_inode:"))
++		/* A guest kqueue is an epoll instance; its eventfd/timerfd helpers and perf events are not. */
++		return starts_with(target, "anon_inode:[eventpoll]") ? PROX_FDTYPE_KQUEUE : -1;
++	if (starts_with(target, "/dev/nvidia") || starts_with(target, "/dev/dri/") ||
++	    starts_with(target, "/proc/") || starts_with(target, "/memfd:"))
++		return -1;
++	if (starts_with(target, "/dev/shm/"))
++		return PROX_FDTYPE_PSHM;
++	if (target[0] == '/') {
++		/* The prefix mounts its own procfs (<prefix>/proc); Darling reads mount tables there. */
++		struct vchroot_unexpand_args uargs; /* per call: several threads may list descriptors */
++		int i = 0;
++		for (; target[i] && i < (int) sizeof(uargs.path) - 1; ++i)
++			uargs.path[i] = target[i];
++		uargs.path[i] = 0;
++		if (vchroot_unexpand(&uargs) == 0 && starts_with(uargs.path, "/proc/"))
++			return -1;
++	}
++	return PROX_FDTYPE_VNODE;
++}
++
++int darling_fd_view_directory_pid(int dirfd)
++{
++	char path[64], target[64];
++	long len;
++	int pid = 0, i = 6;
++
++	__simple_sprintf(path, "/proc/self/fd/%d", dirfd);
++	len = LINUX_SYSCALL(__NR_readlink, path, target, sizeof(target) - 1);
++	if (len < 10)
++		return 0;
++	target[len] = 0;
++	if (!starts_with(target, "/proc/"))
++		return 0;
++	for (; target[i] >= '0' && target[i] <= '9'; ++i)
++		pid = pid * 10 + (target[i] - '0');
++	if (i == 6 || target[i] != '/' || target[i + 1] != 'f' || target[i + 2] != 'd' || target[i + 3] != 0)
++		return 0;
++	return pid;
++}
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/getdtablesize.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/getdtablesize.c
+index 8839860..51f1902 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/getdtablesize.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/unistd/getdtablesize.c
+@@ -7,6 +7,7 @@
+ #include <darling/emulation/conversion/errno.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+ 
++#define DARLING_MAXFILESPERPROC 24576 /* kern.maxfilesperproc of a 16 GB Intel Mac (sysctl_kern.c) */
+ #define min(a,b) ((a) < (b)) ? (a) : (b)
+ 
+ long sys_getdtablesize(void)
+@@ -18,5 +19,6 @@ long sys_getdtablesize(void)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	return min(lim.rlim_cur, INT_MAX);
++	/* darling-lol: XNU's getdtablesize is MIN(RLIMIT_NOFILE soft, maxfilesperproc). */
++	return min(lim.rlim_cur, DARLING_MAXFILESPERPROC);
+ }

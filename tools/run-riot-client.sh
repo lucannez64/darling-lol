@@ -536,6 +536,7 @@ exec python3 "$runner_dir/session-supervisor.py" --prefix "$prefix" \
   --guest-log "$prefix_dir$guest_path/Library/Logs/Riot Games/Riot Client" -- \
   python3 "$runner_dir/exec-guest.py" env -u ELECTRON_RUN_AS_NODE -u DYLD_INSERT_LIBRARIES \
   -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH EGL_PLATFORM=x11 \
+  __CFBundleIdentifier=com.riotgames.RiotGames.RiotClient \
   MAC_CHROMIUM_TMPDIR="${MAC_CHROMIUM_TMPDIR:-/private/tmp}" \
   LANG="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" LC_ALL="${RCLOL_GUEST_LOCALE:-en_US.UTF-8}" \
   mesa_glthread="${RCLOL_MESA_GLTHREAD-${mesa_glthread-false}}" \

@@ -582,6 +582,9 @@ if [ "$keep_identity" != 1 ]; then
 		python3 tools/configure-darling-platform.py --prefix "$prefix" \
 			--regenerate --no-backup --write
 	fi
+	framework_runtime_root=${CLEAN_PREFIX_RUNTIME_ROOT:-$(python3 -c 'import json; print(json.load(open("build/config.json"))["sdk"])')}
+	python3 tools/provision-framework-info.py --prefix "$prefix" --runtime-root "$framework_runtime_root" --write || \
+		warning "Framework metadata not provisioned; run tools/provision-framework-info.py --prefix \"$prefix\" --runtime-root \"$framework_runtime_root\" --write"
 	cleaned=1
 fi
 

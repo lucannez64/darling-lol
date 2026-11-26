@@ -1124,3 +1124,21 @@ index 390be6c..eabf919 100644
 +}
 +
 +@end
+diff --git a/src/NSUserDefaults.m b/src/NSUserDefaults.m
+index 5a9ffc7..56aead1 100644
+--- a/src/NSUserDefaults.m
++++ b/src/NSUserDefaults.m
+@@ -49,8 +49,11 @@ static void initQueues() {
+     if (standardDefaults == nil)
+     {
+         standardDefaults = [[NSUserDefaults alloc] init];
+-        [standardDefaults setObject:[NSLocale preferredLanguages] forKey:@"AppleLanguages"];
+-        [standardDefaults setObject:[[NSLocale systemLocale] languageCode] forKey:@"AppleLocale"];
++        // darling-lol: macOS reads AppleLanguages and AppleLocale from the global domain and never
++        // copies them into the application's own preferences. Writing them here left an
++        // AppleLanguages = () plist for every application that touched NSUserDefaults (measured
++        // against macOS 15.5, 2026-11-26). CFLocale finds the global values through the normal
++        // application -> global search list.
+     }
+     pthread_mutex_unlock(&defaultsLock);
+     return standardDefaults;

@@ -899,6 +899,28 @@ Change from 1280×720 to 1600×900 and leave the client open at the broken size.
 
 The practice-tool exit in the same report remains unresolved: the supplied League client log records the game starting and exiting about two seconds later, but contains no game-process crash reason. These font and resize fixes do not establish a fix for that exit. Further diagnosis needs the game's own log/crash report or stderr from the affected machine.
 
+## Ctrl+Q hides the game, or Ctrl shortcuts act like Cmd
+
+Darling maps the Super key to the Mac Command key and Control to Control,
+like a Mac keyboard. Host key remappers that turn the physical Ctrl key into
+Super for "Mac-style" shortcuts (Kinto's Mac layout does this) therefore make
+in-game Ctrl+Q arrive as Cmd+Q: League treats that as Quit and hides its
+window instead of levelling the Q ability. The client then keeps showing the
+game as in progress, with no Reconnect button, until the hidden game ends.
+
+Exclude the Riot windows from the remapper so Ctrl stays Control there. In
+Kinto, add their window classes to the `remotes` list in
+`~/.config/kinto/kinto.py` (the list Kinto leaves unmapped) and restart Kinto:
+
+```python
+    "LeagueofLegends",
+    "LeagueClientUx",
+    "Riot Client",
+```
+
+Copy and paste still work in the clients: Darling maps Ctrl+C, Ctrl+V and
+Ctrl+X to their Command equivalents itself.
+
 ## Client reports macOS 10.10 and VAN -101
 
 The legacy CarbonCore `Gestalt` implementation read a Darwin kernel release as though it were a macOS product version, then fell through into `gestaltSysArchitecture`, overwriting every result with `gestaltIntel` (10). The standalone probe reproduced `gestalt=10.10.10` even though `kern.osproductversion` was already `14.7`. Version selectors now read that existing product version, return before the architecture case, initialize missing patch versions to zero and implement the documented packed-BCD limits. Null outputs and unknown selectors return errors.

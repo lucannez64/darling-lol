@@ -19,8 +19,13 @@ BASE34 = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ'
 # EMULATED_OSPRODUCTVERSION / EMULATED_OSVERSION (patches/xnu.patch): the plist
 # read by NSProcessInfo and the kern.osproductversion / kern.osversion sysctls
 # have to name one macOS, or a single reader sees two versions at once.
-EMULATED_PRODUCT_VERSION = '14.7'
-EMULATED_BUILD_VERSION = '23H124'
+EMULATED_PRODUCT_VERSION = '15.5'
+EMULATED_BUILD_VERSION = '24F74'
+# Values a macOS 15.5 (24F74) SystemVersion.plist carries.
+IOS_SUPPORT_VERSION = '18.5'
+PRODUCT_COPYRIGHT = '1983-2025 Apple Inc.'
+# macOS installs system metadata plists as rw-r--r--.
+SYSTEM_METADATA_MODE = 0o644
 KNOWN_SERIAL = 'C02ZL0GVMD6N'
 KNOWN_UUID = '6F3B2A1E-8C4D-4E5F-9A7B-1D2C3E4F5A6B'
 GENERATED_KEYS = ('IOPlatformSerialNumber', 'mlb-serial-number', 'IOPlatformUUID',
@@ -161,9 +166,15 @@ def ensure_stopped(prefix):
         raise ValueError('Shut down the selected Darling prefix before writing platform identity')
 
 
-def atomic_write(path, data, create_backup=True):
+def atomic_write(path, data, create_backup=True, mode=None):
+    """Replace path with data. mode, when given, is the final permission set:
+    system metadata that macOS ships world-readable (SystemVersion.plist,
+    framework Info.plist) must not keep mkstemp's private 0600."""
     if path.exists() and path.read_bytes() == data:
-        return False
+        if mode is None or (path.stat().st_mode & 0o777) == mode:
+            return False
+        os.chmod(path, mode)
+        return True
     path.parent.mkdir(parents=True, exist_ok=True)
     if create_backup and path.exists():
         backup = path.with_name(path.name + '.before-platform-change')
@@ -178,6 +189,8 @@ def atomic_write(path, data, create_backup=True):
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)
             stream.flush()
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
@@ -235,7 +248,7 @@ def normalize_system_version(metadata):
 
     The stock Darling runtime ships ProductVersion 11.7.4 and the literal build
     string "Darling"; left in place, NSProcessInfo reports that while
-    kern.osproductversion / kern.osversion report 14.7 / 23H124, so one reader
+    kern.osproductversion / kern.osversion report 15.5 / 24F74, so one reader
     sees two macOS versions and a build string no real install ever carries.
     Converge every version field a reader can see on the one emulated release.
     Other keys (iOSSupportVersion, copyright) are preserved.
@@ -246,9 +259,9 @@ def normalize_system_version(metadata):
     updated['ProductUserVisibleVersion'] = EMULATED_PRODUCT_VERSION
     updated['ProductBuildVersion'] = EMULATED_BUILD_VERSION
     if 'iOSSupportVersion' in updated:
-        updated['iOSSupportVersion'] = '17.7'
+        updated['iOSSupportVersion'] = IOS_SUPPORT_VERSION
     # The stock template credits "Lubos Dolezel"; a real install never does.
-    updated['ProductCopyright'] = '1983-2024 Apple Inc.'
+    updated['ProductCopyright'] = PRODUCT_COPYRIGHT
     return plistlib.dumps(updated, fmt=plistlib.FMT_XML, sort_keys=True)
 
 
@@ -302,7 +315,8 @@ def save_system_version(prefix, runtime_root, create_backup=True):
         checked_path(prefix, relative + '.before-platform-change')
     if target.exists() and not isinstance(plistlib.loads(target.read_bytes()), dict):
         raise ValueError('Existing SystemVersion.plist is invalid')
-    return atomic_write(target, version_plist, create_backup=create_backup)
+    return atomic_write(target, version_plist, create_backup=create_backup,
+                        mode=SYSTEM_METADATA_MODE)
 
 
 def save_provisioning(prefix, properties, runtime_root, create_backup=True):
@@ -313,8 +327,9 @@ def save_provisioning(prefix, properties, runtime_root, create_backup=True):
              'System/Library/CoreServices/SystemVersion.plist']
     changed = False
     for relative in order:
+        mode = SYSTEM_METADATA_MODE if relative.endswith('SystemVersion.plist') else None
         changed = atomic_write(checked_path(prefix, relative), files[relative],
-                               create_backup=create_backup) or changed
+                               create_backup=create_backup, mode=mode) or changed
     return changed
 
 
