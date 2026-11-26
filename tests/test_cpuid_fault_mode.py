@@ -3,9 +3,11 @@
 With the flag token fault=1 the tracer turns on CPUID faulting
 (arch_prctl(ARCH_SET_CPUID, 0)) instead of arming breakpoints, and emulates
 each cpuid from the SIGSEGV it raises. The host test compiles the patched
-handler and runs it for real when this CPU and kernel support CPUID faulting
-(`cpuid_fault` in /proc/cpuinfo); elsewhere it checks the fallback.
+handler and runs it for real when arch_prctl accepts CPUID faulting; where the
+CPU, the kernel or a sandbox refuses it, it checks the fallback. Set
+RCLOL_REQUIRE_CPUID_FAULT=1 to fail instead when the mode cannot be turned on.
 """
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -32,13 +34,13 @@ class CpuidFaultModeTests(unittest.TestCase):
         self.assertIn('rclol_flag_value(contents, "fault=")', requested)
         setup = trace[trace.index('void rclol_cpuid_trace_setup(void)'):]
         # the League branch: fault mode, then the breakpoint groups as fallback
-        fault = setup.index('if (rclol_fault_requested(contents)) {')
+        fault = setup.rindex('if (rclol_fault_requested(contents)) {')
         self.assertLess(fault, setup.index('const unsigned long* chosen = rclol_group1;'))
         self.assertIn('if (on)\n\t\t\treturn;', setup[fault:fault + 500])
-        # the client branch (mvg.framework only)
-        self.assertIn('if (rclol_fault_requested(contents) && rclol_cpuid_fault_enable()) {', setup)
-        self.assertLess(setup.index('rclol_fault_requested(contents) && rclol_cpuid_fault_enable()'),
-                        setup.index('rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);'))
+        # the client branch (mvg.framework only): same order, and a refusal is logged
+        client = setup[:setup.index('rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);')]
+        self.assertIn('if (rclol_fault_requested(contents)) {\n\t\t\tif (rclol_cpuid_fault_enable()) {', client)
+        self.assertIn('fault mode unavailable (mvg process), arming breakpoints', client)
 
     def test_signal_handler_serves_the_fault_before_mach_exception_handling(self):
         sigexc = patched_lines(f'{EMULATION}/src/linux_premigration/signal/sigexc.c')
@@ -57,7 +59,9 @@ class CpuidFaultModeTests(unittest.TestCase):
     def test_handler_emulates_every_cpuid_of_the_process(self):
         trace = patched_lines(TRACE)
         start = trace.index('#define RCLOL_ARCH_GET_CPUID 0x1011')
-        code = trace[start:trace.index('static int rclol_fault_requested(', start)]
+        code = trace[start:trace.index('void rclol_cpuid_trace_setup(void)', start)]
+        flag_value = trace[trace.index('static const char* rclol_flag_value('):]
+        flag_value = flag_value[:flag_value.index('\n}\n') + 3]
         harness = f"""
 #define _GNU_SOURCE
 #include <assert.h>
@@ -90,9 +94,15 @@ static int g_fake = 1;
 static int g_log_enabled = 1;
 static int g_logged;
 static int g_sites_logged;
+static int g_refused;
+static int g_deny_lift;
+static int g_identity_filled;
 static char g_last_site[256];
 static long rclol_sys(long nr, long a1, long a2, long a3, long a4, long a5, long a6)
 {{
+    /* a filter that lets faulting be turned on but not lifted */
+    if (g_deny_lift && nr == SYS_arch_prctl && a1 == 0x1012 && a2 == 1)
+        return -1;
     long rc = syscall(nr, a1, a2, a3, a4, a5, a6);
     return rc < 0 ? -1 : rc;
 }}
@@ -103,10 +113,14 @@ static void rclol_write_str(const char* line)
     if (strncmp(line, "cpuid-site ", 11) == 0) {{
         g_sites_logged++;
         snprintf(g_last_site, sizeof(g_last_site), "%s", line);
-    }} else {{
+    }} else if (strncmp(line, "cpuid-fault ", 12) == 0) {{
         g_logged++;
+    }} else {{
+        g_refused++;
     }}
 }}
+struct darling_cpu_identity;
+static const struct darling_cpu_identity* rclol_identity(void) {{ g_identity_filled = 1; return NULL; }}
 /* stands for the compat transform: leaf 0 becomes GenuineIntel */
 static void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
     uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx)
@@ -120,6 +134,7 @@ static void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
     }}
     if (leaf == 0) {{ *ebx = 0x756e6547; *edx = 0x49656e69; *ecx = 0x6c65746e; }}
 }}
+{flag_value}
 {code}
 
 static volatile int g_unhandled;
@@ -194,8 +209,18 @@ int main(int argc, char** argv)
     sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, NULL);
 
-    if (!rclol_cpuid_fault_enable()) {{
-        /* no CPUID faulting on this CPU or kernel: the mode stays off */
+    /* only the exact token turns the mode on */
+    assert(rclol_fault_requested("fault=1") && rclol_fault_requested("fault=1\\n"));
+    assert(rclol_fault_requested("fake=1 fault=1") && rclol_fault_requested("fault=1,fake=1"));
+    assert(!rclol_fault_requested("") && !rclol_fault_requested("fault=0"));
+    assert(!rclol_fault_requested("fault=10") && !rclol_fault_requested("fault=1x"));
+    assert(!rclol_fault_requested("fault=yes") && !rclol_fault_requested("nofault=1"));
+
+    int on = rclol_cpuid_fault_enable();
+    /* the identity is filled before any handler can run */
+    assert(g_identity_filled);
+    if (!on) {{
+        /* no CPUID faulting on this CPU or kernel, or a sandbox refuses it: the mode stays off */
         assert(!rclol_cpuid_fault_active());
         vendor(seen);
         assert(strcmp(seen, host) == 0);
@@ -240,18 +265,21 @@ int main(int argc, char** argv)
         assert(a == a2 && c == c2 && d == d2 && (b & 0x00ffffff) == (b2 & 0x00ffffff));
     }}
 
-    /* a thread created afterwards is covered too */
+    /* a thread created afterwards is covered too: its cpuid faults as well */
     pthread_t thread;
     char in_thread[13];
+    unsigned long hits = g_fault_hits;
     pthread_create(&thread, NULL, thread_main, in_thread);
     pthread_join(thread, NULL);
     assert(strcmp(in_thread, "GenuineIntel") == 0);
+    assert(g_fault_hits == hits + 1);
 
     /* so is a forked child */
     pid_t pid = fork();
     if (pid == 0) {{
+        hits = g_fault_hits;
         vendor_from(g_guest, seen);
-        _exit(strcmp(seen, "GenuineIntel") == 0 ? 0 : 1);
+        _exit(strcmp(seen, "GenuineIntel") == 0 && g_fault_hits == hits + 1 ? 0 : 1);
     }}
     int status;
     waitpid(pid, &status, 0);
@@ -272,6 +300,16 @@ int main(int argc, char** argv)
     /* the three files and the leaf 1 check above: four sites, however often they run */
     assert(g_sites_logged == 4);
     assert(!g_unhandled);
+
+    /* faulting cannot be lifted: the handler declines instead of running cpuid in here */
+    g_deny_lift = 1;
+    frame.uc_mcontext.gregs.rip = (unsigned long) cpuid_bytes;
+    frame.uc_mcontext.gregs.rax = 0x1234;
+    assert(g_refused == 0);
+    assert(!rclol_cpuid_fault_handle(&info, &frame));
+    assert(g_refused == 1);
+    assert(frame.uc_mcontext.gregs.rip == (unsigned long) cpuid_bytes && frame.uc_mcontext.gregs.rax == 0x1234);
+    g_deny_lift = 0;
     puts("supported");
     return 0;
 }}
@@ -284,8 +322,8 @@ int main(int argc, char** argv)
                            check=True)
             result = subprocess.run([str(binary), folder], check=True, capture_output=True, text=True)
             self.assertIn(result.stdout.strip(), ('supported', 'unsupported'))
-            has_flag = 'cpuid_fault' in Path('/proc/cpuinfo').read_text()
-            if has_flag:
+            # arch_prctl decides: a sandbox may refuse the mode on a CPU that has it
+            if os.environ.get('RCLOL_REQUIRE_CPUID_FAULT') == '1':
                 self.assertEqual(result.stdout.strip(), 'supported')
 
 

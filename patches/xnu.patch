@@ -1947,10 +1947,10 @@ index 0000000..20fd3fe
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..38da01e
+index 0000000..00012e4
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1556 @@
+@@ -0,0 +1,1569 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -3298,6 +3298,8 @@ index 0000000..38da01e
 +// Turn CPUID faulting on for this thread. Returns 1 when it is on.
 +int rclol_cpuid_fault_enable(void)
 +{
++	// The handler runs on any thread and only reads the identity: fill it now.
++	(void) rclol_identity();
 +	// -ENODEV when the CPU or the kernel lacks CPUID faulting.
 +	if (rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0, 0, 0, 0, 0) != 0)
 +		return 0;
@@ -3333,7 +3335,11 @@ index 0000000..38da01e
 +
 +	// Run the instruction with faulting lifted for this thread only. The
 +	// transform runs in the same window: a cpuid of its own must not fault here.
-+	rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 1, 0, 0, 0, 0);
++	if (rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 1, 0, 0, 0, 0) != 0) {
++		// cpuid would fault again in here; leave it to the normal fault path.
++		rclol_write_str("cpuid-trace: cannot lift faulting, cpuid not served\n");
++		return false;
++	}
 +	__asm__ volatile ("cpuid"
 +		: "=a"(oa), "=b"(ob), "=c"(oc), "=d"(od)
 +		: "a"(in_eax), "c"(in_ecx));
@@ -3365,7 +3371,11 @@ index 0000000..38da01e
 +{
 +	const char* fault = rclol_flag_value(contents, "fault=");
 +
-+	return fault && (fault[0] == '1' || fault[0] == 'y' || fault[0] == 'Y');
++	// Exactly "fault=1": a mode that can end the process is not for near misses.
++	if (!fault || fault[0] != '1')
++		return 0;
++	return fault[1] == '\0' || fault[1] == ' ' || fault[1] == '\t'
++		|| fault[1] == '\n' || fault[1] == '\r' || fault[1] == ',';
 +}
 +
 +void rclol_cpuid_trace_setup(void)
@@ -3410,9 +3420,12 @@ index 0000000..38da01e
 +		}
 +		if (!g_fake && compat)
 +			g_fake = 1;
-+		if (rclol_fault_requested(contents) && rclol_cpuid_fault_enable()) {
-+			rclol_write_str("cpuid-trace: fault mode on (mvg process), no breakpoints armed\n");
-+			return;
++		if (rclol_fault_requested(contents)) {
++			if (rclol_cpuid_fault_enable()) {
++				rclol_write_str("cpuid-trace: fault mode on (mvg process), no breakpoints armed\n");
++				return;
++			}
++			rclol_write_str("cpuid-trace: fault mode unavailable (mvg process), arming breakpoints\n");
 +		}
 +		rclol_arm_mvg_cpuinfo((const void*) mvg_base, mvg_base);
 +		{
