@@ -155,11 +155,6 @@ class HwSysctlLeavesTests(unittest.TestCase):
 #define CPUFAMILY_INTEL_SKYLAKE     0x37fc219f
 #define CPUFAMILY_INTEL_KABYLAKE    0x0f817246
 #define CPUFAMILY_INTEL_ICELAKE     0x38435547
-static void copyout_string(const char* str, char* out, unsigned long* out_len)
-{{
-    strcpy(out, str);
-    *out_len = strlen(str) + 1;
-}}
 #define sysctl_handler(_hname) long _hname(const int* name, int nlen, void* old, \\
     unsigned long* oldlen, void* _new, unsigned long newlen)
 
@@ -336,6 +331,12 @@ int main(void)
     char target[8] = "";
     len = sizeof(target); old = target;
     assert(CALL(handle_targettype) == 0 && len == 4 && strcmp(target, "Mac") == 0);
+    /* size query, then a short buffer: untouched, ENOMEM, length 0 */
+    len = 0; old = 0;
+    assert(CALL(handle_targettype) == 0 && len == 4);
+    memset(target, 0x55, sizeof(target));
+    len = 2; old = target;
+    assert(CALL(handle_targettype) == -ENOMEM && len == 0 && target[0] == 0x55 && target[1] == 0x55);
 
     /* host profile: the host's caches, the same 100 MHz base clock */
     g_compat = 0;

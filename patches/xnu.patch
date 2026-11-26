@@ -3333,7 +3333,7 @@ index 7d5ef80..c8672bb 100644
  	[521] = sys_abort_with_payload,
  	[524] = sys_setattrlistat,
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
-index f273989..15f6325 100644
+index f273989..4456ee7 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_hw.c
 @@ -9,13 +9,20 @@
@@ -3769,7 +3769,7 @@ index f273989..15f6325 100644
  }
  
  sysctl_handler(handle_cpu64bitcapable)
-@@ -193,3 +517,458 @@ sysctl_handler(handle_machine)
+@@ -193,3 +517,457 @@ sysctl_handler(handle_machine)
  	copyout_string(need_uname()->machine, (char*) old, oldlen);
  	return 0;
  }
@@ -4225,8 +4225,7 @@ index f273989..15f6325 100644
 +
 +sysctl_handler(handle_targettype)
 +{
-+	copyout_string("Mac", (char*) old, oldlen);
-+	return 0;
++	return hw_out("Mac", sizeof("Mac"), old, oldlen);
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_kern.c
 index bd9cdc2..cffcbe2 100644
