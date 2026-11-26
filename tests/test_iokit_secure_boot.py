@@ -69,10 +69,27 @@ class IokitSecureBootTests(unittest.TestCase):
 #include <cassert>
 
 int main() {{
+    // Truthful host efivar default.
     assert(HostSecureBoot::policyByteForSystemRoot("{enabled_root}", false) == 0x02);
     assert(HostSecureBoot::policyByteForSystemRoot("{disabled_root}", false) == 0x00);
     assert(HostSecureBoot::policyByteForSystemRoot("{trunc_root}", false) == 0x00);
     assert(HostSecureBoot::policyByteForSystemRoot("{missing_root}", false) == 0x00);
+
+    // Unset / empty / auto / host / invalid overrides preserve truthful host state.
+    assert(HostSecureBoot::policyByte(nullptr, "{enabled_root}", false) == 0x02);
+    assert(HostSecureBoot::policyByte("", "{enabled_root}", false) == 0x02);
+    assert(HostSecureBoot::policyByte("auto", "{disabled_root}", false) == 0x00);
+    assert(HostSecureBoot::policyByte("HOST", "{enabled_root}", false) == 0x02);
+    assert(HostSecureBoot::policyByte("bogus", "{enabled_root}", false) == 0x02);
+
+    // Explicit overrides win over host efivar.
+    assert(HostSecureBoot::policyByte("0", "{enabled_root}", false) == 0x00);
+    assert(HostSecureBoot::policyByte("off", "{enabled_root}", false) == 0x00);
+    assert(HostSecureBoot::policyByte("NONE", "{enabled_root}", false) == 0x00);
+    assert(HostSecureBoot::policyByte("1", "{disabled_root}", false) == 0x01);
+    assert(HostSecureBoot::policyByte("Medium", "{disabled_root}", false) == 0x01);
+    assert(HostSecureBoot::policyByte("2", "{disabled_root}", false) == 0x02);
+    assert(HostSecureBoot::policyByte("FULL", "{missing_root}", false) == 0x02);
     return 0;
 }}
 ''')
