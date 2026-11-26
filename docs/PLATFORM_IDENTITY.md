@@ -232,8 +232,10 @@ as on a real i7-9750H. A `cpuid` instruction at a site the trap does not cover
 still returns the host's words. In that view, leaf 7 EBX and leaf `0x80000001`
 keep only the bits a real i7-9750H sets (`0x029c67af`; ECX `0x121`, EDX
 `0x2c100800`), each still only when the host has it: an AMD host's own bits in
-leaf `0x80000001` and a TSX host's HLE/RTM are not passed on. `profile=host`
-reports the real host CPU,
+leaf `0x80000001` and a TSX host's HLE/RTM are not passed on. The commpage,
+which every guest process reads without a system call, carries the same part's
+CPU family (`0x0f817246`) and 64-byte cache line size, and its capability word
+has neither HLE nor RTM. `profile=host` reports the real host CPU,
 GPU, VRAM and memory. `RCLOL_PLATFORM_PROFILE=host|compat` overrides
 the file for one launch; `RCLOL_SYSTEM_PROP=/path/to/system.prop` selects a different
 file for diagnostics.

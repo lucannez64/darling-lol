@@ -9043,7 +9043,7 @@ index f5ba615..53d04ad 100644
  	if (shell_pid != -1)
  		kill(shell_pid, SIGKILL);
 diff --git a/src/startup/mldr/commpage.c b/src/startup/mldr/commpage.c
-index d9a7aea96..bfb6ce45d 100644
+index d9a7aea9..67fb1404 100644
 --- a/src/startup/mldr/commpage.c
 +++ b/src/startup/mldr/commpage.c
 @@ -12,6 +12,12 @@
@@ -9084,7 +9084,7 @@ index d9a7aea96..bfb6ce45d 100644
  	// I'm not sure if Linux has separate page sizes for kernel and user space.
  	// Apple's code uses left shift logical (1 << user_page_shift) to get the page size value.
  	// Since it's very unlikely that the page size won't be a power of 2, we can use __builtin_ctzl()
-@@ -71,6 +95,10 @@ void commpage_setup(bool _64bit)
+@@ -71,6 +95,30 @@ void commpage_setup(bool _64bit)
  	my_caps = get_cpu_caps();
  	if (*ncpus == 1)
  		my_caps |= kUP;
@@ -9092,10 +9092,30 @@ index d9a7aea96..bfb6ce45d 100644
 +	// Apple's libc reads as kNumCPUs (bits 16-23). Writing the word without it
 +	// left NCPUS at 0 on every profile.
 +	my_caps |= ((uint64_t) *ncpus) << kNumCPUsShift;
++
++	// darling-lol: xnu also publishes the cache line size, as a capability bit
++	// and in bytes, and hw.cpufamily. Under profile=compat they are the
++	// i7-9750H's (signature 0x906ea).
++	{
++		unsigned int signature = 0, ebx1 = 0, c, d;
++		uint16_t linesize;
++
++		if (__get_cpuid_max(0, NULL) >= 1)
++			__cpuid_count(1, 0, signature, ebx1, c, d);
++		if (compat_profile)
++		{
++			signature = 0x000906eau;
++			ebx1 = 8u << 8;
++		}
++		linesize = commpage_cache_linesize(ebx1);
++		my_caps |= commpage_cache_linesize_cap(linesize);
++		*(uint16_t*)CGET(_COMM_PAGE_CACHE_LINESIZE) = linesize;
++		*(uint32_t*)CGET(_COMM_PAGE_CPUFAMILY) = commpage_cpufamily(signature);
++	}
  
  	*cpu_caps = (uint32_t) my_caps;
  	*cpu_caps64 = my_caps;
-@@ -79,79 +107,64 @@ void commpage_setup(bool _64bit)
+@@ -79,79 +127,64 @@ void commpage_setup(bool _64bit)
  	{
  		uint64_t* memsize = (uint64_t*)CGET(_COMM_PAGE_MEMORY_SIZE);
  		*memsize = si.totalram * si.mem_unit;
@@ -9222,7 +9242,7 @@ index d9a7aea96..bfb6ce45d 100644
 +        // instruction the host CPU lacks.
 +        ecx1 &= 0x7ffafbbfu;
 +        edx1 &= 0xbfebfbffu;
-+        ebx7 &= 0x000c4b3cu;
++        ebx7 &= 0x000c432cu; // no HLE or RTM: a real i7-9750H has neither
 +    }
 +    return commpage_decode_cpu_caps(ecx1, edx1, ebx7, xcr0, long_mode);
  }
@@ -10787,9 +10807,10 @@ new file mode 100644
 +#endif
 diff --git a/src/startup/mldr/commpage-cpu-caps.h b/src/startup/mldr/commpage-cpu-caps.h
 new file mode 100644
+index 00000000..4545428b
 --- /dev/null
 +++ b/src/startup/mldr/commpage-cpu-caps.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,80 @@
 +#ifndef MLDR_COMMPAGE_CPU_CAPS_H
 +#define MLDR_COMMPAGE_CPU_CAPS_H
 +#include <stdint.h>
@@ -10829,6 +10850,45 @@ new file mode 100644
 +    FEATURE(ebx7, 2, kHasSGX);
 +#undef FEATURE
 +    return caps;
++}
++
++/* hw.cpufamily from the leaf 1 signature: cpuid_set_cpufamily() in xnu's
++ * osfmk/i386/cpuid.c. 0 is CPUFAMILY_UNKNOWN. */
++static inline uint32_t commpage_cpufamily(uint32_t signature)
++{
++    uint32_t family = (signature >> 8) & 0xf;
++    uint32_t model = ((signature >> 4) & 0xf) | ((signature >> 12) & 0xf0);
++
++    if (family != 6)
++        return 0;
++    switch (model) {
++    case 0x17: return UINT32_C(0x78ea4fbc); /* Penryn */
++    case 0x1a: case 0x1e: case 0x1f: case 0x2e: return UINT32_C(0x6b5a4cd2); /* Nehalem */
++    case 0x25: case 0x2c: case 0x2f: return UINT32_C(0x573b5eec); /* Westmere */
++    case 0x2a: case 0x2d: return UINT32_C(0x5490b78c); /* Sandy Bridge */
++    case 0x3a: case 0x3e: return UINT32_C(0x1f65e835); /* Ivy Bridge */
++    case 0x3c: case 0x3f: case 0x45: case 0x46: return UINT32_C(0x10b282dc); /* Haswell */
++    case 0x3d: case 0x47: return UINT32_C(0x582ed09c); /* Broadwell */
++    case 0x4e: case 0x5e: case 0x55: return UINT32_C(0x37fc219f); /* Skylake */
++    case 0x8e: case 0x9e: return UINT32_C(0x0f817246); /* Kaby Lake, Coffee Lake */
++    case 0x7e: case 0x7d: case 0x9f: return UINT32_C(0x38435547); /* Ice Lake */
++    default: return 0;
++    }
++}
++
++/* The CLFLUSH line size of leaf 1 EBX, in bytes, as one of the sizes xnu's
++ * capability word can name; 64 when the CPU gives another. */
++static inline uint16_t commpage_cache_linesize(uint32_t ebx1)
++{
++    uint16_t size = (uint16_t)(((ebx1 >> 8) & 0xff) * 8);
++
++    return (size == 32 || size == 128) ? size : 64;
++}
++
++/* The matching capability bit: xnu derives the commpage's line size from it. */
++static inline uint64_t commpage_cache_linesize_cap(uint16_t size)
++{
++    return size == 32 ? kCache32 : size == 128 ? kCache128 : kCache64;
 +}
 +#endif
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
