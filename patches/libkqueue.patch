@@ -40,7 +40,7 @@ index a9a6512..f324b41 100644
          if (kqops.filter_free != NULL)
              kqops.filter_free(kq, &kq->kq_filt[i]);
 diff --git a/src/common/kevent.c b/src/common/kevent.c
-index f5d53a2..ca91b33 100644
+index f5d53a2..c527b18 100644
 --- a/src/common/kevent.c
 +++ b/src/common/kevent.c
 @@ -27,6 +27,8 @@
@@ -80,7 +80,21 @@ index f5d53a2..ca91b33 100644
      if ((src->flags & EV_DELETE) || ((kn->kn_flags & KNFL_DEFER_DELETE) && (src->flags & EV_ENABLE))) {
          rv = knote_delete(filt, kn);
          dbg_printf("knote_delete returned %d", rv);
-@@ -349,6 +363,7 @@ kevent64_impl(int kqfd, const struct kevent64_s *changelist, int nchanges,
+@@ -223,9 +237,12 @@ err_path:
+             nevents--;
+             eventlist++;
+             nret++;
+-        } else {
++        } else if (status != 0) {
++            errno = status;
+             return (-1);
+         }
++        /* A successful receipt needs output space only to report it. Keep
++         * applying changes when the caller requests no more output events. */
+     }
+ 
+     return (nret);
+@@ -349,6 +366,7 @@ kevent64_impl(int kqfd, const struct kevent64_s *changelist, int nchanges,
      kqueue_addref(kq);
  
      pthread_mutex_unlock(&kq_mtx);
@@ -88,7 +102,7 @@ index f5d53a2..ca91b33 100644
  
  #ifndef NDEBUG
      if (DEBUG_KQUEUE) {
-@@ -386,6 +401,11 @@ kevent64_impl(int kqfd, const struct kevent64_s *changelist, int nchanges,
+@@ -386,6 +404,11 @@ kevent64_impl(int kqfd, const struct kevent64_s *changelist, int nchanges,
      if ((flags & KEVENT_FLAG_ERROR_EVENTS) == 0 && nevents > 0) {
          const struct timespec* ts = (flags & KEVENT_FLAG_IMMEDIATE) ? (&timeout_zero) : timeout;
  again:
@@ -100,7 +114,7 @@ index f5d53a2..ca91b33 100644
          rv = kqops.kevent_wait(kq, nevents, ts);
          dbg_printf("kqops.kevent_wait returned %d", rv);
  
-@@ -395,6 +415,7 @@ again:
+@@ -395,6 +418,7 @@ again:
              ret += rv;
          }
  
