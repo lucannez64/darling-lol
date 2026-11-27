@@ -682,10 +682,61 @@ index 458e659..2e33f20 100644
  			// wait until it's read
  			if (!dtape_semaphore_down_simple(kqchan->waiter_read_semaphore)) {
 diff --git a/duct-tape/src/locks.c b/duct-tape/src/locks.c
-index 69bdf24..48199cd 100644
+index 69bdf24..634b437 100644
 --- a/duct-tape/src/locks.c
 +++ b/duct-tape/src/locks.c
-@@ -98,41 +98,48 @@ bool dtape_mutex_try_lock(dtape_mutex_t* mutex) {
+@@ -61,78 +61,97 @@ void dtape_mutex_lock(dtape_mutex_t* mutex) {
+ 		// note that this means that any microthreads that want to lock the lock will sleep for real!
+ 		// therefore, callers that try to do this must only lock the lock for short periods
+ 		while (true) {
+ 			// FIXME: we really should be using a condvar here; right now, we're just spinning until the owner drops the lock.
+ 			//        we'd need to implement condvars in libsimple first, though.
+ 			libsimple_lock_lock(&mutex->dtape_queue_lock);
+ 			if (mutex->dtape_owner == 0) {
+ 				return;
+ 			}
+ 			libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 			__builtin_ia32_pause();
+ 		}
+ 	}
+ 
+ 	dtape_mutex_assert(mutex, false);
+ 
+-	while (true) {
+-		libsimple_lock_lock(&mutex->dtape_queue_lock);
++	libsimple_lock_lock(&mutex->dtape_queue_lock);
+ 
++	while (true) {
+ 		if (mutex->dtape_owner == 0 || mutex->dtape_owner == (uintptr_t)xthread) {
+ 			// lock successfully acquired
+ 			mutex->dtape_owner = (uintptr_t)xthread;
+ 			libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 			__atomic_thread_fence(__ATOMIC_ACQUIRE);
+ 			return;
+ 		}
+ 
+ 		// lock not acquired; let's wait
+ 		TAILQ_INSERT_TAIL(&mutex->dtape_queue_head, &thread->mutex_link, link);
+ 
+ 		// this call drops the lock
+ 		dtape_hooks->thread_suspend(thread->context, NULL, NULL, &mutex->dtape_queue_lock);
++
++		// dtape_mutex_unlock() takes the thread it wakes off the queue, but a thread can also resume here without
++		// having been woken, as in dtape_condvar_wait(). leave the queue in that case, too; inserting the link again
++		// while it is still queued would corrupt the queue.
++		libsimple_lock_lock(&mutex->dtape_queue_lock);
++		dtape_mutex_link_t* link;
++		TAILQ_FOREACH(link, &mutex->dtape_queue_head, link) {
++			if (link == &thread->mutex_link) {
++				TAILQ_REMOVE(&mutex->dtape_queue_head, link, link);
++				break;
++			}
++		}
+ 	}
+ };
+ 
+ bool dtape_mutex_try_lock(dtape_mutex_t* mutex) {
+ 	thread_t xthread = current_thread();
  	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
  
  	if (!thread) {
