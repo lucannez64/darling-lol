@@ -649,7 +649,7 @@ index 433a9b3..9a70d77 100644
  };
 -
 diff --git a/src/linux/read.c b/src/linux/read.c
-index b6d2b73..8c7e97d 100644
+index b6d2b73..c4c57e3 100644
 --- a/src/linux/read.c
 +++ b/src/linux/read.c
 @@ -15,6 +15,11 @@
@@ -672,7 +672,30 @@ index b6d2b73..8c7e97d 100644
      struct epoll_event * const ev = (struct epoll_event *) ptr;
  
      /* Special case: for regular files, return the offset from current position to end of file */
-@@ -144,8 +150,10 @@ evfilt_read_knote_create(struct filter *filt, struct knote *kn)
+@@ -124,14 +130,19 @@ evfilt_read_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
+         dst->data = 1;
+     } else {
+         /* On return, data contains the number of bytes of protocol
+-           data available to read.
++           data available to read. FIONREAD stores an int, while
++           dst->data is 64 bits wide and still holds the data given at
++           registration, so read the count into an int first.
+          */
+-        if (ioctl(dst->ident, FIONREAD, &dst->data) < 0) {
++        int avail;
++
++        if (ioctl(dst->ident, FIONREAD, &avail) < 0) {
+             /* race condition with socket close, so ignore this error */
+             dbg_puts("ioctl(2) of socket failed");
+             dst->data = 0;
+         } else {
+-            if (dst->data == 0)
++            dst->data = avail;
++            if (avail == 0)
+                 dst->flags |= EV_EOF;
+         }
+     }
+@@ -144,8 +155,10 @@ evfilt_read_knote_create(struct filter *filt, struct knote *kn)
  {
      struct epoll_event ev;
  
@@ -684,7 +707,7 @@ index b6d2b73..8c7e97d 100644
  
      /* Convert the kevent into an epoll_event */
  #if defined(HAVE_EPOLLRDHUP)
-@@ -189,10 +197,13 @@ evfilt_read_knote_create(struct filter *filt, struct knote *kn)
+@@ -189,10 +202,13 @@ evfilt_read_knote_create(struct filter *filt, struct knote *kn)
      else {
          kn->kdata.kn_dupfd = _dup_4libkqueue(kn->kev.ident);
          fcntl(kn->kdata.kn_dupfd, F_SETFD, FD_CLOEXEC);
