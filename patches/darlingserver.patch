@@ -214,7 +214,7 @@ index 633d729..75a3965 100644
  	dtape_condvar_t suspension_condvar;
  
 diff --git a/duct-tape/pthread/kern_synch.c b/duct-tape/pthread/kern_synch.c
-index aa2b6d3..ab7cdb7 100644
+index aa2b6d3..71ba60d 100644
 --- a/duct-tape/pthread/kern_synch.c
 +++ b/duct-tape/pthread/kern_synch.c
 @@ -42,6 +42,7 @@
@@ -225,7 +225,29 @@ index aa2b6d3..ab7cdb7 100644
  //#include <sys/proc_internal.h>
  #include <sys/kauth.h>
  #include <sys/systm.h>
-@@ -1236,8 +1237,22 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
+@@ -1162,8 +1163,19 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
+ 	 * user level as well.
+ 	 */
+ 	if (is_seqhigher_eq(csgen, lockseq) != 0) {
+-		__FAILEDUSERTEST__("psync_cvwait; invalid sequence numbers\n");
+-		return EINVAL;
++		/* The signal can consume this wait before it reaches the kernel.
++		 * Release the mutex as the normal wait path does, then let the
++		 * caller observe a completed (possibly spurious) wakeup. */
++		if (mutex != 0) {
++			uint32_t mutexrv = 0;
++			error = _psynch_mutexdrop(NULL, mutex, mgen, ugen, 0, flags,
++					&mutexrv);
++			if (error != 0) {
++				return error;
++			}
++		}
++		*retval = 0;
++		return 0;
+ 	}
+ 
+ 	PTHREAD_TRACE(psynch_cvar_kwait | DBG_FUNC_START, cv, mutex, cgen, 0);
+@@ -1236,8 +1248,22 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
  			struct timespec ts;
  			ts.tv_sec = (__darwin_time_t)sec;
  			ts.tv_nsec = (nsec & 0x3fffffff);
@@ -660,10 +682,61 @@ index 458e659..2e33f20 100644
  			// wait until it's read
  			if (!dtape_semaphore_down_simple(kqchan->waiter_read_semaphore)) {
 diff --git a/duct-tape/src/locks.c b/duct-tape/src/locks.c
-index 69bdf24..48199cd 100644
+index 69bdf24..634b437 100644
 --- a/duct-tape/src/locks.c
 +++ b/duct-tape/src/locks.c
-@@ -98,41 +98,48 @@ bool dtape_mutex_try_lock(dtape_mutex_t* mutex) {
+@@ -61,78 +61,97 @@ void dtape_mutex_lock(dtape_mutex_t* mutex) {
+ 		// note that this means that any microthreads that want to lock the lock will sleep for real!
+ 		// therefore, callers that try to do this must only lock the lock for short periods
+ 		while (true) {
+ 			// FIXME: we really should be using a condvar here; right now, we're just spinning until the owner drops the lock.
+ 			//        we'd need to implement condvars in libsimple first, though.
+ 			libsimple_lock_lock(&mutex->dtape_queue_lock);
+ 			if (mutex->dtape_owner == 0) {
+ 				return;
+ 			}
+ 			libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 			__builtin_ia32_pause();
+ 		}
+ 	}
+ 
+ 	dtape_mutex_assert(mutex, false);
+ 
+-	while (true) {
+-		libsimple_lock_lock(&mutex->dtape_queue_lock);
++	libsimple_lock_lock(&mutex->dtape_queue_lock);
+ 
++	while (true) {
+ 		if (mutex->dtape_owner == 0 || mutex->dtape_owner == (uintptr_t)xthread) {
+ 			// lock successfully acquired
+ 			mutex->dtape_owner = (uintptr_t)xthread;
+ 			libsimple_lock_unlock(&mutex->dtape_queue_lock);
+ 			__atomic_thread_fence(__ATOMIC_ACQUIRE);
+ 			return;
+ 		}
+ 
+ 		// lock not acquired; let's wait
+ 		TAILQ_INSERT_TAIL(&mutex->dtape_queue_head, &thread->mutex_link, link);
+ 
+ 		// this call drops the lock
+ 		dtape_hooks->thread_suspend(thread->context, NULL, NULL, &mutex->dtape_queue_lock);
++
++		// dtape_mutex_unlock() takes the thread it wakes off the queue, but a thread can also resume here without
++		// having been woken, as in dtape_condvar_wait(). leave the queue in that case, too; inserting the link again
++		// while it is still queued would corrupt the queue.
++		libsimple_lock_lock(&mutex->dtape_queue_lock);
++		dtape_mutex_link_t* link;
++		TAILQ_FOREACH(link, &mutex->dtape_queue_head, link) {
++			if (link == &thread->mutex_link) {
++				TAILQ_REMOVE(&mutex->dtape_queue_head, link, link);
++				break;
++			}
++		}
+ 	}
+ };
+ 
+ bool dtape_mutex_try_lock(dtape_mutex_t* mutex) {
+ 	thread_t xthread = current_thread();
  	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
  
  	if (!thread) {
@@ -1512,7 +1585,7 @@ index afe60fc..02968b2 100644
  
  void Assert(const char* file, int line, const char* expression) {
 diff --git a/duct-tape/src/stubs.c b/duct-tape/src/stubs.c
-index dc1cfa5..3783f82 100644
+index dc1cfa5..f2520e7 100644
 --- a/duct-tape/src/stubs.c
 +++ b/duct-tape/src/stubs.c
 @@ -37,9 +37,18 @@ extern char* getenv(const char* name);
@@ -1543,7 +1616,21 @@ index dc1cfa5..3783f82 100644
  		kind_info = " (unsafe)";
  	} else {
  		if (!log_safe_stubs) {
-@@ -209,12 +218,12 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
+@@ -144,7 +153,12 @@ boolean_t ml_set_interrupts_enabled(boolean_t enable) {
+ };
+ 
+ boolean_t ml_delay_should_spin(uint64_t interval) {
+-	return FALSE;
++	// like XNU, spin for short delays instead of blocking.
++	// these are used to back off from a contended lock (e.g. in clear_wait_internal()), possibly while clearing the
++	// caller's own wait, where blocking the microthread would corrupt its wait state.
++	uint64_t threshold;
++	nanoseconds_to_absolutetime(10 * NSEC_PER_USEC, &threshold);
++	return interval < threshold;
+ };
+ 
+ unsigned int ml_wait_max_cpus(void) {
+@@ -209,12 +223,12 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
  	return KERN_NOT_SUPPORTED;
  };
  
@@ -1611,7 +1698,7 @@ index a9eb4bc..82bf0b8 100644
  		right = convert_task_name_to_port(&looked_up_task->xnu_task);
  	} else {
 diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
-index f4ce909..a6cdb2c 100644
+index f4ce909..0d26e97 100644
 --- a/duct-tape/src/thread.c
 +++ b/duct-tape/src/thread.c
 @@ -53,6 +53,7 @@ dtape_thread_t* dtape_thread_create(dtape_task_t* task, uint64_t nsid, void* con
@@ -1622,7 +1709,32 @@ index f4ce909..a6cdb2c 100644
  	LIST_INIT(&thread->user_states);
  	dtape_mutex_init(&thread->suspension_mutex);
  	dtape_condvar_init(&thread->suspension_condvar);
-@@ -521,11 +522,16 @@ wait_result_t thread_block_parameter(thread_continue_t continuation, void* param
+@@ -505,6 +506,15 @@ static void thread_continuation_callback(void* context) {
+ 	thread->xnu_thread.parameter = NULL;
+ 
+ 	wait_result = thread->xnu_thread.wait_result;
++
++	if (wait_result == THREAD_WAITING) {
++		// resumed although nobody ended the wait (see thread_block_parameter()); keep waiting
++		thread->xnu_thread.state |= TH_WAIT;
++		thread_unlock(&thread->xnu_thread);
++		thread_block_parameter(continuation, parameter);
++		__builtin_unreachable();
++	}
++
+ 	thread_unlock(&thread->xnu_thread);
+ 
+ 	continuation(parameter, wait_result);
+@@ -514,22 +524,39 @@ static void thread_continuation_callback(void* context) {
+ 
+ wait_result_t thread_block_parameter(thread_continue_t continuation, void* parameter) {
+ 	dtape_thread_t* thread = dtape_hooks->current_thread();
++	wait_result_t wait_result;
+ 
++again:
+ 	thread_lock(&thread->xnu_thread);
+ 
+ 	thread->xnu_thread.continuation = continuation;
  	thread->xnu_thread.parameter = parameter;
  
  	bool waiting = thread->xnu_thread.state & TH_WAIT;
@@ -1640,7 +1752,22 @@ index f4ce909..a6cdb2c 100644
  	}
  
  	thread_lock(&thread->xnu_thread);
-@@ -548,8 +554,20 @@ wait_result_t thread_block(thread_continue_t continuation) {
+-	wait_result_t wait_result = thread->xnu_thread.wait_result;
++	wait_result = thread->xnu_thread.wait_result;
++
++	if (waiting && wait_result == THREAD_WAITING) {
++		// we were resumed although nobody ended the wait: a wakeup (thread_unblock() resumes the microthread) can be
++		// left over from an earlier wait that a signal interrupted, and it resumes whatever wait the thread is in
++		// when it runs. we're still on the wait queue, so just keep waiting (the next run clears TH_WAIT again).
++		thread->xnu_thread.state |= TH_WAIT;
++		thread_unlock(&thread->xnu_thread);
++		goto again;
++	}
++
+ 	thread_unlock(&thread->xnu_thread);
+ 
+ 	if (continuation) {
+@@ -548,8 +575,20 @@ wait_result_t thread_block(thread_continue_t continuation) {
  // thread locked
  boolean_t thread_unblock(thread_t xthread, wait_result_t wresult) {
  	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
@@ -1661,7 +1788,7 @@ index f4ce909..a6cdb2c 100644
  	return TRUE;
  };
  
-@@ -782,7 +800,7 @@ thread_set_state(
+@@ -782,7 +821,7 @@ thread_set_state(
  				s64.dr6 = s->dr6;
  				s64.dr7 = s->dr7;
  
@@ -1670,7 +1797,7 @@ index f4ce909..a6cdb2c 100644
  						x86_DEBUG_STATE64_COUNT);
  			}
  			case x86_DEBUG_STATE64:
-@@ -1293,7 +1311,7 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
+@@ -1293,7 +1332,7 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
  		};
  
  		default:
@@ -1679,7 +1806,7 @@ index f4ce909..a6cdb2c 100644
  	}
  };
  
-@@ -1324,11 +1342,11 @@ kern_return_t thread_wire(host_priv_t host_priv, thread_t thread, boolean_t wire
+@@ -1324,11 +1363,11 @@ kern_return_t thread_wire(host_priv_t host_priv, thread_t thread, boolean_t wire
  };
  
  kern_return_t thread_getstatus_to_user(thread_t thread, int flavor, thread_state_t tstate, mach_msg_type_number_t* count) {
@@ -3299,7 +3426,7 @@ index cc10f1d..447ae53 100644
  	int code = 0;
  	std::vector<uint32_t> oldGroups;
 diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
-index f79f057..74252c8 100644
+index f79f057..87825c8 100644
 --- a/src/darlingserver.cpp
 +++ b/src/darlingserver.cpp
 @@ -497,6 +497,113 @@ static void handle_sigusr1(int signum) {
@@ -3416,22 +3543,10 @@ index f79f057..74252c8 100644
  int main(int argc, char** argv) {
  	const char* prefix = NULL;
  	uid_t originalUID = -1;
-@@ -515,6 +622,30 @@ int main(int argc, char** argv) {
+@@ -515,6 +622,18 @@ int main(int argc, char** argv) {
  	char putOld[4096];
  	char *p;
  
-+	/* darling-lol M58f2: never die from SIGPIPE. The server writes to
-+	 * client sockets (MessageQueue::sendMany's sendmmsg, RPC replies,
-+	 * async-writer) whose peers are guest processes that can be torn
-+	 * down at any moment (Chromium helper churn, crashes). The default
-+	 * SIGPIPE disposition kills the whole server SILENTLY — no core,
-+	 * no log — which then wedges the entire container (every guest RPC
-+	 * fails with ECONNREFUSED). The write paths already handle EPIPE /
-+	 * ECONNREFUSED errors gracefully (e.g. message.cpp sendMany drops
-+	 * the dead peer's message); they just never got a chance to run.
-+	 * Ignoring SIGPIPE makes those handlers reachable. */
-+	signal(SIGPIPE, SIG_IGN);
-+
 +	/* darling-lol M58f2b: catch SIGTERM/SIGINT and log the sender instead
 +	 * of dying (see handle_sigterm_diagnostic above). */
 +	{
@@ -3447,7 +3562,7 @@ index f79f057..74252c8 100644
  	if (argc < 6) {
  		fprintf(stderr, "darlingserver is not meant to be started manually\n");
  		exit(1);
-@@ -577,8 +708,15 @@ int main(int argc, char** argv) {
+@@ -577,8 +696,15 @@ int main(int argc, char** argv) {
  
  		// now set our increased rlimit
  		if (setrlimit(RLIMIT_NOFILE, &increased_limit) != 0) {
@@ -3465,7 +3580,20 @@ index f79f057..74252c8 100644
  		}
  
  #endif
-@@ -745,6 +883,15 @@ int main(int argc, char** argv) {
+@@ -735,6 +861,12 @@ int main(int argc, char** argv) {
+ 	perma_drop_privileges(originalUID, originalGID);
+ 	prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+ 
++	// a client can exit while we are writing to one of its pipes or sockets;
++	// that must fail with EPIPE instead of killing the server.
++	// this is done only here, after launchd's process has been created, because an ignored
++	// SIGPIPE survives execve() and launchd (and every process it spawns) must start with the default.
++	signal(SIGPIPE, SIG_IGN);
++
+ #if DSERVER_ASAN
+ 	// set up a signal handler to print leak info
+ 	struct sigaction leak_info_action;
+@@ -745,6 +877,15 @@ int main(int argc, char** argv) {
  #endif
  
  	// create the server
@@ -3672,7 +3800,7 @@ index 7b8000f..dbaf832 100644
  	}
  
 diff --git a/src/message.cpp b/src/message.cpp
-index 414c1d6..5799721 100644
+index 414c1d6..8295d69 100644
 --- a/src/message.cpp
 +++ b/src/message.cpp
 @@ -24,6 +24,25 @@
@@ -4186,6 +4314,15 @@ index 414c1d6..5799721 100644
  	while (ret >= 0) {
  		len = 0;
  		for (size_t i = 0; i < _messages.size() && i < sizeof(mmsgs) / sizeof(*mmsgs); ++i) {
+@@ -530,7 +744,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+ 			break;
+ 		}
+ 
+-		ret = sendmmsg(socket, mmsgs, len, MSG_DONTWAIT);
++		ret = sendmmsg(socket, mmsgs, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+ 
+ 		if (ret < 0) {
+ 			if (errno == EAGAIN) {
 @@ -538,7 +752,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  				break;
  			} else if (errno == EINTR) {
@@ -5758,7 +5895,7 @@ index e502e28..8cc3b39 100644
 +	}
  };
 diff --git a/src/thread.cpp b/src/thread.cpp
-index 5563ad9..0078b9a 100644
+index 5563ad9..c184091 100644
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
 @@ -43,6 +43,7 @@
@@ -5890,7 +6027,47 @@ index 5563ad9..0078b9a 100644
  static thread_local std::shared_ptr<DarlingServer::Thread> currentThreadVar = nullptr;
  static thread_local bool returningToThreadTop = false;
  static thread_local ucontext_t backToThreadTopContext;
-@@ -308,7 +423,14 @@ DarlingServer::Address DarlingServer::Thread::address() const {
+@@ -85,7 +200,22 @@ DarlingServer::Thread::Thread(std::shared_ptr<Process> process, NSID nsid, void*
+ {
+ 	_tid = -1;
+ 
++	auto& scanRegistry = threadRegistry();
+ 	for (const auto& entry: std::filesystem::directory_iterator("/proc/" + std::to_string(process->id()) + "/task")) {
++		// a thread that is already registered is not the one being created; skipping it keeps the cost of
++		// creating a thread independent of how many threads the process already has (reading every
++		// thread's status file made each creation cost time proportional to the thread count, with the
++		// server's single loop blocked meanwhile)
++		pid_t candidate = 0;
++		try {
++			candidate = std::stoi(entry.path().filename().string());
++		} catch (const std::exception&) {
++			continue;
++		}
++		if (scanRegistry.lookupEntryByID(candidate).has_value()) {
++			continue;
++		}
++
+ 		std::ifstream statusFile(entry.path() / "status");
+ 		std::string line;
+ 
+@@ -106,11 +236,15 @@ DarlingServer::Thread::Thread(std::shared_ptr<Process> process, NSID nsid, void*
+ 					continue;
+ 				}
+ 
+-				_tid = std::stoi(entry.path().filename().string());
++				_tid = candidate;
+ 
+ 				break;
+ 			}
+ 		}
++
++		if (_tid != -1) {
++			break;
++		}
+ 	}
+ 
+ 	// if we can't determine the thread id from procfs, try some other more costly methods.
+@@ -308,7 +442,14 @@ DarlingServer::Address DarlingServer::Thread::address() const {
  	return _address;
  };
  
@@ -5906,7 +6083,7 @@ index 5563ad9..0078b9a 100644
  	std::unique_lock lock(_rwlock);
  	_address = address;
  };
-@@ -350,14 +472,14 @@ void DarlingServer::Thread::microthreadWorker() {
+@@ -350,14 +491,14 @@ void DarlingServer::Thread::microthreadWorker() {
  #if DSERVER_ASAN
  		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  #endif
@@ -5923,7 +6100,7 @@ index 5563ad9..0078b9a 100644
  	}
  	__builtin_unreachable();
  };
-@@ -381,13 +503,13 @@ void DarlingServer::Thread::microthreadContinuation() {
+@@ -381,13 +522,13 @@ void DarlingServer::Thread::microthreadContinuation() {
  #if DSERVER_ASAN
  		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  #endif
@@ -5939,7 +6116,7 @@ index 5563ad9..0078b9a 100644
  	}
  	__builtin_unreachable();
  };
-@@ -432,7 +554,7 @@ void DarlingServer::Thread::doWork() {
+@@ -432,7 +573,7 @@ void DarlingServer::Thread::doWork() {
  
  	_runningCondvar.notify_all();
  
@@ -5948,7 +6125,7 @@ index 5563ad9..0078b9a 100644
  
  	if (returningToThreadTop) {
  		// someone jumped back to the top of the microthread
-@@ -503,7 +625,7 @@ void DarlingServer::Thread::doWork() {
+@@ -503,7 +644,7 @@ void DarlingServer::Thread::doWork() {
  			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
  #endif
  
@@ -5957,7 +6134,7 @@ index 5563ad9..0078b9a 100644
  		} else {
  			if (!_pendingCall) {
  				// if we don't actually have a pending call, we have nothing to do
-@@ -520,7 +642,7 @@ void DarlingServer::Thread::doWork() {
+@@ -520,7 +661,7 @@ void DarlingServer::Thread::doWork() {
  			stackPool.allocate(_stack);
  
  			ucontext_t newContext;
@@ -5966,7 +6143,7 @@ index 5563ad9..0078b9a 100644
  			newContext.uc_stack.ss_sp = _stack.base;
  			newContext.uc_stack.ss_size = _stack.size;
  			newContext.uc_stack.ss_flags = 0;
-@@ -531,7 +653,7 @@ void DarlingServer::Thread::doWork() {
+@@ -531,7 +672,7 @@ void DarlingServer::Thread::doWork() {
  			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
  #endif
  
@@ -5975,7 +6152,7 @@ index 5563ad9..0078b9a 100644
  		}
  
  		// inform the compiler that it shouldn't do anything that would live past the setcontext calls
-@@ -602,7 +724,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+@@ -602,7 +743,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  
  	unlockMeWhenSuspending = unlockMe;
  
@@ -5984,7 +6161,7 @@ index 5563ad9..0078b9a 100644
  
  	_rwlock.lock();
  	if (_suspended) {
-@@ -620,7 +742,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+@@ -620,7 +761,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  		__sanitizer_start_switch_fiber((continuationCallback) ? nullptr : &asanOldFakeStack, asanOldStackBottom, asanOldStackSize);
  #endif
  
@@ -5993,7 +6170,7 @@ index 5563ad9..0078b9a 100644
  		__builtin_unreachable();
  	} else {
  		// we've been resumed
-@@ -690,7 +812,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
+@@ -690,7 +831,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
  	std::unique_lock lock(_rwlock);
  	_continuationCallback = startupCallback;
  	_suspended = true;
@@ -6002,7 +6179,7 @@ index 5563ad9..0078b9a 100644
  };
  
  void DarlingServer::Thread::startKernelThread(std::function<void()> startupCallback) {
-@@ -717,6 +839,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -717,6 +858,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  		std::unique_lock lock(_rwlock);
  		oldThread = _impersonating;
  		_impersonating = thread;
@@ -6010,7 +6187,7 @@ index 5563ad9..0078b9a 100644
  	}
  
  	if (oldThread) {
-@@ -730,6 +853,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -730,6 +872,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  };
  
  std::shared_ptr<DarlingServer::Thread> DarlingServer::Thread::impersonatingThread() const {
@@ -6024,7 +6201,7 @@ index 5563ad9..0078b9a 100644
  	std::shared_lock lock(_rwlock);
  	return _impersonating;
  };
-@@ -768,7 +898,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+@@ -768,7 +917,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
  			__sanitizer_start_switch_fiber(nullptr, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  		}
  #endif
@@ -6033,7 +6210,7 @@ index 5563ad9..0078b9a 100644
  		__builtin_unreachable();
  	}
  
-@@ -776,7 +906,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+@@ -776,7 +925,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
  #if DSERVER_ASAN
  	__sanitizer_start_switch_fiber(nullptr, asanOldStackBottom, asanOldStackSize);
  #endif
@@ -6042,7 +6219,7 @@ index 5563ad9..0078b9a 100644
  	__builtin_unreachable();
  };
  
-@@ -872,6 +1002,24 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
+@@ -872,6 +1021,24 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
  };
  
  void DarlingServer::Thread::kernelSync(std::function<void()> fn) {
@@ -6067,7 +6244,7 @@ index 5563ad9..0078b9a 100644
  	std::mutex mutex;
  	std::condition_variable condvar;
  	bool done = false;
-@@ -1443,7 +1591,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
+@@ -1443,7 +1610,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
  #if DSERVER_ASAN
  	__sanitizer_start_switch_fiber(&asanOldFakeStack, stack, stackSize);
  #endif
@@ -6076,7 +6253,7 @@ index 5563ad9..0078b9a 100644
  	__builtin_unreachable();
  };
  
-@@ -1543,7 +1691,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
+@@ -1543,7 +1710,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
  	dtape_thread_sigexc_enter(currentThreadVar->_dtapeThread);
  
  	currentThreadVar->_didSyscallReturnDuringInterrupt = false;

@@ -16,3 +16,34 @@ index 4c9c4a1..db3dda2 100644
  // Libsystem knows about this symbol and exports it to libsyscall
  int
  pthread_current_stack_contains_np(const void *addr, size_t length)
+diff --git a/src/pthread_cond.c b/src/pthread_cond.c
+index f7e532c..ef6c495 100644
+--- a/src/pthread_cond.c
++++ b/src/pthread_cond.c
+@@ -388,15 +388,22 @@ _pthread_psynch_cond_signal(pthread_cond_t *cond, bool broadcast,
+ 
+ 		/* validate to eliminate spurious values, race snapshots */
+ 		if (is_seqhigher((scntval & PTHRW_COUNT_MASK), (lcntval & PTHRW_COUNT_MASK))) {
+-			/* since ucntval may be newer, just redo */
++			/* A concurrent waiter may be publishing a newer L value.  If the
++			 * impossible S > L state persists, recover the S count while
++			 * checking both words atomically. */
+ 			retry_count++;
+ 			if (retry_count > 8192) {
+-				return EAGAIN;
++				uint64_t old_ls = ((uint64_t)scntval << 32) | lcntval;
++				uint32_t repaired_s = (scntval & PTHRW_BIT_MASK) |
++						(lcntval & PTHRW_COUNT_MASK);
++				uint64_t new_ls = ((uint64_t)repaired_s << 32) | lcntval;
++				os_atomic_cmpxchg(c_lsseqaddr, old_ls, new_ls, seq_cst);
++				retry_count = 0;
+ 			} else {
+ 				sched_yield();
+-				retry = true;
+-				continue;
+ 			}
++			retry = true;
++			continue;
+ 		} else if (is_seqhigher((ucntval & PTHRW_COUNT_MASK), (lcntval & PTHRW_COUNT_MASK))) {
+ 			/* since ucntval may be newer, just redo */
+ 			uretry_count++;
