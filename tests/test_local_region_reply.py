@@ -319,6 +319,8 @@ int main(void)
     int maps = open("/proc/self/maps", O_RDONLY);
     assert(maps >= 0);
     int have_ioctl = ioctl(maps, LREGION_IOCTL, &probe) == 0;
+    /* a kernel without it answers ENOTTY; any other error is a failure of this test */
+    assert(have_ioctl || errno == ENOTTY);
     close(maps);
 
     kern_return_t kr = mach_vm_region_recurse(mach_task_self(), &addr, &size, &depth, info, &count);
@@ -381,7 +383,9 @@ int main(void)
                             '-Wno-unused-variable', '-Wno-unused-parameter',
                             str(source), '-o', str(binary)], check=True)
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
-            self.assertIn(result.stdout.strip(), ('ok', 'no-ioctl'))
+            if result.stdout.strip() == 'no-ioctl':
+                self.skipTest('this kernel has no PROCMAP_QUERY: only the hand-over to the server was checked')
+            self.assertEqual(result.stdout.strip(), 'ok')
 
 
 if __name__ == '__main__':
