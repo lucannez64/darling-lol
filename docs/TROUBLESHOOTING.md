@@ -408,7 +408,29 @@ is no terminal), then stops the runtime, saves the Riot logs under
 and keeps the Darling runtime (overlays, certificate store) and the Mesa shader
 cache. `--keep-game` keeps the game and its product metadata instead of
 removing it, and `--all` removes the whole prefix. Only a Darling prefix is
-accepted; any other directory is refused.
+accepted; any other directory is refused. On a Toolbox install, run it from the
+host as usual: it finds the recorded container (`build/toolbox-container`) and
+runs itself inside it with the same options.
+
+### Remove darling-lol completely
+
+To remove the prefix with the runtime, the Riot Client and the game, run from
+the checkout (on the host, also for a Toolbox install):
+
+```sh
+sh scripts/uninstall.sh --all
+```
+
+A Toolbox install also keeps Darling and the build tools in its container.
+Remove the container after the prefix (the default name is `darling-lol`; the
+one in use is in `build/toolbox-container`):
+
+```sh
+toolbox rm --force darling-lol
+```
+
+Then remove the shortcuts with `sh scripts/create-shortcuts.sh --remove` and
+delete the checkout.
 
 ### Clean prefix logs, local state and platform identity
 
