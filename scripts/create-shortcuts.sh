@@ -219,9 +219,18 @@ toolbox_available() {
   toolbox run -c "$1" true >/dev/null 2>&1
 }
 
+distrobox_container_exists() {
+  local manager=''
+  command -v podman >/dev/null 2>&1 || return 1
+  podman container exists -- "$1" >/dev/null 2>&1 || return 1
+  manager=$(podman container inspect --format '{{index .Config.Labels "manager"}}' "$1" 2>/dev/null) || manager=''
+  [[ $manager == distrobox ]]
+}
+
 distrobox_available() {
   command -v distrobox >/dev/null 2>&1 || return 1
-  distrobox enter --no-tty --name "$1" -- true >/dev/null 2>&1
+  distrobox_container_exists "$1" || return 1
+  DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name "$1" -- true </dev/null >/dev/null 2>&1
 }
 
 container_available() {
@@ -265,7 +274,8 @@ detect_container_target() {
       name=$DEFAULT_TOOLBOX
       backend=toolbox
     elif command -v distrobox >/dev/null 2>&1 &&
-         distrobox enter --no-tty --name "$DEFAULT_TOOLBOX" -- sh -c 'command -v darling' >/dev/null 2>&1; then
+         distrobox_container_exists "$DEFAULT_TOOLBOX" &&
+         DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name "$DEFAULT_TOOLBOX" -- sh -c 'command -v darling' </dev/null >/dev/null 2>&1; then
       name=$DEFAULT_TOOLBOX
       backend=distrobox
     fi

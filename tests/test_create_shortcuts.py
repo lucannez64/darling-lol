@@ -655,15 +655,30 @@ class DistroboxShortcutsTests(unittest.TestCase):
     def fake_distrobox(self, container='my-dbx'):
         bin_dir = self.root / 'bin'
         bin_dir.mkdir(exist_ok=True)
+        log = self.root / 'distrobox.log'
         stub = bin_dir / 'distrobox'
         stub.write_text(f'''\
 #!/bin/sh
+printf '%s:%s\\n' "${{DBX_CONTAINER_MANAGER:-}}" "$*" >> "{log}"
 if [ "$1" = enter ] && [ "$2" = --no-tty ] && [ "$3" = --name ] && [ "$4" = {container} ]; then
   exit 0
 fi
 exit 1
 ''')
         stub.chmod(0o755)
+        podman_stub = bin_dir / 'podman'
+        podman_stub.write_text(f'''\
+#!/bin/sh
+case "${{1:-}}:${{2:-}}" in
+  container:exists) [ "${{4:-}}" = {container} ] ;;
+  container:inspect)
+    [ "${{5:-}}" = {container} ] || exit 1
+    printf 'distrobox\\n'
+    ;;
+  *) exit 1 ;;
+esac
+''')
+        podman_stub.chmod(0o755)
         (bin_dir / 'toolbox').write_text('#!/bin/sh\nexit 1\n')
         (bin_dir / 'toolbox').chmod(0o755)
         return str(bin_dir)
@@ -691,6 +706,16 @@ exit 1
         self.assertEqual(result.returncode, 0, result.stderr)
         entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
         self.assertTrue(entry['Exec'].startswith('distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+        calls = (self.root / 'distrobox.log').read_text().splitlines()
+        self.assertTrue(calls and all(line.startswith('podman:') for line in calls), calls)
+
+    def test_missing_distrobox_container_fails_without_entering(self):
+        path = self.fake_distrobox('my-dbx')
+        result = self.run_cli('--create', '--yes', '--distrobox', 'missing-box', path=path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('is not usable', result.stderr)
+        self.assertFalse((self.home / '.local/share/applications/darling-launcher.desktop').exists())
+        self.assertFalse((self.root / 'distrobox.log').exists())
 
     def test_toolbox_flag_falls_back_to_distrobox_when_toolbox_fails(self):
         path = self.fake_distrobox('my-dbx')

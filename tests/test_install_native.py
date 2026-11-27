@@ -1402,10 +1402,10 @@ install_toolbox
         create = next(line for line in lines if 'distrobox create' in line)
         command = next(line for line in lines if line.startswith('exec:'))
         self.assertIn(
-            'distrobox create --yes --name my-box --image registry.fedoraproject.org/fedora-toolbox:45',
+            'env DBX_CONTAINER_MANAGER=podman distrobox create --yes --name my-box --image registry.fedoraproject.org/fedora-toolbox:45',
             create,
         )
-        self.assertIn('exec:distrobox enter --no-tty --name my-box -- ', command)
+        self.assertIn('exec:env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-box -- ', command)
         self.assertIn('DARLING_LOL_TOOLBOX_BACKEND=distrobox', command)
         self.assertIn('DARLING_LOL_TOOLBOX_NAME=my-box', command)
 
@@ -1422,7 +1422,11 @@ install_toolbox
             backend='distrobox', name='my-box', exists=True, manager='distrobox')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(any('distrobox create' in line for line in lines), lines)
-        self.assertTrue(any('exec:distrobox enter --no-tty --name my-box -- ' in line for line in lines), lines)
+        self.assertTrue(
+            any('exec:env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-box -- ' in line
+                for line in lines),
+            lines,
+        )
 
     def test_distrobox_enter_omits_no_tty_when_interactive(self):
         with tempfile.TemporaryDirectory(prefix='install-native-dbx-pty ') as folder:
@@ -1444,7 +1448,10 @@ install_toolbox
             code, output = run_sourced_pty(snippet, b'')
             self.assertEqual(code, 0, output)
             command = log.read_text().strip()
-            self.assertTrue(command.startswith('exec:distrobox enter --name my-box -- '), command)
+            self.assertTrue(
+                command.startswith('exec:env DBX_CONTAINER_MANAGER=podman distrobox enter --name my-box -- '),
+                command,
+            )
             self.assertNotIn('--no-tty', command)
 
 

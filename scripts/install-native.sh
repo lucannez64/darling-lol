@@ -804,7 +804,7 @@ install_toolbox() {
     local image="registry.fedoraproject.org/fedora-toolbox:${release}"
     if ! podman container exists "$TOOLBOX_NAME"; then
       run "Creating Distrobox container '$TOOLBOX_NAME'" \
-        distrobox create --yes --name "$TOOLBOX_NAME" --image "$image"
+        env DBX_CONTAINER_MANAGER=podman distrobox create --yes --name "$TOOLBOX_NAME" --image "$image"
     else
       local manager=''
       manager=$(podman container inspect --format '{{index .Config.Labels "manager"}}' "$TOOLBOX_NAME" 2>/dev/null) || manager=''
@@ -823,7 +823,7 @@ install_toolbox() {
       enter_args=(--no-tty "${enter_args[@]}")
     fi
 
-    exec distrobox enter "${enter_args[@]}" -- \
+    exec env DBX_CONTAINER_MANAGER=podman distrobox enter "${enter_args[@]}" -- \
       "${inner_env[@]}" bash "$SCRIPT_PATH" "${args[@]}"
   fi
 

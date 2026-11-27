@@ -55,7 +55,8 @@ exit 0
 """
 
 FAKE_DISTROBOX = """#!/bin/sh
-# Fake distrobox: records argv, then behaves per the FAKE_TOOLBOX_* knobs.
+# Fake distrobox: records argv and DBX_CONTAINER_MANAGER, then behaves per FAKE_TOOLBOX_*.
+printf '%s\\n' "${DBX_CONTAINER_MANAGER:-}" >> "${FAKE_DISTROBOX_LOG:?}.manager"
 printf '%s\\n' "$*" >> "${FAKE_DISTROBOX_LOG:?}"
 case "${1:-}" in enter) shift ;; *) exit 0 ;; esac
 while [ "$#" -gt 0 ]; do
@@ -79,12 +80,21 @@ exit 0
 
 
 FAKE_PODMAN = """#!/bin/sh
-# Fake podman: reports the container state from FAKE_PODMAN_RUNNING, can fail a
-# stop, and records every call so a restart can be asserted.
+# Fake podman: reports existence, labels and running state from FAKE_PODMAN_*.
 printf '%s\\n' "$*" >> "${FAKE_PODMAN_LOG:?}"
 case "${1:-}" in container) shift ;; esac
 case "${1:-}" in
+  exists)
+    [ "${FAKE_PODMAN_EXISTS:-1}" = 1 ] || exit 1
+    ;;
   inspect)
+    case "${3:-}" in
+      *Labels*)
+        [ "${FAKE_PODMAN_EXISTS:-1}" = 1 ] || exit 1
+        printf '%s\\n' "${FAKE_PODMAN_MANAGER-distrobox}"
+        exit 0
+        ;;
+    esac
     running="${FAKE_PODMAN_RUNNING:-0}"
     # FAKE_PODMAN_STARTS=1: the container counts as running only after a
     # `toolbox run` started it, so a stop can fail after the update.
@@ -919,6 +929,36 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('No existing build', result.stderr)
         self.assertEqual(self.distrobox_lines(), [])
+
+    def test_missing_distrobox_container_fails_without_entering_or_prompting(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        result = self.run_update(input_text='', FAKE_PODMAN_EXISTS='0')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('does not exist', result.stderr)
+        self.assertNotIn('Start it and continue', result.stdout)
+        self.assertEqual(self.distrobox_lines(), [])
+
+    def test_stopped_existing_distrobox_container_still_enters_and_stops(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        result = self.run_update(
+            input_text='',
+            FAKE_PODMAN_EXISTS='1',
+            FAKE_PODMAN_RUNNING='0',
+            FAKE_PODMAN_STARTS='1',
+            FAKE_TOOLBOX_CONTAINER_OK='1',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            any('enter --no-tty --name my-dbx -- ' in line for line in self.distrobox_lines()),
+            self.distrobox_lines(),
+        )
+        self.assertEqual(
+            set(Path(f'{self.distrobox_log}.manager').read_text().splitlines()),
+            {'podman'},
+        )
+        self.assertIn('stop --time 10 my-dbx', self.podman_lines())
 
 
 if __name__ == '__main__':

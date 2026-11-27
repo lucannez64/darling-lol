@@ -36,7 +36,8 @@ exit 0
 """
 
 FAKE_DISTROBOX = """#!/bin/sh
-# Fake distrobox: records argv, then behaves per the FAKE_TOOLBOX_* knobs.
+# Fake distrobox: records argv and DBX_CONTAINER_MANAGER, then behaves per FAKE_TOOLBOX_*.
+printf '%s\\n' "${DBX_CONTAINER_MANAGER:-}" >> "${FAKE_DISTROBOX_LOG:?}.manager"
 printf '%s\\n' "$*" >> "${FAKE_DISTROBOX_LOG:?}"
 case "${1:-}" in enter) shift ;; *) exit 0 ;; esac
 while [ "$#" -gt 0 ]; do
@@ -52,6 +53,17 @@ case "${1:-}" in
   sh) [ "${FAKE_TOOLBOX_HAS_DARLING:-0}" = 1 ] || exit 1 ;;
 esac
 exit 0
+"""
+
+FAKE_PODMAN = """#!/bin/sh
+case "${1:-}:${2:-}" in
+  container:exists) [ "${FAKE_PODMAN_EXISTS:-1}" = 1 ] ;;
+  container:inspect)
+    [ "${FAKE_PODMAN_EXISTS:-1}" = 1 ] || exit 1
+    printf '%s\\n' "${FAKE_PODMAN_MANAGER-distrobox}"
+    ;;
+  *) exit 1 ;;
+esac
 """
 
 
@@ -93,6 +105,8 @@ class CleanPrefixToolboxTests(unittest.TestCase):
         (self.bindir / 'toolbox').chmod(0o755)
         (self.bindir / 'distrobox').write_text(FAKE_DISTROBOX)
         (self.bindir / 'distrobox').chmod(0o755)
+        (self.bindir / 'podman').write_text(FAKE_PODMAN)
+        (self.bindir / 'podman').chmod(0o755)
         self.env = dict(os.environ)
         self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
                         FAKE_DISTROBOX_LOG=str(self.distrobox_log),
@@ -279,6 +293,32 @@ class CleanPrefixToolboxTests(unittest.TestCase):
         )
         self.assertIn(expected, self.distrobox_lines())
         self.assertEqual(self.argv_lines(), [])
+        self.assertEqual(
+            set(Path(f'{self.distrobox_log}.manager').read_text().splitlines()),
+            {'podman'},
+        )
+
+    def test_missing_or_non_distrobox_container_skips_distrobox_enter(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build' / 'toolbox-backend').write_text('distrobox\n')
+        missing = self.run_clean(stdin=subprocess.DEVNULL, FAKE_PODMAN_EXISTS='0')
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn('is not reachable', missing.stderr)
+        self.assertEqual(self.distrobox_lines(), [])
+
+        wrong_manager = self.run_clean(stdin=subprocess.DEVNULL, FAKE_PODMAN_MANAGER='')
+        self.assertEqual(wrong_manager.returncode, 1)
+        self.assertEqual(self.distrobox_lines(), [])
+
+        (self.repo / 'build' / 'toolbox-container').unlink()
+        (self.repo / 'build' / 'toolbox-backend').unlink()
+        legacy = self.run_clean(
+            '--help', stdin=subprocess.DEVNULL,
+            FAKE_TOOLBOX_BAD_VERSION='1',
+            FAKE_PODMAN_EXISTS='0',
+        )
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        self.assertEqual(self.distrobox_lines(), [])
 
     def test_distrobox_desktop_entry_reexecs_without_marker(self):
         apps = self.home / '.local/share/applications'

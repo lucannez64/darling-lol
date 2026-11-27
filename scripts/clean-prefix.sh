@@ -128,6 +128,12 @@ is_toolbx_cli() {
 	esac
 }
 
+distrobox_container_exists() {
+	command -v podman >/dev/null 2>&1 || return 1
+	podman container exists -- "$1" >/dev/null 2>&1 || return 1
+	[ "$(podman container inspect --format '{{index .Config.Labels "manager"}}' "$1" 2>/dev/null || true)" = distrobox ]
+}
+
 inside_toolbox=0
 inside_backend=''
 if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
@@ -183,7 +189,8 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 			name=darling-lol
 			backend=toolbox
 		elif command -v distrobox >/dev/null 2>&1 &&
-			distrobox enter --no-tty --name darling-lol -- sh -c 'command -v darling' >/dev/null 2>&1; then
+			distrobox_container_exists darling-lol &&
+			DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name darling-lol -- sh -c 'command -v darling' </dev/null >/dev/null 2>&1; then
 			name=darling-lol
 			backend=distrobox
 		fi
@@ -195,7 +202,8 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 				error_note "Install Distrobox, then run the cleanup inside the container: distrobox enter $name"
 				exit 1
 			fi
-			if ! distrobox enter --no-tty --name "$name" -- true 2>/dev/null; then
+			if ! distrobox_container_exists "$name" ||
+				! DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name "$name" -- true </dev/null 2>/dev/null; then
 				error "This checkout was installed via Distrobox container '$name', but that container is not reachable."
 				error_note "Start it and run the cleanup inside it: distrobox enter $name"
 				exit 1
@@ -251,6 +259,7 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 		fi
 		set -- env "$@"
 		if [ "$backend" = distrobox ]; then
+			export DBX_CONTAINER_MANAGER=podman
 			if [ -t 0 ]; then
 				exec distrobox enter --name "$name" -- "$@"
 			fi
