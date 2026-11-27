@@ -15,6 +15,7 @@ cd "$repo"
 VERBOSE=0
 BG_PID=''
 LOG=''
+DIGEST_CACHE=''
 # Toolbox container this run started (or restarted); the EXIT trap stops it so
 # a one-shot update does not leave a container running behind.
 TOOLBOX_STOP=''
@@ -137,6 +138,10 @@ cleanup() {
 		fi
 		wait "$BG_PID" 2>/dev/null || true
 		BG_PID=''
+	fi
+	if [ -n "$DIGEST_CACHE" ]; then
+		rm -f -- "$DIGEST_CACHE" 2>/dev/null || true
+		DIGEST_CACHE=''
 	fi
 	if [ -n "$TOOLBOX_STOP" ]; then
 		stop_toolbox_container "$TOOLBOX_STOP" || true
@@ -266,11 +271,21 @@ prepare_output() {
 	fi
 }
 
+# Share one checkout digest across configure, build, install and overlay stamps
+# within this update session; build.sh deletes the file after prepare.py runs.
+init_digest_cache() {
+	DIGEST_CACHE=$(mktemp -- "${TMPDIR:-/tmp}/darling-lol-checkout-digest.XXXXXXXX" 2>/dev/null) || DIGEST_CACHE=''
+	if [ -n "$DIGEST_CACHE" ]; then
+		rm -f -- "$DIGEST_CACHE"
+		export RCLOL_CHECKOUT_DIGEST_CACHE="$DIGEST_CACHE"
+	fi
+}
+
 # Older setups shipped one serial and UUID shared by every install, and prefixes set up before
 # provisioning have no saved identity at all (iokitd then reports a DARLING- serial). Give such a
 # prefix its own identity; custom saved values are left alone.
 replace_shared_identity() {
-	python3 build/runtime/tools/stop-darling-runtime.py
+	[ "${RCLOL_RUNTIME_STOPPED:-0}" = 1 ] || python3 build/runtime/tools/stop-darling-runtime.py
 	python3 tools/configure-darling-platform.py --replace-known-defaults --write ||
 		warning 'Could not replace the shared platform identity; run tools/configure-darling-platform.py --provision --write'
 }
@@ -535,6 +550,7 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	esac
 	mkdir -p build/nix-gcroots
 	prepare_output
+	init_digest_cache
 	printf '\n%s%sUpdating Darling-LoL%s\n' "$BOLD" "$CYAN" "$RESET"
 	run 'Rooting the Nix package closure' \
 		nix-store --realise "$package" --add-root "$repo/build/nix-gcroots/$(basename "$package")" --indirect
@@ -543,7 +559,13 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
 	run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
 	install_system_components cmake --install build/darling-src/build
 	run 'Recording the installed base runtime' python3 scripts/nix-state.py stamp-base
-	run 'Installing the user runtime' ./scripts/install-runtime.sh
+	run 'Installing the user runtime' env \
+		RCLOL_SKIP_PREFLIGHT=1 \
+		RCLOL_SKIP_CONFIGURE=1 \
+		RCLOL_RUNTIME_STOPPED=1 \
+		RCLOL_SKIP_CMAKE_SUBTARGETS=1 \
+		RCLOL_SKIP_DARLINGSERVER_INSTALL=1 \
+		./scripts/install-runtime.sh
 	warn_if_runtime_unsigned
 	replace_shared_identity
 	show_log
@@ -717,14 +739,21 @@ if ! command -v sudo >/dev/null 2>&1; then
 	exit 1
 fi
 prepare_output
+init_digest_cache
 printf '\n%s%sUpdating Darling-LoL%s\n' "$BOLD" "$CYAN" "$RESET"
 
 run 'Building Darling-LoL' ./scripts/build.sh
 run 'Stopping the running runtime' python3 build/runtime/tools/stop-darling-runtime.py
 install_system_components sudo cmake --install build/darling-src/build
-run 'Installing the user runtime' ./scripts/install-runtime.sh
+run 'Installing the user runtime' env \
+	RCLOL_SKIP_PREFLIGHT=1 \
+	RCLOL_SKIP_CONFIGURE=1 \
+	RCLOL_RUNTIME_STOPPED=1 \
+	RCLOL_SKIP_CMAKE_SUBTARGETS=1 \
+	RCLOL_SKIP_DARLINGSERVER_INSTALL=1 \
+	./scripts/install-runtime.sh
 warn_if_runtime_unsigned
 sign_sdk_runtime
-replace_shared_identity
+RCLOL_RUNTIME_STOPPED=1 replace_shared_identity
 show_log
 success 'Update installed. Start Darling with: sh scripts/run.sh'

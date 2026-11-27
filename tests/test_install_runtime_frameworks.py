@@ -85,12 +85,19 @@ class InstallRuntimeFrameworkTests(unittest.TestCase):
         self.assertLess(check, call)
         self.assertIn('RCLOL_FORCE_OVERLAY_REBUILD', self.script)
 
-    def test_validation_mirror_and_signing_run_on_every_update(self):
+    def test_validation_mirror_and_signing_run_outside_overlay_batch(self):
         body = self.batch_body()
-        for every_run in ('validate-riot-runtime.py',
-                          'sync-canonical-runtime-overlays.py',
-                          'sign-darling-runtime.sh'):
-            self.assertNotIn(every_run, body)
+        for outside in ('validate-riot-runtime.py',
+                        'sync-canonical-runtime-overlays.py',
+                        'sign-darling-runtime.sh'):
+            self.assertNotIn(outside, body)
+        self.assertIn('[ -n "$overlay_rebuilt" ] || [ "${RCLOL_FORCE_VALIDATE:-0}" = 1 ]', self.script)
+        gate_start = self.script.index('[ -n "$overlay_rebuilt" ] || [ "${RCLOL_FORCE_VALIDATE:-0}" = 1 ]')
+        gate_end = self.script.index('\nfi\n', gate_start)
+        gate_block = self.script[gate_start:gate_end]
+        self.assertIn('validate-riot-runtime.py', gate_block)
+        self.assertIn('sync-canonical-runtime-overlays.py', gate_block)
+        self.assertLess(gate_end, self.script.index('runtime-sign-stamp.py'))
 
     def test_installed_stub_digests_and_stamp_follow_signing(self):
         sign = self.script.index('sign-darling-runtime.sh" $sign_args')

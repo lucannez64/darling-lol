@@ -787,6 +787,46 @@ class UpdateToolboxTests(unittest.TestCase):
         calls = sudo_log.read_text().splitlines() if sudo_log.exists() else []
         self.assertFalse(any('sign-darling-runtime.sh' in line for line in calls), calls)
 
+    def test_update_passes_session_dedup_env_and_cleans_digest_cache(self):
+        self.prepare_stub_update()
+        runtime_env_log = self.home / 'runtime-env.log'
+        stop_log = self.home / 'stop.log'
+        self.stub(self.bindir / 'python3',
+                  'for arg in "$@"; do\n'
+                  '  if [ "$arg" = - ]; then echo none; fi\n'
+                  '  case "$arg" in\n'
+                  f'    *stop-darling-runtime.py*) echo stopped >> "{stop_log}" ;;\n'
+                  '    *darling-install-stamp.py*)\n'
+                  '      case "$*" in *check*) [ "${FAKE_INSTALL_STAMP_CURRENT:-0}" = 1 ] || exit 1 ;; esac ;;\n'
+                  '    *sdk-sign-stamp.py*)\n'
+                  '      case "$*" in *check*) [ "${FAKE_SDK_STAMP_CURRENT:-0}" = 1 ] || exit 1 ;; esac ;;\n'
+                  '  esac\n'
+                  'done\nexit 0')
+        self.stub(self.repo / 'scripts/install-runtime.sh',
+                  f'printf "SKIP_PREFLIGHT=%s\\nSKIP_CONFIGURE=%s\\nRUNTIME_STOPPED=%s\\n'
+                  f'SKIP_CMAKE=%s\\nSKIP_DSERVER=%s\\nCACHE=%s\\n" '
+                  f'"${{RCLOL_SKIP_PREFLIGHT:-}}" "${{RCLOL_SKIP_CONFIGURE:-}}" '
+                  f'"${{RCLOL_RUNTIME_STOPPED:-}}" "${{RCLOL_SKIP_CMAKE_SUBTARGETS:-}}" '
+                  f'"${{RCLOL_SKIP_DARLINGSERVER_INSTALL:-}}" '
+                  f'"${{RCLOL_CHECKOUT_DIGEST_CACHE:-}}" > "{runtime_env_log}"\n'
+                  'if [ -n "${RCLOL_CHECKOUT_DIGEST_CACHE:-}" ]; then '
+                  ': > "${RCLOL_CHECKOUT_DIGEST_CACHE}"; fi')
+        self.env['FAKE_INSTALL_STAMP_CURRENT'] = '1'
+        self.env['FAKE_SDK_STAMP_CURRENT'] = '1'
+        result = self.run_update('--verbose')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        recorded = dict(line.split('=', 1) for line in runtime_env_log.read_text().splitlines())
+        self.assertEqual(recorded['SKIP_PREFLIGHT'], '1')
+        self.assertEqual(recorded['SKIP_CONFIGURE'], '1')
+        self.assertEqual(recorded['RUNTIME_STOPPED'], '1')
+        self.assertEqual(recorded['SKIP_CMAKE'], '1')
+        self.assertEqual(recorded['SKIP_DSERVER'], '1')
+        self.assertTrue(recorded['CACHE'])
+        # Temporary checkout digest cache must be removed on exit.
+        self.assertFalse(Path(recorded['CACHE']).exists())
+        # replace_shared_identity must not call stop-darling-runtime.py a second time.
+        self.assertEqual(stop_log.read_text().splitlines(), ['stopped'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -199,6 +199,48 @@ int main() {
             cache.chmod(0o755)
             self.assertIn('signed=2 restored=0 skipped=0', sign('--force'))
 
+    def test_parallel_signing_handles_shared_cache_keys_and_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            root = folder / 'runtime'
+            (root / 'a').mkdir(parents=True)
+            (root / 'b').mkdir(parents=True)
+            # Identical content and basename in two folders compete for the same cache key.
+            payload = b'\xcf\xfa\xed\xfe' + b'\x06\0\0\0' * 3 + b'X' * 64
+            targets = [
+                root / 'a/shared.dylib',
+                root / 'b/shared.dylib',
+                root / 'a/unique1.dylib',
+                root / 'b/unique2.dylib',
+            ]
+            for idx, target in enumerate(targets):
+                target.write_bytes(payload if 'shared' in target.name else payload + bytes([idx]))
+            rcodesign = folder / 'rcodesign'
+            rcodesign.write_text('#!/bin/sh\nfor last; do :; done\nprintf SIGNED >> "$last"\n')
+            dcc = folder / 'dcc'
+            dcc.write_text('#!/bin/sh\ncase "$1" in cdhash) echo hash;; *) tail -c 6 "$2" | grep -q SIGNED;; esac\n')
+            for tool in (rcodesign, dcc):
+                tool.chmod(0o755)
+            cache = folder / 'cache'
+            env = dict(os.environ, DCC=str(dcc), RCODESIGN=str(rcodesign),
+                       DARLING_SIGN_CACHE=str(cache), RCLOL_SIGN_JOBS='4')
+            cmd = ['sh', str(ROOT / 'tools/sign-darling-runtime.sh'),
+                   '--allow-running', '--no-trust', '--quiet', str(root)]
+            res = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn('total=4 signed=4 restored=0 skipped=0', res.stdout.splitlines()[-1])
+            # Reinstall unsigned copies and restore concurrently with 4 workers.
+            for idx, target in enumerate(targets):
+                target.write_bytes(payload if 'shared' in target.name else payload + bytes([idx]))
+            res2 = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
+            self.assertIn('total=4 signed=0 restored=4 skipped=0', res2.stdout.splitlines()[-1])
+            # Also verify single-worker mode keeps working.
+            res3 = subprocess.run(cmd, env={**env, 'RCLOL_SIGN_JOBS': '1'},
+                                  capture_output=True, text=True)
+            self.assertEqual(res3.returncode, 0, res3.stdout + res3.stderr)
+            self.assertIn('total=4 signed=0 restored=0 skipped=4', res3.stdout.splitlines()[-1])
+
     def test_ground_truth_does_not_infer_success_from_unavailable_data(self):
         ground = module_at('review_ground_truth', ROOT / 'tests/security/ground_truth_to_golden.py')
         golden = json.loads((ROOT / 'tests/security/fixtures/macos-golden.json').read_text())

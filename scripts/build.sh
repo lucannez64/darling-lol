@@ -18,6 +18,9 @@ prepare_jobs=${RCLOL_PREPARE_JOBS:-$(( $(nproc) > 8 ? 8 : $(nproc) ))}
 case $prepare_jobs in ''|0|*[!0-9]*) prepare_jobs=8;; esac
 case $prepare_jobs in *[!0]*) ;; *) prepare_jobs=8;; esac
 python3 scripts/prepare.py --jobs "$prepare_jobs"
+if [ -n "${RCLOL_CHECKOUT_DIGEST_CACHE:-}" ]; then
+  rm -f -- "$RCLOL_CHECKOUT_DIGEST_CACHE"
+fi
 # Empty build type, as upstream Darling uses: objc4 always defines OBJC_IS_DEBUG_BUILD=1,
 # so Release's -DNDEBUG trips its "mismatch in debug-ness macros" #error.
 # x86-64 only: the patched OpenDirectory declares ivars in @implementation, which the
@@ -53,18 +56,27 @@ fi
 # itself when a CMakeLists.txt changes, but not when a patch adds a file a file(GLOB)
 # would pick up, so the stamp covers the prepared checkout, this script's flags and the
 # cache; anything it cannot read reconfigures instead of skipping.
+reconfigured=0
 if [ "${RCLOL_FORCE_RECONFIGURE:-0}" = 1 ] ||
   ! python3 build/runtime/tools/build-configure-stamp.py --root "$repo" check; then
   cmake -S build/darling-src -B build/darling-src/build -G 'Unix Makefiles' \
     -DCMAKE_BUILD_TYPE= -DTARGET_i386=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DENABLE_METAL=ON \
     -DCMAKE_C_FLAGS="-O3 -march=native -mtune=generic -pipe" \
     -DCMAKE_CXX_FLAGS="-O3 -march=native -mtune=generic -pipe"
+  reconfigured=1
   python3 build/runtime/tools/build-configure-stamp.py --root "$repo" record || \
     echo 'warning: CMake configure stamp not recorded; the next build reconfigures' >&2
 else
   echo 'CMake configuration is up to date; skipping the configure step.'
 fi
-cmake --build build/darling-src/build --parallel "${JOBS:-$(nproc)}"
+if [ "${RCLOL_FORCE_REBUILD:-0}" = 1 ] || [ "$reconfigured" = 1 ] ||
+  ! python3 build/runtime/tools/darling-build-stamp.py --root "$repo" check; then
+  cmake --build build/darling-src/build --parallel "${JOBS:-$(nproc)}"
+  python3 build/runtime/tools/darling-build-stamp.py --root "$repo" record || \
+    echo 'warning: build stamp not recorded; the next build runs cmake --build' >&2
+else
+  echo 'Darling build tree is up to date; skipping cmake --build.'
+fi
 if [ -n "${DARLING_WORKSPACE:-}" ]; then
   echo 'Build complete. Install the base runtime with: cmake --install build/darling-src/build'
 else

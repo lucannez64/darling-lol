@@ -73,16 +73,64 @@ ARTIFACTS = (
 # compiled binaries the tools themselves drop into tools/ are skipped, along
 # with the stamp tooling, which decides whether to run the batch but never
 # changes what it produces.
-TOOL_SKIP_DIRS = ('__pycache__',)
+TOOL_SKIP_DIRS = (
+    '__pycache__',
+    'dc-codesign',
+    'riot-lsem-model',
+    'riot-metal-bind-model',
+    'riot-platform-memory-shim',
+)
 TOOL_OUTPUTS = ('tools/dc-codesign/dc-codesign', 'tools/dc-codesign/dc-parse-fuzz')
 TOOL_SELF = (
     'tools/runtime-overlay-stamp.py',
+    'tools/runtime-sign-stamp.py',
     'tools/build-configure-stamp.py',
+    'tools/darling-build-stamp.py',
     'tools/darling-install-stamp.py',
     'tools/sdk-sign-stamp.py',
     'tools/checkout_digest.py',
     'tools/console.py',
 )
+TOOL_NON_BUILDERS = frozenset((
+    'tools/analyze-macho.sh',
+    'tools/clean-stale-helpers.py',
+    'tools/client-in-game-tricks.py',
+    'tools/close-league-client-in-game.py',
+    'tools/configure-darling-platform.py',
+    'tools/crash-report.py',
+    'tools/dc-cms-verify.py',
+    'tools/dc-notary.py',
+    'tools/dc-trustcache.py',
+    'tools/desktop-entry.py',
+    'tools/discord-ipc-relay.py',
+    'tools/doctor.py',
+    'tools/ensure-darling-root-certificates.py',
+    'tools/ensure-darling-service-accounts.py',
+    'tools/ensure-league-runtime-layout.py',
+    'tools/env-check.sh',
+    'tools/exec-guest.py',
+    'tools/fetch-installer.sh',
+    'tools/hide-league-client-in-game.py',
+    'tools/hide-league-splash-window.py',
+    'tools/install-rcodesign.sh',
+    'tools/migrate-system-profile.py',
+    'tools/perf-baseline.py',
+    'tools/recover-hidden-riot-client.py',
+    'tools/recover-stale-client.py',
+    'tools/riot_overlay_audit.py',
+    'tools/riot_overlay_verify.py',
+    'tools/run-deferred-handoff-tests.sh',
+    'tools/run-keychain-compat.py',
+    'tools/run-process-name-check.py',
+    'tools/run-riot-client.sh',
+    'tools/run-riot-native-check.py',
+    'tools/runtime-package.py',
+    'tools/security-soak.py',
+    'tools/session-supervisor.py',
+    'tools/sign-darling-runtime.sh',
+    'tools/system.prop',
+    'tools/trace-riot-windows.py',
+))
 
 EXTRA_INPUTS = ('scripts/install-runtime.sh',)
 
@@ -105,10 +153,28 @@ def _entry(relative, path):
     return entry(relative, path)
 
 
+def _is_non_builder_tool(relative):
+    """True for launchers, diagnostics, signing and standalone checks outside overlays."""
+    if relative in TOOL_NON_BUILDERS:
+        return True
+    name = relative.rsplit('/', 1)[-1]
+    if relative == 'tools/' + name:
+        if name.startswith('build-riot-') and name.endswith('-check.py'):
+            return True
+        if name.startswith('check-') and name.endswith('.py') and name != 'check-darwin-tlv-calls.py':
+            return True
+        if name.startswith('test-') and name.endswith(('.c', '.cpp')) and name != 'test-darling-wayland.c':
+            return True
+        if name.startswith('riot-') and name.endswith('-offline-check.py'):
+            return True
+    return False
+
+
 def _tool_output(path, root):
-    """True for the compiled binaries and stamp tooling that are not inputs."""
+    """True for compiled outputs, stamp tools and non-overlay tools."""
     relative = path.relative_to(root).as_posix()
-    return relative in TOOL_OUTPUTS or relative in TOOL_SELF
+    return (relative in TOOL_OUTPUTS or relative in TOOL_SELF
+            or _is_non_builder_tool(relative))
 
 
 def tree_digest(root):
@@ -150,12 +216,6 @@ def files_digest(paths, base):
     except OSError:
         return None
     return hasher.hexdigest()
-
-
-# Sources of the overlay builders and installers. Every regular file under
-# tools/ counts, so a new builder cannot be forgotten here; only the build
-# outputs the scripts drop into tools/ are skipped.
-TOOL_SKIP_DIRS = ('__pycache__',)
 
 
 def tools_digest(root):

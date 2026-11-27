@@ -1,7 +1,9 @@
 """Exercise the runtime overlay stamp that lets an update skip the rebuild."""
+import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -164,6 +166,127 @@ class OverlayStampTests(unittest.TestCase):
             [sys.executable, str(ROOT / 'tools/runtime-overlay-stamp.py'),
              '--root', str(self.root), '--state', str(self.state), 'check'],
             capture_output=True).returncode)
+
+    def test_non_builder_tools_do_not_invalidate_the_stamp(self):
+        non_builders = (
+            'tools/run-riot-client.sh',
+            'tools/session-supervisor.py',
+            'tools/doctor.py',
+            'tools/runtime-sign-stamp.py',
+            'tools/darling-build-stamp.py',
+            'tools/build-riot-air-check.py',
+            'tools/check-appkit-idle-wait.py',
+        )
+        for rel in non_builders:
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('# initial\n')
+        self.record()
+        for rel in non_builders:
+            (self.root / rel).write_text('# edited\n')
+            self.assertEqual(0, self.check(), rel)
+
+    def test_validation_and_sync_tools_invalidate_the_stamp(self):
+        for rel in ('tools/validate-riot-runtime.py',
+                    'tools/check-darwin-tlv-calls.py',
+                    'tools/sync-canonical-runtime-overlays.py'):
+            with self.subTest(tool=rel):
+                path = self.root / rel
+                path.write_text('# initial\n')
+                self.record()
+                path.write_text('# edited\n')
+                self.assertEqual(1, self.check())
+
+    def test_every_overlay_validation_and_sync_dependency_is_covered(self):
+        # Trace all tools/* files reachable from install_overlay_batch,
+        # validate-riot-runtime.py, and sync-canonical-runtime-overlays.py.
+        tools_dir = ROOT / 'tools'
+        seeds = [
+            'install-riot-presentation-runtime.sh',
+            'build-darling-wayland.sh',
+            'install-riot-gpu-runtime.sh',
+            'install-riot-carboncore-runtime.sh',
+            'build-riot-libs-runtime.sh',
+            'install-riot-libs-runtime.py',
+            'install-darling-system-profiler.py',
+            'build-riot-electron43-frameworks.py',
+            'run-parallel.sh',
+            'clang-cache.py',
+            'validate-riot-runtime.py',
+            'check-darwin-tlv-calls.py',
+            'sync-canonical-runtime-overlays.py',
+        ]
+        seen = set()
+        queue = list(seeds)
+
+        def enqueue(rel):
+            rel = rel.strip('/')
+            if rel and rel not in ('.', '..') and rel not in seen:
+                queue.append(rel)
+
+        while queue:
+            name = queue.pop(0)
+            if name in seen:
+                continue
+            path = tools_dir / name
+            if not path.exists():
+                continue
+            if path.is_dir():
+                seen.add(name)
+                for sub in sorted(path.rglob('*')):
+                    if sub.is_file():
+                        enqueue(sub.relative_to(tools_dir).as_posix())
+                continue
+            seen.add(name)
+            text = path.read_text(errors='replace')
+            if path.suffix == '.sh':
+                code = '\n'.join(
+                    line for line in text.splitlines()
+                    if not line.lstrip().startswith('#')
+                )
+                for ref in re.findall(r'(?:tools/)([A-Za-z0-9_./-]+)', code):
+                    ref = ref.rstrip(".,;:)'\"")
+                    if (tools_dir / ref).exists():
+                        enqueue(ref)
+            elif path.suffix == '.py':
+                tree = ast.parse(text)
+                docstrings = set()
+                for scope in ast.walk(tree):
+                    body = getattr(scope, 'body', None)
+                    if isinstance(body, list) and body:
+                        first = body[0]
+                        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                            docstrings.add(first.value)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            if (tools_dir / (alias.name + '.py')).exists():
+                                enqueue(alias.name + '.py')
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        if (tools_dir / (node.module + '.py')).exists():
+                            enqueue(node.module + '.py')
+                    elif (isinstance(node, ast.Constant)
+                          and isinstance(node.value, str)
+                          and node not in docstrings):
+                        val = node.value
+                        for ref in re.findall(
+                            r'(?:tools/)?([A-Za-z0-9_./-]+\.(?:c|cpp|mm|m|h|s|sh|py))',
+                            val,
+                        ):
+                            if (tools_dir / ref).exists():
+                                enqueue(ref)
+                        if val.startswith('tools/') and (tools_dir / val[6:]).exists():
+                            enqueue(val[6:])
+                        elif val and '/' not in val and val not in ('.', '..') and (tools_dir / val).exists():
+                            enqueue(val)
+
+        for rel in sorted(seen):
+            candidate = tools_dir / rel
+            if candidate.is_file():
+                self.assertFalse(
+                    stamp._tool_output(candidate, ROOT),
+                    f'{rel} is reachable from overlay batch/validation/sync but excluded from tools_digest',
+                )
 
 
 if __name__ == '__main__':
