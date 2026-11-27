@@ -218,16 +218,22 @@ def files_digest(paths, base):
     return hasher.hexdigest()
 
 
-def tools_digest(root):
+def collect_tool_files(root):
     root = Path(root)
     found = []
+    for top, dirs, files in os.walk(root / 'tools', onerror=_reraise):
+        dirs[:] = sorted(name for name in dirs if name not in TOOL_SKIP_DIRS)
+        for name in files:
+            path = Path(top) / name
+            if path.is_file() and not _tool_output(path, root):
+                found.append(path)
+    return found
+
+
+def tools_digest(root):
+    root = Path(root)
     try:
-        for top, dirs, files in os.walk(root / 'tools', onerror=_reraise):
-            dirs[:] = sorted(name for name in dirs if name not in TOOL_SKIP_DIRS)
-            for name in files:
-                path = Path(top) / name
-                if path.is_file() and not _tool_output(path, root):
-                    found.append(path)
+        found = collect_tool_files(root)
     except OSError:
         return None
     found.extend(path for path in (root / name for name in EXTRA_INPUTS) if path.is_file())

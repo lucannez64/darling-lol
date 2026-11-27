@@ -280,13 +280,24 @@ class OverlayStampTests(unittest.TestCase):
                         elif val and '/' not in val and val not in ('.', '..') and (tools_dir / val).exists():
                             enqueue(val)
 
+        collected = set(stamp.collect_tool_files(ROOT))
         for rel in sorted(seen):
             candidate = tools_dir / rel
             if candidate.is_file():
-                self.assertFalse(
-                    stamp._tool_output(candidate, ROOT),
+                self.assertIn(
+                    candidate,
+                    collected,
                     f'{rel} is reachable from overlay batch/validation/sync but excluded from tools_digest',
                 )
+
+    def test_skipped_tool_directories_are_not_collected(self):
+        skipped = self.root / 'tools' / stamp.TOOL_SKIP_DIRS[0] / 'ignored.py'
+        skipped.parent.mkdir(parents=True, exist_ok=True)
+        skipped.write_text('# ignored\n')
+        self.record()
+        skipped.write_text('# edited\n')
+        self.assertEqual(0, self.check())
+        self.assertNotIn(skipped, stamp.collect_tool_files(self.root))
 
 
 if __name__ == '__main__':
