@@ -12913,3 +12913,55 @@ index 0a7e4927..886f1b35 100644
  
  		opos += bsd->d_reclen;
  		bpos += l64->d_reclen;
+diff --git a/gen/bsdsyscalls/___fork.S b/gen/bsdsyscalls/___fork.S
+index 9f4de9d6..9f9fb255 100644
+--- a/gen/bsdsyscalls/___fork.S
++++ b/gen/bsdsyscalls/___fork.S
+@@ -53,9 +53,11 @@ LEAF(___fork, 0)
+ 
+ 	movl 	$ SYS_fork,%eax; 	// code for fork -> eax
+ #ifdef DARLING
++	// a failure comes back as -errno
+ 	call	__darling_bsd_syscall
+-	cmpl	$0, %eax
+-	jnb L1
++	cmpl	$-4095, %eax
++	jb	L1
++	negl	%eax
+ #else
+ 	UNIX_SYSCALL_TRAP		// do the system call
+ 	jnc	L1			// jump if CF==0
+@@ -84,10 +86,12 @@ LEAF(___fork, 0)
+ 	subq  $24, %rsp   // Align the stack, plus room for local storage
+ 
+ #ifdef DARLING
++	// a failure comes back as -errno
+ 	movl	$ SYS_fork, %eax
+ 	call	__darling_bsd_syscall
+-	cmpq	$0, %rax
+-	jnb L1
++	cmpq	$-4095, %rax
++	jb	L1
++	negq	%rax
+ #else
+ 	movl 	$ SYSCALL_CONSTRUCT_UNIX(SYS_fork),%eax; // code for fork -> rax
+ 	UNIX_SYSCALL_TRAP		// do the system call
+diff --git a/gen/bsdsyscalls/___vfork.S b/gen/bsdsyscalls/___vfork.S
+index b159626b..31469035 100644
+--- a/gen/bsdsyscalls/___vfork.S
++++ b/gen/bsdsyscalls/___vfork.S
+@@ -106,10 +106,12 @@ LEAF(___vfork, 0)
+ 	cmpxchgl	%ecx, (%rdx)
+ 	jne		0b
+ #ifdef DARLING
++	// a failure comes back as -errno
+ 	movl	$ SYS_vfork, %eax
+ 	call	__darling_bsd_syscall
+-	cmpq	$0, %rax
+-	jnb L1
++	cmpq	$-4095, %rax
++	jb	L1
++	negq	%rax
+ #else
+ 	popq		%rdi			// return address in %rdi
+ 	movq		$ SYSCALL_CONSTRUCT_UNIX(SYS_vfork), %rax	// code for vfork -> rax
