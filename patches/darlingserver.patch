@@ -5790,7 +5790,7 @@ index e502e28..8cc3b39 100644
 +	}
  };
 diff --git a/src/thread.cpp b/src/thread.cpp
-index 5563ad9..0078b9a 100644
+index 5563ad9..c184091 100644
 --- a/src/thread.cpp
 +++ b/src/thread.cpp
 @@ -43,6 +43,7 @@
@@ -5922,7 +5922,47 @@ index 5563ad9..0078b9a 100644
  static thread_local std::shared_ptr<DarlingServer::Thread> currentThreadVar = nullptr;
  static thread_local bool returningToThreadTop = false;
  static thread_local ucontext_t backToThreadTopContext;
-@@ -308,7 +423,14 @@ DarlingServer::Address DarlingServer::Thread::address() const {
+@@ -85,7 +200,22 @@ DarlingServer::Thread::Thread(std::shared_ptr<Process> process, NSID nsid, void*
+ {
+ 	_tid = -1;
+ 
++	auto& scanRegistry = threadRegistry();
+ 	for (const auto& entry: std::filesystem::directory_iterator("/proc/" + std::to_string(process->id()) + "/task")) {
++		// a thread that is already registered is not the one being created; skipping it keeps the cost of
++		// creating a thread independent of how many threads the process already has (reading every
++		// thread's status file made each creation cost time proportional to the thread count, with the
++		// server's single loop blocked meanwhile)
++		pid_t candidate = 0;
++		try {
++			candidate = std::stoi(entry.path().filename().string());
++		} catch (const std::exception&) {
++			continue;
++		}
++		if (scanRegistry.lookupEntryByID(candidate).has_value()) {
++			continue;
++		}
++
+ 		std::ifstream statusFile(entry.path() / "status");
+ 		std::string line;
+ 
+@@ -106,11 +236,15 @@ DarlingServer::Thread::Thread(std::shared_ptr<Process> process, NSID nsid, void*
+ 					continue;
+ 				}
+ 
+-				_tid = std::stoi(entry.path().filename().string());
++				_tid = candidate;
+ 
+ 				break;
+ 			}
+ 		}
++
++		if (_tid != -1) {
++			break;
++		}
+ 	}
+ 
+ 	// if we can't determine the thread id from procfs, try some other more costly methods.
+@@ -308,7 +442,14 @@ DarlingServer::Address DarlingServer::Thread::address() const {
  	return _address;
  };
  
@@ -5938,7 +5978,7 @@ index 5563ad9..0078b9a 100644
  	std::unique_lock lock(_rwlock);
  	_address = address;
  };
-@@ -350,14 +472,14 @@ void DarlingServer::Thread::microthreadWorker() {
+@@ -350,14 +491,14 @@ void DarlingServer::Thread::microthreadWorker() {
  #if DSERVER_ASAN
  		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  #endif
@@ -5955,7 +5995,7 @@ index 5563ad9..0078b9a 100644
  	}
  	__builtin_unreachable();
  };
-@@ -381,13 +503,13 @@ void DarlingServer::Thread::microthreadContinuation() {
+@@ -381,13 +522,13 @@ void DarlingServer::Thread::microthreadContinuation() {
  #if DSERVER_ASAN
  		__sanitizer_start_switch_fiber(NULL, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  #endif
@@ -5971,7 +6011,7 @@ index 5563ad9..0078b9a 100644
  	}
  	__builtin_unreachable();
  };
-@@ -432,7 +554,7 @@ void DarlingServer::Thread::doWork() {
+@@ -432,7 +573,7 @@ void DarlingServer::Thread::doWork() {
  
  	_runningCondvar.notify_all();
  
@@ -5980,7 +6020,7 @@ index 5563ad9..0078b9a 100644
  
  	if (returningToThreadTop) {
  		// someone jumped back to the top of the microthread
-@@ -503,7 +625,7 @@ void DarlingServer::Thread::doWork() {
+@@ -503,7 +644,7 @@ void DarlingServer::Thread::doWork() {
  			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
  #endif
  
@@ -5989,7 +6029,7 @@ index 5563ad9..0078b9a 100644
  		} else {
  			if (!_pendingCall) {
  				// if we don't actually have a pending call, we have nothing to do
-@@ -520,7 +642,7 @@ void DarlingServer::Thread::doWork() {
+@@ -520,7 +661,7 @@ void DarlingServer::Thread::doWork() {
  			stackPool.allocate(_stack);
  
  			ucontext_t newContext;
@@ -5998,7 +6038,7 @@ index 5563ad9..0078b9a 100644
  			newContext.uc_stack.ss_sp = _stack.base;
  			newContext.uc_stack.ss_size = _stack.size;
  			newContext.uc_stack.ss_flags = 0;
-@@ -531,7 +653,7 @@ void DarlingServer::Thread::doWork() {
+@@ -531,7 +672,7 @@ void DarlingServer::Thread::doWork() {
  			__sanitizer_start_switch_fiber(&asanOldFakeStack, _stack.base, _stack.size);
  #endif
  
@@ -6007,7 +6047,7 @@ index 5563ad9..0078b9a 100644
  		}
  
  		// inform the compiler that it shouldn't do anything that would live past the setcontext calls
-@@ -602,7 +724,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+@@ -602,7 +743,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  
  	unlockMeWhenSuspending = unlockMe;
  
@@ -6016,7 +6056,7 @@ index 5563ad9..0078b9a 100644
  
  	_rwlock.lock();
  	if (_suspended) {
-@@ -620,7 +742,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
+@@ -620,7 +761,7 @@ void DarlingServer::Thread::suspend(std::function<void()> continuationCallback,
  		__sanitizer_start_switch_fiber((continuationCallback) ? nullptr : &asanOldFakeStack, asanOldStackBottom, asanOldStackSize);
  #endif
  
@@ -6025,7 +6065,7 @@ index 5563ad9..0078b9a 100644
  		__builtin_unreachable();
  	} else {
  		// we've been resumed
-@@ -690,7 +812,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
+@@ -690,7 +831,7 @@ void DarlingServer::Thread::setupKernelThread(std::function<void()> startupCallb
  	std::unique_lock lock(_rwlock);
  	_continuationCallback = startupCallback;
  	_suspended = true;
@@ -6034,7 +6074,7 @@ index 5563ad9..0078b9a 100644
  };
  
  void DarlingServer::Thread::startKernelThread(std::function<void()> startupCallback) {
-@@ -717,6 +839,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -717,6 +858,7 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  		std::unique_lock lock(_rwlock);
  		oldThread = _impersonating;
  		_impersonating = thread;
@@ -6042,7 +6082,7 @@ index 5563ad9..0078b9a 100644
  	}
  
  	if (oldThread) {
-@@ -730,6 +853,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
+@@ -730,6 +872,13 @@ void DarlingServer::Thread::impersonate(std::shared_ptr<Thread> thread) {
  };
  
  std::shared_ptr<DarlingServer::Thread> DarlingServer::Thread::impersonatingThread() const {
@@ -6056,7 +6096,7 @@ index 5563ad9..0078b9a 100644
  	std::shared_lock lock(_rwlock);
  	return _impersonating;
  };
-@@ -768,7 +898,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+@@ -768,7 +917,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
  			__sanitizer_start_switch_fiber(nullptr, currentThreadVar->_stack.base, currentThreadVar->_stack.size);
  		}
  #endif
@@ -6065,7 +6105,7 @@ index 5563ad9..0078b9a 100644
  		__builtin_unreachable();
  	}
  
-@@ -776,7 +906,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
+@@ -776,7 +925,7 @@ void DarlingServer::Thread::syscallReturn(int resultCode) {
  #if DSERVER_ASAN
  	__sanitizer_start_switch_fiber(nullptr, asanOldStackBottom, asanOldStackSize);
  #endif
@@ -6074,7 +6114,7 @@ index 5563ad9..0078b9a 100644
  	__builtin_unreachable();
  };
  
-@@ -872,6 +1002,24 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
+@@ -872,6 +1021,24 @@ void DarlingServer::Thread::kernelAsync(std::function<void()> fn) {
  };
  
  void DarlingServer::Thread::kernelSync(std::function<void()> fn) {
@@ -6099,7 +6139,7 @@ index 5563ad9..0078b9a 100644
  	std::mutex mutex;
  	std::condition_variable condvar;
  	bool done = false;
-@@ -1443,7 +1591,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
+@@ -1443,7 +1610,7 @@ void DarlingServer::Thread::jumpToResume(void* stack, size_t stackSize) {
  #if DSERVER_ASAN
  	__sanitizer_start_switch_fiber(&asanOldFakeStack, stack, stackSize);
  #endif
@@ -6108,7 +6148,7 @@ index 5563ad9..0078b9a 100644
  	__builtin_unreachable();
  };
  
-@@ -1543,7 +1691,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
+@@ -1543,7 +1710,7 @@ void DarlingServer::Thread::_handleInterruptEnterForCurrentThread() {
  	dtape_thread_sigexc_enter(currentThreadVar->_dtapeThread);
  
  	currentThreadVar->_didSyscallReturnDuringInterrupt = false;
