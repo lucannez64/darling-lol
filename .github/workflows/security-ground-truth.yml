@@ -1,8 +1,11 @@
 name: security-ground-truth
 
-# Collects read-only code-signing / SIP observations from real macOS hosts.
-# Used by docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (phase M0).
-# No game, no account, no mutation: the probe only reads csops/csr state.
+# Collects read-only code-signing / SIP observations from real macOS hosts,
+# and what a process sees of itself there (regions, dyld, proc and task info).
+# Used by docs/security/SIP_AMFI_IMPLEMENTATION_PLAN.md (phase M0) and
+# docs/security/GROUND_TRUTH.md.
+# No game, no account, no mutation: the probes only read the state of their
+# own process and of the system.
 
 on:
   workflow_dispatch:
@@ -31,6 +34,26 @@ jobs:
 
       - name: Run probe
         run: ./ground_truth > "ground-truth-${{ matrix.os }}.json"
+
+      - name: Build self-view probe
+        run: |
+          clang -O2 -Wall -Wextra -arch arm64 -o self_view_arm64 tests/security/probe/self_view.c
+          clang -O2 -Wall -Wextra -arch x86_64 -o self_view_x86_64 tests/security/probe/self_view.c
+
+      - name: Run self-view probe
+        run: |
+          ./self_view_arm64 > "self-view-${{ matrix.os }}-arm64.json"
+          # The Intel slice runs under Rosetta when the runner has it.
+          softwareupdate --install-rosetta --agree-to-license > /dev/null 2>&1 || true
+          if arch -x86_64 /usr/bin/true 2> /dev/null; then
+            arch -x86_64 ./self_view_x86_64 > "self-view-${{ matrix.os }}-x86_64.json"
+          fi
+
+      - name: sysctl names and values
+        # Host name and per-boot identifiers are blanked; the names are kept.
+        run: |
+          sysctl -a | sed -E 's/^(kern\.(hostname|nisdomainname|hostid|[a-z]*uuid)): .*/\1: <removed>/' \
+            > "sysctl-${{ matrix.os }}.txt"
 
       - name: Static signing and SIP info
         run: |
@@ -61,4 +84,6 @@ jobs:
           name: ground-truth-${{ matrix.os }}
           path: |
             ground-truth-*.json
+            self-view-*.json
+            sysctl-*.txt
             codesign-*.txt
