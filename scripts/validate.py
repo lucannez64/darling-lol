@@ -3,6 +3,7 @@
 import ast,json,re,subprocess,sys
 from pathlib import Path
 from common import ROOT
+import compat_language
 subprocess.run([sys.executable,str(ROOT/'scripts/configure.py')],check=True)
 try:
     files=subprocess.check_output(['git','-C',str(ROOT),'ls-files','-z'],stderr=subprocess.DEVNULL).decode().split('\0')
@@ -10,30 +11,6 @@ except (OSError, subprocess.CalledProcessError):
     files=[str(p.relative_to(ROOT)) for p in ROOT.rglob('*') if p.is_file() and not any(part.startswith('.') or part in ['build','__pycache__'] for part in p.relative_to(ROOT).parts)]
 errors=[]
 secret_patterns=[r'gh[pousr]_[A-Za-z0-9]{30,}',r'AKIA[0-9A-Z]{16}',r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}',r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----']
-# Compatibility language (docs/COMPLIANCE.md). Framing words always fail;
-# "spoof"/"bypass" fail only next to anti-cheat, detection, ban or telemetry
-# context, since "compositor bypass" is ordinary engineering. A line that, with
-# the one before it, states a negation ("not", "avoid", ...) is a non-goal.
-framing_re=re.compile(r'\b(?:stealth\w*|evasion|evad\w*|unbannable|undetectable)\b',re.I)
-loaded_re=re.compile(r'\b(?:spoof\w*|bypass\w*|circumvent\w*)\b',re.I)
-risk_re=re.compile(r'anti-?cheat|vanguard|detect|\bban(?:s|ned)?\b|telemetry|attestation|\bdrm\b',re.I)
-negation_re=re.compile(r"\b(?:not|never|avoid|without|out of scope|instead of)\b|n't\b",re.I)
-language_exempt={
-    'AGENTS.md':'lists the words to avoid',
-    'CONTRIBUTING.md':'lists the words to avoid',
-    'docs/COMPLIANCE.md':'defines the wording policy',
-    'docs/skills/open-pr/SKILL.md':'restates the wording policy',
-    'docs/security/ATTESTATION_143_FINDINGS.md':'quotes the client config key and log line verbatim',
-    'scripts/validate.py':'defines this check',
-}
-def language_errors(name,text):
-    if name in language_exempt:return []
-    out=[];prev=''
-    for n,line in enumerate(text.splitlines(),1):
-        if (framing_re.search(line) or (loaded_re.search(line) and risk_re.search(line))) and not negation_re.search(prev+' '+line):
-            out.append(f'{name}:{n}: use compatibility language (docs/COMPLIANCE.md): '+line.strip()[:100])
-        prev=line
-    return out
 for name in filter(None,files):
     p=ROOT/name;data=p.read_bytes()
     # The Nix desktop package intentionally ships this icon, not a runtime binary.
@@ -46,7 +23,7 @@ for name in filter(None,files):
     if re.search(r'/(?:home|Users)/' + 'hi' + 'rew' + r'(?:/|\b)',text):
         errors.append(name+': development-machine path')
     if any(re.search(pattern,text) for pattern in secret_patterns):errors.append(name+': possible credential; review before publishing')
-    errors+=language_errors(name,text)
+    errors+=compat_language.errors(name,text)
     if name.split('/')[0] in ['build','logs','Config','Library'] or p.suffix in ['.dylib','.so','.asar','.perf','.zip']:
         errors.append(name+': local artifact')
 for p in list((ROOT/'scripts').glob('*.py'))+list((ROOT/'build/runtime/tools').glob('*.py')):
