@@ -125,7 +125,7 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 10,
+      "modified_files": 11,
       "new_files": [
         "NSConstantCollections.m"
       ]
