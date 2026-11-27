@@ -198,6 +198,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+
+# Paths are filesystem bytes decoded with surrogateescape; print them back unchanged.
+sys.stdout.reconfigure(errors='surrogateescape')
+sys.stderr.reconfigure(errors='surrogateescape')
 
 SDK_PATH = '/usr/local/libexec/darling'
 TMP_DIR = os.environ['SIGN_TMP']
@@ -278,7 +283,7 @@ def cache_key_for(path):
         content = file_sha256(path)
     except OSError:
         return ''
-    ident = hashlib.sha256(os.path.basename(path).encode()).hexdigest()[:16]
+    ident = hashlib.sha256(os.fsencode(os.path.basename(path))).hexdigest()[:16]
     return f'{content}-{ident}'
 
 
@@ -364,25 +369,27 @@ def prune_cache(cache_dir, kept_paths, new_entries):
     index_path = os.path.join(cache_dir, 'index')
     merged = {}
     try:
-        with open(index_path, 'r', encoding='utf-8', errors='replace') as handle:
-            for line in handle:
-                line = line.rstrip('\n')
-                if '\t' not in line:
+        with open(index_path, 'rb') as handle:
+            for raw in handle:
+                raw = raw.rstrip(b'\n')
+                if b'\t' not in raw:
                     continue
-                k, p = line.split('\t', 1)
+                k_bytes, p_bytes = raw.split(b'\t', 1)
+                p = os.fsdecode(p_bytes)
                 if p in kept_paths:
-                    merged[p] = k
+                    merged[p] = k_bytes.decode('ascii', 'replace')
     except OSError:
         pass
     for k, p in new_entries:
         merged[p] = k
-    lines = sorted(f'{k}\t{p}' for p, k in merged.items())
+    lines = sorted(k.encode('ascii', 'replace') + b'\t' + os.fsencode(p)
+                   for p, k in merged.items())
     part = None
     try:
         fd, part = tempfile.mkstemp(dir=cache_dir, prefix='.index.')
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        with os.fdopen(fd, 'wb') as handle:
             if lines:
-                handle.write('\n'.join(lines) + '\n')
+                handle.write(b'\n'.join(lines) + b'\n')
         os.replace(part, index_path)
     except OSError:
         if part is not None:
@@ -579,21 +586,34 @@ for root in sys.argv[1:]:
     entries = scan_macho(root)
     cache_dir = ''
     if CACHE_ROOT:
-        cache_dir = os.path.join(CACHE_ROOT, hashlib.sha256(root.encode()).hexdigest()[:16])
+        cache_dir = os.path.join(CACHE_ROOT, hashlib.sha256(os.fsencode(root)).hexdigest()[:16])
         try:
             os.makedirs(cache_dir, mode=0o700, exist_ok=True)
         except OSError:
             cache_dir = ''
     trust_this_root = TRUST or (SDK_SELECTED and not NO_TRUST and root == SDK_PATH)
 
-    if jobs > 1 and len(entries) > 1:
+    # Names that share a device and inode (hard links) are signed in place by
+    # rcodesign, so one lock per inode serializes them while other files stay parallel.
+    locks = {}
+    work = []
+    for kind, path in entries:
+        try:
+            info = os.lstat(path)
+            key = (info.st_dev, info.st_ino)
+        except OSError:
+            key = ('path', path)
+        work.append((kind, path, locks.setdefault(key, threading.Lock())))
+
+    def run_locked(item):
+        with item[2]:
+            return process_one(item[0], item[1], cache_dir, trust_this_root)
+
+    if jobs > 1 and len(work) > 1:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            results = list(pool.map(
-                lambda item: process_one(item[0], item[1], cache_dir, trust_this_root),
-                entries,
-            ))
+            results = list(pool.map(run_locked, work))
     else:
-        results = [process_one(k, f, cache_dir, trust_this_root) for k, f in entries]
+        results = [run_locked(item) for item in work]
 
     kept_paths = set()
     new_entries = []

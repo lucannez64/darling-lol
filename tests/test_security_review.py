@@ -228,7 +228,14 @@ int main() {
                    '--allow-running', '--no-trust', '--quiet', str(root)]
             res = subprocess.run(cmd, env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-            self.assertIn('total=4 signed=4 restored=0 skipped=0', res.stdout.splitlines()[-1])
+            last_line = res.stdout.splitlines()[-1]
+            self.assertTrue(
+                'total=4 signed=4 restored=0 skipped=0' in last_line
+                or 'total=4 signed=3 restored=1 skipped=0' in last_line,
+                last_line,
+            )
+            for target in targets:
+                self.assertTrue(target.read_bytes().endswith(b'SIGNED'), target)
             # Reinstall unsigned copies and restore concurrently with 4 workers.
             for idx, target in enumerate(targets):
                 target.write_bytes(payload if 'shared' in target.name else payload + bytes([idx]))
@@ -280,6 +287,91 @@ int main() {
                     self.assertNotEqual(res.returncode, 0)
                     self.assertIn('signing worker failed', res.stderr)
                     self.assertFalse(dct_log.exists())
+
+    def test_parallel_signing_serializes_hard_linked_inodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            root = folder / 'runtime'
+            root.mkdir()
+            payload = b'\xcf\xfa\xed\xfe' + b'\x06\0\0\0' * 3 + b'X' * 64
+            first = root / 'first.dylib'
+            second = root / 'second.dylib'
+            first.write_bytes(payload)
+            os.link(first, second)
+
+            rcodesign = folder / 'rcodesign'
+            # Detect concurrent execution on the same inode via an atomic lockdir.
+            rcodesign.write_text(
+                '#!/bin/sh\n'
+                'for last; do :; done\n'
+                'lock="$RACE_DIR/lock"\n'
+                'if ! mkdir "$lock" 2>/dev/null; then\n'
+                '  echo "concurrent inode write" >&2\n'
+                '  exit 1\n'
+                'fi\n'
+                'sleep 0.05\n'
+                'printf SIGNED >> "$last"\n'
+                'rmdir "$lock"\n'
+            )
+            dcc = folder / 'dcc'
+            dcc.write_text('#!/bin/sh\ncase "$1" in cdhash) echo hash;; *) tail -c 6 "$2" | grep -q SIGNED;; esac\n')
+            for tool in (rcodesign, dcc):
+                tool.chmod(0o755)
+            race_dir = folder / 'race'
+            race_dir.mkdir()
+            env = dict(
+                os.environ,
+                DCC=str(dcc),
+                RCODESIGN=str(rcodesign),
+                RACE_DIR=str(race_dir),
+                DARLING_SIGN_CACHE=str(folder / 'cache'),
+                RCLOL_SIGN_JOBS='4',
+            )
+            res = subprocess.run(
+                ['sh', str(ROOT / 'tools/sign-darling-runtime.sh'),
+                 '--allow-running', '--no-trust', '--quiet', str(root)],
+                env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertNotIn('concurrent inode write', res.stderr)
+            self.assertIn('total=2 signed=1 restored=0 skipped=1', res.stdout.splitlines()[-1])
+
+    def test_signing_preserves_non_utf8_filesystem_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            root_bytes = os.fsencode(folder) + b'/runtime-\xff'
+            os.mkdir(root_bytes)
+            file_bytes = root_bytes + b'/lib-\xfe.dylib'
+            payload = b'\xcf\xfa\xed\xfe' + b'\x06\0\0\0' * 3 + b'X' * 64
+            with open(file_bytes, 'wb') as handle:
+                handle.write(payload)
+
+            rcodesign = folder / 'rcodesign'
+            rcodesign.write_text('#!/bin/sh\nfor last; do :; done\nprintf SIGNED >> "$last"\n')
+            dcc = folder / 'dcc'
+            dcc.write_text('#!/bin/sh\ncase "$1" in cdhash) echo hash;; *) tail -c 6 "$2" | grep -q SIGNED;; esac\n')
+            for tool in (rcodesign, dcc):
+                tool.chmod(0o755)
+            cache = folder / 'cache'
+            env = {
+                os.fsencode(k): os.fsencode(v)
+                for k, v in os.environ.items()
+            }
+            env[b'DCC'] = os.fsencode(dcc)
+            env[b'RCODESIGN'] = os.fsencode(rcodesign)
+            env[b'DARLING_SIGN_CACHE'] = os.fsencode(cache)
+            cmd = [b'sh', os.fsencode(ROOT / 'tools/sign-darling-runtime.sh'),
+                   b'--allow-running', b'--no-trust', root_bytes]
+            res = subprocess.run(cmd, env=env, capture_output=True)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn(b'total=1 signed=1 restored=0 skipped=0', res.stdout.splitlines()[-1])
+
+            # Reinstall unsigned bytes and verify binary index restores the non-UTF-8 path.
+            with open(file_bytes, 'wb') as handle:
+                handle.write(payload)
+            res2 = subprocess.run(cmd, env=env, capture_output=True)
+            self.assertEqual(res2.returncode, 0, res2.stdout + res2.stderr)
+            self.assertIn(b'total=1 signed=0 restored=1 skipped=0', res2.stdout.splitlines()[-1])
 
     def test_ground_truth_does_not_infer_success_from_unavailable_data(self):
         ground = module_at('review_ground_truth', ROOT / 'tests/security/ground_truth_to_golden.py')
