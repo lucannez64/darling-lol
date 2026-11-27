@@ -1684,7 +1684,7 @@ index a9eb4bc..82bf0b8 100644
  		right = convert_task_name_to_port(&looked_up_task->xnu_task);
  	} else {
 diff --git a/duct-tape/src/thread.c b/duct-tape/src/thread.c
-index f4ce909..a6cdb2c 100644
+index f4ce909..0d26e97 100644
 --- a/duct-tape/src/thread.c
 +++ b/duct-tape/src/thread.c
 @@ -53,6 +53,7 @@ dtape_thread_t* dtape_thread_create(dtape_task_t* task, uint64_t nsid, void* con
@@ -1695,7 +1695,32 @@ index f4ce909..a6cdb2c 100644
  	LIST_INIT(&thread->user_states);
  	dtape_mutex_init(&thread->suspension_mutex);
  	dtape_condvar_init(&thread->suspension_condvar);
-@@ -521,11 +522,16 @@ wait_result_t thread_block_parameter(thread_continue_t continuation, void* param
+@@ -505,6 +506,15 @@ static void thread_continuation_callback(void* context) {
+ 	thread->xnu_thread.parameter = NULL;
+ 
+ 	wait_result = thread->xnu_thread.wait_result;
++
++	if (wait_result == THREAD_WAITING) {
++		// resumed although nobody ended the wait (see thread_block_parameter()); keep waiting
++		thread->xnu_thread.state |= TH_WAIT;
++		thread_unlock(&thread->xnu_thread);
++		thread_block_parameter(continuation, parameter);
++		__builtin_unreachable();
++	}
++
+ 	thread_unlock(&thread->xnu_thread);
+ 
+ 	continuation(parameter, wait_result);
+@@ -514,22 +524,39 @@ static void thread_continuation_callback(void* context) {
+ 
+ wait_result_t thread_block_parameter(thread_continue_t continuation, void* parameter) {
+ 	dtape_thread_t* thread = dtape_hooks->current_thread();
++	wait_result_t wait_result;
+ 
++again:
+ 	thread_lock(&thread->xnu_thread);
+ 
+ 	thread->xnu_thread.continuation = continuation;
  	thread->xnu_thread.parameter = parameter;
  
  	bool waiting = thread->xnu_thread.state & TH_WAIT;
@@ -1713,7 +1738,22 @@ index f4ce909..a6cdb2c 100644
  	}
  
  	thread_lock(&thread->xnu_thread);
-@@ -548,8 +554,20 @@ wait_result_t thread_block(thread_continue_t continuation) {
+-	wait_result_t wait_result = thread->xnu_thread.wait_result;
++	wait_result = thread->xnu_thread.wait_result;
++
++	if (waiting && wait_result == THREAD_WAITING) {
++		// we were resumed although nobody ended the wait: a wakeup (thread_unblock() resumes the microthread) can be
++		// left over from an earlier wait that a signal interrupted, and it resumes whatever wait the thread is in
++		// when it runs. we're still on the wait queue, so just keep waiting (the next run clears TH_WAIT again).
++		thread->xnu_thread.state |= TH_WAIT;
++		thread_unlock(&thread->xnu_thread);
++		goto again;
++	}
++
+ 	thread_unlock(&thread->xnu_thread);
+ 
+ 	if (continuation) {
+@@ -548,8 +575,20 @@ wait_result_t thread_block(thread_continue_t continuation) {
  // thread locked
  boolean_t thread_unblock(thread_t xthread, wait_result_t wresult) {
  	dtape_thread_t* thread = dtape_thread_for_xnu_thread(xthread);
@@ -1734,7 +1774,7 @@ index f4ce909..a6cdb2c 100644
  	return TRUE;
  };
  
-@@ -782,7 +800,7 @@ thread_set_state(
+@@ -782,7 +821,7 @@ thread_set_state(
  				s64.dr6 = s->dr6;
  				s64.dr7 = s->dr7;
  
@@ -1743,7 +1783,7 @@ index f4ce909..a6cdb2c 100644
  						x86_DEBUG_STATE64_COUNT);
  			}
  			case x86_DEBUG_STATE64:
-@@ -1293,7 +1311,7 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
+@@ -1293,7 +1332,7 @@ kern_return_t thread_info(thread_t xthread, thread_flavor_t flavor, thread_info_
  		};
  
  		default:
@@ -1752,7 +1792,7 @@ index f4ce909..a6cdb2c 100644
  	}
  };
  
-@@ -1324,11 +1342,11 @@ kern_return_t thread_wire(host_priv_t host_priv, thread_t thread, boolean_t wire
+@@ -1324,11 +1363,11 @@ kern_return_t thread_wire(host_priv_t host_priv, thread_t thread, boolean_t wire
  };
  
  kern_return_t thread_getstatus_to_user(thread_t thread, int flavor, thread_state_t tstate, mach_msg_type_number_t* count) {
