@@ -9243,7 +9243,7 @@ index b998456..45f8b40 100644
  
  	if (code < 0) {
  		if (code == -LINUX_EINTR) {
-@@ -92,33 +118,860 @@ retry:
+@@ -92,33 +118,873 @@ retry:
  			}
  		}
  		__simple_printf("mach_msg_overwrite failed (internally): %d\n", code);
@@ -9925,6 +9925,7 @@ index b998456..45f8b40 100644
 +static volatile int lregion_refresh;
 +static volatile int lregion_maps_fd = -1;
 +static volatile int lregion_maps_pid;
++static volatile int lregion_unsupported; /* no PROCMAP_QUERY (Linux before 6.11): leave every call to the server */
 +_Static_assert(sizeof(struct lregion_query) == 104, "PROCMAP_QUERY ABI");
 +_Static_assert(sizeof(struct lregion_short_info) == 48, "short region reply ABI");
 +
@@ -10004,10 +10005,13 @@ index b998456..45f8b40 100644
 +		lregion_pace();
 +		int fd = __atomic_load_n(&lregion_maps_fd, __ATOMIC_ACQUIRE);
 +		int self = (int) LINUX_SYSCALL(__NR_getpid);
++		int fresh = 0;
 +		if (fd < 0 || __atomic_load_n(&lregion_maps_pid, __ATOMIC_ACQUIRE) != self) {
-+			int low = LINUX_SYSCALL(__NR_open, "/proc/self/maps", 02000000 /* O_RDONLY | O_CLOEXEC */, 0);
++			int low = __atomic_load_n(&lregion_unsupported, __ATOMIC_ACQUIRE) ? -1 :
++				LINUX_SYSCALL(__NR_open, "/proc/self/maps", 02000000 /* O_RDONLY | O_CLOEXEC */, 0);
 +			fd = -1;
 +			if (low >= 0) {
++				fresh = 1;
 +				fd = LINUX_SYSCALL(__NR_fcntl, low, 1030 /* F_DUPFD_CLOEXEC */, 900);
 +				if (fd >= 0)
 +					LINUX_SYSCALL(__NR_close, low);
@@ -10024,8 +10028,17 @@ index b998456..45f8b40 100644
 +			q.query_flags = 0x10; /* PROCMAP_QUERY_COVERING_OR_NEXT_VMA */
 +			q.query_addr = *address;
 +			long rv = LINUX_SYSCALL(__NR_ioctl, fd, LREGION_IOCTL, &q);
-+			if (rv < 0 && rv != -LINUX_ENOENT)
++			if (rv < 0 && rv != -LINUX_ENOENT) {
 +				__atomic_store_n(&lregion_maps_fd, -1, __ATOMIC_RELEASE); /* not ours any more: reopen on the next call */
++				if (fresh) {
++					/* Opened by this call, so it is ours to close. Kernels before 6.11 have no PROCMAP_QUERY and
++					 * fail every query with ENOTTY, which used to leave one /proc/self/maps open per call; stop
++					 * trying there, as darlingserver does. */
++					LINUX_SYSCALL(__NR_close, fd);
++					if (rv == -LINUX_ENOTTY || rv == -LINUX_EINVAL)
++						__atomic_store_n(&lregion_unsupported, 1, __ATOMIC_RELEASE);
++				}
++			}
 +			if (rv == -LINUX_ENOENT)
 +				return KERN_NO_SPACE; /* MIG leaves all caller outputs untouched on failure. */
 +			if (rv == 0 && *infoCnt != LREGION_SHORT_INFO_COUNT) {
