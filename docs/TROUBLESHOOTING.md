@@ -127,7 +127,7 @@ podman rm -f darling-lol   # remove the container if microos-toolbox created one
 bash scripts/install-native.sh --toolbox
 ```
 
-Once installed with Distrobox, `scripts/update.sh`, `scripts/clean-prefix.sh`, `scripts/uninstall.sh`, the desktop shortcuts, and the session supervisor all detect `build/toolbox-backend` and re-enter the Distrobox container automatically. You can also enter a Fedora 44 Distrobox container manually (`distrobox create --name darling-lol --image registry.fedoraproject.org/fedora-toolbox:44`, then `distrobox enter darling-lol` and `bash scripts/install-native.sh`).
+Once installed with Distrobox, `scripts/update.sh`, `scripts/clean-prefix.sh`, `scripts/uninstall.sh`, the desktop shortcuts, and the session supervisor all detect `build/toolbox-backend` and re-enter the Distrobox container automatically. You can also enter a Fedora 44 Distrobox container manually (`distrobox create --name darling-lol --image registry.fedoraproject.org/fedora-toolbox:44`, then `distrobox enter darling-lol` and `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh`).
 
 ## Update says the Toolbox container is not reachable
 
