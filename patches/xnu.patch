@@ -1631,7 +1631,7 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..715efd3 100644
+index 206e92e4..e82c33ff 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 @@ -14,6 +14,7 @@
@@ -1854,7 +1854,18 @@ index 206e92e..715efd3 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +539,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -332,6 +512,10 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+ 			if (!(sig_flags[linux_signum] & LINUX_SA_NODEFER))
+ 				set |= (1ull << (linux_signum-1));
+ 
++			// darling-lol: the guest's sa_mask (sigfillset, or SIGSEGV itself for
++			// a SIGSEGV handler) must not block the cpuid faults of fault mode.
++			set = rclol_cpuid_fault_mask(set);
++
+ 			LINUX_SYSCALL(__NR_rt_sigprocmask, 2 /* LINUX_SIG_SETMASK */,
+ 				&set, NULL, sizeof(linux_sigset_t));
+ 
+@@ -359,7 +543,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -1871,10 +1882,10 @@ index 206e92e..715efd3 100644
  	}
 diff --git a/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h b/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h
 new file mode 100644
-index 0000000..20fd3fe
+index 00000000..fa3d9853
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/include/linux_premigration/signal/cpuid_trace.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,86 @@
 +#ifndef _RCLOL_CPUID_TRACE_H
 +#define _RCLOL_CPUID_TRACE_H
 +
@@ -1950,13 +1961,23 @@ index 0000000..20fd3fe
 +
 +#endif
 +
++// A Linux signal mask about to be installed: in fault mode SIGSEGV (11) must
++// stay deliverable, since the kernel kills a process whose cpuid faults while
++// it is blocked. Used by sys_sigprocmask and by sigexc before a guest handler.
++static inline unsigned long long rclol_cpuid_fault_mask(unsigned long long mask)
++{
++	if (rclol_cpuid_fault_active())
++		mask &= ~(1ull << (11 /* LINUX_SIGSEGV */ - 1));
++	return mask;
++}
++
 +#endif // _RCLOL_CPUID_TRACE_H
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
 new file mode 100644
-index 0000000..4e80310
+index 00000000..d0b13723
 --- /dev/null
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/cpuid_trace.c
-@@ -0,0 +1,1655 @@
+@@ -0,0 +1,1696 @@
 +// darling-lol: cpuid execute-breakpoint tracer. See cpuid_trace.h for the why.
 +//
 +// Mechanism
@@ -3222,6 +3243,8 @@ index 0000000..4e80310
 +
 +static int g_fault_mode = 0;
 +static unsigned long g_fault_hits = 0;
++// Threads whose faulting could not be restored after a served cpuid.
++static unsigned long g_fault_relock_failures = 0;
 +
 +#define RCLOL_FAULT_SITES 512
 +#define RCLOL_FAULT_SITE_HOST (1UL << 63) // above any user address
@@ -3383,6 +3406,44 @@ index 0000000..4e80310
 +	return 1;
 +}
 +
++// After a served cpuid, turn faulting back on for this thread. If the kernel
++// refuses twice, the thread keeps running cpuid unserved (host values) while the
++// mode stays on for the others: say so once, so the log does not look complete.
++static void rclol_fault_relock(void)
++{
++	if (rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0, 0, 0, 0, 0) == 0)
++		return;
++	if (rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0, 0, 0, 0, 0) == 0)
++		return;
++	if (__atomic_fetch_add(&g_fault_relock_failures, 1, __ATOMIC_RELAXED) == 0) {
++		char line[160];
++		__simple_snprintf(line, sizeof(line),
++			"cpuid-trace: cannot restore faulting tid=%ld, its later cpuid keep host values\n",
++			rclol_gettid());
++		rclol_write_str(line);
++	}
++}
++
++// Length of the cpuid instruction at ip, or 0 when it is another instruction.
++// Prefixes (REX, operand size, rep, segment) do not change cpuid but move it.
++static unsigned long rclol_cpuid_length(const unsigned char* ip)
++{
++	unsigned long n = 0;
++	// The CPU decoded the whole faulting instruction, so its bytes are mapped:
++	// stop at the first byte that is not a prefix.
++	while (n < 4) {
++		unsigned char b = ip[n];
++		if ((b & 0xf0) == 0x40 || b == 0x66 || b == 0xf2 || b == 0xf3
++				|| b == 0x2e || b == 0x36 || b == 0x3e || b == 0x26 || b == 0x64 || b == 0x65)
++			++n;
++		else
++			break;
++	}
++	if (ip[n] != 0x0f || ip[n + 1] != 0xa2)
++		return 0;
++	return n + 2;
++}
++
 +bool rclol_cpuid_fault_handle(struct linux_siginfo* info, struct linux_ucontext* ctxt)
 +{
 +	if (!g_fault_mode || !info || !ctxt)
@@ -3393,7 +3454,8 @@ index 0000000..4e80310
 +	struct linux_gregset* r = &ctxt->uc_mcontext.gregs;
 +	const unsigned char* ip = (const unsigned char*) r->rip;
 +
-+	if (ip[0] != 0x0f || ip[1] != 0xa2)
++	unsigned long length = rclol_cpuid_length(ip);
++	if (length == 0)
 +		return false; // another privileged instruction; let normal handling run
 +
 +	uint32_t in_eax = (uint32_t) r->rax;
@@ -3422,13 +3484,13 @@ index 0000000..4e80310
 +	// Only guest code gets the compat view here.
 +	if (g_fake && !host)
 +		rclol_cpuid_trace_spoof(in_eax, in_ecx, &oa, &ob, &oc, &od);
-+	rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0, 0, 0, 0, 0);
++	rclol_fault_relock();
 +
 +	r->rax = oa;
 +	r->rbx = ob;
 +	r->rcx = oc;
 +	r->rdx = od;
-+	r->rip += 2;
++	r->rip += length;
 +
 +	unsigned long n = __atomic_fetch_add(&g_fault_hits, 1, __ATOMIC_RELAXED);
 +	if (g_log_enabled && n < RCLOL_FAULT_LOG_FIRST_N) {
@@ -13476,7 +13538,7 @@ index d127afc..adaf95e 100644
  
  		oid[oid_len++] = next->oid;
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c
-index c0acf2b..f003819 100644
+index c0acf2b7..f613b233 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/signal/sigprocmask.c
 @@ -6,6 +6,7 @@
@@ -13493,8 +13555,8 @@ index c0acf2b..f003819 100644
  
 +	// darling-lol: in cpuid fault mode every cpuid arrives as SIGSEGV, and the
 +	// kernel kills a process that takes that fault with the signal blocked.
-+	if (set != NULL && linux_how != 1 /* LINUX_SIG_UNBLOCK */ && rclol_cpuid_fault_active())
-+		in &= ~(1ull << (LINUX_SIGSEGV - 1));
++	if (set != NULL && linux_how != 1 /* LINUX_SIG_UNBLOCK */)
++		in = rclol_cpuid_fault_mask(in);
 +
  	ret = LINUX_SYSCALL(__NR_rt_sigprocmask, linux_how,
  			(set != NULL) ? &in : NULL, &out, sizeof(linux_sigset_t));

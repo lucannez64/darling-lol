@@ -53,9 +53,63 @@ class CpuidFaultModeTests(unittest.TestCase):
 
     def test_guest_masks_never_block_sigsegv_in_fault_mode(self):
         mask = patched_lines(f'{EMULATION}/src/xnu_syscall/bsd/impl/signal/sigprocmask.c')
-        self.assertIn('if (set != NULL && linux_how != 1 /* LINUX_SIG_UNBLOCK */ && rclol_cpuid_fault_active())\n'
-                      '\t\tin &= ~(1ull << (LINUX_SIGSEGV - 1));', mask)
-        self.assertLess(mask.index('rclol_cpuid_fault_active()'), mask.index('__NR_rt_sigprocmask'))
+        self.assertIn('if (set != NULL && linux_how != 1 /* LINUX_SIG_UNBLOCK */)\n'
+                      '\t\tin = rclol_cpuid_fault_mask(in);', mask)
+        self.assertLess(mask.index('rclol_cpuid_fault_mask('), mask.index('__NR_rt_sigprocmask'))
+
+    def test_guest_handler_mask_never_blocks_sigsegv_in_fault_mode(self):
+        # sigexc installs the guest's sa_mask with a raw rt_sigprocmask before
+        # calling the guest handler: a sigfillset mask, or SIGSEGV kept blocked
+        # for a SIGSEGV handler, would make a cpuid in the handler fatal.
+        sigexc = patched_lines(f'{EMULATION}/src/linux_premigration/signal/sigexc.c')
+        forward = sigexc[sigexc.index('if (!(sig_flags[linux_signum] & LINUX_SA_NODEFER))'):]
+        forward = forward[:forward.index('&set, NULL, sizeof(linux_sigset_t));')]
+        nodefer = forward.index('set |= (1ull << (linux_signum-1));')
+        strip = forward.index('set = rclol_cpuid_fault_mask(set);')
+        self.assertLess(nodefer, strip)
+        self.assertLess(strip, forward.index('LINUX_SYSCALL(__NR_rt_sigprocmask, 2 /* LINUX_SIG_SETMASK */,'))
+
+    @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
+    def test_fault_mask_helper_clears_only_sigsegv_and_only_when_on(self):
+        header = patched_lines(f'{EMULATION}/include/linux_premigration/signal/cpuid_trace.h')
+        helper = header[header.index('static inline unsigned long long rclol_cpuid_fault_mask('):]
+        helper = helper[:helper.index('\n}\n') + 3]
+        harness = f"""
+#include <assert.h>
+#include <signal.h>
+static int g_on;
+static int rclol_cpuid_fault_active(void) {{ return g_on; }}
+{helper}
+int main(void)
+{{
+    unsigned long long all = ~0ull, segv = 1ull << (SIGSEGV - 1);
+    assert(rclol_cpuid_fault_mask(all) == all);
+    g_on = 1;
+    assert(rclol_cpuid_fault_mask(all) == (all & ~segv));
+    assert(rclol_cpuid_fault_mask(segv) == 0);
+    assert(rclol_cpuid_fault_mask(1ull << (SIGTRAP - 1)) == 1ull << (SIGTRAP - 1));
+    return 0;
+}}
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'mask.c'
+            binary = Path(folder) / 'mask'
+            source.write_text(harness)
+            subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+    def test_failed_relock_is_logged_once_and_counted(self):
+        trace = patched_lines(TRACE)
+        relock = trace[trace.index('static void rclol_fault_relock(void)'):]
+        relock = relock[:relock.index('\n}\n')]
+        self.assertEqual(relock.count('rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0, 0, 0, 0, 0) == 0'), 2)
+        self.assertIn('__atomic_fetch_add(&g_fault_relock_failures, 1, __ATOMIC_RELAXED) == 0', relock)
+        self.assertIn('cannot restore faulting tid=%ld', relock)
+        handler = trace[trace.index('bool rclol_cpuid_fault_handle('):]
+        handler = handler[:handler.index('\n}\n')]
+        # the result is still written back after a failed relock
+        self.assertLess(handler.index('rclol_fault_relock();'), handler.index('r->rip += length;'))
+        self.assertNotIn('rclol_sys(__NR_arch_prctl, RCLOL_ARCH_SET_CPUID, 0,', handler)
 
     def test_clock_probe_runs_no_cpuid_once_faulting_is_on(self):
         # The probe is lazy and its callers may have SIGSEGV blocked (the RPC
@@ -109,6 +163,7 @@ static int g_logged;
 static int g_sites_logged;
 static int g_refused;
 static int g_deny_lift;
+static int g_deny_relock;
 static int g_identity_filled;
 static char g_last_site[256];
 static long rclol_sys(long nr, long a1, long a2, long a3, long a4, long a5, long a6)
@@ -116,14 +171,20 @@ static long rclol_sys(long nr, long a1, long a2, long a3, long a4, long a5, long
     /* a filter that lets faulting be turned on but not lifted */
     if (g_deny_lift && nr == SYS_arch_prctl && a1 == 0x1012 && a2 == 1)
         return -1;
+    /* and one that refuses to turn it back on */
+    if (g_deny_relock && nr == SYS_arch_prctl && a1 == 0x1012 && a2 == 0)
+        return -1;
     long rc = syscall(nr, a1, a2, a3, a4, a5, a6);
     return rc < 0 ? -1 : rc;
 }}
 static unsigned long long rclol_monotonic_ns(void) {{ return 0; }}
 static long rclol_gettid(void) {{ return syscall(SYS_gettid); }}
+static int g_relock_logged;
 static void rclol_write_str(const char* line)
 {{
-    if (strncmp(line, "cpuid-site ", 11) == 0) {{
+    if (strncmp(line, "cpuid-trace: cannot restore faulting tid=", 41) == 0) {{
+        g_relock_logged++;
+    }} else if (strncmp(line, "cpuid-site ", 11) == 0) {{
         g_sites_logged++;
         snprintf(g_last_site, sizeof(g_last_site), "%s", line);
     }} else if (strncmp(line, "cpuid-fault ", 12) == 0) {{
@@ -344,6 +405,43 @@ int main(int argc, char** argv)
     assert(g_refused == 1);
     assert(frame.uc_mcontext.gregs.rip == (unsigned long) cpuid_bytes && frame.uc_mcontext.gregs.rax == 0x1234);
     g_deny_lift = 0;
+
+    /* a REX- or 0x66-prefixed cpuid is served and skipped whole */
+    {{
+        static const unsigned char rex_cpuid[] = {{ 0x48, 0x0f, 0xa2 }};
+        static const unsigned char two_prefixes[] = {{ 0x66, 0x48, 0x0f, 0xa2 }};
+        static const unsigned char prefixed_nop[] = {{ 0x48, 0x90, 0x90 }};
+        frame.uc_mcontext.gregs.rax = 0;
+        frame.uc_mcontext.gregs.rip = (unsigned long) rex_cpuid;
+        assert(rclol_cpuid_fault_handle(&info, &frame));
+        assert(frame.uc_mcontext.gregs.rip == (unsigned long) rex_cpuid + 3);
+        frame.uc_mcontext.gregs.rax = 0;
+        frame.uc_mcontext.gregs.rip = (unsigned long) two_prefixes;
+        assert(rclol_cpuid_fault_handle(&info, &frame));
+        assert(frame.uc_mcontext.gregs.rip == (unsigned long) two_prefixes + 4);
+        frame.uc_mcontext.gregs.rip = (unsigned long) prefixed_nop;
+        assert(!rclol_cpuid_fault_handle(&info, &frame));
+        assert(frame.uc_mcontext.gregs.rip == (unsigned long) prefixed_nop);
+    }}
+
+    /* faulting cannot be restored: the cpuid is still served, the thread is logged once */
+    {{
+        unsigned long served = g_fault_hits;
+        g_deny_relock = 1;
+        for (int i = 0; i < 2; i++) {{
+            frame.uc_mcontext.gregs.rax = 0;
+            frame.uc_mcontext.gregs.rip = (unsigned long) cpuid_bytes;
+            assert(rclol_cpuid_fault_handle(&info, &frame));
+            assert(frame.uc_mcontext.gregs.rip == (unsigned long) cpuid_bytes + 2);
+        }}
+        g_deny_relock = 0;
+        assert(g_fault_hits == served + 2);
+        assert(g_relock_logged == 1 && g_fault_relock_failures == 2);
+        /* this thread really runs unfaulted now; the mode itself stays on */
+        assert(syscall(SYS_arch_prctl, RCLOL_ARCH_GET_CPUID, 0UL) == 1);
+        assert(rclol_cpuid_fault_active());
+        syscall(SYS_arch_prctl, RCLOL_ARCH_SET_CPUID, 0UL);
+    }}
     puts("supported");
     return 0;
 }}
