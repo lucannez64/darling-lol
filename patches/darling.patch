@@ -13716,7 +13716,7 @@ index 1e9ec25..0114e25 100644
  				break;
  			}
 diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
-index a68739ff..5c8eb836 100644
+index a68739ff0..de23cb5b8 100644
 --- a/src/launchd/src/core.c
 +++ b/src/launchd/src/core.c
 @@ -463,6 +463,9 @@ static job_t job_mig_intran2(jobmgr_t jm, mach_port_t mport, pid_t upid);
@@ -13729,7 +13729,29 @@ index a68739ff..5c8eb836 100644
  static void jobmgr_setup_env_from_other_jobs(jobmgr_t jm);
  static void jobmgr_export_env_from_other_jobs(jobmgr_t jm, launch_data_t dict);
  static struct machservice *jobmgr_lookup_service(jobmgr_t jm, const char *name, bool check_parent, pid_t target_pid);
-@@ -4312,6 +4315,8 @@ jobmgr_callback(void *obj, struct kevent *kev)
+@@ -1729,6 +1732,7 @@ job_new_anonymous(jobmgr_t jm, pid_t anonpid)
+ 		return NULL;
+ 	}
+ 
++#ifndef DARLING
+ 	if (anonpid >= 100000) {
+ 		/* The kernel current defines PID_MAX to be 99999, but that define isn't
+ 		 * exported.
+@@ -1737,6 +1741,13 @@ job_new_anonymous(jobmgr_t jm, pid_t anonpid)
+ 		errno = EINVAL;
+ 		return NULL;
+ 	}
++#else
++	if (anonpid >= 4194304) {
++		launchd_syslog(LOG_WARNING, "Did PID_MAX change? Got request from PID: %d", anonpid);
++		errno = EINVAL;
++		return NULL;
++	}
++#endif
+ 
+ 	/* libproc returns the number of bytes written into the buffer upon success,
+ 	 * zero on failure. I'd much rather it return -1 on failure, like sysctl(3).
+@@ -4312,6 +4323,8 @@ jobmgr_callback(void *obj, struct kevent *kev)
  		} else if (kev->ident == (uintptr_t)jm) {
  			jobmgr_log(jm, LOG_DEBUG, "Shutdown timer firing.");
  			jobmgr_still_alive_with_check(jm);
@@ -13738,7 +13760,7 @@ index a68739ff..5c8eb836 100644
  		} else if (kev->ident == (uintptr_t)&jm->reboot_flags) {
  			jobmgr_do_garbage_collection(jm);
  		} else if (kev->ident == (uintptr_t)&launchd_runtime_busy_time) {
-@@ -6702,6 +6707,65 @@ jobmgr_do_garbage_collection(jobmgr_t jm)
+@@ -6702,6 +6715,65 @@ jobmgr_do_garbage_collection(jobmgr_t jm)
  	return jm;
  }
  
@@ -13804,7 +13826,7 @@ index a68739ff..5c8eb836 100644
  void
  jobmgr_kill_stray_children(jobmgr_t jm, pid_t *p, size_t np)
  {
-@@ -11796,6 +11860,7 @@ jobmgr_init(bool sflag)
+@@ -11796,6 +11868,7 @@ jobmgr_init(bool sflag)
  		}
  	}
  	s_no_hang_fd = _fd(s_no_hang_fd);
