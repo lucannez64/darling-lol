@@ -907,3 +907,81 @@ index 71e536c..501d28e 100644
      if (tfd < 0) {
          dbg_printf("timerfd_create(2): %s", strerror(errno));
          return (-1);
+diff --git a/src/linux/write.c b/src/linux/write.c
+index e029a6d..9b51a5d 100644
+--- a/src/linux/write.c
++++ b/src/linux/write.c
+@@ -23,6 +23,7 @@
+ #include <stdio.h>
+ #include <sys/ioctl.h>
+ #include <sys/queue.h>
++#include <sys/stat.h>
+ #include <sys/socket.h>
+ #include <sys/types.h>
+ #include <string.h>
+@@ -32,6 +33,50 @@
+ 
+ #include "private.h"
+ 
++/*
++ * Capacity of a pipe's buffer. Darwin's fcntl(2) has no command to query or
++ * change it, so every pipe a Darwin program can see has the system default.
++ */
++#define PIPE_BUFFER_SIZE 65536
++
++/*
++ * Space available in the write buffer of fd, never negative. For a socket
++ * this is the send buffer size less the bytes still queued (TIOCOUTQ alone
++ * reports only the queued bytes, 0 for an idle connection); for a pipe the
++ * buffer capacity less the unread bytes. Other descriptors keep reporting
++ * the queued byte count.
++ */
++static int64_t
++write_space_avail(int fd)
++{
++    struct stat sb;
++    int queued = 0, sndbuf = 0;
++    socklen_t sl = sizeof(sndbuf);
++
++    if (fstat(fd, &sb) < 0) {
++        /* race condition with close, so ignore this error */
++        return (0);
++    }
++
++    if (S_ISFIFO(sb.st_mode)) {
++        if (ioctl(fd, FIONREAD, &queued) < 0)
++            return (0);
++        return (queued < PIPE_BUFFER_SIZE) ? (PIPE_BUFFER_SIZE - queued) : 0;
++    }
++
++    if (ioctl(fd, TIOCOUTQ, &queued) < 0) {
++        /* race condition with socket close, so ignore this error */
++        dbg_puts("ioctl(2) of socket failed");
++        return (0);
++    }
++    if (!S_ISSOCK(sb.st_mode))
++        return (queued);
++
++    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl) < 0)
++        return (0);
++    return (sndbuf > queued) ? (sndbuf - queued) : 0;
++}
++
+ int
+ evfilt_socket_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
+ {
+@@ -49,12 +94,8 @@ evfilt_socket_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
+     if (ev->events & EPOLLERR)
+         dst->fflags = 1; /* FIXME: Return the actual socket error */
+           
+-    /* On return, data contains the the amount of space remaining in the write buffer */
+-    if (ioctl(dst->ident, TIOCOUTQ, &dst->data) < 0) {
+-            /* race condition with socket close, so ignore this error */
+-            dbg_puts("ioctl(2) of socket failed");
+-            dst->data = 0;
+-    }
++    /* On return, data contains the space remaining in the write buffer. */
++    dst->data = write_space_avail(dst->ident);
+ 
+     return (0);
+ }
