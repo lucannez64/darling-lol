@@ -1,5 +1,6 @@
 """The launcher's host display and GPU setup, run from its own text with fake cookies and a fake DRM tree."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -332,7 +333,111 @@ class NvidiaVram(HostEnvFixture):
         source = LAUNCHER.read_text()
         self.assertEqual(source.count('/device/vendor'), 2)
         pin = source[source.index('NVIDIA Vulkan ICD pin'):source.index('newest_xwayland_cookie() {')]
-        self.assertIn('if host_gpus_all_nvidia; then', pin)
+        self.assertEqual(pin.count('host_gpus_all_nvidia "$4" || return 0'), 2)
+        self.assertIn('pin_nvidia_vulkan_icd /run/.toolboxenv /run/host \'\' /sys/class/drm\n', pin)
+
+
+class ToolboxNvidia(HostEnvFixture):
+    """The Vulkan ICD pin and the Toolbox EGL manifests, on a fake container and host tree (issue #361)."""
+    PIN = launcher_text('host_gpus_all_nvidia() {', 'host_nvidia_vram_mb() {') + launcher_text(
+        'pin_nvidia_vulkan_icd() {', 'pin_nvidia_vulkan_icd /run/.toolboxenv')
+    EGL_VARS = ('__EGL_VENDOR_LIBRARY_FILENAMES', '__EGL_VENDOR_LIBRARY_DIRS',
+                '__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES', '__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS')
+
+    def setUp(self):
+        super().setUp()
+        root = Path(self.tmp.name)
+        self.marker = root / 'toolboxenv'
+        self.container = root / 'container'
+        self.host = root / 'host'
+        self.stage = self.runtime / 'darling-lol-nvidia-egl'
+        self.marker.touch()
+        (self.bin / 'mkdir').symlink_to(shutil.which('mkdir'))
+
+    drm = NvidiaVram.drm
+
+    def touch(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n')
+        return path
+
+    def host_driver(self):
+        """The host-only NVIDIA userspace the reporter of issue #361 had."""
+        for name in ('libEGL_nvidia.so.0', 'libnvidia-egl-xlib.so.1', 'libnvidia-egl-xcb.so.1'):
+            self.touch(self.host / 'usr/lib64' / name)
+        return self.touch(self.host / 'usr/share/vulkan/icd.d/nvidia_icd.x86_64.json')
+
+    def launch(self, vendors=('0x10de',), marker=None, **env):
+        # "$1" is the sourced block; the fixture paths follow it.
+        tail = 'pin_nvidia_vulkan_icd "$2" "$3" "$4" "$5"; write_nvidia_egl_manifests "$2" "$3" "$4" "$5" "$6"; '
+        tail += ''.join(f'printf "{name}=%s\\n" "${{{name}-unset}}"; '
+                        for name in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES', *self.EGL_VARS))
+        out = self.run_block(self.PIN, tail, str(marker or self.marker), str(self.host), str(self.container),
+                             self.drm(*vendors), str(self.stage), **env)
+        return dict(line.split('=', 1) for line in out.splitlines())
+
+    def test_host_only_driver_gets_absolute_manifests_and_the_host_icd(self):
+        icd = self.host_driver()
+        values = self.launch()
+        self.assertEqual(values['VK_DRIVER_FILES'], str(icd))
+        self.assertEqual(values['VK_ICD_FILENAMES'], str(icd))
+        vendor = self.stage / 'vendor.json'
+        self.assertEqual(values['__EGL_VENDOR_LIBRARY_FILENAMES'], str(vendor))
+        self.assertEqual(json.loads(vendor.read_text()),
+                         {'file_format_version': '1.0.0',
+                          'ICD': {'library_path': str(self.host / 'usr/lib64/libEGL_nvidia.so.0')}})
+        platforms = values['__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES'].split(':')
+        self.assertEqual(platforms, [str(self.stage / 'xcb.json'), str(self.stage / 'xlib.json')])
+        libraries = [json.loads(Path(item).read_text())['ICD']['library_path'] for item in platforms]
+        self.assertEqual(libraries, [str(self.host / 'usr/lib64/libnvidia-egl-xcb.so.1'),
+                                     str(self.host / 'usr/lib64/libnvidia-egl-xlib.so.1')])
+        self.assertTrue(all(Path(item).is_absolute() for item in libraries))
+        self.assertEqual(self.stage.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(values['__EGL_VENDOR_LIBRARY_DIRS'], 'unset')
+
+    def test_native_host_and_other_gpus_are_untouched(self):
+        self.host_driver()
+        expected = {name: 'unset' for name in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES', *self.EGL_VARS)}
+        self.assertEqual(self.launch(marker=self.marker.parent / 'no toolboxenv'), expected)
+        self.assertEqual(self.launch(vendors=('0x1002',)), expected)
+        self.assertEqual(self.launch(vendors=('0x8086', '0x10de')), expected)
+        self.assertFalse(self.stage.exists())
+
+    def test_user_values_are_untouched(self):
+        self.host_driver()
+        for name in self.EGL_VARS:
+            values = self.launch(**{name: '/mine.json'})
+            self.assertEqual(values[name], '/mine.json', name)
+            for other in self.EGL_VARS:
+                if other != name:
+                    self.assertEqual(values[other], 'unset', (name, other))
+        self.assertFalse(self.stage.exists())
+        values = self.launch(VK_ICD_FILENAMES='/mine_icd.json')
+        self.assertEqual((values['VK_ICD_FILENAMES'], values['VK_DRIVER_FILES']), ('/mine_icd.json', 'unset'))
+
+    def test_container_driver_with_its_own_manifest_is_kept(self):
+        self.host_driver()
+        self.touch(self.container / 'usr/lib64/libEGL_nvidia.so.0')
+        self.touch(self.container / 'usr/share/glvnd/egl_vendor.d/10_nvidia.json')
+        self.touch(self.container / 'usr/share/vulkan/icd.d/nvidia_icd.json')
+        values = self.launch()
+        # Without lvp the container's own NVIDIA ICD is not pinned (issue #127 rule).
+        self.assertEqual(values['VK_ICD_FILENAMES'], 'unset')
+        self.assertEqual(values['__EGL_VENDOR_LIBRARY_FILENAMES'], 'unset')
+        self.assertFalse(self.stage.exists())
+
+    def test_container_library_without_a_manifest_is_preferred_over_the_host_copy(self):
+        self.host_driver()
+        self.touch(self.container / 'usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0')
+        self.launch()
+        self.assertEqual(json.loads((self.stage / 'vendor.json').read_text())['ICD']['library_path'],
+                         str(self.container / 'usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0'))
+
+    def test_no_runtime_directory_writes_nothing(self):
+        self.host_driver()
+        self.stage = ''
+        values = self.launch()
+        self.assertEqual(values['__EGL_VENDOR_LIBRARY_FILENAMES'], 'unset')
 
 
 if __name__ == '__main__':

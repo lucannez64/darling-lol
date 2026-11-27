@@ -352,6 +352,24 @@ def trust_store(env):
     return next((str(path) for path in candidates if path.exists()), '')
 
 
+NVIDIA_EGL_LIBDIRS = ('usr/lib64', 'usr/lib/x86_64-linux-gnu', 'usr/lib')
+
+
+def nvidia_egl_location(marker=Path('/run/.toolboxenv'), container_root=Path('/'),
+                        host_root=Path('/run/host')):
+    """Where libEGL_nvidia.so.0 lives inside Toolbox: 'container', 'host' or 'missing'.
+
+    Outside Toolbox this is 'not-toolbox'. The launcher writes absolute-path EGL manifests
+    when the library is only on the host side (issue #361).
+    """
+    if not Path(marker).exists():
+        return 'not-toolbox'
+    for place, root in (('container', Path(container_root)), ('host', Path(host_root))):
+        if any((root / libdir / 'libEGL_nvidia.so.0').exists() for libdir in NVIDIA_EGL_LIBDIRS):
+            return place
+    return 'missing'
+
+
 def rootless_namespace(proc_root=Path('/proc')):
     """True in a rootless user namespace (Toolbox, the Nix runtime).
 
@@ -432,6 +450,7 @@ def gather(prefix=None, env=None, proc_root=Path('/proc'), sys_root=Path('/sys')
         'disk': {'free': free_disk, 'free_gib': gib(free_disk)},
         'gpus': read_gpus(sys_root, proc_root),
         'vulkan_icds': vulkan_icds(env),
+        'nvidia_egl': nvidia_egl_location(),
         'prefix': str(prefix),
         'workspace': env.get('DARLING_WORKSPACE', ''),
         'runtime_dir': str(runtime_bin),
@@ -544,6 +563,23 @@ def check_vulkan(facts):
         return 'fail', 'No Vulkan ICD found; install the Mesa Vulkan driver (vulkan-radeon or vulkan-intel)'
     names = ', '.join(Path(item).name for item in icds)
     return 'ok', names
+
+
+def check_toolbox_nvidia_egl(facts):
+    location = facts.get('nvidia_egl', 'not-toolbox')
+    if location == 'not-toolbox':
+        return 'ok', 'Not inside Toolbox'
+    if not any(gpu.get('vendor_id') == '0x10de' for gpu in facts['gpus']):
+        return 'ok', 'No NVIDIA GPU'
+    guide = 'see docs/TROUBLESHOOTING.md, "NVIDIA in Toolbox"'
+    if location == 'host':
+        return 'warn', ('The NVIDIA EGL vendor library is only on the host side (/run/host); the launcher '
+                        'writes EGL manifests with its absolute path. If OpenGL still lands on llvmpipe, '
+                        + guide)
+    if location == 'missing':
+        return 'warn', ('No NVIDIA EGL vendor library (libEGL_nvidia.so.0) in the container or under '
+                        '/run/host: OpenGL falls back to llvmpipe and the game cannot present; ' + guide)
+    return 'ok', 'NVIDIA EGL vendor library inside the container'
 
 
 def check_session(facts):
@@ -699,6 +735,7 @@ CHECKS = (
     ('gpu', 'GPU driver', check_gpu),
     ('vulkan', 'Vulkan driver', check_vulkan),
     ('hybrid', 'Hybrid graphics', check_hybrid),
+    ('toolbox_nvidia_egl', 'Toolbox NVIDIA EGL', check_toolbox_nvidia_egl),
     ('session', 'Display session', check_session),
     ('wayland', 'Experimental Wayland game window', check_wayland),
     ('hud', 'Overlay layer', check_hud),

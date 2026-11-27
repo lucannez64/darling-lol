@@ -187,24 +187,74 @@ export RCLOL_CDN_IPV4_ONLY="${RCLOL_CDN_IPV4_ONLY:-1}"
 # Guest services started by ensure-darling-root-certificates.py inherit this environment.
 # When NVIDIA is the only active DRM GPU and Mesa's software ICD (lvp_icd) is
 # installed alongside nvidia_icd.json, pin the NVIDIA Vulkan ICD so the loader
-# cannot enumerate llvmpipe ahead of the presenting GPU (issue #127).
-if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
- if host_gpus_all_nvidia; then
-  has_sw_icd=0
-  for sw in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
-   [ -r "$sw" ] && { has_sw_icd=1; break; }
+# cannot enumerate llvmpipe ahead of the presenting GPU (issue #127). Inside
+# Toolbox ($1 exists) the driver can live only on the host side, under $2/usr or
+# $2/etc; that ICD is pinned whether or not lvp is installed, because the
+# container's loader would not see it at all (issue #361). $3 is the container
+# root ('' for /) and $4 replaces /sys/class/drm in tests.
+pin_nvidia_vulkan_icd() {
+ [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ] || return 0
+ host_gpus_all_nvidia "$4" || return 0
+ has_sw_icd=0
+ for sw in "$3"/usr/share/vulkan/icd.d/lvp_icd*.json "$3"/etc/vulkan/icd.d/lvp_icd*.json; do
+  [ -r "$sw" ] && { has_sw_icd=1; break; }
+ done
+ nvicd=
+ for candidate in "$3"/usr/share/vulkan/icd.d/nvidia_icd*.json "$3"/etc/vulkan/icd.d/nvidia_icd*.json; do
+  [ -r "$candidate" ] && { nvicd=$candidate; break; }
+ done
+ if [ -z "$nvicd" ] && [ -f "$1" ]; then
+  for candidate in "$2"/usr/share/vulkan/icd.d/nvidia_icd*.json "$2"/etc/vulkan/icd.d/nvidia_icd*.json; do
+   [ -r "$candidate" ] && { nvicd=$candidate; has_sw_icd=1; break; }
   done
-  if [ "$has_sw_icd" = 1 ]; then
-   for nvicd in /usr/share/vulkan/icd.d/nvidia_icd*.json /etc/vulkan/icd.d/nvidia_icd*.json; do
-    if [ -r "$nvicd" ]; then
-     export VK_DRIVER_FILES="$nvicd"
-     export VK_ICD_FILENAMES="$nvicd"
-     break
-    fi
-   done
-  fi
  fi
-fi
+ [ "$has_sw_icd" = 1 ] && [ -n "$nvicd" ] || return 0
+ export VK_DRIVER_FILES="$nvicd"
+ export VK_ICD_FILENAMES="$nvicd"
+}
+# Prints the first library named $1 under the container root $2, then the host root $3.
+find_nvidia_library() {
+ for libroot in "$2" "$3"; do
+  for libdir in usr/lib64 usr/lib/x86_64-linux-gnu usr/lib; do
+   [ -r "$libroot/$libdir/$1" ] && { printf '%s\n' "$libroot/$libdir/$1"; return 0; }
+  done
+ done
+ return 1
+}
+# --- Toolbox NVIDIA EGL manifests (issue #361) ---
+# Inside Toolbox the NVIDIA EGL vendor library can exist only under /run/host. The
+# privileged darling executable drops LD_LIBRARY_PATH, so a manifest with a bare library
+# name does not load there: OpenGL falls back to llvmpipe and the Vulkan drawable import
+# fails on the loading screen. Write private manifests with absolute library paths and
+# point glvnd and the NVIDIA platform loader at them. Arguments as in
+# pin_nvidia_vulkan_icd; $5 is the private directory for the manifests.
+# Nothing changes outside Toolbox, on a host that is not all NVIDIA, when any EGL
+# manifest variable is set, or when the container has its own NVIDIA manifest and library.
+write_nvidia_egl_manifests() {
+ [ -f "$1" ] && [ -n "$5" ] || return 0
+ [ -z "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" ] && [ -z "${__EGL_VENDOR_LIBRARY_DIRS:-}" ] || return 0
+ [ -z "${__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES:-}" ] && [ -z "${__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS:-}" ] || return 0
+ host_gpus_all_nvidia "$4" || return 0
+ if find_nvidia_library libEGL_nvidia.so.0 "$3" /nonexistent >/dev/null; then
+  for manifest in "$3"/usr/share/glvnd/egl_vendor.d/*nvidia*.json "$3"/etc/glvnd/egl_vendor.d/*nvidia*.json; do
+   [ -r "$manifest" ] && return 0
+  done
+ fi
+ egl_vendor=$(find_nvidia_library libEGL_nvidia.so.0 "$3" "$2") || return 0
+ (umask 077; mkdir -p "$5") || return 0
+ printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s"}}\n' "$egl_vendor" >"$5/vendor.json"
+ platforms=
+ for platform in wayland:libnvidia-egl-wayland.so.1 xcb:libnvidia-egl-xcb.so.1 xlib:libnvidia-egl-xlib.so.1; do
+  platform_library=$(find_nvidia_library "${platform#*:}" "$3" "$2") || continue
+  printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s"}}\n' "$platform_library" >"$5/${platform%%:*}.json"
+  platforms="${platforms:+$platforms:}$5/${platform%%:*}.json"
+ done
+ export __EGL_VENDOR_LIBRARY_FILENAMES="$5/vendor.json"
+ [ -z "$platforms" ] || export __EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES="$platforms"
+}
+pin_nvidia_vulkan_icd /run/.toolboxenv /run/host '' /sys/class/drm
+write_nvidia_egl_manifests /run/.toolboxenv /run/host '' /sys/class/drm \
+ "${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/darling-lol-nvidia-egl}"
 # On GNOME/Mutter Wayland, Xwayland writes its auth cookie under XDG_RUNTIME_DIR
 # (.mutter-Xwaylandauth.*), a new one at every login. Export the newest one before any
 # helper can start Darling so launchd and iokitd inherit XAUTHORITY. Nothing is copied

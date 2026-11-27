@@ -1071,6 +1071,33 @@ the practice game renders after installing both changes. A separate warning
 about an unbound constant buffer at slot 29 remains and needs investigation;
 this successful observation does not establish that every scene works.
 
+### NVIDIA in Toolbox
+
+In a Toolbox container the NVIDIA userspace driver can exist only on the host
+side, under `/run/host/usr`. The privileged `darling` executable drops
+`LD_LIBRARY_PATH`, so EGL manifests that name the library without a path do
+not load there: OpenGL falls back to Mesa `llvmpipe` while Vulkan runs on the
+NVIDIA GPU, and League aborts on the loading screen when the drawable import
+fails (`0x505`, [issue #361](https://github.com/lucannez64/darling-lol/issues/361)).
+
+When `/run/.toolboxenv` exists, every DRM card is NVIDIA and the container has
+no NVIDIA EGL manifest and library of its own, the launcher writes manifests
+with absolute library paths to `$XDG_RUNTIME_DIR/darling-lol-nvidia-egl/` and
+exports `__EGL_VENDOR_LIBRARY_FILENAMES` (for `libEGL_nvidia.so.0`) and
+`__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES` (for the `libnvidia-egl-wayland`,
+`-xcb` and `-xlib` platform libraries it finds). It looks in `usr/lib64`,
+`usr/lib/x86_64-linux-gnu` and `usr/lib` of the container first, then of
+`/run/host`. When the container has no NVIDIA Vulkan ICD, the host's
+`/run/host/usr/share/vulkan/icd.d/nvidia_icd*.json` is pinned as well, so
+Vulkan and OpenGL stay on the same GPU. Setting any of
+`__EGL_VENDOR_LIBRARY_FILENAMES`, `__EGL_VENDOR_LIBRARY_DIRS`,
+`__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES` or
+`__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS` turns the EGL part off, and
+`VK_ICD_FILENAMES` or `VK_DRIVER_FILES` the Vulkan part. `darling-lol --doctor`
+reports, under "Toolbox NVIDIA EGL", whether the vendor library was found only
+on the host side. Check the result with the `presenting GL` line described in
+[Vulkan device or ICD selection](#vulkan-device-or-icd-selection).
+
 ## Vulkan device or ICD selection
 
 The Metal wrapper renders with Vulkan and hands each frame to an OpenGL (EGL)

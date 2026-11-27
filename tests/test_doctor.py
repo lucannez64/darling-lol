@@ -276,6 +276,33 @@ class HybridAndSwitchTests(unittest.TestCase):
         self.assertEqual(status, 'warn')
         self.assertIn('/tmp/metal-gpu', message)
 
+    def test_toolbox_nvidia_egl_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker, container, host = root / 'toolboxenv', root / 'container', root / 'host'
+            where = lambda: doctor.nvidia_egl_location(marker, container, host)
+            self.assertEqual(where(), 'not-toolbox')
+            marker.touch()
+            self.assertEqual(where(), 'missing')
+            (host / 'usr/lib64').mkdir(parents=True)
+            (host / 'usr/lib64/libEGL_nvidia.so.0').touch()
+            self.assertEqual(where(), 'host')
+            (container / 'usr/lib/x86_64-linux-gnu').mkdir(parents=True)
+            (container / 'usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0').touch()
+            self.assertEqual(where(), 'container')
+
+    def test_toolbox_nvidia_egl_reports_a_host_only_library(self):
+        check = doctor.check_toolbox_nvidia_egl
+        self.assertEqual(check(facts(gpus=[NVIDIA]))[0], 'ok')
+        self.assertEqual(check(facts(nvidia_egl='host'))[0], 'ok')
+        self.assertEqual(check(facts(gpus=[NVIDIA], nvidia_egl='container'))[0], 'ok')
+        status, message = check(facts(gpus=[NVIDIA], nvidia_egl='host'))
+        self.assertEqual(status, 'warn')
+        self.assertIn('only on the host side', message)
+        status, message = check(facts(gpus=[NVIDIA], nvidia_egl='missing'))
+        self.assertEqual(status, 'warn')
+        self.assertIn('llvmpipe', message)
+
     def test_switches_report_diagnostics_before_tuning(self):
         self.assertEqual(doctor.check_switches(facts())[0], 'ok')
         traced = facts(switches={'diagnostic': ['rclol-input-trace'], 'tuning': ['rclol-core-isolation']})
