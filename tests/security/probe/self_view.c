@@ -212,13 +212,14 @@ static const char *jstr(const char *s)
  * point, application, temporary directory) is never printed. */
 static const char *clean_path(const char *p)
 {
-	static const char *const sys[] = {"/System/", "/usr/lib/", "/usr/libexec/", "/usr/bin/", "/usr/sbin/",
-		"/usr/share/", "/bin/", "/sbin/", "/dev/", "/Library/Apple/", "/private/var/db/dyld/",
-		"/private/var/db/oah/", NULL};
+	static const char *const sys[] = {"/System/Library/", "/System/Applications/", "/System/Cryptexes/",
+		"/System/DriverKit/", "/System/iOSSupport/", "/System/Volumes/Preboot/Cryptexes/", "/usr/lib/",
+		"/usr/libexec/", "/usr/bin/", "/usr/sbin/", "/usr/share/", "/bin/", "/sbin/", "/dev/",
+		"/Library/Apple/", "/private/var/db/dyld/", "/private/var/db/oah/", NULL};
 	static const char *const homes[] = {"/Users/", "/home/", "/root/", "/var/root/", "/private/var/root/", NULL};
 	static const char *const tmps[] = {"/tmp/", "/private/tmp/", "/var/tmp/", "/private/var/tmp/",
 		"/var/folders/", "/private/var/folders/", NULL};
-	static const char host[] = "/Volumes/SystemRoot/";
+	static const char host[] = "/Volumes/SystemRoot/", data[] = "/System/Volumes/Data/";
 	char *out = scratch();
 	const char *q, *kind = "<other>";
 
@@ -228,8 +229,10 @@ static const char *clean_path(const char *p)
 		kind = "<relative>";
 	else if (!p[1])
 		kind = "/";
-	/* the host's root as Darling shows it: judged by the path below it */
+	/* the host's root as Darling shows it, and the data volume, which holds
+	 * the homes: judged by the path below them */
 	q = strncmp(p, host, sizeof(host) - 1) ? p : p + sizeof(host) - 2;
+	q = strncmp(q, data, sizeof(data) - 1) ? q : q + sizeof(data) - 2;
 	if (!strncmp(q, "/Applications/", 14))
 		kind = "<application>";
 	for (int i = 0; homes[i]; i++)

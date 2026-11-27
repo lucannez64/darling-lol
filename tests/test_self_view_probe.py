@@ -59,7 +59,8 @@ class SelfViewProbeTests(unittest.TestCase):
             self.assertIn(text, clean)
         # no prefix under which a user creates folders is in the list printed in full
         listed = clean[clean.index('sys[] = {'):clean.index('NULL};')]
-        for prefix in ('"/Applications/"', '"/usr/"', '"/Library/"', '"/opt/"', '"/etc/"', '"/var/"', '"/private/"'):
+        for prefix in ('"/Applications/"', '"/usr/"', '"/Library/"', '"/opt/"', '"/etc/"', '"/var/"', '"/private/"',
+                       '"/System/"', '"/System/Volumes/"'):
             self.assertNotIn(prefix, listed, prefix)
         # nothing of an unknown path survives: no basename, no remainder
         self.assertNotIn('strrchr', clean)
@@ -140,6 +141,17 @@ int main(void)
     PATH("/Users/alice/project/tool", "<home>");
     PATH("/home/alice", "<home>");
     PATH("/Volumes/SystemRoot/home/alice/project", "<home>");
+    /* the data volume holds the homes: the path below it decides */
+    PATH("/System/Volumes/Data/Users/alice", "<home>");
+    PATH("/System/Volumes/Data/Users/alice/Library/x", "<home>");
+    PATH("/System/Volumes/Data/Applications/alice", "<application>");
+    PATH("/System/Volumes/Data/opt/alice", "<other>");
+    PATH("/System/Volumes/Data/usr/lib/x", "/System/Volumes/Data/usr/lib/x");
+    PATH("/System/Volumes/alice", "<other>");
+    PATH("/System/alice", "<other>");
+    PATH("/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64",
+         "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64");
+    PATH("/System/Volumes/Preboot/alice", "<other>");
     PATH("/Applications/alice", "<application>");
     PATH("/Applications/Some Game.app/Contents/MacOS/Game", "<application>");
     PATH("/opt/alice/bin/tool", "<other>");
