@@ -95,11 +95,13 @@ class CleanPrefixToolboxTests(unittest.TestCase):
         (self.bindir / 'distrobox').chmod(0o755)
         self.env = dict(os.environ)
         self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
-                        FAKE_DISTROBOX_LOG=str(self.distrobox_log))
+                        FAKE_DISTROBOX_LOG=str(self.distrobox_log),
+                        DARLING_TOOLBOX_ENV=str(folder / 'missing-toolboxenv'),
+                        DARLING_CONTAINER_ENV=str(folder / 'missing-containerenv'))
         self.env['PATH'] = f'{self.bindir}:{self.env["PATH"]}'
         for name in ('DARLING_WORKSPACE', 'CLEAN_PREFIX_REEXEC', 'DPREFIX',
                      'RIOT_GUEST_HOME', 'CLEAN_PREFIX_PROC_ROOT',
-                     'CLEAN_PREFIX_RUNTIME_ROOT', 'NO_COLOR'):
+                     'CLEAN_PREFIX_RUNTIME_ROOT', 'NO_COLOR', 'CONTAINER_ID'):
             self.env.pop(name, None)
 
     def run_clean(self, *args, cwd=None, stdin=None, **overrides):

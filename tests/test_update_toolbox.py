@@ -170,10 +170,13 @@ class UpdateToolboxTests(unittest.TestCase):
         self.env = dict(os.environ)
         self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
                         FAKE_DISTROBOX_LOG=str(self.distrobox_log),
-                        FAKE_PODMAN_LOG=str(self.podman_log))
+                        FAKE_PODMAN_LOG=str(self.podman_log),
+                        DARLING_TOOLBOX_ENV=str(folder / 'missing-toolboxenv'),
+                        DARLING_CONTAINER_ENV=str(folder / 'missing-containerenv'))
         self.env['PATH'] = f'{self.bindir}:{self.env["PATH"]}'
         self.env.pop('DARLING_WORKSPACE', None)
         self.env.pop('DARLING_LOL_UPDATE_REEXEC', None)
+        self.env.pop('CONTAINER_ID', None)
 
     def run_update(self, *args, input_text=None, **overrides):
         env = dict(self.env)

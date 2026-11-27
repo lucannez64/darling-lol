@@ -37,14 +37,15 @@ class CreateDesktopEntryTests(unittest.TestCase):
             script.chmod(0o755)
 
     def run_entry(self, *args, inside=False, name='', backend=''):
-        if not inside and Path('/run/.toolboxenv').is_file():
-            self.skipTest('host runs inside a Toolbox container')
         env = {**os.environ, 'HOME': str(self.home),
                'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
+               'DARLING_TOOLBOX_ENV': str(self.repo / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(self.repo / 'missing-containerenv'),
                'DARLING_LOL_TOOLBOX': '1' if inside else '0',
                'DARLING_LOL_TOOLBOX_NAME': name,
                'DARLING_LOL_TOOLBOX_BACKEND': backend,
                'DARLING_LOL_WINDOW_ENTRIES': '0'}
+        env.pop('CONTAINER_ID', None)
         result = subprocess.run(['sh', str(self.repo / 'scripts/create-desktop-entry.sh'), *args],
                                 env=env, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)

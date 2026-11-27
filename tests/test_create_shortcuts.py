@@ -86,6 +86,8 @@ exit 1
     def run_script(self, *args, path=None, input=None, desktop='X-Unknown', lang='C'):
         env = {**os.environ,
                'HOME': str(self.home),
+               'DARLING_TOOLBOX_ENV': str(self.root / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(self.root / 'missing-containerenv'),
                # Desktop discovery (xdg-user-dir) must not read the caller's
                # configuration and write shortcuts into their real folders.
                'XDG_CONFIG_HOME': str(self.home / '.config'),
@@ -93,6 +95,9 @@ exit 1
                # ships, so the region/locale question is skipped unless a test
                # asks for a supported one.
                'LC_ALL': lang, 'LC_MESSAGES': lang, 'LANG': lang}
+        for key in ('CONTAINER_ID', 'DARLING_LOL_TOOLBOX',
+                    'DARLING_LOL_TOOLBOX_NAME', 'DARLING_LOL_TOOLBOX_BACKEND'):
+            env.pop(key, None)
         # Deterministic session: only XDG_CURRENT_DESKTOP=GNOME may create the
         # window entries by default or ask the window-entries question.
         env['XDG_CURRENT_DESKTOP'] = desktop
@@ -110,9 +115,15 @@ exit 1
         env = {**os.environ,
                'HOME': str(self.home),
                'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'DARLING_TOOLBOX_ENV': str(self.root / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(self.root / 'missing-containerenv'),
                'DARLING_LOL_SHORTCUT_SCRIPT': str(self.repo / 'scripts/create-shortcuts.sh'),
                'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
                **overrides}
+        for key in ('CONTAINER_ID', 'DARLING_LOL_TOOLBOX',
+                    'DARLING_LOL_TOOLBOX_NAME', 'DARLING_LOL_TOOLBOX_BACKEND'):
+            if key not in overrides:
+                env.pop(key, None)
         return subprocess.run(
             ['bash', '-c',
              f'source "$DARLING_LOL_SHORTCUT_SCRIPT"\n{snippet}'],
@@ -660,9 +671,14 @@ exit 1
     def run_cli(self, *args, path=None):
         env = {**os.environ,
                'HOME': str(self.home),
+               'DARLING_TOOLBOX_ENV': str(self.root / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(self.root / 'missing-containerenv'),
                'XDG_CONFIG_HOME': str(self.home / '.config'),
                'XDG_CURRENT_DESKTOP': 'X-Unknown',
                'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C'}
+        for key in ('CONTAINER_ID', 'DARLING_LOL_TOOLBOX',
+                    'DARLING_LOL_TOOLBOX_NAME', 'DARLING_LOL_TOOLBOX_BACKEND'):
+            env.pop(key, None)
         if path is not None:
             env['PATH'] = path + os.pathsep + env.get('PATH', '')
         return subprocess.run(

@@ -55,6 +55,18 @@ exit 0
 """
 
 
+def tool_sandbox(folder, *names):
+    """Return a PATH dir exposing only the given host tools."""
+    bindir = Path(folder) / 'tools'
+    bindir.mkdir()
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved is None:
+            raise unittest.SkipTest(f'{name} is unavailable')
+        os.symlink(resolved, bindir / name)
+    return bindir
+
+
 class UninstallToolboxTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -67,6 +79,7 @@ class UninstallToolboxTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix='uninstall-toolbox-')
         self.addCleanup(tmp.cleanup)
         folder = Path(tmp.name)
+        self.folder = folder
         # A space in the checkout path must survive the re-exec.
         self.repo = folder / 'my repo'
         self.home = folder / 'home'
@@ -86,10 +99,12 @@ class UninstallToolboxTests(unittest.TestCase):
         (self.bindir / 'distrobox').chmod(0o755)
         self.env = dict(os.environ)
         self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
-                        FAKE_DISTROBOX_LOG=str(self.distrobox_log))
+                        FAKE_DISTROBOX_LOG=str(self.distrobox_log),
+                        DARLING_TOOLBOX_ENV=str(folder / 'missing-toolboxenv'),
+                        DARLING_CONTAINER_ENV=str(folder / 'missing-containerenv'))
         self.env['PATH'] = f'{self.bindir}:{self.env["PATH"]}'
         for name in ('DARLING_WORKSPACE', 'UNINSTALL_REEXEC', 'DPREFIX',
-                     'RIOT_GUEST_HOME', 'UNINSTALL_PROC_ROOT'):
+                     'RIOT_GUEST_HOME', 'UNINSTALL_PROC_ROOT', 'CONTAINER_ID'):
             self.env.pop(name, None)
 
     def run_uninstall(self, *args, **overrides):
@@ -214,8 +229,8 @@ class UninstallToolboxTests(unittest.TestCase):
         self.assertEqual(unreachable.returncode, 1)
         self.assertIn('distrobox enter my-dbx', unreachable.stderr)
 
-        (self.bindir / 'distrobox').unlink()
-        result = self.run_uninstall('--yes', PATH=f'{self.bindir}:/bin:/usr/bin')
+        bindir = tool_sandbox(self.folder, 'cat', 'dirname')
+        result = self.run_uninstall('--yes', PATH=str(bindir))
         self.assertEqual(result.returncode, 1)
         self.assertIn('Distrobox is not installed on this host', result.stderr)
         self.assertIn('distrobox enter my-dbx', result.stderr)
