@@ -8761,7 +8761,7 @@ index c1b2d50..fa6f707 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
-index b998456..45f8b40 100644
+index b998456..e3d34a1 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 @@ -12,9 +12,29 @@
@@ -8817,7 +8817,7 @@ index b998456..45f8b40 100644
  
  	if (code < 0) {
  		if (code == -LINUX_EINTR) {
-@@ -92,33 +118,860 @@ retry:
+@@ -92,33 +118,919 @@ retry:
  			}
  		}
  		__simple_printf("mach_msg_overwrite failed (internally): %d\n", code);
@@ -9483,6 +9483,9 @@ index b998456..45f8b40 100644
 +};
 +#define LREGION_IOCTL 0xC0686611ul /* PROCMAP_QUERY = _IOWR('f', 17, struct procmap_query), 104 bytes */
 +#define LREGION_SHORT_INFO_COUNT 12 /* VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 */
++#define LREGION_V0_INFO_COUNT 16    /* VM_REGION_SUBMAP_INFO_V0_COUNT_64: up to user_wired_count */
++#define LREGION_V1_INFO_COUNT 17    /* ..._V1_...: adds pages_reusable */
++#define LREGION_V2_INFO_COUNT 19    /* ..._V2_...: adds object_id_full */
 +struct lregion_short_info {
 +	int protection, max_protection;
 +	unsigned int inheritance;
@@ -9494,6 +9497,19 @@ index b998456..45f8b40 100644
 +	unsigned int object_id;
 +	unsigned short user_wired_count;
 +} __attribute__((packed, aligned(4)));
++struct lregion_long_info { /* vm_region_submap_info_64 (osfmk/mach/vm_region.h, pack(4)) */
++	int protection, max_protection;
++	unsigned int inheritance;
++	unsigned long long offset;
++	unsigned int user_tag, pages_resident, pages_shared_now_private, pages_swapped_out, pages_dirtied, ref_count;
++	unsigned short shadow_depth;
++	unsigned char external_pager, share_mode;
++	int is_submap, behavior;
++	unsigned int object_id;
++	unsigned short user_wired_count, pad;
++	unsigned int pages_reusable;
++	unsigned long long object_id_full;
++} __attribute__((packed, aligned(4)));
 +static volatile int lregion_state; /* 0 undecided, 1 on, -1 off */
 +static unsigned int lregion_calls;
 +static volatile int lregion_refresh;
@@ -9501,6 +9517,64 @@ index b998456..45f8b40 100644
 +static volatile int lregion_maps_pid;
 +_Static_assert(sizeof(struct lregion_query) == 104, "PROCMAP_QUERY ABI");
 +_Static_assert(sizeof(struct lregion_short_info) == 48, "short region reply ABI");
++_Static_assert(sizeof(struct lregion_long_info) == 76, "long region reply ABI");
++_Static_assert(__builtin_offsetof(struct lregion_long_info, pages_reusable) == 64, "V0 region reply ABI");
++_Static_assert(__builtin_offsetof(struct lregion_long_info, object_id_full) == 68, "V1 region reply ABI");
++_Static_assert(__builtin_offsetof(struct lregion_short_info, share_mode) == 31, "short share_mode");
++_Static_assert(__builtin_offsetof(struct lregion_long_info, share_mode) == 47, "long share_mode");
++_Static_assert(__builtin_offsetof(struct lregion_long_info, object_id) == 56, "long object_id");
++
++/* The reply darlingserver builds for one mapping (duct-tape memory.c, mach_vm_region_recurse), for the four counts it
++ * accepts. Returns 0 for any other count, which the caller leaves to the server: it refuses the smaller ones, and
++ * the MIG stub clamps a larger one to 19. */
++static int lregion_fill(int* info, unsigned int count, unsigned long long start, unsigned long long end,
++	unsigned long long vma_flags, unsigned long long offset)
++{
++	int prot = (int) (vma_flags & 7); /* PROCMAP_QUERY_VMA_READABLE/WRITABLE/EXECUTABLE = VM_PROT_READ/WRITE/EXECUTE */
++	int shared = (vma_flags & 8) != 0; /* PROCMAP_QUERY_VMA_SHARED */
++	int max_prot;
++	unsigned long long object = start >> 12;
++
++	if ((prot & VM_PROT_EXECUTE) && !(prot & VM_PROT_WRITE))
++		max_prot = VM_PROT_READ | VM_PROT_EXECUTE;
++	else if (prot & VM_PROT_EXECUTE)
++		max_prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
++	else if (prot == 0)
++		max_prot = 0;
++	else
++		max_prot = VM_PROT_READ | VM_PROT_WRITE;
++
++	if (count == LREGION_SHORT_INFO_COUNT) {
++		struct lregion_short_info out;
++		for (unsigned long i = 0; i < sizeof(out); ++i) ((char*) &out)[i] = 0;
++		out.protection = prot;
++		out.max_protection = max_prot;
++		out.inheritance = shared ? 0 /* VM_INHERIT_SHARE */ : 1 /* VM_INHERIT_COPY */;
++		out.offset = offset;
++		out.ref_count = 1;
++		out.share_mode = shared ? 4 /* SM_SHARED */ : 2 /* SM_PRIVATE */;
++		out.object_id = (unsigned int) object;
++		for (unsigned long i = 0; i < sizeof(out); ++i) ((char*) info)[i] = ((char*) &out)[i];
++		return 1;
++	}
++	if (count == LREGION_V0_INFO_COUNT || count == LREGION_V1_INFO_COUNT || count == LREGION_V2_INFO_COUNT) {
++		struct lregion_long_info out;
++		for (unsigned long i = 0; i < sizeof(out); ++i) ((char*) &out)[i] = 0;
++		out.protection = prot;
++		out.max_protection = max_prot;
++		out.inheritance = shared ? 0 : 1;
++		out.offset = offset;
++		out.pages_resident = (unsigned int) ((end - start) >> 12);
++		out.ref_count = 1;
++		out.share_mode = shared ? 4 : 2;
++		out.object_id = (unsigned int) object;
++		out.object_id_full = object;
++		/* only the words the caller asked for, as the server copies them */
++		for (unsigned long i = 0; i < count * sizeof(int); ++i) ((char*) info)[i] = ((char*) &out)[i];
++		return 1;
++	}
++	return 0;
++}
 +
 +extern kern_return_t __darling_rpc_mach_vm_region_recurse(mach_port_name_t target, unsigned long long* address, unsigned long long* size,
 +	unsigned int* depth, int* info, unsigned int* infoCnt);
@@ -9566,11 +9640,12 @@ index b998456..45f8b40 100644
 +			__atomic_store_n(&lregion_pace_us, LREGION_DEFAULT_PACE_US, __ATOMIC_RELAXED);
 +		}
 +	}
-+	/* Any count up to the long structure (19 words): the server only fills the short one (12) and returns the others
-+	 * zeroed, with the region's address and size (checked with tools/riot-region-count19-check.c). The scanner in
-+	 * League asks with the long count, so the short-only version of this path never ran in a match. */
-+	if (state == 1 && target == mach_task_self() && address && size && info && infoCnt &&
-+	    *infoCnt >= 1 && *infoCnt <= 19) {
++	/* The four counts the server answers as asked; any other goes to it, like a call with a NULL argument. The
++	 * scanner in League asks with the long count (19 words), so a short-only version of this path never ran in a
++	 * match. */
++	if (state == 1 && target == mach_task_self() && address && size && depth && info && infoCnt &&
++	    (*infoCnt == LREGION_SHORT_INFO_COUNT || *infoCnt == LREGION_V0_INFO_COUNT ||
++	     *infoCnt == LREGION_V1_INFO_COUNT || *infoCnt == LREGION_V2_INFO_COUNT)) {
 +		/* One descriptor, opened once and kept at a high number. It was opened and closed for every call before
 +		 * (~9,000 times a second), which churned the low descriptor numbers the rest of the process hands out.
 +		 * After a fork the inherited descriptor still names the parent's address space, so it is tied to the pid;
@@ -9601,27 +9676,11 @@ index b998456..45f8b40 100644
 +			if (rv < 0 && rv != -LINUX_ENOENT)
 +				__atomic_store_n(&lregion_maps_fd, -1, __ATOMIC_RELEASE); /* not ours any more: reopen on the next call */
 +			if (rv == -LINUX_ENOENT)
-+				return KERN_NO_SPACE; /* MIG leaves all caller outputs untouched on failure. */
-+			if (rv == 0 && *infoCnt != LREGION_SHORT_INFO_COUNT) {
-+				for (unsigned int i = 0; i < *infoCnt; ++i) info[i] = 0;
++				return KERN_INVALID_ADDRESS; /* past the last mapping, as the server answers; outputs stay untouched */
++			if (rv == 0 && lregion_fill(info, *infoCnt, q.vma_start, q.vma_end, q.vma_flags, q.vma_offset)) {
 +				*address = q.vma_start;
 +				*size = q.vma_end - q.vma_start;
-+				if (depth) *depth = 0;
-+				return KERN_SUCCESS;
-+			}
-+			if (rv == 0) {
-+				struct lregion_short_info* out = (struct lregion_short_info*) info;
-+				for (unsigned long i = 0; i < sizeof(*out); ++i) ((char*) out)[i] = 0;
-+				out->protection = q.vma_flags & 7;
-+				out->offset = q.vma_offset;
-+				/* Compatibility with duct-tape memory.c: the server fills the LONG structure,
-+				 * then MIG copies only its first 48 bytes for a short request. Its share_mode
-+				 * lands at byte 47 (short-structure trailing padding), not the short share_mode. */
-+				((unsigned char*)out)[47] = (q.vma_flags & 8) ? 4 : 2;
-+				out->max_protection = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
-+				*address = q.vma_start;
-+				*size = q.vma_end - q.vma_start;
-+				if (depth) *depth = 0;
++				*depth = 0;
 +				return KERN_SUCCESS;
 +			}
 +		}
@@ -9681,7 +9740,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -128,21 +981,33 @@ kern_return_t semaphore_signal_thread_trap_impl(
+@@ -128,21 +1040,33 @@ kern_return_t semaphore_signal_thread_trap_impl(
  				mach_port_name_t signal_name,
  				mach_port_name_t thread_name)
  {
@@ -9716,7 +9775,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -152,14 +1017,33 @@ kern_return_t semaphore_wait_signal_trap_impl(
+@@ -152,14 +1076,33 @@ kern_return_t semaphore_wait_signal_trap_impl(
  				mach_port_name_t wait_name,
  				mach_port_name_t signal_name)
  {
@@ -9751,7 +9810,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -170,14 +1054,24 @@ kern_return_t semaphore_timedwait_trap_impl(
+@@ -170,14 +1113,24 @@ kern_return_t semaphore_timedwait_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
@@ -9777,7 +9836,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -189,14 +1083,32 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
+@@ -189,14 +1142,32 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
@@ -9811,7 +9870,7 @@ index b998456..45f8b40 100644
  	}
  
  	return code;
-@@ -514,6 +1426,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
+@@ -514,6 +1485,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
  		__simple_printf("mach_port_construct failed (internally): %d\n", code);
  		__simple_abort();
  	}
@@ -9824,7 +9883,7 @@ index b998456..45f8b40 100644
  
  	return code;
  }
-@@ -673,16 +1591,16 @@ kern_return_t macx_backing_store_recovery_impl(
+@@ -673,16 +1650,16 @@ kern_return_t macx_backing_store_recovery_impl(
  	return KERN_FAILURE;
  }
  
@@ -9844,7 +9903,7 @@ index b998456..45f8b40 100644
  	return 0;
  }
  
-@@ -692,12 +1610,53 @@ kern_return_t syscall_thread_switch_impl(
+@@ -692,12 +1669,53 @@ kern_return_t syscall_thread_switch_impl(
  				int option,
  				mach_msg_timeout_t option_time)
  {
@@ -9902,7 +9961,7 @@ index b998456..45f8b40 100644
  
  	// TODO: we could implement this with yield_to() in LKM
  	return KERN_SUCCESS;
-@@ -721,7 +1680,11 @@ kern_return_t task_for_pid_impl(
+@@ -721,7 +1739,11 @@ kern_return_t task_for_pid_impl(
  				int pid,
  				mach_port_name_t *t)
  {
