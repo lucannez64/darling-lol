@@ -485,25 +485,32 @@ def session_registry(container_id, base=None):
     return root / 'darling-lol-toolbox' / container_id
 
 
-def in_container_scope(proc, unit):
+def cgroup_paths(proc):
     try:
-        return any(line.startswith('0::') and unit in Path(line[3:]).parts
-                   for line in (proc / 'cgroup').read_text().splitlines())
+        return [Path(line[3:]) for line in (proc / 'cgroup').read_text().splitlines()
+                if line.startswith('0::')]
     except OSError:
-        return False
+        return []
+
+
+def in_container_scope(proc, unit):
+    return any(unit in path.parts for path in cgroup_paths(proc))
 
 
 def in_container_scope_root(proc, unit):
     """True when `proc` sits directly in `unit`, not in a nested sub-cgroup."""
-    try:
-        for line in (proc / 'cgroup').read_text().splitlines():
-            if line.startswith('0::'):
-                parts = Path(line[3:]).parts
-                if parts and parts[-1] == unit:
-                    return True
-    except OSError:
-        return False
-    return False
+    return any(path.parts and path.parts[-1] == unit for path in cgroup_paths(proc))
+
+
+def in_private_cgroup_scope(proc):
+    """True when `proc` lives inside the reader's private cgroup namespace."""
+    return any(path.is_absolute() and '..' not in path.parts
+               for path in cgroup_paths(proc))
+
+
+def in_private_cgroup_root(proc):
+    """True when `proc` sits at `/` of the reader's private cgroup namespace."""
+    return any(path == Path('/') for path in cgroup_paths(proc))
 
 
 def launcher_helper(script):
@@ -535,13 +542,19 @@ def is_container_init(args):
 def toolbox_state(container_id, proc_root):
     """Return the live container init identity and whether its scope is idle."""
     unit = 'libpod-%s.scope' % container_id
-    if not in_container_scope(proc_root / 'self', unit):
+    host_scope = in_container_scope(proc_root / 'self', unit)
+    private_scope = not host_scope and in_private_cgroup_root(proc_root / 'self')
+    if not host_scope and not private_scope:
         return None, False
+    in_scope = ((lambda proc: in_container_scope(proc, unit)) if host_scope
+                else in_private_cgroup_scope)
+    at_scope_root = ((lambda proc: in_container_scope_root(proc, unit)) if host_scope
+                     else in_private_cgroup_root)
     scoped = []
     for proc in proc_root.iterdir():
         if not proc.name.isdigit() or int(proc.name) == os.getpid():
             continue
-        if not in_container_scope(proc, unit):
+        if not in_scope(proc):
             continue
         info = process_info(proc)
         if info is not None and info[0] in ('Z', 'X'):
@@ -551,7 +564,7 @@ def toolbox_state(container_id, proc_root):
     scope_pids = {pid for pid, _proc, _info, _args in scoped}
     candidates = []
     for pid, proc, info, args in scoped:
-        if info is None or info[1] in scope_pids or not in_container_scope_root(proc, unit):
+        if info is None or info[1] in scope_pids or not at_scope_root(proc):
             continue
         kind = is_container_init(args)
         if kind is not None:

@@ -570,6 +570,31 @@ class ToolboxSessionTests(unittest.TestCase):
             stop.assert_not_called()
             shutil.rmtree(proc)
 
+    def test_distrobox_private_cgroup_namespace_stops_idle_container(self):
+        shutil.rmtree(self.proc / '12345')
+        (self.proc / 'self/cgroup').write_text('0::/\n')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/\n')
+        sleeper = fake_process(self.proc, 22346, comm='sleep', ppid=22345)
+        (sleeper / 'cmdline').write_bytes(b'sleep\x0015\x00')
+        (sleeper / 'cgroup').write_text('0::/\n')
+        outside = fake_process(self.proc, 22347, comm='bash', ppid=1)
+        (outside / 'cgroup').write_text('0::/../../user.slice/session-1.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_distrobox_private_cgroup_namespace_keeps_busy_container_running(self):
+        shutil.rmtree(self.proc / '12345')
+        (self.proc / 'self/cgroup').write_text('0::/\n')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/\n')
+        shell = fake_process(self.proc, 22346, comm='bash', ppid=1)
+        (shell / 'cgroup').write_text('0::/exec\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
     def test_launcher_helpers_do_not_block_the_stop(self):
         for pid, name in enumerate(('close-league-client-in-game.py',
                                     'discord-ipc-relay.py',
