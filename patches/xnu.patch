@@ -12702,3 +12702,42 @@ index d1cdd3d..0656874 100644
  			p = strtok_r(line, " ", &saveptr);
  			if (p == NULL)
  				continue;
+diff --git a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.h b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.h
+index 35e1ca19..48826e93 100644
+--- a/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.h
++++ b/darling/src/libsystem_kernel/emulation/include/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.h
+@@ -3,7 +3,7 @@
+ 
+ #include <stdint.h>
+ 
+-long sys_psynch_cvsignal(void* cv, uint32_t cvlsgen, uint32_t cvugen, int thread_port, void* mutex, uint32_t mugen,
++long sys_psynch_cvsignal(void* cv, uint64_t cvlsgen, uint32_t cvugen, int thread_port, void* mutex, uint64_t mugen,
+ 		uint64_t tid, uint32_t flags);
+ 
+ #endif // LINUX_PSYNCH_CVSIGNAL_H
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvbroad.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvbroad.c
+index 997b2a8d..f2dae282 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvbroad.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvbroad.c
+@@ -10,7 +10,7 @@ long sys_psynch_cvbroad(void* cv, uint64_t cvlsgen, uint64_t cvudgen, uint32_t f
+ 		uint64_t tid)
+ {
+ 	uint32_t retval;
+-	int ret = dserver_rpc_psynch_cvbroad(cv, cvlsgen, cvudgen, flags, mugen, mugen, tid, &retval);
++	int ret = dserver_rpc_psynch_cvbroad(cv, cvlsgen, cvudgen, flags, mutex, mugen, tid, &retval);
+ 
+ 	if (ret < 0) {
+ 		__simple_printf("psynch_cvbroad failed internally: %d", ret);
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.c
+index a11c77cf..53cdb047 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/psynch/psynch_cvsignal.c
+@@ -6,7 +6,7 @@
+ 
+ #include <darlingserver/rpc.h>
+ 
+-long sys_psynch_cvsignal(void* cv, uint32_t cvlsgen, uint32_t cvugen, int thread_port, void* mutex, uint32_t mugen,
++long sys_psynch_cvsignal(void* cv, uint64_t cvlsgen, uint32_t cvugen, int thread_port, void* mutex, uint64_t mugen,
+ 		uint64_t tid, uint32_t flags)
+ {
+ 	uint32_t retval;
