@@ -1625,10 +1625,18 @@ index dc8fbb8..171746a 100644
 +	__linux_sched_yield_site("SWTYLD");
 +}
 diff --git a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-index 206e92e..b31d6e1 100644
+index 206e92e4..7215f07f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/linux_premigration/signal/sigexc.c
-@@ -14,6 +14,7 @@
+@@ -6,6 +6,7 @@
+ #include <_libkernel_init.h>
+ 
+ #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigaction.h>
++#include <darling/emulation/conversion/signal/duct_signals.h>
+ #include <darling/emulation/common/base.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/exit.h>
+ #include <darling/emulation/linux_premigration/linux-syscalls/linux.h>
+@@ -14,6 +15,7 @@
  #include <darling/emulation/xnu_syscall/bsd/impl/mman/mman.h>
  #include <darling/emulation/xnu_syscall/bsd/impl/signal/kill.h>
  #include <darling/emulation/common/simple.h>
@@ -1636,7 +1644,7 @@ index 206e92e..b31d6e1 100644
  
  #include <darlingserver/rpc.h>
  
-@@ -118,6 +119,15 @@ void sigexc_setup(void)
+@@ -118,6 +120,15 @@ void sigexc_setup(void)
  	sigexc_setup1();
  	sigexc_setup2();
  
@@ -1652,7 +1660,7 @@ index 206e92e..b31d6e1 100644
  #ifdef VARIANT_DYLD
  	bool started_suspended;
  	int code = dserver_rpc_started_suspended(&started_suspended);
-@@ -151,8 +161,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
+@@ -151,8 +162,13 @@ void sigrt_handler(int signum, struct linux_siginfo* info, struct linux_ucontext
  	int status = dserver_rpc_interrupt_enter();
  
  	if (status != 0) {
@@ -1668,7 +1676,7 @@ index 206e92e..b31d6e1 100644
  	}
  
  	if (signum == SIGNAL_SIGEXC_SUSPEND) {
-@@ -267,13 +282,175 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
+@@ -267,13 +283,175 @@ static void state_from_kernel(struct linux_ucontext* ctxt, const void* tstate, c
  #endif
  }
  
@@ -1845,7 +1853,19 @@ index 206e92e..b31d6e1 100644
  	}
  
  	kern_printf("sigexc_handler(%d, %p, %p)\n", linux_signum, info, ctxt);
-@@ -359,7 +536,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+@@ -326,7 +504,10 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
+ 			kern_printf("sigexc: will forward signal to app handler (%p)\n", sig_handlers[linux_signum]);
+ 
+ 			// Update the signal mask to what the application actually wanted
+-			linux_sigset_t set = sig_masks[linux_signum];
++			// sig_masks holds the Darwin-numbered mask given to sigaction()
++			sigset_t bsd_mask = sig_masks[linux_signum];
++			linux_sigset_t set;
++			sigset_bsd_to_linux(&bsd_mask, &set);
+ 
+ 			// Keep the current signal blocked, which is the default behavior
+ 			if (!(sig_flags[linux_signum] & LINUX_SA_NODEFER))
+@@ -359,7 +540,13 @@ void sigexc_handler(int linux_signum, struct linux_siginfo* info, struct linux_u
  						sizeof(sa.sa_mask));
  
  				// Resend signal to self
@@ -12741,3 +12761,20 @@ index a11c77cf..53cdb047 100644
  		uint64_t tid, uint32_t flags)
  {
  	uint32_t retval;
+diff --git a/darling/src/libsystem_kernel/emulation/src/conversion/signal/sigaction.c b/darling/src/libsystem_kernel/emulation/src/conversion/signal/sigaction.c
+index bb30b3ff..bc691bfe 100644
+--- a/darling/src/libsystem_kernel/emulation/src/conversion/signal/sigaction.c
++++ b/darling/src/libsystem_kernel/emulation/src/conversion/signal/sigaction.c
+@@ -40,6 +40,12 @@ void handler_linux_to_bsd(int linux_signum, struct linux_siginfo* info, void* ct
+ 	if (lc != NULL)
+ 	{
+ 		ucontext_linux_to_bsd(lc, &bc, (struct bsd_mcontext*) __builtin_alloca(sizeof(struct bsd_mcontext)));
++#if !defined(__aarch64__) && !defined(__arm64__)
++		// On x86 the Linux context has no fault address; the exception state
++		// carries the address of the faulting access, as siginfo does.
++		if (info && (linux_signum == LINUX_SIGSEGV || linux_signum == LINUX_SIGBUS))
++			bc.uc_mcontext->es.faultvaddr = (unsigned long)info->si_addr;
++#endif
+ 		if (lc->uc_link != NULL)
+ 		{
+ 			struct bsd_ucontext* bc_link = (struct bsd_ucontext*) __builtin_alloca(sizeof(struct bsd_ucontext));
