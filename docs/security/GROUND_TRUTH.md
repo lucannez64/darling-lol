@@ -134,3 +134,36 @@ A linker-signed binary with no team therefore reports `CS_VALID|CS_LINKER_SIGNED
 - Hardened-runtime behaviour of a notarized third-party app.
 - Notarization tickets (no public notarized fixture here).
 - Intel behaviour: the matrix is arm64 only.
+
+## What a process sees of itself
+
+A second probe, `tests/security/probe/self_view.c`, records what a process can read about itself: its memory regions, dyld state, `proc_pidinfo` and `task_info` answers, a few filesystem paths and the names of some environment variables. It describes its own process; of other processes it reads only the name and path of its parent and of pids 0 and 1, the number of pids the system lists and whether 0 and 1 are among them. It prints nothing that names a machine or a user: fixed system locations are printed in full, any other path only as its kind (`<home>`, `<application>`, `<tmp>`, `<translation-cache>`, `<other>`). The same file builds against an old SDK, so it can run unchanged inside Darling and the two JSON outputs can be diffed.
+
+The workflow runs it natively (arm64) and, under Rosetta, as x86_64; it also stores `sysctl -a` with the host name and per-boot identifiers blanked.
+
+Run: `45925926141` (macOS 15.8.2, 24H232, `macos-15` runner).
+
+| Observation | arm64 | x86_64 under Rosetta |
+|---|---|---|
+| `mach_vm_region_recurse` counts accepted | 12, 16, 17, 19; 20 is answered as 19; 0 is `KERN_INVALID_ARGUMENT` | same |
+| words written | exactly the count asked for | same |
+| past the last region | `KERN_INVALID_ADDRESS` | same |
+| main executable `__TEXT` (long structure) | protection `r-x`, maximum `r-x`, inheritance copy, `share_mode` `SM_COW`, `external_pager` 1, `shadow_depth` 1, `ref_count` 4, `pages_resident` 2, hashed `object_id` | same shape |
+| regions in a scanner-style walk | 52 | 366 |
+| executable regions | 3, all inside a dyld image, 2 of them in the shared cache | 22: 4 in an image, 12 in the shared cache, 8 in neither (the translation runtime) |
+| share modes seen | `SM_COW`, `SM_PRIVATE`, `SM_EMPTY`, `SM_SHARED`, `SM_TRUESHARED` | same |
+| `user_tag` on anonymous memory | malloc tags (1, 2, 7, 11, 12), stack (30), others | same kind |
+| `mach_vm_region` flavors `BASIC_INFO_64`, `EXTENDED_INFO`, `TOP_INFO`; `vm_region_64`; `vm_region_recurse_64` | all succeed | all succeed |
+| dyld shared cache | UUID, range and file path present; `_dyld_shared_cache_contains_path("/usr/lib/libSystem.B.dylib")` true while that path does not exist on disk | same |
+| `dyld_all_image_infos` | version 17, `dyldVersion` `1286.12`, cache base and slide non-zero | same |
+| `PROC_PIDTBSDINFO` | flags `0x404010` (`PROC_FLAG_LP64` set), start time set, status 2 | `0x2404010` |
+| `PROC_PIDREGIONINFO`, `PROC_PIDREGIONPATHINFO`, `PROC_PIDREGIONPATHINFO2`, `PROC_PIDVNODEPATHINFO`, `proc_pid_rusage` | succeed; `PROC_PIDREGIONPATHINFO3` is `EINVAL` | same |
+| `kern.proc.pid` | `P_LP64` set, `p_starttime` set | same |
+| `kern.procargs2` | the environment follows argv | same |
+| threads | `task_threads` count equals `pti_threadnum` (1) | equal (2) |
+| `task_info` | every flavor tried succeeds; all eight audit-token words non-zero; `phys_footprint` non-zero | same |
+| `/proc`, `/sys`, `/run`, `/dev/shm`, `/Volumes/SystemRoot` | absent | absent |
+| `/System/Library/Extensions`, `/System/Volumes/Preboot`, `/System/Volumes/Data`, `/System/Cryptexes` | present | present |
+| `statfs("/")` | `apfs` | `apfs` |
+
+What this establishes: the structure sizes and return codes of the region calls, what real region records contain, which `proc_pidinfo` and `task_info` flavors answer, and the dyld shared-cache state a current macOS reports. What it does not: the runner is an arm64 VM, so the x86_64 column is a translated process (its eight executable regions outside any image belong to the translation runtime) and hardware values in the `sysctl` file are the VM's, not a Mac's.

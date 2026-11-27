@@ -35,6 +35,7 @@ if alias.resolve() != headers.resolve():
 #define CTLTYPE_OPAQUE 5
 #define CTLTYPE_STRUCT 6
 #define CTL_HW         6
+#define CTL_MAXNAME    12
 #define HW_MACHINE     1
 #define HW_MODEL       2
 #define HW_NCPU        3

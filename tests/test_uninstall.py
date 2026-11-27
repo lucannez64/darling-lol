@@ -79,7 +79,10 @@ class UninstallTests(unittest.TestCase):
         """Run the script; `answer` is typed at a terminal, otherwise stdin is not one."""
         env = dict(os.environ, HOME=str(self.home), DPREFIX=str(prefix or self.prefix),
                    RIOT_GUEST_HOME=str((prefix or self.prefix) / 'Users/tester'),
-                   UNINSTALL_PROC_ROOT=str(self.proc), **extra)
+                   UNINSTALL_PROC_ROOT=str(self.proc),
+                   # The re-exec is covered by test_uninstall_toolbox; keep this
+                   # suite host-independent even when a real toolbox container exists.
+                   UNINSTALL_REEXEC='1', **extra)
         env.pop('DARLING_WORKSPACE', None)
         command = ['sh', str(self.repo / 'scripts/uninstall.sh'), *arguments]
         if answer is None:

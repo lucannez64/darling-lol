@@ -8,7 +8,7 @@
       "revision": "60ba801decee7a00782f74f6be4c8ffb013f79ff",
       "repository": "https://github.com/darlinghq/darling.git",
       "patch": "patches/darling.patch",
-      "modified_files": 117,
+      "modified_files": 121,
       "new_files": [
         "src/CoreAudio/CoreAudio/AudioConverterShim.c",
         "src/CoreAudio/AudioTrace.h",
@@ -34,7 +34,8 @@
         "src/startup/mldr/include/dc_mseal.h",
         "src/startup/mldr/include/dc_image_snapshot.h",
         "src/startup/mldr/include/dc_macho_slice.h",
-        "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm"
+        "src/CoreAudio/CoreAudio/AudioHardwareBlocks.mm",
+        "src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m"
       ]
     },
     {
@@ -124,7 +125,7 @@
       "revision": "a3640a77410cf1825f7855172b1551ae7917c461",
       "repository": "https://github.com/darlinghq/darling-corefoundation.git",
       "patch": "patches/corefoundation.patch",
-      "modified_files": 10,
+      "modified_files": 11,
       "new_files": [
         "NSConstantCollections.m"
       ]
@@ -353,7 +354,7 @@
       "revision": "fa29287aa2f0115271e091f1031f53c9e024005d",
       "repository": "https://github.com/darlinghq/darling-xnu.git",
       "patch": "patches/xnu.patch",
-      "modified_files": 109,
+      "modified_files": 111,
       "new_files": [
         "darling/src/libsystem_kernel/emulation/include/common/cpu_topology.h",
         "darling/src/libsystem_kernel/emulation/include/common/private_mutex.h",
