@@ -331,7 +331,7 @@
       "revision": "1a12df76d12bfc9fdfffadb290f7742763568765",
       "repository": "https://github.com/darlinghq/darling-objc4.git",
       "patch": "patches/objc4.patch",
-      "modified_files": 3,
+      "modified_files": 4,
       "new_files": []
     },
     {
