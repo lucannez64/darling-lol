@@ -218,7 +218,7 @@ static const char *clean_path(const char *p)
 		"/Library/Apple/", "/private/var/db/dyld/", "/private/var/db/oah/", NULL};
 	static const char *const homes[] = {"/Users/", "/home/", "/root/", "/var/root/", "/private/var/root/", NULL};
 	static const char *const tmps[] = {"/tmp/", "/private/tmp/", "/var/tmp/", "/private/var/tmp/",
-		"/var/folders/", "/private/var/folders/", NULL};
+		"/var/folders/", "/private/var/folders/", "/dev/shm/", "/run/", NULL};
 	static const char host[] = "/Volumes/SystemRoot/", data[] = "/System/Volumes/Data/";
 	char *out = scratch();
 	const char *q, *kind = "<other>";
@@ -245,6 +245,9 @@ static const char *clean_path(const char *p)
 	for (int i = 0; sys[i] && !strstr(q, "/../"); i++)
 		if (!strncmp(q, sys[i], strlen(sys[i])))
 			kind = p;
+	/* under /dev only a device node itself: a host has writable directories there */
+	if (!strncmp(q, "/dev/", 5) && strchr(q + 5, '/'))
+		kind = strncmp(q, "/dev/shm/", 9) ? "<other>" : "<tmp>";
 	snprintf(out, SV_BUFSZ, "%s", kind);
 	return out;
 }

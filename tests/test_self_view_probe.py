@@ -152,6 +152,19 @@ int main(void)
     PATH("/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64",
          "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64");
     PATH("/System/Volumes/Preboot/alice", "<other>");
+    /* under /dev only a device node: a Linux host has writable directories there */
+    PATH("/Volumes/SystemRoot/dev/shm/alice", "<tmp>");
+    PATH("/dev/shm/alice/x", "<tmp>");
+    PATH("/dev/mqueue/alice", "<other>");
+    PATH("/Volumes/SystemRoot/dev/null", "/Volumes/SystemRoot/dev/null");
+    PATH("/Volumes/SystemRoot/run/user/1000/alice", "<tmp>");
+    PATH("/Volumes/SystemRoot/tmp/alice", "<tmp>");
+    PATH("/Volumes/SystemRoot/var/tmp/alice", "<tmp>");
+    PATH("/Volumes/SystemRoot/opt/alice", "<other>");
+    PATH("/Volumes/SystemRoot/mnt/alice", "<other>");
+    PATH("/Volumes/SystemRoot/srv/alice", "<other>");
+    PATH("/Volumes/SystemRoot/usr/local/alice", "<other>");
+    PATH("/Volumes/SystemRoot/root/alice", "<home>");
     PATH("/Applications/alice", "<application>");
     PATH("/Applications/Some Game.app/Contents/MacOS/Game", "<application>");
     PATH("/opt/alice/bin/tool", "<other>");
