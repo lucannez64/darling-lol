@@ -3321,7 +3321,7 @@ index cc10f1d..447ae53 100644
  	int code = 0;
  	std::vector<uint32_t> oldGroups;
 diff --git a/src/darlingserver.cpp b/src/darlingserver.cpp
-index f79f057..74252c8 100644
+index f79f057..87825c8 100644
 --- a/src/darlingserver.cpp
 +++ b/src/darlingserver.cpp
 @@ -497,6 +497,113 @@ static void handle_sigusr1(int signum) {
@@ -3438,22 +3438,10 @@ index f79f057..74252c8 100644
  int main(int argc, char** argv) {
  	const char* prefix = NULL;
  	uid_t originalUID = -1;
-@@ -515,6 +622,30 @@ int main(int argc, char** argv) {
+@@ -515,6 +622,18 @@ int main(int argc, char** argv) {
  	char putOld[4096];
  	char *p;
  
-+	/* darling-lol M58f2: never die from SIGPIPE. The server writes to
-+	 * client sockets (MessageQueue::sendMany's sendmmsg, RPC replies,
-+	 * async-writer) whose peers are guest processes that can be torn
-+	 * down at any moment (Chromium helper churn, crashes). The default
-+	 * SIGPIPE disposition kills the whole server SILENTLY — no core,
-+	 * no log — which then wedges the entire container (every guest RPC
-+	 * fails with ECONNREFUSED). The write paths already handle EPIPE /
-+	 * ECONNREFUSED errors gracefully (e.g. message.cpp sendMany drops
-+	 * the dead peer's message); they just never got a chance to run.
-+	 * Ignoring SIGPIPE makes those handlers reachable. */
-+	signal(SIGPIPE, SIG_IGN);
-+
 +	/* darling-lol M58f2b: catch SIGTERM/SIGINT and log the sender instead
 +	 * of dying (see handle_sigterm_diagnostic above). */
 +	{
@@ -3469,7 +3457,7 @@ index f79f057..74252c8 100644
  	if (argc < 6) {
  		fprintf(stderr, "darlingserver is not meant to be started manually\n");
  		exit(1);
-@@ -577,8 +708,15 @@ int main(int argc, char** argv) {
+@@ -577,8 +696,15 @@ int main(int argc, char** argv) {
  
  		// now set our increased rlimit
  		if (setrlimit(RLIMIT_NOFILE, &increased_limit) != 0) {
@@ -3487,7 +3475,20 @@ index f79f057..74252c8 100644
  		}
  
  #endif
-@@ -745,6 +883,15 @@ int main(int argc, char** argv) {
+@@ -735,6 +861,12 @@ int main(int argc, char** argv) {
+ 	perma_drop_privileges(originalUID, originalGID);
+ 	prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+ 
++	// a client can exit while we are writing to one of its pipes or sockets;
++	// that must fail with EPIPE instead of killing the server.
++	// this is done only here, after launchd's process has been created, because an ignored
++	// SIGPIPE survives execve() and launchd (and every process it spawns) must start with the default.
++	signal(SIGPIPE, SIG_IGN);
++
+ #if DSERVER_ASAN
+ 	// set up a signal handler to print leak info
+ 	struct sigaction leak_info_action;
+@@ -745,6 +877,15 @@ int main(int argc, char** argv) {
  #endif
  
  	// create the server
@@ -3694,7 +3695,7 @@ index 7b8000f..dbaf832 100644
  	}
  
 diff --git a/src/message.cpp b/src/message.cpp
-index 414c1d6..5799721 100644
+index 414c1d6..8295d69 100644
 --- a/src/message.cpp
 +++ b/src/message.cpp
 @@ -24,6 +24,25 @@
@@ -4208,6 +4209,15 @@ index 414c1d6..5799721 100644
  	while (ret >= 0) {
  		len = 0;
  		for (size_t i = 0; i < _messages.size() && i < sizeof(mmsgs) / sizeof(*mmsgs); ++i) {
+@@ -530,7 +744,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
+ 			break;
+ 		}
+ 
+-		ret = sendmmsg(socket, mmsgs, len, MSG_DONTWAIT);
++		ret = sendmmsg(socket, mmsgs, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+ 
+ 		if (ret < 0) {
+ 			if (errno == EAGAIN) {
 @@ -538,7 +752,7 @@ bool DarlingServer::MessageQueue::sendMany(int socket) {
  				break;
  			} else if (errno == EINTR) {
