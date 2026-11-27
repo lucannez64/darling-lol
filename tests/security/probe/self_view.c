@@ -215,7 +215,7 @@ static const char *clean_path(const char *p)
 	static const char *const sys[] = {"/System/Library/", "/System/Applications/", "/System/Cryptexes/",
 		"/System/DriverKit/", "/System/iOSSupport/", "/System/Volumes/Preboot/Cryptexes/", "/usr/lib/",
 		"/usr/libexec/", "/usr/bin/", "/usr/sbin/", "/usr/share/", "/bin/", "/sbin/", "/dev/",
-		"/Library/Apple/", "/private/var/db/dyld/", "/private/var/db/oah/", NULL};
+		"/Library/Apple/", "/private/var/db/dyld/", NULL};
 	static const char *const homes[] = {"/Users/", "/home/", "/root/", "/var/root/", "/private/var/root/", NULL};
 	static const char *const tmps[] = {"/tmp/", "/private/tmp/", "/var/tmp/", "/private/var/tmp/",
 		"/var/folders/", "/private/var/folders/", "/dev/shm/", "/run/", NULL};
@@ -235,6 +235,9 @@ static const char *clean_path(const char *p)
 	q = strncmp(q, data, sizeof(data) - 1) ? q : q + sizeof(data) - 2;
 	if (!strncmp(q, "/Applications/", 14))
 		kind = "<application>";
+	/* Rosetta's cache: its directories are named by per-install identifiers */
+	if (!strncmp(q, "/private/var/db/oah/", 20) || !strncmp(q, "/var/db/oah/", 12))
+		kind = "<translation-cache>";
 	for (int i = 0; homes[i]; i++)
 		if (!strncmp(q, homes[i], strlen(homes[i])))
 			kind = "<home>";

@@ -55,7 +55,7 @@ class SelfViewProbeTests(unittest.TestCase):
         clean = self.code[self.code.index('static const char *clean_path('):]
         clean = clean[:clean.index('\n}\n')]
         for text in ('"/home/"', '"/Users/"', '"<home>"', '"<tmp>"', '"<other>"', '"<relative>"',
-                     '"<application>"', '"/Volumes/SystemRoot/"'):
+                     '"<application>"', '"<translation-cache>"', '"/Volumes/SystemRoot/"'):
             self.assertIn(text, clean)
         # no prefix under which a user creates folders is in the list printed in full
         listed = clean[clean.index('sys[] = {'):clean.index('NULL};')]
@@ -152,6 +152,9 @@ int main(void)
     PATH("/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64",
          "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64");
     PATH("/System/Volumes/Preboot/alice", "<other>");
+    /* Rosetta's cache is named by identifiers of the install */
+    PATH("/private/var/db/oah/0123abcd/4567ef01/tool.aot", "<translation-cache>");
+    PATH("/var/db/oah/0123abcd/4567ef01/tool.aot", "<translation-cache>");
     /* under /dev only a device node: a Linux host has writable directories there */
     PATH("/Volumes/SystemRoot/dev/shm/alice", "<tmp>");
     PATH("/dev/shm/alice/x", "<tmp>");
