@@ -13716,7 +13716,7 @@ index 1e9ec25..0114e25 100644
  				break;
  			}
 diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
-index a68739ff0..de23cb5b8 100644
+index a68739ff0..dbd4c1bb8 100644
 --- a/src/launchd/src/core.c
 +++ b/src/launchd/src/core.c
 @@ -463,6 +463,9 @@ static job_t job_mig_intran2(jobmgr_t jm, mach_port_t mport, pid_t upid);
@@ -13751,6 +13751,15 @@ index a68739ff0..de23cb5b8 100644
  
  	/* libproc returns the number of bytes written into the buffer upon success,
  	 * zero on failure. I'd much rather it return -1 on failure, like sysctl(3).
+@@ -1989,7 +2000,7 @@ job_new_subjob(job_t j, uuid_t identifier)
+ 			nj->stdinpath = strdup(j->stdinpath);
+ 		}
+ 		if (j->stdoutpath) {
+-			nj->stdoutpath = strdup(j->stdinpath);
++			nj->stdoutpath = strdup(j->stdoutpath);
+ 		}
+ 		if (j->stderrpath) {
+ 			nj->stderrpath = strdup(j->stderrpath);
 @@ -4312,6 +4323,8 @@ jobmgr_callback(void *obj, struct kevent *kev)
  		} else if (kev->ident == (uintptr_t)jm) {
  			jobmgr_log(jm, LOG_DEBUG, "Shutdown timer firing.");
