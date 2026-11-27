@@ -1585,7 +1585,7 @@ index afe60fc..02968b2 100644
  
  void Assert(const char* file, int line, const char* expression) {
 diff --git a/duct-tape/src/stubs.c b/duct-tape/src/stubs.c
-index dc1cfa5..3783f82 100644
+index dc1cfa5..f2520e7 100644
 --- a/duct-tape/src/stubs.c
 +++ b/duct-tape/src/stubs.c
 @@ -37,9 +37,18 @@ extern char* getenv(const char* name);
@@ -1616,7 +1616,21 @@ index dc1cfa5..3783f82 100644
  		kind_info = " (unsafe)";
  	} else {
  		if (!log_safe_stubs) {
-@@ -209,12 +218,12 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
+@@ -144,7 +153,12 @@ boolean_t ml_set_interrupts_enabled(boolean_t enable) {
+ };
+ 
+ boolean_t ml_delay_should_spin(uint64_t interval) {
+-	return FALSE;
++	// like XNU, spin for short delays instead of blocking.
++	// these are used to back off from a contended lock (e.g. in clear_wait_internal()), possibly while clearing the
++	// caller's own wait, where blocking the microthread would corrupt its wait state.
++	uint64_t threshold;
++	nanoseconds_to_absolutetime(10 * NSEC_PER_USEC, &threshold);
++	return interval < threshold;
+ };
+ 
+ unsigned int ml_wait_max_cpus(void) {
+@@ -209,12 +223,12 @@ kern_return_t kmod_get_info(host_t host, kmod_info_array_t* kmod_list, mach_msg_
  	return KERN_NOT_SUPPORTED;
  };
  
