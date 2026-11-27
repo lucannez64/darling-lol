@@ -46,32 +46,79 @@ done
 # then the installer's default container for a legacy checkout) and run the
 # same command there. A native install records build/native-install and is
 # never redirected; UNINSTALL_REEXEC stops the re-exec from looping.
-if [ ! -f /run/.toolboxenv ] && [ -z "${UNINSTALL_REEXEC:-}" ] &&
+is_toolbx_cli() {
+	command -v toolbox >/dev/null 2>&1 || return 1
+	case "$(toolbox --version </dev/null 2>/dev/null || true)" in
+	'toolbox version '*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+inside_container=0
+if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
+	inside_container=1
+elif [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
+	inside_container=1
+fi
+if [ "$inside_container" = 0 ] && [ -z "${UNINSTALL_REEXEC:-}" ] &&
 	[ -z "${DARLING_WORKSPACE:-}" ] && [ ! -f build/native-install ]; then
 	name=''
+	backend=''
 	if [ -f build/toolbox-container ]; then
 		IFS= read -r name <build/toolbox-container || true
+		backend=toolbox
+		if [ -r build/toolbox-backend ] && [ "$(cat build/toolbox-backend)" = distrobox ]; then
+			backend=distrobox
+		fi
 	else
 		entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
 		name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
 			sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
+		if [ -n "$name" ]; then
+			backend=toolbox
+		else
+			name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
+				sed -n 's/^Exec=distrobox enter --no-tty --name \([^ ]*\) -- .*$/\1/p' | head -n 1)
+			if [ -n "$name" ]; then
+				backend=distrobox
+			fi
+		fi
 	fi
-	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 &&
-		toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
-		name=darling-lol
+	if [ -z "$name" ]; then
+		if is_toolbx_cli &&
+			toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+			name=darling-lol
+			backend=toolbox
+		elif command -v distrobox >/dev/null 2>&1 &&
+			distrobox enter --no-tty --name darling-lol -- sh -c 'command -v darling' >/dev/null 2>&1; then
+			name=darling-lol
+			backend=distrobox
+		fi
 	fi
 	if [ -n "$name" ]; then
-		if ! command -v toolbox >/dev/null 2>&1; then
-			echo "This checkout was installed via Toolbox container '$name', but Toolbox is not installed on this host. Install Toolbox, or run this inside the container: toolbox enter $name" >&2
-			exit 1
+		if [ "$backend" = distrobox ]; then
+			if ! command -v distrobox >/dev/null 2>&1; then
+				echo "This checkout was installed via Distrobox container '$name', but Distrobox is not installed on this host. Install Distrobox, or run this inside the container: distrobox enter $name" >&2
+				exit 1
+			fi
+			if ! distrobox enter --no-tty --name "$name" -- true 2>/dev/null; then
+				echo "This checkout was installed via Distrobox container '$name', but that container is not reachable. Start it and run this inside it: distrobox enter $name" >&2
+				exit 1
+			fi
+			echo "Distrobox install detected; running the uninstall inside container '$name'..."
+		else
+			if ! command -v toolbox >/dev/null 2>&1; then
+				echo "This checkout was installed via Toolbox container '$name', but Toolbox is not installed on this host. Install Toolbox, or run this inside the container: toolbox enter $name" >&2
+				exit 1
+			fi
+			if ! toolbox run -c "$name" true 2>/dev/null; then
+				echo "This checkout was installed via Toolbox container '$name', but that container is not reachable. Start it and run this inside it: toolbox enter $name" >&2
+				exit 1
+			fi
+			echo "Toolbox install detected; running the uninstall inside container '$name'..."
 		fi
-		if ! toolbox run -c "$name" true 2>/dev/null; then
-			echo "This checkout was installed via Toolbox container '$name', but that container is not reachable. Start it and run this inside it: toolbox enter $name" >&2
-			exit 1
-		fi
-		echo "Toolbox install detected; running the uninstall inside container '$name'..."
-		# `toolbox run` uses the container environment and executes its first
-		# argument, so overrides go after `env`. The confirmation happens inside.
+		# `toolbox run` / `distrobox enter` uses the container environment and executes
+		# its first argument, so overrides go after `env`. The confirmation happens inside.
 		set -- UNINSTALL_REEXEC=1 sh "$repo/scripts/uninstall.sh" "$@"
 		if [ -n "${DPREFIX+x}" ]; then
 			set -- DPREFIX="$DPREFIX" "$@"
@@ -81,6 +128,12 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${UNINSTALL_REEXEC:-}" ] &&
 		fi
 		if [ -n "${UNINSTALL_PROC_ROOT+x}" ]; then
 			set -- UNINSTALL_PROC_ROOT="$UNINSTALL_PROC_ROOT" "$@"
+		fi
+		if [ "$backend" = distrobox ]; then
+			if [ -t 0 ]; then
+				exec distrobox enter --name "$name" -- env "$@"
+			fi
+			exec distrobox enter --no-tty --name "$name" -- env "$@"
 		fi
 		exec toolbox run --container "$name" env "$@"
 	fi

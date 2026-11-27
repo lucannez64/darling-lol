@@ -75,7 +75,7 @@ bash scripts/install-native.sh
 
 **Options:**
 
-- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbox container, keeping build dependencies off the host. Works on any host with `toolbox` and `podman` installed. The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`).
+- `--toolbox`, `-t`: Run the installation inside a Fedora Toolbx container, keeping build dependencies off the host. Uses Toolbx (`containers/toolbox`) and `podman`, and automatically falls back to **Distrobox** (`distrobox` and `podman`) when Toolbx is unavailable (such as on openSUSE). The container is named by `DARLING_LOL_TOOLBOX_NAME` (default `darling-lol`). See [troubleshooting](docs/TROUBLESHOOTING.md#toolbox-install-fails-on-opensuse-or-with-an-incompatible-toolbox-command).
 - `--verbose`, `-v`: Full command output.
 - `--yes`, `-y`: Skip confirmations (needed when not run from a terminal). On Arch, a native install runs a full `pacman -Syu` and asks first unless this is given.
 - `--region CODE`: Riot region (`EUW`, `EUNE`, `NA`, `BR`, `KR`, `JP`, `OCE`, `LAN`, `LAS`, `TR`, `RU`, `SG2`). Without it, an interactive install asks; with `--yes` or without a terminal it is the region of an explicit `--locale`, else `EUW`.

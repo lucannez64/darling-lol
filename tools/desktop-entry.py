@@ -82,15 +82,16 @@ def quote_exec_argument(value: str) -> str:
     return f'"{escaped}"'
 
 
-def exec_command(script: str, toolbox: str | None = None, env=()) -> str:
-    """Return the Exec value for a project script, optionally through Toolbox.
+def exec_command(script: str, toolbox: str | None = None, env=(),
+                 distrobox: str | None = None) -> str:
+    """Return the Exec value for a project script, optionally in a container.
 
-    The native installer runs inside Toolbox when it is invoked with
+    The native installer runs inside Toolbx or Distrobox when invoked with
     ``--toolbox``; every entry must then re-enter the same container instead
     of running on the host, where neither Darling nor its dependencies are
     installed.  That holds for the launcher and for the sign-in link handler.
     Launch flags arrive as ``env`` NAME=VALUE assignments ahead of the script;
-    inside the Toolbox wrapper they are set in the container, so the guest
+    inside the container wrapper they are set in the container, so the guest
     session inherits them.
     """
     command = str(PROJECT_ROOT / script)
@@ -101,6 +102,9 @@ def exec_command(script: str, toolbox: str | None = None, env=()) -> str:
     parts.append(quote_exec_argument(command))
     if toolbox is not None:
         parts = ["toolbox", "run", "-c", quote_exec_argument(toolbox), *parts]
+    elif distrobox is not None:
+        parts = ["distrobox", "enter", "--no-tty", "--name",
+                 quote_exec_argument(distrobox), "--", *parts]
     return " ".join(parts)
 
 
@@ -125,19 +129,29 @@ def unquote_exec_argument(value: str) -> str:
     return value.replace("%%", "%")
 
 
-def unwrap_exec(command: str) -> tuple[str | None, list[str], str]:
-    """Split an Exec command into (toolbox container, env assignments, command).
+def unwrap_exec_backend(command: str) -> tuple[str | None, str | None, list[str], str]:
+    """Split an Exec command into (backend, container, env assignments, command).
 
     Recognises exactly the wrappers this helper generates: an optional
-    ``toolbox run -c CONTAINER`` prefix and an optional ``env`` prefix whose
-    arguments are all NAME=VALUE assignments.  Any other command comes back
-    with ``toolbox=None``, no assignments and itself as the final fragment.
+    ``toolbox run -c CONTAINER`` or ``distrobox enter --no-tty --name CONTAINER --``
+    prefix and an optional ``env`` prefix whose arguments are all NAME=VALUE
+    assignments.  Any other command comes back with ``backend=None``,
+    ``container=None``, no assignments and itself as the final fragment.
     """
-    toolbox = None
+    backend = None
+    container = None
     wrapper = re.fullmatch(rf"toolbox run -c ({EXEC_TOKEN}) (.+)", command)
     if wrapper:
-        toolbox = unquote_exec_argument(wrapper[1])
+        backend = "toolbox"
+        container = unquote_exec_argument(wrapper[1])
         command = wrapper[2]
+    else:
+        wrapper = re.fullmatch(
+            rf"distrobox enter --no-tty --name ({EXEC_TOKEN}) -- (.+)", command)
+        if wrapper:
+            backend = "distrobox"
+            container = unquote_exec_argument(wrapper[1])
+            command = wrapper[2]
     env: list[str] = []
     while True:
         match = re.fullmatch(rf"env ({EXEC_TOKEN}) (.+)", command)
@@ -152,7 +166,13 @@ def unwrap_exec(command: str) -> tuple[str | None, list[str], str]:
             break
         env.append(assignment)
         command = match[2]
-    return toolbox, env, command
+    return backend, container, env, command
+
+
+def unwrap_exec(command: str) -> tuple[str | None, list[str], str]:
+    """Split an Exec command into (container, env assignments, command)."""
+    _backend, container, env, final = unwrap_exec_backend(command)
+    return container, env, final
 
 
 def exec_marker_variants() -> set[str]:
@@ -239,7 +259,8 @@ def shortcut_directories() -> list[Path]:
 
 
 def main(toolbox: str | None = None, window_entries: bool = False,
-         name: str = "Darling Launcher", env=(), icon: str | None = None):
+         name: str = "Darling Launcher", env=(), icon: str | None = None,
+         distrobox: str | None = None):
     icons_base = HOST_HOME / ".local/share/icons"
     apps_base = HOST_HOME / ".local/share/applications"
 
@@ -290,7 +311,7 @@ def main(toolbox: str | None = None, window_entries: bool = False,
     # Terminal stays false here because this entry runs launch-shortcut.sh,
     # which saves session output in build/desktop-launch.log; the packaged
     # entry runs the session directly and therefore needs a terminal.
-    exec_cmd = exec_command(LAUNCH_SHORTCUT_SCRIPT, toolbox, env)
+    exec_cmd = exec_command(LAUNCH_SHORTCUT_SCRIPT, toolbox, env, distrobox=distrobox)
     project_path = escape_string(str(PROJECT_ROOT))
     keywords = "Darling;Launcher;Compatibility;"
     if window_entries:
@@ -376,7 +397,7 @@ StartupNotify=false
     # the scheme; the user's explicit choices in mimeapps.list are left alone.
     # In a Toolbox install open-guest-url.sh needs `darling`, which only exists
     # inside the container, so the handler re-enters it like the launcher does.
-    handler_exec = exec_command(URL_HANDLER_SCRIPT, toolbox)
+    handler_exec = exec_command(URL_HANDLER_SCRIPT, toolbox, distrobox=distrobox)
     handler_file = apps_base / "darling-url-handler.desktop"
     handler_file.write_text(f"""[Desktop Entry]
 Version=1.0
@@ -466,10 +487,12 @@ def show() -> None:
         next((line[5:] for line in lines if line.startswith("Name=")), "")))
     if not owned:
         return
-    toolbox, env, _ = unwrap_exec(commands[0])
+    backend, container, env, _ = unwrap_exec_backend(commands[0])
     print("icon=" + unescape_string(
         next((line[5:] for line in lines if line.startswith("Icon=")), "")))
-    print(f"toolbox={toolbox or ''}")
+    print(f"toolbox={container if backend == 'toolbox' else ''}")
+    if backend == "distrobox":
+        print(f"distrobox={container}")
     for item in env:
         print(f"env={item}")
 
@@ -479,6 +502,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--toolbox", metavar="CONTAINER",
         help="launch the entry through 'toolbox run -c CONTAINER'",
+    )
+    parser.add_argument(
+        "--distrobox", metavar="CONTAINER",
+        help="launch the entry through 'distrobox enter --no-tty --name CONTAINER --'",
     )
     parser.add_argument(
         "--window-entries", action="store_true",
@@ -517,6 +544,8 @@ if __name__ == "__main__":
     for item in arguments.env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", item, re.DOTALL):
             parser.error(f"--env expects NAME=VALUE, got {item!r}")
+    if arguments.toolbox is not None and arguments.distrobox is not None:
+        parser.error("--toolbox and --distrobox cannot be used together")
     icon = None
     if arguments.icon is not None:
         icon_path = Path(arguments.icon).expanduser()
@@ -528,18 +557,21 @@ if __name__ == "__main__":
     window_entries = (arguments.window_entries
                       or os.environ.get("DARLING_LOL_WINDOW_ENTRIES") == "1")
     if arguments.show:
-        if (arguments.toolbox is not None or arguments.window_entries
+        if (arguments.toolbox is not None or arguments.distrobox is not None
+                or arguments.window_entries
                 or arguments.remove or arguments.remove_all or arguments.env
                 or arguments.icon is not None
                 or arguments.name != "Darling Launcher"):
             parser.error("--show takes no other options")
         show()
     elif arguments.remove:
-        if arguments.toolbox is not None or arguments.window_entries or arguments.env \
-                or arguments.icon is not None or arguments.name != "Darling Launcher":
+        if (arguments.toolbox is not None or arguments.distrobox is not None
+                or arguments.window_entries or arguments.env
+                or arguments.icon is not None or arguments.name != "Darling Launcher"):
             parser.error("--remove takes no creation options")
         remove(arguments.remove_all)
     else:
         if arguments.remove_all:
             parser.error("--remove-all is only valid together with --remove")
-        sys.exit(main(arguments.toolbox, window_entries, arguments.name, arguments.env, icon))
+        sys.exit(main(arguments.toolbox, window_entries, arguments.name, arguments.env, icon,
+                      distrobox=arguments.distrobox))

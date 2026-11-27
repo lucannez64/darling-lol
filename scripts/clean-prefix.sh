@@ -120,24 +120,42 @@ if [ "$custom_backup_dir" = 1 ]; then
 	esac
 fi
 
+is_toolbx_cli() {
+	command -v toolbox >/dev/null 2>&1 || return 1
+	case "$(toolbox --version </dev/null 2>/dev/null || true)" in
+	'toolbox version '*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 inside_toolbox=0
-if [ -f /run/.toolboxenv ]; then
+inside_backend=''
+if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
 	inside_toolbox=1
+	inside_backend=toolbox
+elif [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
+	inside_toolbox=1
+	inside_backend=distrobox
 fi
 
-# A Toolbox install keeps Darling, the runtime and the build cache inside the
-# container, so a host run cannot find `darling` to stop the runtime. Detect it
-# the same way scripts/update.sh does: the marker written by install-native.sh,
-# then the launcher entry for this checkout, then the installer's default
-# container only for a legacy checkout that left no record at all. A native
-# install records build/native-install and is never redirected.
+# A Toolbox or Distrobox install keeps Darling, the runtime and the build cache
+# inside the container, so a host run cannot find `darling` to stop the runtime.
+# Detect it the same way scripts/update.sh does: the marker written by
+# install-native.sh, then the launcher entry for this checkout, then the
+# installer's default container only for a legacy checkout that left no record at
+# all. A native install records build/native-install and is never redirected.
 # CLEAN_PREFIX_REEXEC stops the re-exec from looping when the inner run is not
 # recognized as being inside the container.
 if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 	[ -z "${DARLING_WORKSPACE:-}" ] && [ ! -f build/native-install ]; then
 	name=''
+	backend=''
 	if [ -f build/toolbox-container ]; then
 		name=$(cat build/toolbox-container)
+		backend=toolbox
+		if [ -r build/toolbox-backend ] && [ "$(cat build/toolbox-backend)" = distrobox ]; then
+			backend=distrobox
+		fi
 	else
 		# $HOME holds a single launcher entry shared by every checkout: only trust
 		# its container name when its Exec points at this checkout's scripts.
@@ -146,26 +164,56 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 		entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
 		name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
 			sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
+		if [ -n "$name" ]; then
+			backend=toolbox
+		else
+			name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
+				sed -n 's/^Exec=distrobox enter --no-tty --name \([^ ]*\) -- .*$/\1/p' | head -n 1)
+			if [ -n "$name" ]; then
+				backend=distrobox
+			fi
+		fi
 	fi
 	# No record of any kind: only a legacy checkout can be assumed to live in the
 	# installer's default container. This probe also starts a stopped container,
 	# so it must not decide for checkouts that are already recorded above.
-	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 &&
-		toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
-		name=darling-lol
+	if [ -z "$name" ]; then
+		if is_toolbx_cli &&
+			toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+			name=darling-lol
+			backend=toolbox
+		elif command -v distrobox >/dev/null 2>&1 &&
+			distrobox enter --no-tty --name darling-lol -- sh -c 'command -v darling' >/dev/null 2>&1; then
+			name=darling-lol
+			backend=distrobox
+		fi
 	fi
 	if [ -n "$name" ]; then
-		if ! command -v toolbox >/dev/null 2>&1; then
-			error "This checkout was installed via Toolbox container '$name', but Toolbox is not installed on this host."
-			error_note "Install Toolbox, then run the cleanup inside the container: toolbox enter $name"
-			exit 1
+		if [ "$backend" = distrobox ]; then
+			if ! command -v distrobox >/dev/null 2>&1; then
+				error "This checkout was installed via Distrobox container '$name', but Distrobox is not installed on this host."
+				error_note "Install Distrobox, then run the cleanup inside the container: distrobox enter $name"
+				exit 1
+			fi
+			if ! distrobox enter --no-tty --name "$name" -- true 2>/dev/null; then
+				error "This checkout was installed via Distrobox container '$name', but that container is not reachable."
+				error_note "Start it and run the cleanup inside it: distrobox enter $name"
+				exit 1
+			fi
+			info "Distrobox install detected; running the cleanup inside container '$name'..."
+		else
+			if ! command -v toolbox >/dev/null 2>&1; then
+				error "This checkout was installed via Toolbox container '$name', but Toolbox is not installed on this host."
+				error_note "Install Toolbox, then run the cleanup inside the container: toolbox enter $name"
+				exit 1
+			fi
+			if ! toolbox run -c "$name" true 2>/dev/null; then
+				error "This checkout was installed via Toolbox container '$name', but that container is not reachable."
+				error_note "Start it and run the cleanup inside it: toolbox enter $name"
+				exit 1
+			fi
+			info "Toolbox install detected; running the cleanup inside container '$name'..."
 		fi
-		if ! toolbox run -c "$name" true 2>/dev/null; then
-			error "This checkout was installed via Toolbox container '$name', but that container is not reachable."
-			error_note "Start it and run the cleanup inside it: toolbox enter $name"
-			exit 1
-		fi
-		info "Toolbox install detected; running the cleanup inside container '$name'..."
 		# Rebuild the parsed options so the container run needs neither the host
 		# cwd nor a second parse. A relative --backup-dir was already resolved
 		# against the caller's cwd above; the confirmation still happens inside.
@@ -183,9 +231,9 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 			set -- "$@" --yes
 		fi
 		set -- CLEAN_PREFIX_REEXEC=1 "$@"
-		# `toolbox run` uses the container environment, so pass through the
-		# overrides a caller may have set for this checkout. They go after
-		# `env` (added below): `toolbox run` would run `NAME=value` as a command.
+		# `toolbox run` / `distrobox enter` uses the container environment, so pass
+		# through the overrides a caller may have set for this checkout. They go
+		# after `env` (added below): `toolbox run` would run `NAME=value` as a command.
 		if [ -n "${DPREFIX+x}" ]; then
 			set -- DPREFIX="$DPREFIX" "$@"
 		fi
@@ -202,6 +250,12 @@ if [ "$inside_toolbox" = 0 ] && [ -z "${CLEAN_PREFIX_REEXEC:-}" ] &&
 			set -- NO_COLOR="$NO_COLOR" "$@"
 		fi
 		set -- env "$@"
+		if [ "$backend" = distrobox ]; then
+			if [ -t 0 ]; then
+				exec distrobox enter --name "$name" -- "$@"
+			fi
+			exec distrobox enter --no-tty --name "$name" -- "$@"
+		fi
 		exec toolbox run --container "$name" "$@"
 	fi
 fi
@@ -210,8 +264,19 @@ if [ "$inside_toolbox" = 1 ]; then
 	name=''
 	if [ -f build/toolbox-container ]; then
 		IFS= read -r name <build/toolbox-container || true
+	elif [ "$inside_backend" = distrobox ] && [ -n "${CONTAINER_ID:-}" ]; then
+		name=$CONTAINER_ID
 	fi
-	if [ -n "$name" ]; then
+	if [ -r build/toolbox-backend ] && [ "$(cat build/toolbox-backend)" = distrobox ]; then
+		inside_backend=distrobox
+	fi
+	if [ "$inside_backend" = distrobox ]; then
+		if [ -n "$name" ]; then
+			info "Running inside Distrobox container '$name'."
+		else
+			info 'Running inside a Distrobox container.'
+		fi
+	elif [ -n "$name" ]; then
 		info "Running inside Toolbox container '$name'."
 	else
 		info 'Running inside a Toolbox container.'

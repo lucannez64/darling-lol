@@ -30,6 +30,9 @@ YES=0
 NAME=''
 TOOLBOX=''
 TOOLBOX_SET=0
+TOOLBOX_FLAG=0
+DISTROBOX_SET=0
+CONTAINER_BACKEND=''
 # 1 when the hidden League/Riot Client window entries were requested
 # (--window-entries or DARLING_LOL_WINDOW_ENTRIES=1); never created by default.
 WINDOW_ENTRIES=0
@@ -49,8 +52,15 @@ CURRENT_NAME=''
 CURRENT_ICON=''
 CURRENT_ENV=()
 
-if [[ -f /run/.toolboxenv || ${DARLING_LOL_TOOLBOX:-0} == 1 ]]; then
+if [[ -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]]; then
   INSIDE_TOOLBOX=1
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
+elif [[ -n ${CONTAINER_ID:-} && -f ${DARLING_CONTAINER_ENV:-/run/.containerenv} ]]; then
+  INSIDE_TOOLBOX=1
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-distrobox}
+elif [[ ${DARLING_LOL_TOOLBOX:-0} == 1 ]]; then
+  INSIDE_TOOLBOX=1
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
 fi
 
 if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
@@ -108,8 +118,10 @@ Options:
   -y, --yes          Accept the defaults without prompting (required without a
                      terminal; an action is required too)
   --name NAME        Launcher shortcut name (default: Darling Launcher)
-  --toolbox NAME     Run the shortcut through the given Toolbox container;
-                     an empty value runs it on the host
+  --toolbox NAME     Run the shortcut through the given Toolbox container
+                     (falls back to Distrobox when available); an empty value
+                     runs it on the host
+  --distrobox NAME   Run the shortcut through the given Distrobox container
   --window-entries   Also create the hidden entries that name and icon the
                      League client, game and Riot Client windows in the GNOME
                      overview (GNOME only; the question is skipped elsewhere)
@@ -163,10 +175,18 @@ parse_args() {
         ;;
       --toolbox)
         (( $# >= 2 )) || fail '--toolbox requires a value.'
-        TOOLBOX=$2; TOOLBOX_SET=1
+        TOOLBOX=$2; TOOLBOX_SET=1; TOOLBOX_FLAG=1
         shift
         ;;
-      --toolbox=*) TOOLBOX=${1#--toolbox=}; TOOLBOX_SET=1 ;;
+      --toolbox=*) TOOLBOX=${1#--toolbox=}; TOOLBOX_SET=1; TOOLBOX_FLAG=1 ;;
+      --distrobox)
+        (( $# >= 2 )) || fail '--distrobox requires a value.'
+        TOOLBOX=$2; TOOLBOX_SET=1; DISTROBOX_SET=1; CONTAINER_BACKEND=distrobox
+        shift
+        ;;
+      --distrobox=*)
+        TOOLBOX=${1#--distrobox=}; TOOLBOX_SET=1; DISTROBOX_SET=1; CONTAINER_BACKEND=distrobox
+        ;;
       --window-entries) WINDOW_ENTRIES=1 ;;
       --env)
         (( $# >= 2 )) || fail '--env requires a NAME=VALUE value.'
@@ -181,86 +201,166 @@ parse_args() {
     esac
     shift
   done
+
+  if (( TOOLBOX_FLAG && DISTROBOX_SET )); then
+    fail '--toolbox and --distrobox cannot be used together.'
+  fi
+}
+
+is_toolbx_cli() {
+  local version=''
+  command -v toolbox >/dev/null 2>&1 || return 1
+  version=$(toolbox --version </dev/null 2>/dev/null) || version=''
+  [[ $version == 'toolbox version '* ]]
 }
 
 toolbox_available() {
-  command -v toolbox >/dev/null 2>&1 || return 1
+  is_toolbx_cli || return 1
   toolbox run -c "$1" true >/dev/null 2>&1
 }
 
-# A Toolbox installation is detected the same way scripts/update.sh does it:
-# the marker recorded by the installer, then the container named in an
-# installed shortcut's Exec line, then the installer's default container when
-# it actually provides Darling.
-detect_toolbox_install() {
-  local name=''
+distrobox_available() {
+  command -v distrobox >/dev/null 2>&1 || return 1
+  distrobox enter --no-tty --name "$1" -- true >/dev/null 2>&1
+}
+
+container_available() {
+  if [[ $2 == distrobox ]]; then
+    distrobox_available "$1"
+  else
+    toolbox_available "$1"
+  fi
+}
+
+# Detect a Toolbox or Distrobox installation and record its name and backend
+# into DETECTED_CONTAINER and DETECTED_BACKEND without spawning a subshell.
+detect_container_target() {
+  local name='' backend=''
+  DETECTED_CONTAINER=''
+  DETECTED_BACKEND=''
   if [[ -f $TARGET_DIR/build/toolbox-container ]]; then
     name=$(<"$TARGET_DIR/build/toolbox-container")
+    backend=toolbox
+    if [[ -f $TARGET_DIR/build/toolbox-backend ]] &&
+       [[ $(<"$TARGET_DIR/build/toolbox-backend") == distrobox ]]; then
+      backend=distrobox
+    fi
   fi
   if [[ -z $name && -f $LAUNCHER_ENTRY ]]; then
     name=$(sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' "$LAUNCHER_ENTRY" 2>/dev/null | head -n 1)
+    if [[ -n $name ]]; then
+      backend=toolbox
+    else
+      name=$(sed -n 's/^Exec=distrobox enter --no-tty --name \([^ ]*\) -- .*$/\1/p' "$LAUNCHER_ENTRY" 2>/dev/null | head -n 1)
+      if [[ -n $name ]]; then
+        backend=distrobox
+      fi
+    fi
     name=${name%\"}
     name=${name#\"}
   fi
-  if [[ -z $name ]] && command -v toolbox >/dev/null 2>&1 &&
-     toolbox run -c "$DEFAULT_TOOLBOX" sh -c 'command -v darling' >/dev/null 2>&1; then
-    name=$DEFAULT_TOOLBOX
+  if [[ -z $name ]]; then
+    if is_toolbx_cli &&
+       toolbox run -c "$DEFAULT_TOOLBOX" sh -c 'command -v darling' >/dev/null 2>&1; then
+      name=$DEFAULT_TOOLBOX
+      backend=toolbox
+    elif command -v distrobox >/dev/null 2>&1 &&
+         distrobox enter --no-tty --name "$DEFAULT_TOOLBOX" -- sh -c 'command -v darling' >/dev/null 2>&1; then
+      name=$DEFAULT_TOOLBOX
+      backend=distrobox
+    fi
   fi
   [[ -n $name ]] || return 1
   # A stale marker or an outdated entry must not suggest a dead container.
-  if (( ! INSIDE_TOOLBOX )) && ! toolbox_available "$name"; then
-    warning "Toolbox container '$name' was detected but is not usable; ignoring it."
+  if (( ! INSIDE_TOOLBOX )) && ! container_available "$name" "$backend"; then
+    local label='Toolbox'
+    if [[ $backend == distrobox ]]; then label='Distrobox'; fi
+    warning "$label container '$name' was detected but is not usable; ignoring it."
     return 1
   fi
-  printf '%s' "$name"
+  DETECTED_CONTAINER=$name
+  DETECTED_BACKEND=$backend
 }
 
-# Where the shortcut runs. Inside Toolbox there is no choice: the host has no
+# Print the detected container name (preserving the helper contract).
+detect_toolbox_install() {
+  local DETECTED_CONTAINER='' DETECTED_BACKEND=''
+  detect_container_target || return 1
+  printf '%s' "$DETECTED_CONTAINER"
+}
+
+# Where the shortcut runs. Inside a container there is no choice: the host has no
 # Darling, so the entry must re-enter the container. Otherwise a detected
-# Toolbox installation is suggested as the default; without one, the host is
-# the default and a container is opt-in.
+# Toolbox/Distrobox installation is suggested as the default; without one, the
+# host is the default and a container is opt-in.
 choose_target() {
   if (( INSIDE_TOOLBOX )); then
+    local backend=${CONTAINER_BACKEND:-toolbox}
+    if [[ -z ${DARLING_LOL_TOOLBOX_BACKEND:-} && -f $TARGET_DIR/build/toolbox-backend ]] &&
+       [[ $(<"$TARGET_DIR/build/toolbox-backend") == distrobox ]]; then
+      backend=distrobox
+    fi
     local container=${DARLING_LOL_TOOLBOX_NAME:-}
     if [[ -z $container && -f $TARGET_DIR/build/toolbox-container ]]; then
       container=$(<"$TARGET_DIR/build/toolbox-container")
     fi
+    if [[ -z $container && $backend == distrobox && -n ${CONTAINER_ID:-} ]]; then
+      container=$CONTAINER_ID
+    fi
     container=${container:-$DEFAULT_TOOLBOX}
+    local label='Toolbox'
+    if [[ $backend == distrobox ]]; then label='Distrobox'; fi
     if (( TOOLBOX_SET )) && [[ $TOOLBOX != "$container" ]]; then
-      warning "Running inside Toolbox '$container'; ignoring --toolbox '$TOOLBOX'."
+      warning "Running inside $label '$container'; ignoring container override '$TOOLBOX'."
     fi
     TOOLBOX=$container
-    info "Running inside Toolbox '$TOOLBOX': the shortcut will re-enter this container."
+    CONTAINER_BACKEND=$backend
+    info "Running inside $label '$TOOLBOX': the shortcut will re-enter this container."
     return 0
   fi
 
-  local detected=''
-  detected=$(detect_toolbox_install || true)
+  local DETECTED_CONTAINER='' DETECTED_BACKEND=''
+  detect_container_target || true
 
   if (( TOOLBOX_SET )); then
-    if [[ -n $TOOLBOX ]] && ! toolbox_available "$TOOLBOX"; then
-      fail "Toolbox container '$TOOLBOX' is not usable. Start it with 'toolbox enter $TOOLBOX'."
+    if [[ -n $TOOLBOX ]]; then
+      if (( DISTROBOX_SET )); then
+        distrobox_available "$TOOLBOX" ||
+          fail "Distrobox container '$TOOLBOX' is not usable. Start it with 'distrobox enter $TOOLBOX'."
+        CONTAINER_BACKEND=distrobox
+      elif toolbox_available "$TOOLBOX"; then
+        CONTAINER_BACKEND=toolbox
+      elif distrobox_available "$TOOLBOX"; then
+        CONTAINER_BACKEND=distrobox
+      else
+        fail "Toolbox container '$TOOLBOX' is not usable. Start it with 'toolbox enter $TOOLBOX'."
+      fi
+    else
+      CONTAINER_BACKEND=''
     fi
     return 0
   fi
 
-  if [[ -n $detected ]]; then
+  if [[ -n $DETECTED_CONTAINER ]]; then
+    local label='Toolbox'
+    if [[ $DETECTED_BACKEND == distrobox ]]; then label='Distrobox'; fi
     if interactive_run; then
       local reply
       while true; do
-        read -r -p "${CYAN}${ICON_INFO}${RESET} Run the shortcut through Toolbox '$detected'? [Y/n]: " reply ||
+        read -r -p "${CYAN}${ICON_INFO}${RESET} Run the shortcut through $label '$DETECTED_CONTAINER'? [Y/n]: " reply ||
           fail 'No input received while choosing where the shortcut runs.'
         case ${reply,,} in
-          ''|y|yes) TOOLBOX=$detected; break ;;
-          n|no) TOOLBOX=''; break ;;
+          ''|y|yes) TOOLBOX=$DETECTED_CONTAINER; CONTAINER_BACKEND=$DETECTED_BACKEND; break ;;
+          n|no) TOOLBOX=''; CONTAINER_BACKEND=''; break ;;
           *) warning 'Invalid answer. Enter y or n.' ;;
         esac
       done
     else
-      TOOLBOX=$detected
+      TOOLBOX=$DETECTED_CONTAINER
+      CONTAINER_BACKEND=$DETECTED_BACKEND
     fi
     if [[ -n $TOOLBOX ]]; then
-      info "Shortcut target: Toolbox '$TOOLBOX' (detected installation)."
+      info "Shortcut target: $label '$TOOLBOX' (detected installation)."
     else
       info 'Shortcut target: the host.'
     fi
@@ -268,13 +368,14 @@ choose_target() {
   fi
 
   TOOLBOX=''
+  CONTAINER_BACKEND=''
   if ! interactive_run; then
     info 'Shortcut target: the host (no Toolbox installation detected).'
     return 0
   fi
   local reply
   while true; do
-    read -r -p "${CYAN}${ICON_INFO}${RESET} Run the shortcut through a Toolbox container? [y/N]: " reply ||
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Run the shortcut through a Toolbox or Distrobox container? [y/N]: " reply ||
       fail 'No input received while choosing where the shortcut runs.'
     case ${reply,,} in
       ''|n|no) info 'Shortcut target: the host.'; return 0 ;;
@@ -283,15 +384,21 @@ choose_target() {
     esac
   done
   while true; do
-    read -r -p "${CYAN}${ICON_INFO}${RESET} Toolbox container name [$DEFAULT_TOOLBOX]: " reply ||
+    read -r -p "${CYAN}${ICON_INFO}${RESET} Container name [$DEFAULT_TOOLBOX]: " reply ||
       fail 'No input received while naming the container.'
     reply=${reply:-$DEFAULT_TOOLBOX}
     if toolbox_available "$reply"; then
       TOOLBOX=$reply
+      CONTAINER_BACKEND=toolbox
       info "Shortcut target: Toolbox '$TOOLBOX'."
       return 0
+    elif distrobox_available "$reply"; then
+      TOOLBOX=$reply
+      CONTAINER_BACKEND=distrobox
+      info "Shortcut target: Distrobox '$TOOLBOX'."
+      return 0
     fi
-    warning "Toolbox container '$reply' is not usable. Start it with 'toolbox enter $reply' and try again."
+    warning "Container '$reply' is not usable. Start it with 'toolbox enter $reply' (or 'distrobox enter $reply') and try again."
   done
 }
 
@@ -693,7 +800,11 @@ summarize() {
   printf '\n%s%sShortcut summary%s\n' "$BOLD" "$CYAN" "$RESET"
   printf '%sName: %s%s\n' "$DIM" "$NAME" "$RESET"
   if [[ -n $TOOLBOX ]]; then
-    printf "%sTarget: Toolbox '%s'%s\n" "$DIM" "$TOOLBOX" "$RESET"
+    if [[ $CONTAINER_BACKEND == distrobox ]]; then
+      printf "%sTarget: Distrobox '%s'%s\n" "$DIM" "$TOOLBOX" "$RESET"
+    else
+      printf "%sTarget: Toolbox '%s'%s\n" "$DIM" "$TOOLBOX" "$RESET"
+    fi
   else
     printf '%sTarget: the host%s\n' "$DIM" "$RESET"
   fi
@@ -755,7 +866,13 @@ run_helper() {
 
 run_create_update() {
   local args=(--name "$NAME") flag
-  if [[ -n $TOOLBOX ]]; then args+=(--toolbox "$TOOLBOX"); fi
+  if [[ -n $TOOLBOX ]]; then
+    if [[ $CONTAINER_BACKEND == distrobox ]]; then
+      args+=(--distrobox "$TOOLBOX")
+    else
+      args+=(--toolbox "$TOOLBOX")
+    fi
+  fi
   if (( WINDOW_ENTRIES )); then args+=(--window-entries); fi
   if (( ${#ENV_FLAGS[@]} )); then
     for flag in "${ENV_FLAGS[@]}"; do args+=(--env "$flag"); done

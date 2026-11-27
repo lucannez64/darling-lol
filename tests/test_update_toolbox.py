@@ -15,6 +15,14 @@ REEXEC_ARGV = 'run --container {name} env DARLING_LOL_UPDATE_REEXEC=1 sh {repo}/
 
 FAKE_TOOLBOX = """#!/bin/sh
 # Fake toolbox: records argv, then behaves per the FAKE_TOOLBOX_* knobs.
+if [ "${1:-}" = --version ]; then
+  if [ "${FAKE_TOOLBOX_BAD_VERSION:-0}" = 1 ]; then
+    echo "toolbox: unrecognized option '--version'" >&2
+    exit 1
+  fi
+  printf 'toolbox version 0.0.99.5\\n'
+  exit 0
+fi
 printf '%s\\n' "$*" >> "${FAKE_TOOLBOX_LOG:?}"
 case "${1:-}" in run) shift ;; *) exit 0 ;; esac
 case "${1:-}" in
@@ -37,6 +45,29 @@ case "${1:-}" in
       fi
       exit 0
     fi
+    [ "${FAKE_TOOLBOX_CONTAINER_OK:-0}" = 1 ] || exit 1
+    printf 1 > "${FAKE_TOOLBOX_LOG}.started"
+    ;;
+  env) [ "${FAKE_TOOLBOX_REEXEC_FAIL:-0}" != 1 ] || exit 1 ;;
+  sh) [ "${FAKE_TOOLBOX_HAS_DARLING:-0}" = 1 ] || exit 1 ;;
+esac
+exit 0
+"""
+
+FAKE_DISTROBOX = """#!/bin/sh
+# Fake distrobox: records argv, then behaves per the FAKE_TOOLBOX_* knobs.
+printf '%s\\n' "$*" >> "${FAKE_DISTROBOX_LOG:?}"
+case "${1:-}" in enter) shift ;; *) exit 0 ;; esac
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-tty) shift ;;
+    --name) shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+case "${1:-}" in
+  true)
     [ "${FAKE_TOOLBOX_CONTAINER_OK:-0}" = 1 ] || exit 1
     printf 1 > "${FAKE_TOOLBOX_LOG}.started"
     ;;
@@ -106,6 +137,7 @@ class UpdateToolboxTests(unittest.TestCase):
         self.home = folder / 'home'
         self.bindir = folder / 'bin'
         self.log = folder / 'toolbox.log'
+        self.distrobox_log = folder / 'distrobox.log'
         self.podman_log = folder / 'podman.log'
         (self.repo / 'scripts').mkdir(parents=True)
         self.home.mkdir()
@@ -113,6 +145,8 @@ class UpdateToolboxTests(unittest.TestCase):
         shutil.copy2(UPDATE, self.repo / 'scripts' / 'update.sh')
         (self.bindir / 'toolbox').write_text(FAKE_TOOLBOX)
         (self.bindir / 'toolbox').chmod(0o755)
+        (self.bindir / 'distrobox').write_text(FAKE_DISTROBOX)
+        (self.bindir / 'distrobox').chmod(0o755)
         (self.bindir / 'podman').write_text(FAKE_PODMAN)
         (self.bindir / 'podman').chmod(0o755)
         # The client probe scans the real /proc, so answer it from a stub: the
@@ -135,6 +169,7 @@ class UpdateToolboxTests(unittest.TestCase):
                   'done\nexit 0')
         self.env = dict(os.environ)
         self.env.update(HOME=str(self.home), FAKE_TOOLBOX_LOG=str(self.log),
+                        FAKE_DISTROBOX_LOG=str(self.distrobox_log),
                         FAKE_PODMAN_LOG=str(self.podman_log))
         self.env['PATH'] = f'{self.bindir}:{self.env["PATH"]}'
         self.env.pop('DARLING_WORKSPACE', None)
@@ -180,6 +215,11 @@ class UpdateToolboxTests(unittest.TestCase):
         if not self.log.exists():
             return []
         return self.log.read_text().splitlines()
+
+    def distrobox_lines(self):
+        if not self.distrobox_log.exists():
+            return []
+        return self.distrobox_log.read_text().splitlines()
 
     def podman_lines(self):
         if not self.podman_log.exists():
@@ -786,6 +826,96 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertNotIn('Signing Darling system components', result.stdout)
         calls = sudo_log.read_text().splitlines() if sudo_log.exists() else []
         self.assertFalse(any('sign-darling-runtime.sh' in line for line in calls), calls)
+
+    def test_distrobox_marker_reenters_and_stops_container(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        result = self.run_update(input_text='', FAKE_TOOLBOX_CONTAINER_OK='1', FAKE_PODMAN_STARTS='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = (
+            f'enter --no-tty --name my-dbx -- env DARLING_LOL_UPDATE_REEXEC=1 '
+            f'sh {self.repo}/scripts/update.sh'
+        )
+        self.assertIn(expected, self.distrobox_lines())
+        self.assertEqual(self.argv_lines(), [])
+        self.assertIn('stop --time 10 my-dbx', self.podman_lines())
+
+    def test_distrobox_desktop_entry_reenters_distrobox(self):
+        apps = self.home / '.local/share/applications'
+        apps.mkdir(parents=True, exist_ok=True)
+        (apps / 'darling-launcher.desktop').write_text(
+            '[Desktop Entry]\n'
+            f'Exec=distrobox enter --no-tty --name deskdbx -- {self.repo}/scripts/desktop-run.sh\n'
+        )
+        result = self.run_update(input_text='', FAKE_TOOLBOX_CONTAINER_OK='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            any('enter --no-tty --name deskdbx -- ' in line for line in self.distrobox_lines()),
+            self.distrobox_lines(),
+        )
+
+    def test_legacy_checkout_falls_back_to_distrobox_when_toolbox_missing(self):
+        (self.bindir / 'toolbox').unlink()
+        bindir = tool_sandbox(self.folder, 'cat', 'dirname', 'grep', 'sed', 'head', 'sleep')
+        path = f'{self.bindir}:{bindir}'
+        result = self.run_update(input_text='', PATH=path, FAKE_TOOLBOX_CONTAINER_OK='1',
+                                 FAKE_TOOLBOX_HAS_DARLING='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            any('enter --no-tty --name darling-lol -- ' in line for line in self.distrobox_lines()),
+            self.distrobox_lines(),
+        )
+
+    def test_legacy_checkout_skips_microos_toolbox_and_uses_distrobox(self):
+        result = self.run_update(
+            input_text='',
+            FAKE_TOOLBOX_BAD_VERSION='1',
+            FAKE_TOOLBOX_CONTAINER_OK='1',
+            FAKE_TOOLBOX_HAS_DARLING='1',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.argv_lines(), [])
+        self.assertTrue(
+            any('enter --no-tty --name darling-lol -- ' in line for line in self.distrobox_lines()),
+            self.distrobox_lines(),
+        )
+
+    def test_distrobox_missing_gives_distinct_message(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        bindir = tool_sandbox(self.folder, 'cat', 'dirname', 'grep', 'sed', 'head', 'sleep')
+        result = self.run_update(input_text='', PATH=str(bindir))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Distrobox container 'my-dbx'", result.stderr)
+        self.assertIn('is not installed on this host', result.stderr)
+        self.assertIn('distrobox enter my-dbx', result.stderr)
+        self.assertEqual(self.distrobox_lines(), [])
+
+    def test_distrobox_verbose_forwards_verbose_flag(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        result = self.run_update('--verbose', input_text='', FAKE_TOOLBOX_CONTAINER_OK='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = (
+            f'enter --no-tty --name my-dbx -- env DARLING_LOL_UPDATE_REEXEC=1 '
+            f'sh {self.repo}/scripts/update.sh --verbose'
+        )
+        self.assertIn(expected, self.distrobox_lines())
+
+    def test_inside_distrobox_skips_reexec(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        containerenv = self.folder / 'containerenv'
+        containerenv.write_text('name="my-dbx"\n')
+        result = self.run_update(
+            input_text='',
+            DARLING_TOOLBOX_ENV=str(self.folder / 'missing-toolboxenv'),
+            DARLING_CONTAINER_ENV=str(containerenv),
+            CONTAINER_ID='my-dbx',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('No existing build', result.stderr)
+        self.assertEqual(self.distrobox_lines(), [])
 
 
 if __name__ == '__main__':

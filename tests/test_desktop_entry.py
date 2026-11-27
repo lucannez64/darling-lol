@@ -683,7 +683,10 @@ class DesktopEntryTests(unittest.TestCase):
         script = self.installed_helper(project)
         for args in (('--remove', '--name', 'X'), ('--remove', '--env', 'A=1'),
                      ('--remove', '--toolbox', 'box'),
+                     ('--remove', '--distrobox', 'box'),
+                     ('--toolbox', 'box', '--distrobox', 'box'),
                      ('--show', '--name', 'X'), ('--show', '--env', 'A=1'),
+                     ('--show', '--distrobox', 'box'),
                      ('--show', '--remove'), ('--show', '--window-entries'),
                      ('--env', 'A=1', '--remove-all')):
             result = subprocess.run([sys.executable, str(script), *args],
@@ -691,6 +694,38 @@ class DesktopEntryTests(unittest.TestCase):
                                     env=self.child_env(), check=False)
             self.assertNotEqual(result.returncode, 0, args)
             self.assertIn('error', result.stderr.lower())
+
+    def test_distrobox_wraps_launcher_window_and_url_entries(self):
+        project = self.project()
+        result = self.install(project, '--distrobox', 'my box', '--window-entries',
+                              '--env', 'RCLOL_REGION=TR')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launcher = parse_entry(self.entry().read_text())
+        self.assertEqual(
+            launcher['Exec'],
+            f'distrobox enter --no-tty --name "my box" -- env RCLOL_REGION=TR '
+            f'"{project}/scripts/launch-shortcut.sh"',
+        )
+        handler = parse_entry(self.window_entry('darling-url-handler.desktop').read_text())
+        self.assertEqual(
+            handler['Exec'],
+            f'distrobox enter --no-tty --name "my box" -- "{project}/scripts/open-guest-url.sh" %u',
+        )
+        shown = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(
+            shown.stdout,
+            'owned=yes\nname=Darling Launcher\nicon=darling-launcher\n'
+            'toolbox=\ndistrobox=my box\nenv=RCLOL_REGION=TR\n',
+        )
+        removed = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--remove', '--remove-all'],
+            capture_output=True, text=True, env=self.child_env(), check=False)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse(self.entry().exists())
+        self.assertFalse(self.window_entry('darling-url-handler.desktop').exists())
 
     def test_missing_icon_fails(self):
         project = self.project()

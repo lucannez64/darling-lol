@@ -159,6 +159,17 @@ class StopRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'toolbox enter mybox'):
                 self.run_script(rendered)
 
+    def test_missing_darling_command_names_the_recorded_distrobox_container(self):
+        self.missing_darling = True
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'build').mkdir()
+            (Path(folder) / 'build/toolbox-container').write_text('mybox\n')
+            (Path(folder) / 'build/toolbox-backend').write_text('distrobox\n')
+            rendered = Path(folder) / 'stop-darling-runtime.py'
+            rendered.write_text(SCRIPT.read_text().replace('@PROJECT_ROOT@', folder))
+            with self.assertRaisesRegex(SystemExit, 'distrobox enter mybox'):
+                self.run_script(rendered)
+
     def test_invalid_marker(self):
         (self.prefix / '.init.pid').write_text('invalid')
         self.run_script()

@@ -97,14 +97,24 @@ try:
 except FileNotFoundError:
     # install-native.sh --toolbox records the container it used for this checkout
     container = 'darling-lol'
+    label = 'Toolbox'
+    enter_cmd = f'toolbox enter {container}'
     if not PROJECT_ROOT.startswith('@'):
         try:
             container = (Path(PROJECT_ROOT) / 'build/toolbox-container').read_text().strip() or container
         except OSError:
             pass
+        try:
+            if (Path(PROJECT_ROOT) / 'build/toolbox-backend').read_text().strip() == 'distrobox':
+                label = 'Distrobox'
+                enter_cmd = f'distrobox enter {container}'
+            else:
+                enter_cmd = f'toolbox enter {container}'
+        except OSError:
+            enter_cmd = f'toolbox enter {container}'
     raise SystemExit(
         "The 'darling' command was not found. Run this from the install that owns the prefix "
-        f"(for a Toolbox install: toolbox enter {container}). Runtime remains untouched."
+        f"(for a {label} install: {enter_cmd}). Runtime remains untouched."
     )
 deadline = time.monotonic() + 5
 while live(old_pid) and time.monotonic() < deadline:

@@ -113,7 +113,21 @@ toolbox create --distro fedora --release 44 darling-lol
 bash scripts/install-native.sh --toolbox
 ```
 
-If `toolbox` keeps pulling an old image, create the container from an explicit registry tag (for example `toolbox create --image registry.fedoraproject.org/fedora-toolbox:44 darling-lol`). The same requirements apply when you enter the container manually later (Distrobox included): run `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh` from the checkout inside the container.
+If `toolbox` keeps pulling an old image, create the container from an explicit registry tag (for example `toolbox create --image registry.fedoraproject.org/fedora-toolbox:44 darling-lol`). The same requirements apply when you enter a Toolbx container manually later: run `DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh` from the checkout inside the container. (For Distrobox, see the next section.)
+
+## Toolbox install fails on openSUSE or with an incompatible `toolbox` command
+
+`--toolbox` uses **Toolbx** (`containers/toolbox`, packaged as `toolbox` on Fedora and Arch Linux and as `podman-toolbox` on Debian and Ubuntu), and automatically falls back to **Distrobox** when Toolbx is unavailable.
+
+On openSUSE (Tumbleweed, Leap, MicroOS), `zypper install toolbox` installs `microos-toolbox`, a different script that uses an incompatible set of CLI flags. If `distrobox` and `podman` are installed, `scripts/install-native.sh --toolbox` skips `microos-toolbox` and uses Distrobox automatically; if `distrobox` is not installed yet, it fails before starting the install and tells you how to install it:
+
+```sh
+sudo zypper install distrobox podman
+podman rm -f darling-lol   # remove the container if microos-toolbox created one earlier
+bash scripts/install-native.sh --toolbox
+```
+
+Once installed with Distrobox, `scripts/update.sh`, `scripts/clean-prefix.sh`, `scripts/uninstall.sh`, the desktop shortcuts, and the session supervisor all detect `build/toolbox-backend` and re-enter the Distrobox container automatically. You can also enter a Fedora 44 Distrobox container manually (`distrobox create --name darling-lol --image registry.fedoraproject.org/fedora-toolbox:44`, then `distrobox enter darling-lol` and `bash scripts/install-native.sh`).
 
 ## Update says the Toolbox container is not reachable
 

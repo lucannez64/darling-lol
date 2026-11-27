@@ -256,22 +256,32 @@ class ContainerTests(unittest.TestCase):
         for signum, handler in self.handlers.items():
             signal.signal(signum, handler)
 
-    def metadata(self):
-        return supervisor.container_metadata(self.marker, self.containerenv)
+    def metadata(self, environ=None):
+        return supervisor.container_metadata(self.marker, self.containerenv, environ=environ)
 
     def test_toolbox_container_is_identified(self):
         self.containerenv.write_text(
             'engine="podman-5.8.9"\n'
             'name="darling-lol"\n'
             'id="612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356"\n')
-        self.assertEqual(self.metadata(), (
+        self.assertEqual(self.metadata(environ={}), (
+            'darling-lol',
+            '612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356'))
+
+    def test_distrobox_container_is_identified_via_container_id(self):
+        self.containerenv.write_text(
+            'engine="podman-5.8.9"\n'
+            'name="darling-lol"\n'
+            'id="612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356"\n')
+        self.marker.unlink()
+        self.assertEqual(self.metadata(environ={'CONTAINER_ID': 'darling-lol'}), (
             'darling-lol',
             '612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356'))
 
     def test_missing_toolbox_marker_is_ignored(self):
         self.containerenv.write_text('name="outer"\nid="abc123"\n')
         self.marker.unlink()
-        self.assertIsNone(self.metadata())
+        self.assertIsNone(self.metadata(environ={}))
 
     def test_missing_metadata_is_ignored(self):
         self.assertIsNone(self.metadata())
@@ -514,6 +524,27 @@ class ToolboxSessionTests(unittest.TestCase):
         (other / 'cgroup').write_text('0::/user.slice/libpod-other.scope\n')
         _code, stop = self.run_supervisor(container=self.container)
         stop.assert_called_once()
+
+    def test_distrobox_init_and_keepalive_sleep_are_idle(self):
+        shutil.rmtree(self.proc / '12345')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        sleeper = fake_process(self.proc, 22346, comm='sleep', ppid=22345)
+        (sleeper / 'cmdline').write_bytes(b'sleep\x0015\x00')
+        (sleeper / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_distrobox_interactive_shell_leaves_container_running(self):
+        shutil.rmtree(self.proc / '12345')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        shell = fake_process(self.proc, 22346, comm='bash', ppid=1)
+        (shell / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope/exec\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
 
     def test_launcher_helpers_do_not_block_the_stop(self):
         for pid, name in enumerate(('close-league-client-in-game.py',

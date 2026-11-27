@@ -29,19 +29,21 @@ class CreateDesktopEntryTests(unittest.TestCase):
         self.bin.mkdir()
         for name, body in {
             'toolbox': 'printf "toolbox should not start for shortcut creation\\n" >&2; exit 99',
+            'distrobox': 'printf "distrobox should not start for shortcut creation\\n" >&2; exit 99',
             'podman': '[ "$1" = container ] && [ "$2" = exists ] && [ "$3" = -- ] && [ "$4" = my-box ]',
         }.items():
             script = self.bin / name
             script.write_text(f'#!/bin/sh\n{body}\n')
             script.chmod(0o755)
 
-    def run_entry(self, *args, inside=False, name=''):
+    def run_entry(self, *args, inside=False, name='', backend=''):
         if not inside and Path('/run/.toolboxenv').is_file():
             self.skipTest('host runs inside a Toolbox container')
         env = {**os.environ, 'HOME': str(self.home),
                'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
                'DARLING_LOL_TOOLBOX': '1' if inside else '0',
                'DARLING_LOL_TOOLBOX_NAME': name,
+               'DARLING_LOL_TOOLBOX_BACKEND': backend,
                'DARLING_LOL_WINDOW_ENTRIES': '0'}
         result = subprocess.run(['sh', str(self.repo / 'scripts/create-desktop-entry.sh'), *args],
                                 env=env, capture_output=True, text=True, check=False)
@@ -93,3 +95,38 @@ class CreateDesktopEntryTests(unittest.TestCase):
         args, stderr = self.run_entry()
         self.assertEqual(args, [])
         self.assertIn('deleted-box', stderr)
+
+    def test_host_uses_recorded_distrobox(self):
+        self.record_toolbox()
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        args, _ = self.run_entry('--window-entries')
+        self.assertEqual(args, ['--distrobox', 'my-box', '--window-entries'])
+
+    def test_inside_distrobox_passes_distrobox_flag(self):
+        self.record_toolbox()
+        args, _ = self.run_entry(inside=True, backend='distrobox')
+        self.assertEqual(args, ['--distrobox', 'my-box'])
+
+    def test_host_ignores_a_missing_distrobox_container(self):
+        self.record_toolbox('deleted-box')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        args, stderr = self.run_entry()
+        self.assertEqual(args, [])
+        self.assertIn('Distrobox container deleted-box is unavailable', stderr)
+
+    def test_inside_distrobox_with_darling_lol_toolbox_env_uses_distrobox(self):
+        containerenv = self.repo / 'containerenv'
+        containerenv.write_text('name="my-dbx"\n')
+        env = {**os.environ, 'HOME': str(self.home),
+               'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
+               'DARLING_TOOLBOX_ENV': str(self.repo / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(containerenv),
+               'DARLING_LOL_TOOLBOX': '1',
+               'DARLING_LOL_TOOLBOX_NAME': '',
+               'DARLING_LOL_TOOLBOX_BACKEND': '',
+               'CONTAINER_ID': 'my-dbx',
+               'DARLING_LOL_WINDOW_ENTRIES': '0'}
+        result = subprocess.run(['sh', str(self.repo / 'scripts/create-desktop-entry.sh')],
+                                env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ['--distrobox', 'my-dbx'])

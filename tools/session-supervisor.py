@@ -374,16 +374,19 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
     return remaining
 
 
-def container_metadata(marker=TOOLBOX_MARKER, containerenv=CONTAINER_ENV):
-    """(name, id) of the Toolbox container hosting this process, or None.
+def container_metadata(marker=TOOLBOX_MARKER, containerenv=CONTAINER_ENV, environ=None):
+    """(name, id) of the Toolbx or Distrobox container hosting this process, or None.
 
-    Only a Toolbox container qualifies: `/run/.containerenv` exists in every
-    Podman container, but a native install inside an ordinary container must
-    not stop it. The ID is validated as hexadecimal because it becomes part of
-    a systemd unit name.
+    Only a Toolbx (`/run/.toolboxenv`) or Distrobox (`CONTAINER_ID` +
+    `/run/.containerenv`) container qualifies: `/run/.containerenv` exists in
+    every Podman container, so a native install inside an ordinary container
+    must not stop it. The ID is validated as hexadecimal because it becomes
+    part of a systemd unit name.
     """
+    env = os.environ if environ is None else environ
+    is_distrobox = bool((env.get('CONTAINER_ID') or '').strip())
     try:
-        if not marker.exists():
+        if not marker.exists() and not is_distrobox:
             return None
         lines = containerenv.read_text(errors='replace').splitlines()
     except OSError:
@@ -498,13 +501,30 @@ def launcher_helper(script):
         return False
 
 
+def is_container_init(args):
+    """Return 'toolbox' or 'distrobox' when `args` is that container's init."""
+    if not args:
+        return None
+    cmd = Path(args[0]).name
+    if cmd == 'toolbox' and 'init-container' in args[1:]:
+        return 'toolbox'
+    if cmd == 'entrypoint':
+        return 'distrobox'
+    if (len(args) > 1 and cmd in ('sh', 'dash', 'bash')
+            and Path(args[1]).name in ('entrypoint', 'distrobox-init')):
+        return 'distrobox'
+    return None
+
+
 def toolbox_state(container_id, proc_root):
-    """Return the live Toolbx init identity and whether its scope is idle."""
+    """Return the live container init identity and whether its scope is idle."""
     unit = 'libpod-%s.scope' % container_id
     if not in_container_scope(proc_root / 'self', unit):
         return None, False
+    members = []
     instance = None
-    idle = True
+    init_pid = None
+    init_kind = None
     for proc in proc_root.iterdir():
         if not proc.name.isdigit() or int(proc.name) == os.getpid():
             continue
@@ -514,10 +534,18 @@ def toolbox_state(container_id, proc_root):
         if info is not None and info[0] in ('Z', 'X'):
             continue
         args = command_line(proc)
-        if (info is not None and args and Path(args[0]).name == 'toolbox'
-                and 'init-container' in args[1:]):
+        kind = is_container_init(args) if info is not None else None
+        if kind is not None:
             # Both the mount namespace inode and PID can be reused at restart.
             instance = '%s:%d' % (proc.name, info[2])
+            init_pid = int(proc.name)
+            init_kind = kind
+            continue
+        members.append((info, args))
+    idle = True
+    for info, args in members:
+        if (init_kind == 'distrobox' and info is not None
+                and info[1] == init_pid and args and Path(args[0]).name == 'sleep'):
             continue
         if (len(args) > 1 and Path(args[0]).name.startswith('python')
                 and Path(args[1]).name in LAUNCHER_HELPERS
@@ -529,6 +557,7 @@ def toolbox_state(container_id, proc_root):
                 and Path(args[1]).name == 'session-supervisor.py'):
             continue
         idle = False
+        break
     return instance, idle
 
 
