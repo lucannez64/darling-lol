@@ -278,7 +278,7 @@
       "revision": "f07f265bfbcf071c1adfc808de971e053ea5edc5",
       "repository": "https://github.com/darlinghq/darling-libpthread.git",
       "patch": "patches/libpthread.patch",
-      "modified_files": 1,
+      "modified_files": 2,
       "new_files": []
     },
     {
