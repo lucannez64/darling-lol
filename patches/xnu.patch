@@ -12437,10 +12437,21 @@ index a1b55f5..e6540d8 100644
  host_statistics64(
  #endif
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
-index 6600da7..a291362 100644
+index 6600da78..87ec832f 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/helper/misc/sysctl_proc.c
-@@ -124,6 +124,48 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
+@@ -43,7 +43,9 @@ extern char *strncpy(char *dest, const char *src, __SIZE_TYPE__ n);
+ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* buflen)
+ {
+ 	int fd, ret = 0;
+-	char dents[256];
++	// Must be at least as large as the longest directory record, so that
++	// sys_getdirentries never has to drop an entry that does not fit.
++	char dents[1024];
+ 	long basep = 0;
+ 	int nproc = 0;
+ 	struct kinfo_proc_chain *first = NULL, *last = NULL;
+@@ -124,6 +126,48 @@ int _sysctl_proc(int what, int flag, struct kinfo_proc* out, unsigned long* bufl
  	return ret;
  }
  
@@ -12489,7 +12500,7 @@ index 6600da7..a291362 100644
  bool read_string(const char* path, char* dst, int maxlen)
  {
  	int fd, rd;
-@@ -215,7 +257,10 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
+@@ -215,7 +259,10 @@ static struct kinfo_proc_chain* load_proc(const char* name, int what, int flag)
  
  	// comm
  	READELEM();
@@ -12800,3 +12811,105 @@ index bb30b3ff..bc691bfe 100644
  		if (lc->uc_link != NULL)
  		{
  			struct bsd_ucontext* bc_link = (struct bsd_ucontext*) __builtin_alloca(sizeof(struct bsd_ucontext));
+diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
+index 0a7e4927..886f1b35 100644
+--- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
++++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/dirent/getdirentries.c
+@@ -20,9 +20,15 @@ extern int strcmp(const char* str1, const char* str2);
+ 
+ #define ALIGN(x, alignment) (((x) + (alignment - 1)) & ~(alignment - 1))
+ #define BSD_DIRENT_MIN_SIZE ALIGN(sizeof(struct bsd_dirent) + 2, 4)
+-#define BSD_DIRENT64_MIN_SIZE ALIGN(sizeof(struct bsd_dirent64) + 2, 4)
+ #define LINUX_DIRENT64_MIN_SIZE ALIGN(sizeof(struct linux_dirent64) + 2, 8)
+ 
++// getdirentries64 records are 8-byte aligned and their name starts at offset
++// 21, so a record is ALIGN(22 + namelen, 8) bytes, at most 8 bytes more than
++// the Linux record (ALIGN(20 + namelen, 8), at least 24 bytes) it comes from.
++// Reading at most len / 32 * 24 bytes of Linux records therefore always fits
++// in len bytes, and no entry read from the kernel is dropped.
++#define BSD_DIRENT64_MAX_SIZE_PER_LINUX_MIN 32
++
+ static inline void round_to_4(unsigned short* reclen)
+ {
+ 	if (*reclen & 3)
+@@ -33,22 +39,35 @@ static inline void round_to_4(unsigned short* reclen)
+ 	}
+ }
+ 
++// A BSD record (8-byte header, name, NUL, rounded to 4) is never larger than
++// the Linux record it is made from (19-byte header, name, NUL, rounded to 8).
++// Reading at most len bytes of Linux records therefore always fits in len
++// bytes of BSD records. Entries read from the kernel but not returned cannot
++// be handed back, so reading more than fits would silently drop the entries
++// at the end of every call.
++// The host read must still be able to return the longest Linux record
++// (255-byte name), so callers with a buffer smaller than that can still lose
++// entries; callers that enumerate a directory should pass a larger one.
++#define LINUX_DIRENT64_LARGEST_RECORD 280
++#define GETDIRENTRIES_HOST_BUF_MAX 2048
++
+ long sys_getdirentries(int fd, char* ibuf, unsigned int len, long* basep)
+ {
+ 	int ret, bpos = 0, opos = 0;
+ 
+-	unsigned int max_entry_count = len / BSD_DIRENT_MIN_SIZE;
++	unsigned int hostlen = len;
++	if (hostlen < LINUX_DIRENT64_LARGEST_RECORD)
++		hostlen = LINUX_DIRENT64_LARGEST_RECORD;
++	if (hostlen > GETDIRENTRIES_HOST_BUF_MAX)
++		hostlen = GETDIRENTRIES_HOST_BUF_MAX;
+ 
+-	// don't want to blow up the stack
+-	if (max_entry_count > 20)
+-		max_entry_count = 20;
+-
+-	char buf[max_entry_count * LINUX_DIRENT64_MIN_SIZE];
++	// bounded, so this doesn't blow up the stack
++	char buf[GETDIRENTRIES_HOST_BUF_MAX];
+ 
+ 	if (basep)
+ 		*basep = 0;
+ 
+-	ret = LINUX_SYSCALL(__NR_getdents64, fd, buf, sizeof(buf));
++	ret = LINUX_SYSCALL(__NR_getdents64, fd, buf, hostlen);
+ 	if (ret < 0)
+ 		return errno_linux_to_bsd(ret);
+ 
+@@ -87,7 +106,7 @@ long sys_getdirentries64(int fd, char* ibuf, unsigned int len, long* basep)
+ {
+ 	int ret, bpos = 0, opos = 0;
+ 
+-	unsigned int max_entry_count = len / BSD_DIRENT64_MIN_SIZE;
++	unsigned int max_entry_count = len / BSD_DIRENT64_MAX_SIZE_PER_LINUX_MIN;
+ 
+ 	// don't want to blow up the stack
+ 	if (max_entry_count > 20)
+@@ -107,23 +126,22 @@ long sys_getdirentries64(int fd, char* ibuf, unsigned int len, long* basep)
+ 		struct linux_dirent64* l64;
+ 		struct bsd_dirent64* bsd;
+ 		int slen;
++		unsigned short reclen;
+ 
+ 		l64 = (struct linux_dirent64*) (buf + bpos);
+ 		bsd = (struct bsd_dirent64*) (ibuf + opos);
+ 		slen = strlen(l64->d_name);
+ 
+-		if (len-opos < sizeof(struct bsd_dirent64) + slen + 1)
++		reclen = ALIGN(__builtin_offsetof(struct bsd_dirent64, d_name) + slen + 1, 8);
++		if (len - opos < reclen)
+ 			break;
+ 
+ 		bsd->d_ino = l64->d_ino;
+ 		bsd->d_type = l64->d_type;
+-		strcpy(bsd->d_name, l64->d_name);
+-
+-		bsd->d_reclen = sizeof(struct bsd_dirent64) + slen + 1;
+ 		bsd->d_namlen = slen;
+ 		bsd->d_seekoff = 0;
+-
+-		round_to_4(&bsd->d_reclen);
++		bsd->d_reclen = reclen;
++		strcpy(bsd->d_name, l64->d_name);
+ 
+ 		opos += bsd->d_reclen;
+ 		bpos += l64->d_reclen;
