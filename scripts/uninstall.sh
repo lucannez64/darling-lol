@@ -84,7 +84,7 @@ if [ "$inside_container" = 0 ] && [ -z "${UNINSTALL_REEXEC:-}" ] &&
 			backend=toolbox
 		else
 			name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
-				sed -n 's/^Exec=distrobox enter --no-tty --name \([^ ]*\) -- .*$/\1/p' | head -n 1)
+				sed -n 's/^Exec=\(env DBX_CONTAINER_MANAGER=podman \)\{0,1\}distrobox enter --no-tty --name \([^ ]*\) -- .*$/\2/p' | head -n 1)
 			if [ -n "$name" ]; then
 				backend=distrobox
 			fi

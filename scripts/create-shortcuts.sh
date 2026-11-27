@@ -260,7 +260,7 @@ detect_container_target() {
     if [[ -n $name ]]; then
       backend=toolbox
     else
-      name=$(sed -n 's/^Exec=distrobox enter --no-tty --name \([^ ]*\) -- .*$/\1/p' "$LAUNCHER_ENTRY" 2>/dev/null | head -n 1)
+      name=$(sed -n 's/^Exec=\(env DBX_CONTAINER_MANAGER=podman \)\{0,1\}distrobox enter --no-tty --name \([^ ]*\) -- .*$/\2/p' "$LAUNCHER_ENTRY" 2>/dev/null | head -n 1)
       if [[ -n $name ]]; then
         backend=distrobox
       fi

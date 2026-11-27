@@ -703,13 +703,13 @@ class DesktopEntryTests(unittest.TestCase):
         launcher = parse_entry(self.entry().read_text())
         self.assertEqual(
             launcher['Exec'],
-            f'distrobox enter --no-tty --name "my box" -- env RCLOL_REGION=TR '
+            f'env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name "my box" -- env RCLOL_REGION=TR '
             f'"{project}/scripts/launch-shortcut.sh"',
         )
         handler = parse_entry(self.window_entry('darling-url-handler.desktop').read_text())
         self.assertEqual(
             handler['Exec'],
-            f'distrobox enter --no-tty --name "my box" -- "{project}/scripts/open-guest-url.sh" %u',
+            f'env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name "my box" -- "{project}/scripts/open-guest-url.sh" %u',
         )
         shown = subprocess.run(
             [sys.executable, self.installed_helper(project), '--show'],
@@ -719,6 +719,23 @@ class DesktopEntryTests(unittest.TestCase):
             shown.stdout,
             'owned=yes\nname=Darling Launcher\nicon=darling-launcher\n'
             'toolbox=\ndistrobox=my box\nenv=RCLOL_REGION=TR\n',
+        )
+        # Entries written before DBX_CONTAINER_MANAGER=podman pinning still parse and stay owned.
+        self.entry().write_text(
+            '[Desktop Entry]\n'
+            'Type=Application\n'
+            'Name=Darling Launcher\n'
+            'Icon=darling-launcher\n'
+            f'Exec=distrobox enter --no-tty --name "my box" -- "{project}/scripts/launch-shortcut.sh"\n'
+        )
+        legacy_shown = subprocess.run(
+            [sys.executable, self.installed_helper(project), '--show'],
+            env=self.child_env(), capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(
+            legacy_shown.stdout,
+            'owned=yes\nname=Darling Launcher\nicon=darling-launcher\n'
+            'toolbox=\ndistrobox=my box\n',
         )
         removed = subprocess.run(
             [sys.executable, self.installed_helper(project), '--remove', '--remove-all'],

@@ -103,8 +103,8 @@ def exec_command(script: str, toolbox: str | None = None, env=(),
     if toolbox is not None:
         parts = ["toolbox", "run", "-c", quote_exec_argument(toolbox), *parts]
     elif distrobox is not None:
-        parts = ["distrobox", "enter", "--no-tty", "--name",
-                 quote_exec_argument(distrobox), "--", *parts]
+        parts = ["env", "DBX_CONTAINER_MANAGER=podman", "distrobox", "enter",
+                 "--no-tty", "--name", quote_exec_argument(distrobox), "--", *parts]
     return " ".join(parts)
 
 
@@ -147,7 +147,8 @@ def unwrap_exec_backend(command: str) -> tuple[str | None, str | None, list[str]
         command = wrapper[2]
     else:
         wrapper = re.fullmatch(
-            rf"distrobox enter --no-tty --name ({EXEC_TOKEN}) -- (.+)", command)
+            rf"(?:env DBX_CONTAINER_MANAGER=podman )?distrobox enter --no-tty --name ({EXEC_TOKEN}) -- (.+)",
+            command)
         if wrapper:
             backend = "distrobox"
             container = unquote_exec_argument(wrapper[1])

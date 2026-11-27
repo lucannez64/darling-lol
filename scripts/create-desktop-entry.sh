@@ -59,7 +59,7 @@ elif [ "${DARLING_LOL_TOOLBOX:-0}" = 1 ]; then
     name=$(sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' \
       "$entry" 2>/dev/null | head -n 1)
     if [ -z "$name" ]; then
-      name=$(sed -n 's/^Exec=distrobox enter --no-tty --name \([^ ]*\) -- .*$/\1/p' \
+      name=$(sed -n 's/^Exec=\(env DBX_CONTAINER_MANAGER=podman \)\{0,1\}distrobox enter --no-tty --name \([^ ]*\) -- .*$/\2/p' \
         "$entry" 2>/dev/null | head -n 1)
       if [ -n "$name" ] && [ -z "${DARLING_LOL_TOOLBOX_BACKEND:-}" ]; then
         backend=distrobox

@@ -325,7 +325,7 @@ class CleanPrefixToolboxTests(unittest.TestCase):
         apps.mkdir(parents=True, exist_ok=True)
         (apps / 'darling-launcher.desktop').write_text(
             '[Desktop Entry]\n'
-            f'Exec=distrobox enter --no-tty --name deskdbx -- {self.repo}/scripts/desktop-run.sh\n'
+            f'Exec=env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name deskdbx -- {self.repo}/scripts/desktop-run.sh\n'
         )
         result = self.run_clean('--yes', stdin=subprocess.DEVNULL, FAKE_TOOLBOX_CONTAINER_OK='1')
         self.assertEqual(result.returncode, 0, result.stderr)

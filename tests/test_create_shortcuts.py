@@ -705,7 +705,7 @@ esac
         result = self.run_cli('--create', '--yes', '--distrobox', 'my-dbx', path=path)
         self.assertEqual(result.returncode, 0, result.stderr)
         entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
-        self.assertTrue(entry['Exec'].startswith('distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
         calls = (self.root / 'distrobox.log').read_text().splitlines()
         self.assertTrue(calls and all(line.startswith('podman:') for line in calls), calls)
 
@@ -722,7 +722,7 @@ esac
         result = self.run_cli('--create', '--yes', '--toolbox', 'my-dbx', path=path)
         self.assertEqual(result.returncode, 0, result.stderr)
         entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
-        self.assertTrue(entry['Exec'].startswith('distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
 
     def test_detected_distrobox_backend_creates_distrobox_shortcut(self):
         path = self.fake_distrobox('my-dbx')
@@ -731,7 +731,7 @@ esac
         result = self.run_cli('--create', '--yes', path=path)
         self.assertEqual(result.returncode, 0, result.stderr)
         entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
-        self.assertTrue(entry['Exec'].startswith('distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
 
     def test_inside_distrobox_with_darling_lol_toolbox_env_uses_distrobox(self):
         path = self.fake_distrobox('my-dbx')
@@ -754,7 +754,7 @@ esac
             capture_output=True, text=True, env=env, check=False, cwd=str(self.repo))
         self.assertEqual(result.returncode, 0, result.stderr)
         entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
-        self.assertTrue(entry['Exec'].startswith('distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
 
     def test_inside_distrobox_prefers_container_id_over_stale_marker(self):
         path = self.fake_distrobox('new-box')
@@ -778,7 +778,7 @@ esac
             capture_output=True, text=True, env=env, check=False, cwd=str(self.repo))
         self.assertEqual(result.returncode, 0, result.stderr)
         entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
-        self.assertTrue(entry['Exec'].startswith('distrobox enter --no-tty --name new-box -- '), entry['Exec'])
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name new-box -- '), entry['Exec'])
 
     def test_inside_toolbx_distrobox_flag_keeps_toolbx_backend(self):
         path = self.fake_distrobox('other-box')

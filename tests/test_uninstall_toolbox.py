@@ -244,7 +244,7 @@ class UninstallToolboxTests(unittest.TestCase):
         apps = self.home / '.local/share/applications'
         apps.mkdir(parents=True)
         (apps / 'darling-launcher.desktop').write_text(
-            f'[Desktop Entry]\nExec=distrobox enter --no-tty --name deskdbx -- {self.repo}/scripts/desktop-run.sh\n')
+            f'[Desktop Entry]\nExec=env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name deskdbx -- {self.repo}/scripts/desktop-run.sh\n')
         result = self.run_uninstall('--keep-game', FAKE_TOOLBOX_CONTAINER_OK='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(
