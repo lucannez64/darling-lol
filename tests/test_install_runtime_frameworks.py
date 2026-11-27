@@ -75,6 +75,13 @@ class InstallRuntimeFrameworkTests(unittest.TestCase):
         normalize = self.script.index('configure-darling-platform.py --prefix "$prefix_dir" --normalize-system-version --write')
         self.assertLess(stop, normalize)
 
+    def test_certificate_update_clears_runtime_stopped_before_stop_guard(self):
+        check = self.script.index('ensure-darling-root-certificates.py --prefix "$prefix_dir" --check')
+        reset = self.script.index('runtime_stopped=0', check)
+        stop = self.script.index('stop-darling-runtime.py', reset)
+        self.assertLess(check, reset)
+        self.assertLess(reset, stop)
+
     def batch_body(self):
         start = self.script.index('install_overlay_batch() {\n')
         return self.script[start:self.script.index('\n}\n', start)]

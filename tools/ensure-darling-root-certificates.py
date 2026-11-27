@@ -273,7 +273,16 @@ def main(argv=None):
     parser.add_argument('--prefix', type=Path, default=Path(os.environ.get('DPREFIX', str(Path.home() / '.darling'))))
     parser.add_argument('--darling', default='darling', help='Darling command (for tests)')
     parser.add_argument('--force', action='store_true', help='rebuild even when the stamp is current')
+    parser.add_argument('--check', action='store_true',
+                        help='exit 0 when the root store is current without starting Darling')
     args = parser.parse_args(argv)
+    if args.check:
+        try:
+            bundle = args.bundle or default_bundle()
+            folder = args.prefix.expanduser() / 'System/Library/Keychains'
+            return 0 if current(folder, bundle_digest(bundle.read_bytes())) else 1
+        except (Failure, OSError):
+            return 1
     try:
         return ensure(args.prefix.expanduser(), args.bundle or default_bundle(), args.darling.split(), args.force)
     except (Failure, OSError) as error:

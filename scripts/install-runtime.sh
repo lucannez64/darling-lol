@@ -47,9 +47,18 @@ fi
 # One-time move of profiles installed while HOST was the default (issue #31).
 python3 build/runtime/tools/migrate-system-profile.py "$prefix/private/etc/darling-system.prop" || \
   echo "Hardware profile not migrated; set profile=compat in $prefix/private/etc/darling-system.prop" >&2
-# Build the system root store now that the prefix exists; Darling is stopped next anyway.
-python3 build/runtime/tools/ensure-darling-root-certificates.py || \
-  echo 'Darling system root store not installed; the launcher retries it' >&2
+# Build the system root store now that the prefix exists; if certificates are
+# not already current, the helper may start Darling and must be followed by a stop.
+if [ "$runtime_stopped" = 1 ]; then
+  if ! python3 build/runtime/tools/ensure-darling-root-certificates.py --prefix "$prefix_dir" --check; then
+    runtime_stopped=0
+    python3 build/runtime/tools/ensure-darling-root-certificates.py --prefix "$prefix_dir" || \
+      echo 'Darling system root store not installed; the launcher retries it' >&2
+  fi
+else
+  python3 build/runtime/tools/ensure-darling-root-certificates.py --prefix "$prefix_dir" || \
+    echo 'Darling system root store not installed; the launcher retries it' >&2
+fi
 if [ "$runtime_stopped" != 1 ]; then
   python3 build/runtime/tools/stop-darling-runtime.py
   runtime_stopped=1
