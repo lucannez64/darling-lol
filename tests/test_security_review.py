@@ -241,6 +241,46 @@ int main() {
             self.assertEqual(res3.returncode, 0, res3.stdout + res3.stderr)
             self.assertIn('total=4 signed=0 restored=0 skipped=4', res3.stdout.splitlines()[-1])
 
+    def test_signer_fails_closed_when_python_worker_fails_or_omits_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            root = folder / 'runtime'
+            root.mkdir()
+            (root / 'lib.dylib').write_bytes(b'\xcf\xfa\xed\xfe' + b'\0' * 16)
+            rcodesign = folder / 'rcodesign'
+            rcodesign.write_text('#!/bin/sh\nexit 0\n')
+            dcc = folder / 'dcc'
+            dcc.write_text('#!/bin/sh\nexit 1\n')
+            dct_log = folder / 'dct.log'
+            dct = folder / 'dct.py'
+            dct.write_text('import os, pathlib\npathlib.Path(os.environ["DCT_LOG"]).write_text("ran")\n')
+            bindir = folder / 'bin'
+            bindir.mkdir()
+            py_stub = bindir / 'python3'
+            for tool in (rcodesign, dcc):
+                tool.chmod(0o755)
+            for exit_code in ('7', '0'):
+                with self.subTest(exit_code=exit_code):
+                    py_stub.write_text(f'#!/bin/sh\nexit {exit_code}\n')
+                    py_stub.chmod(0o755)
+                    env = dict(
+                        os.environ,
+                        PATH=f'{bindir}:{os.environ["PATH"]}',
+                        DCC=str(dcc),
+                        RCODESIGN=str(rcodesign),
+                        DCT=str(dct),
+                        DCT_LOG=str(dct_log),
+                        DARLING_SIGN_CACHE=str(folder / 'cache'),
+                    )
+                    res = subprocess.run(
+                        ['sh', str(ROOT / 'tools/sign-darling-runtime.sh'),
+                         '--allow-running', '--trust', '--quiet', str(root)],
+                        env=env, capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(res.returncode, 0)
+                    self.assertIn('signing worker failed', res.stderr)
+                    self.assertFalse(dct_log.exists())
+
     def test_ground_truth_does_not_infer_success_from_unavailable_data(self):
         ground = module_at('review_ground_truth', ROOT / 'tests/security/ground_truth_to_golden.py')
         golden = json.loads((ROOT / 'tests/security/fixtures/macos-golden.json').read_text())

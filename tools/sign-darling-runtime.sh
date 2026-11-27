@@ -172,6 +172,7 @@ if [ "$cache" -eq 1 ] && [ "$dry" -eq 0 ] && [ "$force" -eq 0 ]; then
 fi
 
 counts_file=$tmp/counts
+py_rc=0
 # shellcheck disable=SC2086
 SIGN_TMP="$tmp" \
 SIGN_TRUST_ENTRIES="$trust_entries" \
@@ -188,7 +189,7 @@ SIGN_SDK_SELECTED="$sdk_selected" \
 SIGN_NO_TRUST="$no_trust" \
 SIGN_QUIET="$quiet" \
 SIGN_CACHE_ROOT="$cache_root" \
-python3 - $roots <<'PY'
+python3 - $roots <<'PY' || py_rc=$?
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
@@ -620,11 +621,15 @@ with open(COUNTS_FILE, 'w', encoding='utf-8') as handle:
         handle.write(f'{key_name}={value}\n')
 PY
 
-total=0; signed=0; restored=0; skipped=0; fat=0; thinned=0; object=0; failed=0
-if [ -f "$counts_file" ]; then
-	# shellcheck disable=SC1090
-	. "$counts_file"
+if [ "$py_rc" -ne 0 ] || [ ! -f "$counts_file" ]; then
+	echo "sign-darling-runtime.sh: signing worker failed (exit $py_rc)" >&2
+	[ "$py_rc" -ne 0 ] && exit "$py_rc"
+	exit 1
 fi
+
+total=0; signed=0; restored=0; skipped=0; fat=0; thinned=0; object=0; failed=0
+# shellcheck disable=SC1090
+. "$counts_file"
 
 if [ "$dry" -eq 0 ] && [ -s "$trust_entries" ]; then
 	if [ -z "$trust_store" ]; then
