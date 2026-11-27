@@ -4,9 +4,9 @@
  * Companion of ground_truth.c. It runs on a real macOS host and, unchanged,
  * inside a compatibility layer built against an old SDK, so that the two JSON
  * outputs can be diffed. It describes its own process. Of other processes it
- * reads only the name and path of its parent and of pids 0 and 1, and how many
- * pids the system lists. No signal, no ptrace, no network, no file write,
- * nothing but stdout.
+ * reads only the name and path of its parent and of pids 0 and 1, how many
+ * pids the system lists, and whether 0 and 1 are among them. No signal, no
+ * ptrace, no network, no file write, nothing but stdout.
  *
  * Build:  clang -O2 -Wall -Wextra -o self_view self_view.c
  *         (add -arch x86_64 for the Intel slice, which also runs under Rosetta)
@@ -207,13 +207,14 @@ static const char *jstr(const char *s)
 	return out;
 }
 
-/* System locations are printed in full. Any other path is reduced to its
- * kind: a name a user chose (home, project folder, mount point, temporary
- * directory) is never printed. */
+/* Fixed system locations are printed in full. Any other path is reduced to
+ * its kind: a name a user could have chosen (home, project folder, mount
+ * point, application, temporary directory) is never printed. */
 static const char *clean_path(const char *p)
 {
-	static const char *const sys[] = {"/System/", "/usr/", "/Library/", "/bin/", "/sbin/", "/dev/",
-		"/Applications/", "/etc/", "/private/etc/", "/private/var/db/", NULL};
+	static const char *const sys[] = {"/System/", "/usr/lib/", "/usr/libexec/", "/usr/bin/", "/usr/sbin/",
+		"/usr/share/", "/bin/", "/sbin/", "/dev/", "/Library/Apple/", "/private/var/db/dyld/",
+		"/private/var/db/oah/", NULL};
 	static const char *const homes[] = {"/Users/", "/home/", "/root/", "/var/root/", "/private/var/root/", NULL};
 	static const char *const tmps[] = {"/tmp/", "/private/tmp/", "/var/tmp/", "/private/var/tmp/",
 		"/var/folders/", "/private/var/folders/", NULL};
@@ -229,13 +230,16 @@ static const char *clean_path(const char *p)
 		kind = "/";
 	/* the host's root as Darling shows it: judged by the path below it */
 	q = strncmp(p, host, sizeof(host) - 1) ? p : p + sizeof(host) - 2;
+	if (!strncmp(q, "/Applications/", 14))
+		kind = "<application>";
 	for (int i = 0; homes[i]; i++)
 		if (!strncmp(q, homes[i], strlen(homes[i])))
 			kind = "<home>";
 	for (int i = 0; tmps[i]; i++)
 		if (!strncmp(q, tmps[i], strlen(tmps[i])))
 			kind = "<tmp>";
-	for (int i = 0; sys[i]; i++)
+	/* a ".." could lead out of a system location */
+	for (int i = 0; sys[i] && !strstr(q, "/../"); i++)
 		if (!strncmp(q, sys[i], strlen(sys[i])))
 			kind = p;
 	snprintf(out, SV_BUFSZ, "%s", kind);
@@ -1177,18 +1181,38 @@ static void sec_raw(void)
 
 static int name_cmp(const void *a, const void *b)
 {
-	return strcmp((const char *)a, (const char *)b);
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* A variable name as text that can be turned back into its bytes: letters,
+ * digits and '_' as they are, any other byte as %XX. */
+static char *name_text(const char *name, size_t n)
+{
+	char *out = malloc(3 * n + 1), *o = out;
+
+	if (!out)
+		exit(2);
+	for (size_t i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)name[i];
+
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')
+			*o++ = (char)c;
+		else
+			o += snprintf(o, 4, "%%%02X", c);
+	}
+	*o = '\0';
+	return out;
 }
 
 static void sec_env(void)
 {
 	static const char *const prefixes[] = {"DYLD_", "DARLING", "RCLOL", "LD_", "XDG_", "DBUS_", NULL};
 	static const char *const exact[] = {"DISPLAY", "WAYLAND_DISPLAY", "EGL_PLATFORM", NULL};
-	static char names[64][128], list[64 * 140];
-	unsigned total = 0, kept = 0, dropped = 0;
-	size_t at = 0;
+	char **names = NULL, *list;
+	size_t kept = 0, cap = 0, size = 3, at = 0;
+	unsigned total = 0;
 
-	/* Names only, never values: nothing after the '=' is copied. */
+	/* Names only, never values: nothing after the '=' is read into a name. */
 	for (char **e = environ; e && *e; e++, total++) {
 		size_t n = strcspn(*e, "=");
 		int wanted = 0;
@@ -1199,23 +1223,28 @@ static void sec_env(void)
 			wanted |= n == strlen(exact[i]) && !strncmp(*e, exact[i], n);
 		if (!wanted)
 			continue;
-		if (kept == 64 || n >= sizeof(names[0])) {
-			dropped++;
-			continue;
+		if (kept == cap) {
+			cap = cap ? cap * 2 : 16;
+			names = realloc(names, cap * sizeof(*names));
+			if (!names)
+				exit(2);
 		}
-		memcpy(names[kept], *e, n);
-		names[kept++][n] = '\0';
+		names[kept] = name_text(*e, n);
+		size += strlen(names[kept++]) + 4;
 	}
-	qsort(names, kept, sizeof(names[0]), name_cmp);
-	list[0] = '\0';
-	for (unsigned i = 0; i < kept; i++)
-		if (at < sizeof(list) - 800)
-			at += (size_t)snprintf(list + at, sizeof(list) - at, "%s%s", i ? ", " : "", jstr(names[i]));
-		else
-			dropped++;
+	if (kept)
+		qsort(names, kept, sizeof(*names), name_cmp);
+	list = calloc(1, size);
+	if (!list)
+		exit(2);
+	for (size_t i = 0; i < kept; i++) {
+		at += (size_t)snprintf(list + at, size - at, "%s\"%s\"", i ? ", " : "", names[i]);
+		free(names[i]);
+	}
 	kv("names", "[%s]", list);
-	kv("names_dropped", "%u", dropped);
 	kv("total", "%u", total);
+	free(list);
+	free(names);
 }
 
 /* ---- meta -------------------------------------------------------------- */
