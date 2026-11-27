@@ -313,11 +313,11 @@ class CleanPrefixToolboxTests(unittest.TestCase):
         (self.repo / 'build' / 'toolbox-container').unlink()
         (self.repo / 'build' / 'toolbox-backend').unlink()
         legacy = self.run_clean(
-            '--help', stdin=subprocess.DEVNULL,
+            '--yes', stdin=subprocess.DEVNULL,
             FAKE_TOOLBOX_BAD_VERSION='1',
             FAKE_PODMAN_EXISTS='0',
         )
-        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        self.assertNotEqual(legacy.returncode, 0)
         self.assertEqual(self.distrobox_lines(), [])
 
     def test_distrobox_desktop_entry_reexecs_without_marker(self):
