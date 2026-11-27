@@ -12638,10 +12638,18 @@ index 8e38a5e..0000001 100644
  	if (fd < 0)
  		return fd;
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c
-index dd67573..b760391 100644
+index dd675730..88c32532 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/process/posix_spawn.c
-@@ -70,6 +70,16 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
+@@ -27,6 +27,7 @@
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/setpgid.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/signal/sigprocmask.h>
+ #include <darling/emulation/other/mach/lkm.h>
++#include <darling/emulation/common/guarded/table.h>
+ #include <darling/emulation/common/simple.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/process/fork.h>
+ #include <darling/emulation/xnu_syscall/bsd/impl/unistd/chdir.h>
+@@ -70,6 +71,16 @@ long sys_posix_spawn(int* pid, const char* path, const struct _posix_spawn_args_
  		close_internal(pipe[0]);
  
  		_libkernel_functions->posix_spawn_child();
@@ -12658,6 +12666,20 @@ index dd67573..b760391 100644
  
  no_fork:
  		if (desc && desc->attrp)
+@@ -140,6 +151,13 @@ no_fork:
+ 							continue;
+ 						}
+ 
++						// Darling's own descriptors (the RPC socket and the
++						// process lifetime pipe) are not the program's;
++						// leave them as they are
++						if (guard_table_check(fd, guard_flag_prevent_close)) {
++							continue;
++						}
++
+ 						if (desc && desc->factp) {
+ 							// if this FD is one that we're creating, don't set O_CLOEXEC on it
+ 							for (size_t j = 0; j < desc->factp->psfa_act_count; j++) {
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/getfsstat.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/getfsstat.c
 index d1cdd3d..0656874 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/stat/getfsstat.c
