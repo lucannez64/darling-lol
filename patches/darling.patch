@@ -12759,7 +12759,7 @@ index 0000000..1f3c473
 +}
 +#endif
 diff --git a/src/startup/mldr/elfcalls/threads.c b/src/startup/mldr/elfcalls/threads.c
-index e789986ea..211508eea 100644
+index e789986ea..704f36848 100644
 --- a/src/startup/mldr/elfcalls/threads.c
 +++ b/src/startup/mldr/elfcalls/threads.c
 @@ -32,6 +32,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -12779,7 +12779,19 @@ index e789986ea..211508eea 100644
  };
  
  static void* darling_thread_entry(void* p);
-@@ -193,7 +196,16 @@ void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_si
+@@ -173,6 +176,11 @@ void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_si
+ 	// otherwise, allocate them ourselves
+ 	if (pth == NULL || args.is_workqueue) {
+ 		pth = dthread_structure_allocate(stack_size, DEFAULT_DTHREAD_GUARD_SIZE, (void**)&args.stack_addr);
++		if (pth == NULL) {
++			// no stack to run the thread on
++			pthread_attr_destroy(&attr);
++			return NULL;
++		}
+ 	} else if (!args.is_workqueue) {
+ 		// `arg2` is `stack_addr` for normal threads
+ 		args.stack_addr = arg2;
+@@ -193,7 +201,16 @@ void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_si
  	//pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
  
  	args.pth = pth;
@@ -12796,7 +12808,7 @@ index e789986ea..211508eea 100644
  	pthread_attr_destroy(&attr);
  
  	while (args.pth != NULL)
-@@ -216,7 +228,12 @@ static void* darling_thread_entry(void* p)
+@@ -216,7 +233,12 @@ static void* darling_thread_entry(void* p)
  	int new_rpc_fd = __mldr_create_rpc_socket();
  	if (new_rpc_fd < 0) {
  		// we can't do anything if we don't get our own separate connection to darlingserver
@@ -12810,7 +12822,7 @@ index e789986ea..211508eea 100644
  		abort();
  	}
  
-@@ -244,6 +261,8 @@ static void* darling_thread_entry(void* p)
+@@ -244,6 +266,8 @@ static void* darling_thread_entry(void* p)
  	dthread->tsd[DTHREAD_TSD_SLOT_MACH_THREAD_SELF] = (void*)(intptr_t)thread_self_port;
  	args.port = thread_self_port;
  
@@ -12819,7 +12831,7 @@ index e789986ea..211508eea 100644
  	in_args->pth = NULL;
  
  	if (setjmp(t_jmpbuf))
-@@ -329,6 +348,12 @@ int __darling_thread_terminate(void* stackaddr,
+@@ -329,6 +353,12 @@ int __darling_thread_terminate(void* stackaddr,
  {
  	int checkout_result = 0;
  
@@ -12832,7 +12844,7 @@ index e789986ea..211508eea 100644
  	if (t_server_socket != -1) {
  		checkout_result = dserver_rpc_explicit_checkout(t_server_socket, -1, false);
  	} else {
-@@ -356,12 +381,10 @@ int __darling_thread_terminate(void* stackaddr,
+@@ -356,12 +386,10 @@ int __darling_thread_terminate(void* stackaddr,
  	{
  		// dispatch_main() calls pthread_exit(NULL) on the main thread,
  		// which turns our process into a zombie on Linux.
@@ -12848,7 +12860,7 @@ index e789986ea..211508eea 100644
  	}
  
  	t_freeaddr = stackaddr;
-@@ -387,8 +410,9 @@ int __darling_thread_rpc_socket(void) {
+@@ -387,8 +415,9 @@ int __darling_thread_rpc_socket(void) {
  			// this is the main thread
  			t_server_socket = __dserver_main_thread_socket_fd;
  		} else {

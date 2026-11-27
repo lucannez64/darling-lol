@@ -5471,7 +5471,7 @@ index 304dadd..1320eda 100644
  	return 0;
  };
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_create.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_create.c
-index 6f8cf43..c5f6d08 100644
+index 6f8cf43a..414202f1 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_create.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_create.c
 @@ -33,6 +33,7 @@ static bool _uses_threads = false;
@@ -5482,6 +5482,26 @@ index 6f8cf43..c5f6d08 100644
  static void rpc_guard(int fd) {
  	guard_entry_options_t options;
  	options.close = __dserver_close_socket;
+@@ -69,9 +70,18 @@ long sys_bsdthread_create(void* thread_start, void* arg,
+ 	ret = darling_thread_create((void**) stack, pthread_entry_point_wrapper, thread_start,
+ 			arg, stacksize, flags);
+ #else
+-	return __darling_thread_create(((uintptr_t)stack), pthread_obj_size,
++	void* created = __darling_thread_create(((uintptr_t)stack), pthread_obj_size,
+ 			pthread_entry_point_wrapper, thread_start, arg, (uintptr_t) stack, flags,
+ 			&callbacks, pthread);
++
++	// __darling_thread_create returns NULL when the native thread could not
++	// be created. Report that as a resource shortage, which is the error
++	// pthread_create() documents for it; returning NULL would tell libpthread
++	// that the thread was started.
++	if (created == NULL)
++		return -EAGAIN;
++
++	return (long) created;
+ #endif
+ 
+ 	if (ret < 0)
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c
 index 919205b..5c678ab 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/bsd/impl/bsdthread/bsdthread_register.c
