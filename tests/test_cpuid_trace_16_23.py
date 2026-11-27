@@ -292,6 +292,24 @@ static long rclol_sys(long nr, long a1, long a2, long a3, long a4, long a5, long
     return 0;
 }}
 
+// The host outside the trapped leaf: its maximum leaves and its leaf 1 ECX
+// (a Zen 3's).
+static uint32_t g_host_max_basic = 0x10u;
+static uint32_t g_host_max_ext = 0x80000023u;
+static uint32_t g_host_leaf1_ecx = 0x7ed8320bu;
+
+static void rclol_host_cpuid(uint32_t leaf, uint32_t subleaf,
+    uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx) {{
+    (void)subleaf;
+    *eax = *ebx = *ecx = *edx = 0;
+    if (leaf == 0u)
+        *eax = g_host_max_basic;
+    else if (leaf == 0x80000000u)
+        *eax = g_host_max_ext;
+    else if (leaf == 1u)
+        *ecx = g_host_leaf1_ecx;
+}}
+
 {log_helpers}
 {spoof_helpers}
 
@@ -384,12 +402,85 @@ int main(void) {{
         rclol_cpuid_trace_spoof(beyond[i], 0u, &a, &b, &c, &d);
         assert(a == 2600u && b == 4500u && c == 100u && d == 0u);
     }}
-    // The hypervisor range and XSAVE leaf (0xd) pass through.
+    // The hypervisor range and subleaf 0 of the XSAVE leaf (0xd) pass through.
     a = b = c = d = 0x12345678u;
     rclol_cpuid_trace_spoof(0x40000000u, 0u, &a, &b, &c, &d);
     assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
     rclol_cpuid_trace_spoof(0xdu, 0u, &a, &b, &c, &d);
     assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
+
+    // Leaf 0xd on an AVX-512 host: XSAVE writes the host's area, so its state
+    // components, sizes and offsets are never reduced to the i7-9750H's 832
+    // and 1088 bytes.
+    a = 0xe7u; b = 0xa80u; c = 0xa80u; d = 0u;
+    rclol_cpuid_trace_spoof(0xdu, 0u, &a, &b, &c, &d);
+    assert(a == 0xe7u && b == 0xa80u && c == 0xa80u && d == 0u);
+    a = 0x200u; b = 0x480u; c = 0u; d = 0u; // ZMM_Hi256: 512 bytes at 1152
+    rclol_cpuid_trace_spoof(0xdu, 6u, &a, &b, &c, &d);
+    assert(a == 0x200u && b == 0x480u && c == 0u && d == 0u);
+    // Subleaf 1 keeps the host's area size too; XFD and the CET states of
+    // IA32_XSS, which the i7-9750H lacks, are dropped.
+    a = 0x1fu; b = 0xa98u; c = 0x1900u; d = 0x1u;
+    rclol_cpuid_trace_spoof(0xdu, 1u, &a, &b, &c, &d);
+    assert(a == 0xfu && b == 0xa98u && c == 0x100u && d == 0u);
+    // A host without XSAVEC, XSAVES or the Processor Trace state is not
+    // offered them.
+    a = 0x1u; b = 0x340u; c = 0u; d = 0u;
+    rclol_cpuid_trace_spoof(0xdu, 1u, &a, &b, &c, &d);
+    assert(a == 0x1u && b == 0x340u && c == 0u && d == 0u);
+
+    // Leaves 5, 6 and 0xa: the i7-9750H's words (machdep.cpu.mwait, thermal
+    // and arch_perf of a real one), whatever the host's are.
+    a = 0x40u; b = 0x40u; c = 3u; d = 0x11u;
+    rclol_cpuid_trace_spoof(5u, 0u, &a, &b, &c, &d);
+    assert(a == 0x40u && b == 0x40u && c == 3u && d == 0x11142120u);
+    a = 4u; b = 0u; c = 1u; d = 0u;
+    rclol_cpuid_trace_spoof(6u, 0u, &a, &b, &c, &d);
+    assert(a == 0x27f7u && b == 2u && c == 9u && d == 0u);
+    a = b = c = d = 0u;
+    rclol_cpuid_trace_spoof(0xau, 0u, &a, &b, &c, &d);
+    assert(a == 0x07300404u && b == 0u && c == 0u && d == 0x603u);
+    // A host without MONITOR has no MON bit in leaf 1 and an empty leaf 5.
+    g_host_leaf1_ecx &= ~(1u << 3);
+    a = 0u; b = 0u; c = g_host_leaf1_ecx; d = 0u;
+    rclol_cpuid_trace_spoof(1u, 0u, &a, &b, &c, &d);
+    assert((c & (1u << 3)) == 0u);
+    a = 0x40u; b = 0x40u; c = 3u; d = 0x11u;
+    rclol_cpuid_trace_spoof(5u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0u && d == 0u);
+    g_host_leaf1_ecx |= 1u << 3;
+
+    // A host whose own maximum basic leaf is 4 answers leaves 7 and 0xd with
+    // another leaf's data: none of it is reported as a feature or a state.
+    g_host_max_basic = 4u;
+    a = b = c = d = 0xffffffffu;
+    rclol_cpuid_trace_spoof(7u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0u && d == 0u);
+    for (uint32_t i = 0; i < 3u; ++i) {{
+        a = b = c = d = 0xffffffffu;
+        rclol_cpuid_trace_spoof(0xdu, i, &a, &b, &c, &d);
+        assert(a == 0u && b == 0u && c == 0u && d == 0u);
+    }}
+    // The identity's own leaves do not depend on the host's maximum, and the
+    // hypervisor range has its own.
+    a = b = c = d = 0xdeadbeefu;
+    rclol_cpuid_trace_spoof(4u, 0u, &a, &b, &c, &d);
+    assert(a == leaf4[0][0] && b == leaf4[0][1] && c == leaf4[0][2] && d == leaf4[0][3]);
+    rclol_cpuid_trace_spoof(6u, 0u, &a, &b, &c, &d);
+    assert(a == 0x27f7u && b == 2u && c == 9u && d == 0u);
+    rclol_cpuid_trace_spoof(0x16u, 0u, &a, &b, &c, &d);
+    assert(a == 2600u && b == 4500u && c == 100u && d == 0u);
+    a = b = c = d = 0x12345678u;
+    rclol_cpuid_trace_spoof(0x40000000u, 0u, &a, &b, &c, &d);
+    assert(a == 0x12345678u && b == 0x12345678u && c == 0x12345678u && d == 0x12345678u);
+    g_host_max_basic = 0x10u;
+    // The extended range likewise: no invariant TSC from a host without leaf
+    // 0x80000007.
+    g_host_max_ext = 0x80000004u;
+    a = b = c = d = 0xffffffffu;
+    rclol_cpuid_trace_spoof(0x80000007u, 0u, &a, &b, &c, &d);
+    assert(a == 0u && b == 0u && c == 0u && d == 0u);
+    g_host_max_ext = 0x80000023u;
 
     // Leaf 7: subleaf 0 masks host EBX to the word a real i7-9750H reports
     // (drops HLE/RTM/AVX-512/SHA) and clears EAX/ECX/EDX; subleaf > 0 zeroes

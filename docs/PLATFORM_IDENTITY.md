@@ -232,7 +232,32 @@ as on a real i7-9750H. A `cpuid` instruction at a site the trap does not cover
 still returns the host's words. In that view, leaf 7 EBX and leaf `0x80000001`
 keep only the bits a real i7-9750H sets (`0x029c67af`; ECX `0x121`, EDX
 `0x2c100800`), each still only when the host has it: an AMD host's own bits in
-leaf `0x80000001` and a TSX host's HLE/RTM are not passed on. The commpage,
+leaf `0x80000001` and a TSX host's HLE/RTM are not passed on. The other
+`machdep.cpu` groups decode the same view. `mwait.*`, `thermal.*` and
+`arch_perf.*` read leaves 5, 6 and `0xa`, which the trap answers with the
+i7-9750H's words (64-byte monitor lines and sub C-states `0x11142120`; a thermal
+sensor, turbo and 2 thresholds; performance monitoring version 4 with four
+48-bit counters); leaf 5 is empty when the host has no MONITOR, like the `MON`
+feature bit. `tlb.*` decodes the leaf 2 descriptors: 8 large-page instruction
+entries and 64 + 64 small-page data entries. `microcode_version` (234) and
+`processor_flag` (5) are not in `cpuid`: they come from the identity table, and
+under `profile=host` from the host kernel's
+`/sys/devices/system/cpu/cpu0/microcode`. `machdep.tsc.frequency` is XNU's
+24 MHz crystal times the leaf `0x15` ratio, 2592000000; `rdtsc` is not trapped
+and still counts at the host's rate. Under `profile=host` the crystal is the
+one leaf `0x15` names; a host whose leaf names none, or that has no such leaf,
+reports the rate its kernel measured (half the `bogomips` of `/proc/cpuinfo`,
+in MHz). `xsave.*` is the one group that keeps host
+values: `XGETBV` and `XSAVE` are not trapped, so leaf `0xd` keeps the host's
+state components and area sizes, and only sub-leaf 1 drops what an i7-9750H
+lacks (XFD, the CET states). A real MacBookPro16,1 reports `31 832 1088 0` and
+`15 832 256 0`; `machdep.cpu.xsave.*` matches them only on a host with the same
+state components, a Skylake-family Intel part. Any other host differs: without
+MPX the first words are `7 832 832 0`, PKRU or AVX-512 state raises the sizes,
+and without the Processor Trace state the third word of `extended_state1` is 0.
+A smaller figure than the host writes would let a guest undersize its XSAVE
+area. Where the host's own maximum `cpuid` leaf is below a leaf, the trap takes
+no host bits for it. The commpage,
 which every guest process reads without a system call, carries the same part's
 CPU family (`0x0f817246`) and 64-byte cache line size, and its capability word
 has neither HLE nor RTM. `profile=host` reports the real host CPU,

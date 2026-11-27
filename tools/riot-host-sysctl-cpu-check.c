@@ -189,10 +189,11 @@ char* getenv(const char* name) {
     return NULL;
 }
 
-// A minimal sysctl tree whose "hw" node is the real one; sysctl_unspec.c
-// walks it for sysctlbyname (name -> oid).
+// A minimal sysctl tree whose "hw" and "machdep" nodes are the real ones;
+// sysctl_unspec.c walks it for sysctlbyname (name -> oid).
 static const struct known_sysctl root_children[] = {
     { .oid = 6 /* CTL_HW */, .type = CTLTYPE_NODE, .exttype = "", .name = "hw", .subctls = sysctls_hw },
+    { .oid = 7 /* CTL_MACHDEP */, .type = CTLTYPE_NODE, .exttype = "", .name = "machdep", .subctls = sysctls_machdep },
     { .oid = -1 }
 };
 const struct known_sysctl sysctls_root = {
@@ -408,6 +409,39 @@ static void ref_cpuid(unsigned int leaf, unsigned int out[4]) {
         : "a"(leaf), "c"(0u));
 }
 
+// A hexadecimal file of /sys/devices/system/cpu/cpu0/microcode, 0 when the
+// host has none (a container or a VM).
+static unsigned int ref_microcode(const char* name) {
+    char path[96], buf[64];
+    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu0/microcode/%s", name);
+    FILE* file = fopen(path, "r");
+    if (file == NULL)
+        return 0;
+    if (fgets(buf, sizeof(buf), file) == NULL)
+        buf[0] = '\0';
+    fclose(file);
+    return (unsigned int)strtoul(buf, NULL, 16);
+}
+
+// The longest names of the tree have five components; name_to_oid used to
+// hold four.
+static int deep_names_resolve(void) {
+    const struct known_sysctl* unspec = NULL;
+    for (const struct known_sysctl* entry = sysctls_unspec; entry->oid != -1; ++entry) {
+        if (strcmp(entry->name, "name_to_oid") == 0)
+            unspec = entry;
+    }
+    static const char name[] = "machdep.cpu.tlb.data.small_level1";
+    int oid[12] = { 0 };
+    unsigned long len = sizeof(oid);
+    long rc = unspec == NULL ? -1 : unspec->handler(NULL, 0, oid, &len, (void*)name, strlen(name));
+    if (rc != 0 || len != 5 * sizeof(int) || oid[0] != 7 || oid[5] != 0) {
+        fprintf(stderr, "HOST_SYSCTL_MACHDEP pass=0 error=name_to_oid %s rc=%ld len=%lu\n", name, rc, len);
+        return 0;
+    }
+    return 1;
+}
+
 static const struct known_sysctl* find_machdep(const char* name) {
     for (const struct known_sysctl* entry = sysctls_machdep[0].subctls; entry->oid != -1; ++entry)
         if (strcmp(entry->name, name) == 0)
@@ -532,6 +566,16 @@ static int machdep_mode(int compat) {
         }
     }
 
+    // The two MSR values: the i7-9750H's under compat, else what the host
+    // kernel publishes (Linux gives the platform ID as a mask).
+    unsigned int flag = 0;
+    for (unsigned int mask = ref_microcode("processor_flags"); mask > 1; mask >>= 1)
+        flag++;
+    require_value(find_machdep("microcode_version"), compat ? 234 : (int)ref_microcode("version"));
+    require_value(find_machdep("processor_flag"), compat ? 5 : (int)flag);
+    if (!deep_names_resolve())
+        return 1;
+
     if (compat) {
         // A profile brand from the launcher (tools/system.prop) wins.
         machdep_string("brand_string", brand, sizeof(brand));
@@ -569,7 +613,7 @@ static int table_is_unique(const struct known_sysctl* table, const char* node) {
 int main(int argc, char** argv) {
     const char* mode = argc > 1 ? argv[1] : "normal";
 
-    if (!table_is_unique(sysctls_hw, "hw"))
+    if (!table_is_unique(sysctls_hw, "hw") || !table_is_unique(sysctls_machdep, "machdep"))
         return 1;
 
     if (strcmp(mode, "machdep") == 0)
@@ -695,6 +739,11 @@ int main(int argc, char** argv) {
     if (compat) {
         require_value(find_machdep("core_count"), 6);
         require_value(find_machdep("thread_count"), 12);
+    }
+    if (strcmp(mode, "optout") == 0) {
+        // The opt-out's fixed count, not the host's core count.
+        require_value(find_machdep("core_count"), 8);
+        require_value(find_machdep("thread_count"), 8);
     }
 
     printf("HOST_SYSCTL_CPU pass=1 mode=%s ncpu=%d active=%d logicalcpu=%d logicalcpu_max=%d physicalcpu=%d physicalcpu_max=%d model=%s\n",
