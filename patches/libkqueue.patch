@@ -850,3 +850,37 @@ index 58b1544..8337ea0 100644
      return (0);
  }
  
+diff --git a/src/linux/timer.c b/src/linux/timer.c
+index 71e536c..501d28e 100644
+--- a/src/linux/timer.c
++++ b/src/linux/timer.c
+@@ -181,7 +181,19 @@ evfilt_timer_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
+     /* On return, data contains the number of times the
+        timer has been trigered.
+      */
+-    n = read(src->data.pfd, &expired, sizeof(expired));
++    do {
++        n = read(src->data.pfd, &expired, sizeof(expired));
++    } while (n < 0 && errno == EINTR);
++    if (n < 0 && errno == EAGAIN) {
++        /*
++         * Another thread waiting on this kqueue saw the same expiration and
++         * has delivered it already (or the timer was rearmed since). Report
++         * nothing rather than wait for the next expiration with the kqueue
++         * locked; a one-shot timer would never expire again.
++         */
++        dst->filter = EVFILT_DROP;
++        return (0);
++    }
+     if (n != sizeof(expired)) {
+         dbg_puts("invalid read from timerfd");
+         expired = 1;  /* Fail gracefully */
+@@ -200,7 +212,7 @@ evfilt_timer_knote_create(struct filter *filt, struct knote *kn)
+ 
+     kn->kev.flags |= EV_CLEAR;
+ 
+-    tfd = timerfd_create(LINUX_CLOCK_MONOTONIC, 0);
++    tfd = timerfd_create(LINUX_CLOCK_MONOTONIC, TFD_NONBLOCK);
+     if (tfd < 0) {
+         dbg_printf("timerfd_create(2): %s", strerror(errno));
+         return (-1);
