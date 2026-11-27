@@ -31,6 +31,9 @@ class LocalRegionReplyTests(unittest.TestCase):
         traps = patched_lines('xnu.patch', TRAPS)
         entry = traps[traps.index('kern_return_t mach_vm_region_recurse(mach_port_name_t target'):]
         entry = entry[:entry.index('return __darling_rpc_mach_vm_region_recurse(target')]
+        # the stub always gets a depth to read
+        self.assertIn('return __darling_rpc_mach_vm_region_recurse(target, address, size, '
+                      'depth ? depth : &no_depth, info, infoCnt);', traps)
         self.assertIn('*infoCnt == LREGION_SHORT_INFO_COUNT || *infoCnt == LREGION_V0_INFO_COUNT ||', entry)
         self.assertIn('*infoCnt == LREGION_V1_INFO_COUNT || *infoCnt == LREGION_V2_INFO_COUNT', entry)
         # a NULL depth stays answered here: the RPC stub would read it and fault
@@ -257,6 +260,7 @@ typedef unsigned int mach_port_name_t;
 #define LINUX_ENOENT 2
 #define SENTINEL 0x7777
 static mach_port_name_t mach_task_self(void) {{ return 0x103; }}
+static int g_fail_ioctl;
 static int darling_is_league_game(void) {{ return 0; }}
 
 /* raw system calls, as the emulation makes them; the switch file that turns the path on exists */
@@ -266,6 +270,8 @@ static long fake_syscall(long nr, long a0, long a1, long a2, long a3, long a4, l
         return 0;
     if (nr == SYS_open && strcmp((const char*) a0, "/tmp/rclol-region-pace-us") == 0)
         return -ENOENT;
+    if (nr == SYS_ioctl && g_fail_ioctl)
+        return -EIO;
     long rc = syscall(nr, a0, a1, a2, a3, a4, a5);
     return rc < 0 ? -errno : rc;
 }}
@@ -282,11 +288,13 @@ static long fake_syscall(long nr, long a0, long a1, long a2, long a3, long a4, l
 {code}
 
 static int g_server_calls;
+static unsigned int g_server_depth;
 kern_return_t __darling_rpc_mach_vm_region_recurse(mach_port_name_t target, unsigned long long* address,
     unsigned long long* size, unsigned int* depth, int* info, unsigned int* infoCnt)
 {{
-    (void) target; (void) address; (void) size; (void) depth; (void) info; (void) infoCnt;
+    (void) target; (void) address; (void) size; (void) info; (void) infoCnt;
     g_server_calls++;
+    g_server_depth = *depth; /* the generated stub reads it before sending */
     return SENTINEL;
 }}
 
@@ -351,6 +359,16 @@ int main(void)
     count = 19;
     assert(mach_vm_region_recurse(mach_task_self(), NULL, &size, &depth, info, &count) == SENTINEL);
     assert(g_server_calls == 4);
+
+    /* the ioctl fails: the call goes to the server, which still gets a depth to read */
+    g_fail_ioctl = 1;
+    addr = want; count = 19; g_server_depth = 99;
+    assert(mach_vm_region_recurse(mach_task_self(), &addr, &size, NULL, info, &count) == SENTINEL);
+    assert(g_server_calls == 5 && g_server_depth == 0);
+    depth = 7;
+    assert(mach_vm_region_recurse(mach_task_self(), &addr, &size, &depth, info, &count) == SENTINEL);
+    assert(g_server_calls == 6 && g_server_depth == 7);
+    g_fail_ioctl = 0;
     puts("ok");
     return 0;
 }}

@@ -8761,7 +8761,7 @@ index c1b2d50..fa6f707 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
-index b998456..0246f50 100644
+index b998456..e508205 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 @@ -12,9 +12,29 @@
@@ -8817,7 +8817,7 @@ index b998456..0246f50 100644
  
  	if (code < 0) {
  		if (code == -LINUX_EINTR) {
-@@ -92,33 +118,919 @@ retry:
+@@ -92,33 +118,921 @@ retry:
  			}
  		}
  		__simple_printf("mach_msg_overwrite failed (internally): %d\n", code);
@@ -9642,7 +9642,7 @@ index b998456..0246f50 100644
 +	}
 +	/* The four counts the server answers as asked; any other goes to it. The scanner in League asks with the long
 +	 * count (19 words), so a short-only version of this path never ran in a match. A NULL depth is answered here as
-+	 * before: the RPC stub reads it and would fault. */
++	 * before. */
 +	if (state == 1 && target == mach_task_self() && address && size && info && infoCnt &&
 +	    (*infoCnt == LREGION_SHORT_INFO_COUNT || *infoCnt == LREGION_V0_INFO_COUNT ||
 +	     *infoCnt == LREGION_V1_INFO_COUNT || *infoCnt == LREGION_V2_INFO_COUNT)) {
@@ -9686,7 +9686,9 @@ index b998456..0246f50 100644
 +		}
 +	}
 +
-+	return __darling_rpc_mach_vm_region_recurse(target, address, size, depth, info, infoCnt);
++	/* The RPC stub reads the depth before it sends the request: give it one when the caller has none. */
++	unsigned int no_depth = 0;
++	return __darling_rpc_mach_vm_region_recurse(target, address, size, depth ? depth : &no_depth, info, infoCnt);
 +}
 +
  kern_return_t semaphore_signal_trap_impl(
@@ -9740,7 +9742,7 @@ index b998456..0246f50 100644
  	}
  
  	return code;
-@@ -128,21 +1040,33 @@ kern_return_t semaphore_signal_thread_trap_impl(
+@@ -128,21 +1042,33 @@ kern_return_t semaphore_signal_thread_trap_impl(
  				mach_port_name_t signal_name,
  				mach_port_name_t thread_name)
  {
@@ -9775,7 +9777,7 @@ index b998456..0246f50 100644
  	}
  
  	return code;
-@@ -152,14 +1076,33 @@ kern_return_t semaphore_wait_signal_trap_impl(
+@@ -152,14 +1078,33 @@ kern_return_t semaphore_wait_signal_trap_impl(
  				mach_port_name_t wait_name,
  				mach_port_name_t signal_name)
  {
@@ -9810,7 +9812,7 @@ index b998456..0246f50 100644
  	}
  
  	return code;
-@@ -170,14 +1113,24 @@ kern_return_t semaphore_timedwait_trap_impl(
+@@ -170,14 +1115,24 @@ kern_return_t semaphore_timedwait_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
@@ -9836,7 +9838,7 @@ index b998456..0246f50 100644
  	}
  
  	return code;
-@@ -189,14 +1142,32 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
+@@ -189,14 +1144,32 @@ kern_return_t semaphore_timedwait_signal_trap_impl(
  				unsigned int sec,
  				clock_res_t nsec)
  {
@@ -9870,7 +9872,7 @@ index b998456..0246f50 100644
  	}
  
  	return code;
-@@ -514,6 +1485,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
+@@ -514,6 +1487,12 @@ kern_return_t _kernelrpc_mach_port_construct_trap_impl(
  		__simple_printf("mach_port_construct failed (internally): %d\n", code);
  		__simple_abort();
  	}
@@ -9883,7 +9885,7 @@ index b998456..0246f50 100644
  
  	return code;
  }
-@@ -673,16 +1650,16 @@ kern_return_t macx_backing_store_recovery_impl(
+@@ -673,16 +1652,16 @@ kern_return_t macx_backing_store_recovery_impl(
  	return KERN_FAILURE;
  }
  
@@ -9903,7 +9905,7 @@ index b998456..0246f50 100644
  	return 0;
  }
  
-@@ -692,12 +1669,53 @@ kern_return_t syscall_thread_switch_impl(
+@@ -692,12 +1671,53 @@ kern_return_t syscall_thread_switch_impl(
  				int option,
  				mach_msg_timeout_t option_time)
  {
@@ -9961,7 +9963,7 @@ index b998456..0246f50 100644
  
  	// TODO: we could implement this with yield_to() in LKM
  	return KERN_SUCCESS;
-@@ -721,7 +1739,11 @@ kern_return_t task_for_pid_impl(
+@@ -721,7 +1741,11 @@ kern_return_t task_for_pid_impl(
  				int pid,
  				mach_port_name_t *t)
  {
