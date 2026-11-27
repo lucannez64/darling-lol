@@ -3,8 +3,10 @@
  *
  * Companion of ground_truth.c. It runs on a real macOS host and, unchanged,
  * inside a compatibility layer built against an old SDK, so that the two JSON
- * outputs can be diffed. It inspects only its own process: no signal, no
- * ptrace, no network, no file write, nothing but stdout.
+ * outputs can be diffed. It describes its own process. Of other processes it
+ * reads only the name and path of its parent and of pids 0 and 1, and how many
+ * pids the system lists. No signal, no ptrace, no network, no file write,
+ * nothing but stdout.
  *
  * Build:  clang -O2 -Wall -Wextra -o self_view self_view.c
  *         (add -arch x86_64 for the Intel slice, which also runs under Rosetta)
@@ -12,7 +14,8 @@
  *
  * Output: one JSON object, one field per line, keys sorted inside each
  * section. Nothing that names a machine or a user is printed: no host name,
- * no user name, no hardware identifier. Paths are reduced by clean_path().
+ * no user name, no hardware identifier. clean_path() prints system paths in
+ * full and anything else by kind only.
  *
  * Portability: anything newer than the 10.13 SDK, or absent from the public
  * headers, is resolved with dlsym(RTLD_DEFAULT) and reported as missing when
@@ -138,6 +141,7 @@ _Static_assert(offsetof(struct sv_all_image_infos, platform) == 320, "dyld_all_i
 #define MISSING "{\"present\": false}"
 
 int main(void);
+extern char **environ;
 
 static int sv_errno;
 #define CALL(r, expr) do { errno = 0; (r) = (expr); sv_errno = errno; } while (0)
@@ -156,6 +160,24 @@ static char *scratch(void)
 	return b;
 }
 
+/* Length of the well-formed UTF-8 sequence at p (2 to 4 bytes), or 0. */
+static size_t utf8_len(const unsigned char *p)
+{
+	size_t n = p[0] >= 0xf0 ? 4 : p[0] >= 0xe0 ? 3 : p[0] >= 0xc2 ? 2 : 0;
+
+	if (!n || p[0] > 0xf4)
+		return 0;
+	for (size_t i = 1; i < n; i++)
+		if ((p[i] & 0xc0) != 0x80)
+			return 0;
+	/* overlong forms, surrogates, beyond U+10FFFF */
+	if ((p[0] == 0xe0 && p[1] < 0xa0) || (p[0] == 0xed && p[1] > 0x9f) ||
+	    (p[0] == 0xf0 && p[1] < 0x90) || (p[0] == 0xf4 && p[1] > 0x8f))
+		return 0;
+	return n;
+}
+
+/* A JSON string: UTF-8 text is kept, a byte that is not UTF-8 becomes U+FFFD. */
 static const char *jstr(const char *s)
 {
 	char *out = scratch();
@@ -163,13 +185,21 @@ static const char *jstr(const char *s)
 
 	out[n++] = '"';
 	for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p && n < SV_BUFSZ - 8; p++) {
+		size_t u;
+
 		if (*p == '"' || *p == '\\') {
 			out[n++] = '\\';
 			out[n++] = (char)*p;
-		} else if (*p < 0x20 || *p >= 0x7f) {
+		} else if (*p < 0x20 || *p == 0x7f) {
 			n += (size_t)snprintf(out + n, 7, "\\u%04x", *p);
-		} else {
+		} else if (*p < 0x80) {
 			out[n++] = (char)*p;
+		} else if ((u = utf8_len(p)) != 0) {
+			memcpy(out + n, p, u);
+			n += u;
+			p += u - 1;
+		} else {
+			n += (size_t)snprintf(out + n, 7, "\\ufffd");
 		}
 	}
 	out[n++] = '"';
@@ -177,42 +207,38 @@ static const char *jstr(const char *s)
 	return out;
 }
 
-/* System paths pass. A home directory becomes <home>, a per-user temporary
- * directory <tmp>, and any other absolute path <other>/basename. */
+/* System locations are printed in full. Any other path is reduced to its
+ * kind: a name a user chose (home, project folder, mount point, temporary
+ * directory) is never printed. */
 static const char *clean_path(const char *p)
 {
-	static const char *const sys[] = {"/System", "/usr", "/Library", "/bin", "/sbin", "/private",
-		"/dev", "/Applications", "/opt", "/etc", "/var", "/tmp", "/Volumes/SystemRoot", NULL};
+	static const char *const sys[] = {"/System/", "/usr/", "/Library/", "/bin/", "/sbin/", "/dev/",
+		"/Applications/", "/etc/", "/private/etc/", "/private/var/db/", NULL};
+	static const char *const homes[] = {"/Users/", "/home/", "/root/", "/var/root/", "/private/var/root/", NULL};
+	static const char *const tmps[] = {"/tmp/", "/private/tmp/", "/var/tmp/", "/private/var/tmp/",
+		"/var/folders/", "/private/var/folders/", NULL};
+	static const char host[] = "/Volumes/SystemRoot/";
 	char *out = scratch();
-	const char *base, *home;
+	const char *q, *kind = "<other>";
 
 	if (!p || !*p)
 		return out;
-	base = strrchr(p, '/');
-	base = base ? base + 1 : p;
-	for (int i = 0; i < 2; i++) {
-		home = strstr(p, i ? "/home/" : "/Users/");
-		if (home) {
-			home = strchr(home + (i ? 6 : 7), '/');
-			snprintf(out, SV_BUFSZ, "<home>%s", home ? home : "");
-			return out;
-		}
-	}
-	if (strstr(p, "/var/folders/")) {
-		snprintf(out, SV_BUFSZ, "<tmp>/%s", base);
-		return out;
-	}
-	for (int i = 0; sys[i] && p[0] == '/' && p[1]; i++) {
-		size_t n = strlen(sys[i]);
-		if (!strncmp(p, sys[i], n) && (p[n] == '/' || !p[n]))
-			p = NULL;
-		if (!p)
-			break;
-	}
-	if (p && p[0] == '/' && p[1])
-		snprintf(out, SV_BUFSZ, "<other>/%s", base);
-	else
-		snprintf(out, SV_BUFSZ, "%s", p ? p : base - (base - out > 0 ? 0 : 0));
+	if (p[0] != '/')
+		kind = "<relative>";
+	else if (!p[1])
+		kind = "/";
+	/* the host's root as Darling shows it: judged by the path below it */
+	q = strncmp(p, host, sizeof(host) - 1) ? p : p + sizeof(host) - 2;
+	for (int i = 0; homes[i]; i++)
+		if (!strncmp(q, homes[i], strlen(homes[i])))
+			kind = "<home>";
+	for (int i = 0; tmps[i]; i++)
+		if (!strncmp(q, tmps[i], strlen(tmps[i])))
+			kind = "<tmp>";
+	for (int i = 0; sys[i]; i++)
+		if (!strncmp(q, sys[i], strlen(sys[i])))
+			kind = p;
+	snprintf(out, SV_BUFSZ, "%s", kind);
 	return out;
 }
 
@@ -870,10 +896,14 @@ static void sec_proc(void)
 	   r, ERRNO_IF(r <= 0), sizeof(rp), pri_str(&rp.prp_prinfo), jpath(rp.prp_vip.vip_path));
 	/* Flavor 3 takes a device: the first region backed by a file on it. */
 	memset(&st, 0, sizeof(st));
-	(void)stat("/usr/lib/dyld", &st);
-	r = pidinfo(PROC_PIDREGIONPATHINFO3, (uint64_t)st.st_dev, &rp, sizeof(rp));
-	kv("pidinfo_regionpathinfo3", "{\"rc\": %d, \"errno\": %d, \"size\": %zu, %s, \"path\": %s}",
-	   r, ERRNO_IF(r <= 0), sizeof(rp), pri_str(&rp.prp_prinfo), jpath(rp.prp_vip.vip_path));
+	CALL(r, stat("/usr/lib/dyld", &st));
+	if (r != 0) {
+		kv("pidinfo_regionpathinfo3", "{\"skipped\": \"no device to ask for\", \"stat_errno\": %d}", sv_errno);
+	} else {
+		r = pidinfo(PROC_PIDREGIONPATHINFO3, (uint64_t)st.st_dev, &rp, sizeof(rp));
+		kv("pidinfo_regionpathinfo3", "{\"rc\": %d, \"errno\": %d, \"size\": %zu, %s, \"path\": %s}",
+		   r, ERRNO_IF(r <= 0), sizeof(rp), pri_str(&rp.prp_prinfo), jpath(rp.prp_vip.vip_path));
+	}
 
 	r = pidinfo(PROC_PIDVNODEPATHINFO, 0, &vp, sizeof(vp));
 	kv("pidinfo_vnodepathinfo", "{\"rc\": %d, \"errno\": %d, \"size\": %zu, \"cdir\": %s, \"rdir\": %s}",
@@ -918,14 +948,17 @@ static void sec_proc(void)
 	   B(kp.kp_proc.p_starttime.tv_sec), B(kp.kp_eproc.e_ppid == parent), (unsigned)kp.kp_eproc.e_ucred.cr_uid);
 
 	/* kern.procargs2: argc, executable path, padding, argv strings, then the
-	 * environment. Only lengths and counts are reported, never the strings. */
+	 * environment and the kernel's own launch strings. Only lengths and counts
+	 * are reported, never the strings; the environment is recognised by its
+	 * first entry. */
 	mib[1] = KERN_ARGMAX;
 	len = sizeof(argmax);
 	if (sysctl(mib, 2, &argmax, &len, NULL, 0) != 0 || argmax <= 0)
 		argmax = 1 << 20;
 	{
 		char *buf = calloc(1, (size_t)argmax), *p, *end;
-		int argc = 0, strings = 0;
+		int argc = 0, strings = 0, env_seen = 0;
+		const char *first = environ ? environ[0] : NULL;
 
 		mib[1] = KERN_PROCARGS2;
 		mib[2] = self;
@@ -945,14 +978,17 @@ static void sec_proc(void)
 				p += p < end;
 			}
 			while (p < end && *p) {
+				size_t l = strnlen(p, (size_t)(end - p));
+
 				strings++;
-				p += strnlen(p, (size_t)(end - p));
+				env_seen |= first && strlen(first) == l && !memcmp(p, first, l);
+				p += l;
 				p += p < end;
 			}
 		}
 		kv("sysctl_kern_procargs2", "{\"rc\": %d, \"errno\": %d, \"argmax\": %d, \"length\": %zu, \"argc\": %d, "
-		   "\"env_block_after_argv\": %s, \"strings_after_argv\": %d}",
-		   r, ERRNO_IF(r), argmax, r == 0 ? len : 0, argc, B(strings > 0), strings);
+		   "\"environ_found_after_argv\": %s, \"strings_after_argv\": %d}",
+		   r, ERRNO_IF(r), argmax, r == 0 ? len : 0, argc, B(env_seen), strings);
 		free(buf);
 	}
 
@@ -994,7 +1030,7 @@ static void sec_task(void)
 	mach_msg_type_number_t count, ncount = 0, tcount = 0;
 	thread_t thread = pthread_mach_thread_np(pthread_self());
 	kern_return_t kr;
-	char extra[256];
+	char extra[420]; /* a 63-byte name with every byte escaped is 378 characters */
 	int pid = -1, nonnull = 0;
 
 	kr = mach_port_names(mach_task_self(), &names, &ncount, &types, &tcount);
@@ -1139,18 +1175,22 @@ static void sec_raw(void)
 
 /* ---- env --------------------------------------------------------------- */
 
-extern char **environ;
+static int name_cmp(const void *a, const void *b)
+{
+	return strcmp((const char *)a, (const char *)b);
+}
 
 static void sec_env(void)
 {
 	static const char *const prefixes[] = {"DYLD_", "DARLING", "RCLOL", "LD_", "XDG_", "DBUS_", NULL};
 	static const char *const exact[] = {"DISPLAY", "WAYLAND_DISPLAY", "EGL_PLATFORM", NULL};
-	unsigned total = 0;
+	static char names[64][128], list[64 * 140];
+	unsigned total = 0, kept = 0, dropped = 0;
+	size_t at = 0;
 
-	/* Names only, never values. */
+	/* Names only, never values: nothing after the '=' is copied. */
 	for (char **e = environ; e && *e; e++, total++) {
-		char key[160] = "name ";
-		size_t n = strcspn(*e, "="), k = strlen(key);
+		size_t n = strcspn(*e, "=");
 		int wanted = 0;
 
 		for (int i = 0; prefixes[i]; i++)
@@ -1159,15 +1199,22 @@ static void sec_env(void)
 			wanted |= n == strlen(exact[i]) && !strncmp(*e, exact[i], n);
 		if (!wanted)
 			continue;
-		for (size_t i = 0; i < n && k < sizeof(key) - 1; i++) {
-			char c = (*e)[i];
-			int plain = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
-
-			key[k++] = plain ? c : '?';
+		if (kept == 64 || n >= sizeof(names[0])) {
+			dropped++;
+			continue;
 		}
-		key[k] = '\0';
-		kv(key, "true");
+		memcpy(names[kept], *e, n);
+		names[kept++][n] = '\0';
 	}
+	qsort(names, kept, sizeof(names[0]), name_cmp);
+	list[0] = '\0';
+	for (unsigned i = 0; i < kept; i++)
+		if (at < sizeof(list) - 800)
+			at += (size_t)snprintf(list + at, sizeof(list) - at, "%s%s", i ? ", " : "", jstr(names[i]));
+		else
+			dropped++;
+	kv("names", "[%s]", list);
+	kv("names_dropped", "%u", dropped);
 	kv("total", "%u", total);
 }
 
@@ -1220,5 +1267,6 @@ int main(void)
 	sec_task();
 	section("task", 1);
 	printf("}\n");
-	return 0;
+	/* a short capture must not pass for a complete one */
+	return fflush(stdout) != 0 || ferror(stdout) ? 1 : 0;
 }

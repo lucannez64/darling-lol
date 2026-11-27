@@ -137,11 +137,11 @@ A linker-signed binary with no team therefore reports `CS_VALID|CS_LINKER_SIGNED
 
 ## What a process sees of itself
 
-A second probe, `tests/security/probe/self_view.c`, records what a process can read about itself: its memory regions, dyld state, `proc_pidinfo` and `task_info` answers, a few filesystem paths and the names of some environment variables. It inspects only its own process and prints nothing that names a machine or a user. The same file builds against an old SDK, so it can run unchanged inside Darling and the two JSON outputs can be diffed.
+A second probe, `tests/security/probe/self_view.c`, records what a process can read about itself: its memory regions, dyld state, `proc_pidinfo` and `task_info` answers, a few filesystem paths and the names of some environment variables. It describes its own process; of other processes it reads only the name and path of its parent and of pids 0 and 1, and the number of pids the system lists. It prints nothing that names a machine or a user: system paths are printed in full, any other path only as its kind (`<home>`, `<tmp>`, `<other>`). The same file builds against an old SDK, so it can run unchanged inside Darling and the two JSON outputs can be diffed.
 
 The workflow runs it natively (arm64) and, under Rosetta, as x86_64; it also stores `sysctl -a` with the host name and per-boot identifiers blanked.
 
-First run: `45923145577` (macOS 15.8.2, 24H232, `macos-15` runner).
+Run: `45924963910` (macOS 15.8.2, 24H232, `macos-15` runner).
 
 | Observation | arm64 | x86_64 under Rosetta |
 |---|---|---|
@@ -159,7 +159,7 @@ First run: `45923145577` (macOS 15.8.2, 24H232, `macos-15` runner).
 | `PROC_PIDTBSDINFO` | flags `0x404010` (`PROC_FLAG_LP64` set), start time set, status 2 | `0x2404010` |
 | `PROC_PIDREGIONINFO`, `PROC_PIDREGIONPATHINFO`, `PROC_PIDREGIONPATHINFO2`, `PROC_PIDVNODEPATHINFO`, `proc_pid_rusage` | succeed; `PROC_PIDREGIONPATHINFO3` is `EINVAL` | same |
 | `kern.proc.pid` | `P_LP64` set, `p_starttime` set | same |
-| `kern.procargs2` | environment block follows argv | same |
+| `kern.procargs2` | the environment follows argv | same |
 | threads | `task_threads` count equals `pti_threadnum` (1) | equal (2) |
 | `task_info` | every flavor tried succeeds; all eight audit-token words non-zero; `phys_footprint` non-zero | same |
 | `/proc`, `/sys`, `/run`, `/dev/shm`, `/Volumes/SystemRoot` | absent | absent |
