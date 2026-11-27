@@ -8761,7 +8761,7 @@ index c1b2d50..fa6f707 100644
  	return ret;
  }
 diff --git a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
-index b998456..e3d34a1 100644
+index b998456..0246f50 100644
 --- a/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 +++ b/darling/src/libsystem_kernel/emulation/src/xnu_syscall/mach/impl/mach_traps.c
 @@ -12,9 +12,29 @@
@@ -9640,10 +9640,10 @@ index b998456..e3d34a1 100644
 +			__atomic_store_n(&lregion_pace_us, LREGION_DEFAULT_PACE_US, __ATOMIC_RELAXED);
 +		}
 +	}
-+	/* The four counts the server answers as asked; any other goes to it, like a call with a NULL argument. The
-+	 * scanner in League asks with the long count (19 words), so a short-only version of this path never ran in a
-+	 * match. */
-+	if (state == 1 && target == mach_task_self() && address && size && depth && info && infoCnt &&
++	/* The four counts the server answers as asked; any other goes to it. The scanner in League asks with the long
++	 * count (19 words), so a short-only version of this path never ran in a match. A NULL depth is answered here as
++	 * before: the RPC stub reads it and would fault. */
++	if (state == 1 && target == mach_task_self() && address && size && info && infoCnt &&
 +	    (*infoCnt == LREGION_SHORT_INFO_COUNT || *infoCnt == LREGION_V0_INFO_COUNT ||
 +	     *infoCnt == LREGION_V1_INFO_COUNT || *infoCnt == LREGION_V2_INFO_COUNT)) {
 +		/* One descriptor, opened once and kept at a high number. It was opened and closed for every call before
@@ -9680,7 +9680,7 @@ index b998456..e3d34a1 100644
 +			if (rv == 0 && lregion_fill(info, *infoCnt, q.vma_start, q.vma_end, q.vma_flags, q.vma_offset)) {
 +				*address = q.vma_start;
 +				*size = q.vma_end - q.vma_start;
-+				*depth = 0;
++				if (depth) *depth = 0;
 +				return KERN_SUCCESS;
 +			}
 +		}

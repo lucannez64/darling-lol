@@ -33,8 +33,9 @@ class LocalRegionReplyTests(unittest.TestCase):
         entry = entry[:entry.index('return __darling_rpc_mach_vm_region_recurse(target')]
         self.assertIn('*infoCnt == LREGION_SHORT_INFO_COUNT || *infoCnt == LREGION_V0_INFO_COUNT ||', entry)
         self.assertIn('*infoCnt == LREGION_V1_INFO_COUNT || *infoCnt == LREGION_V2_INFO_COUNT', entry)
-        # a NULL argument is the stub's to handle, as for every other caller
-        self.assertIn('address && size && depth && info && infoCnt &&', entry)
+        # a NULL depth stays answered here: the RPC stub would read it and fault
+        self.assertIn('address && size && info && infoCnt &&', entry)
+        self.assertIn('if (depth) *depth = 0;', entry)
         self.assertIn('lregion_fill(info, *infoCnt, q.vma_start, q.vma_end, q.vma_flags, q.vma_offset)', entry)
         # no reply of its own for a long count any more
         self.assertNotIn('info[i] = 0', entry)
@@ -236,9 +237,10 @@ int main(void)
 #define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
-#include <stdarg.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -258,21 +260,24 @@ static mach_port_name_t mach_task_self(void) {{ return 0x103; }}
 static int darling_is_league_game(void) {{ return 0; }}
 
 /* raw system calls, as the emulation makes them; the switch file that turns the path on exists */
-static long fake_syscall(long nr, ...)
+static long fake_syscall(long nr, long a0, long a1, long a2, long a3, long a4, long a5)
 {{
-    va_list ap;
-    long a[6];
-    va_start(ap, nr);
-    for (int i = 0; i < 6; i++) a[i] = va_arg(ap, long);
-    va_end(ap);
-    if (nr == SYS_access && strcmp((const char*) a[0], "/tmp/rclol-local-region-all") == 0)
+    if (nr == SYS_access && strcmp((const char*) a0, "/tmp/rclol-local-region-all") == 0)
         return 0;
-    if (nr == SYS_open && strcmp((const char*) a[0], "/tmp/rclol-region-pace-us") == 0)
+    if (nr == SYS_open && strcmp((const char*) a0, "/tmp/rclol-region-pace-us") == 0)
         return -ENOENT;
-    long rc = syscall(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+    long rc = syscall(nr, a0, a1, a2, a3, a4, a5);
     return rc < 0 ? -errno : rc;
 }}
-#define LINUX_SYSCALL(...) fake_syscall(__VA_ARGS__, 0L, 0L, 0L, 0L, 0L, 0L)
+/* every argument converted to long, whatever its type, as the emulation's own macro does */
+#define L(x) ((long) (x))
+#define SC1(n) fake_syscall(L(n), 0, 0, 0, 0, 0, 0)
+#define SC2(n, a) fake_syscall(L(n), L(a), 0, 0, 0, 0, 0)
+#define SC3(n, a, b) fake_syscall(L(n), L(a), L(b), 0, 0, 0, 0)
+#define SC4(n, a, b, c) fake_syscall(L(n), L(a), L(b), L(c), 0, 0, 0)
+#define SC5(n, a, b, c, d) fake_syscall(L(n), L(a), L(b), L(c), L(d), 0, 0)
+#define SC_PICK(_1, _2, _3, _4, _5, name, ...) name
+#define LINUX_SYSCALL(...) SC_PICK(__VA_ARGS__, SC5, SC4, SC3, SC2, SC1)(__VA_ARGS__)
 
 {code}
 
@@ -297,9 +302,22 @@ int main(void)
     unsigned long long addr = want + 4096, size = 0x1111;
     unsigned int depth = 77, count = 19;
     for (int i = 0; i < 24; i++) info[i] = GUARD;
+    /* does this kernel have PROCMAP_QUERY? asked directly, not through the code under test */
+    struct lregion_query probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.size = sizeof(probe);
+    probe.query_flags = 0x10;
+    probe.query_addr = want;
+    int maps = open("/proc/self/maps", O_RDONLY);
+    assert(maps >= 0);
+    int have_ioctl = ioctl(maps, LREGION_IOCTL, &probe) == 0;
+    close(maps);
+
     kern_return_t kr = mach_vm_region_recurse(mach_task_self(), &addr, &size, &depth, info, &count);
-    if (kr == SENTINEL) {{
-        puts("no-ioctl"); /* a kernel without PROCMAP_QUERY: every call goes to the server */
+    if (!have_ioctl) {{
+        /* without it every call goes to the server */
+        assert(kr == SENTINEL && g_server_calls == 1);
+        puts("no-ioctl");
         return 0;
     }}
     assert(kr == KERN_SUCCESS && g_server_calls == 0);
@@ -318,7 +336,12 @@ int main(void)
     assert(addr == 0xfffffffffffff000ull && size == 0x1111 && depth == 77 && count == 19 && info[0] == GUARD);
     assert(g_server_calls == 0);
 
-    /* left to the server: another task, another count, a NULL argument */
+    /* a NULL depth is answered here too: the RPC stub would read it */
+    addr = want; size = 0; count = 19;
+    assert(mach_vm_region_recurse(mach_task_self(), &addr, &size, NULL, info, &count) == KERN_SUCCESS);
+    assert(addr == want && size == 3 * 4096 && g_server_calls == 0);
+
+    /* left to the server: another task, another count, a NULL address */
     addr = want; count = 19;
     assert(mach_vm_region_recurse(0x999, &addr, &size, &depth, info, &count) == SENTINEL);
     count = 13;
@@ -326,9 +349,8 @@ int main(void)
     count = 20;
     assert(mach_vm_region_recurse(mach_task_self(), &addr, &size, &depth, info, &count) == SENTINEL);
     count = 19;
-    assert(mach_vm_region_recurse(mach_task_self(), &addr, &size, NULL, info, &count) == SENTINEL);
     assert(mach_vm_region_recurse(mach_task_self(), NULL, &size, &depth, info, &count) == SENTINEL);
-    assert(g_server_calls == 5);
+    assert(g_server_calls == 4);
     puts("ok");
     return 0;
 }}
