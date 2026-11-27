@@ -120,7 +120,10 @@ int main(void)
         check = 'if (LINUX_SYSCALL(__NR_arch_prctl, 0x1011 /* ARCH_GET_CPUID */, 0) == 0) {'
         self.assertIn(check, probe)
         self.assertLess(probe.index(check), probe.index('"cpuid"'))
-        self.assertIn('fc_state = -1;', probe[probe.index(check):probe.index('"cpuid"')])
+        guard = probe[probe.index(check):probe.index('"cpuid"')]
+        self.assertIn('fc_state = -1;\n\t\treturn fc_state;\n\t}', guard)
+        # with faulting off the probe still reaches cpuid: the guard is the only early return
+        self.assertEqual(probe[:probe.index('"cpuid"')].count('return'), 1)
 
     @unittest.skipUnless(shutil.which('cc'), 'C compiler required')
     def test_handler_emulates_every_cpuid_of_the_process(self):
@@ -132,6 +135,7 @@ int main(void)
         harness = f"""
 #define _GNU_SOURCE
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -193,6 +197,7 @@ static void rclol_write_str(const char* line)
         g_refused++;
     }}
 }}
+static int g_transforms;
 struct darling_cpu_identity;
 static const struct darling_cpu_identity* rclol_identity(void) {{ g_identity_filled = 1; return NULL; }}
 /* stands for the compat transform: leaf 0 becomes GenuineIntel */
@@ -200,6 +205,7 @@ static void rclol_cpuid_trace_spoof(uint32_t leaf, uint32_t subleaf,
     uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx)
 {{
     (void) subleaf; (void) eax;
+    g_transforms++;
     /* the transform may read the host's cpuid; inside the handler that must not fault */
     {{
         uint32_t a, b, c, d;
@@ -328,6 +334,8 @@ int main(int argc, char** argv)
     vendor_from(g_guest, seen);
     assert(strcmp(seen, "GenuineIntel") == 0);
     assert(g_fault_hits == 1 && g_logged == 1);
+    /* by the transform, called once: on an Intel host the vendor alone would not show it */
+    assert(g_transforms == 1);
 
     /* the site is described once, by file name and offset, without its path */
     assert(g_sites_logged == 1);
@@ -338,17 +346,19 @@ int main(int argc, char** argv)
         assert(rip == (unsigned long) g_guest + 5 && off == 5);
     }}
     vendor_from(g_guest, seen);
-    assert(g_sites_logged == 1 && g_logged == 2);
+    assert(g_sites_logged == 1 && g_logged == 2 && g_transforms == 2);
 
-    /* a host library (this ELF binary) keeps the host's answer */
+    /* a host library (this ELF binary) keeps the host's answer: no transform */
     vendor(seen);
     assert(strcmp(seen, host) == 0);
     assert(g_sites_logged == 2 && strstr(g_last_site, " host file=fault-harness\\n"));
+    assert(g_fault_hits == 3 && g_transforms == 2);
 
     /* so does the emulation layer, which applies the compat view itself */
     vendor_from(emulation, seen);
     assert(strcmp(seen, host) == 0);
     assert(g_sites_logged == 3 && strstr(g_last_site, " emulation file=libsystem_kernel.dylib\\n"));
+    assert(g_fault_hits == 4 && g_transforms == 2);
 
     /* other leaves keep the host's values; the registers and rip are restored */
     {{
@@ -364,20 +374,26 @@ int main(int argc, char** argv)
     pthread_t thread;
     char in_thread[13];
     unsigned long hits = g_fault_hits;
-    pthread_create(&thread, NULL, thread_main, in_thread);
-    pthread_join(thread, NULL);
+    memset(in_thread, 0, sizeof(in_thread));
+    assert(pthread_create(&thread, NULL, thread_main, in_thread) == 0);
+    assert(pthread_join(thread, NULL) == 0);
     assert(strcmp(in_thread, "GenuineIntel") == 0);
     assert(g_fault_hits == hits + 1);
 
     /* so is a forked child */
     pid_t pid = fork();
+    assert(pid >= 0);
     if (pid == 0) {{
         hits = g_fault_hits;
         vendor_from(g_guest, seen);
         _exit(strcmp(seen, "GenuineIntel") == 0 && g_fault_hits == hits + 1 ? 0 : 1);
     }}
-    int status;
-    waitpid(pid, &status, 0);
+    int status = -1;
+    pid_t reaped;
+    do {{
+        reaped = waitpid(pid, &status, 0);
+    }} while (reaped < 0 && errno == EINTR);
+    assert(reaped == pid);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
     /* only cpuid faults are claimed: not a memory fault, not another instruction */
