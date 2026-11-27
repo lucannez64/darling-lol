@@ -163,7 +163,7 @@
       "revision": "63f667cf06d7ed59553adebb0c8d70a117135ac9",
       "repository": "https://github.com/darlinghq/darling-dyld.git",
       "patch": "patches/dyld.patch",
-      "modified_files": 5,
+      "modified_files": 9,
       "new_files": [
         "src/dc_image_snapshot.h"
       ]

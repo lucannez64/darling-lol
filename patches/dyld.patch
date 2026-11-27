@@ -49,7 +49,7 @@ index 9242278..c944ac3 100644
  
  void ImageLoaderMachO::mapSegments(const void* memoryImage, uint64_t imageLen, const LinkContext& context)
 diff --git a/src/dyld2.cpp b/src/dyld2.cpp
-index 3710870..2d0f1dd 100644
+index 3710870..e59f9e7 100644
 --- a/src/dyld2.cpp
 +++ b/src/dyld2.cpp
 @@ -1,3 +1,6 @@
@@ -109,7 +109,43 @@ index 3710870..2d0f1dd 100644
  #endif
  #else
  	#include <libamfi.h>
-@@ -2514,6 +2551,13 @@ static void checkEnvironmentVariables(const char* envp[])
+@@ -1299,7 +1336,9 @@ static void notifyBatchPartial(dyld_image_states state, bool orLater, dyld_image
+ 			if ( (onlyHandler == NULL) && ((state == dyld_image_state_bound) || (orLater && (dyld_image_state_bound > state))) && (sNotifyObjCMapped != NULL) ) {
+ 				const char* paths[imageCount];
+ 				const mach_header* mhs[imageCount];
++				ImageLoader* unprotected[imageCount];
+ 				unsigned objcImageCount = 0;
++				unsigned unprotectedCount = 0;
+ 				for (int i=0; i < imageCount; ++i) {
+ 					ImageLoader* image = findImageByMachHeader(infos[i].imageLoadAddress);
+ 					bool hasObjC = false;
+@@ -1322,8 +1361,15 @@ static void notifyBatchPartial(dyld_image_states state, bool orLater, dyld_image
+ 						paths[objcImageCount] = infos[i].imageFilePath;
+ 						mhs[objcImageCount]   = infos[i].imageLoadAddress;
+ 						++objcImageCount;
+-						if ( image != NULL )
++						if ( image != NULL ) {
+ 							image->setObjCMappedNotified();
++							// objc's map_images rewrites selrefs/protorefs/classrefs, which may live in an
++							// SG_READ_ONLY __DATA_CONST that link() already protected
++							if ( image->madeDataReadOnly() ) {
++								image->setReadOnlyDataWritable(true);
++								unprotected[unprotectedCount++] = image;
++							}
++						}
+ 					}
+ 				}
+ 				if ( objcImageCount != 0 ) {
+@@ -1333,6 +1379,8 @@ static void notifyBatchPartial(dyld_image_states state, bool orLater, dyld_image
+ 					uint64_t t1 = mach_absolute_time();
+ 					ImageLoader::fgTotalObjCSetupTime += (t1-t0);
+ 				}
++				for (unsigned i=0; i < unprotectedCount; ++i)
++					unprotected[i]->setReadOnlyDataWritable(false);
+ 			}
+ 		}
+         allImagesUnlock();
+@@ -2514,6 +2562,13 @@ static void checkEnvironmentVariables(const char* envp[])
  				key[keyLen] = '\0';
  				if ( (strncmp(key, "DYLD_PRINT_", 11) == 0) && !gLinkContext.allowEnvVarsPrint )
  					continue;
@@ -123,7 +159,7 @@ index 3710870..2d0f1dd 100644
  				processDyldEnvironmentVariable(key, value, NULL);
  			}
  		}
-@@ -3361,12 +3405,40 @@ static bool isSimulatorBinary(const uint8_t* firstPages, const char* path)
+@@ -3361,12 +3416,40 @@ static bool isSimulatorBinary(const uint8_t* firstPages, const char* path)
  #endif
  
  
@@ -301,3 +337,72 @@ index 461012d..f42a426 100644
 +
  #endif // __DYLDLOCK__
  
+diff --git a/src/ImageLoader.cpp b/src/ImageLoader.cpp
+index 7ff3ea8..c87d49a 100644
+--- a/src/ImageLoader.cpp
++++ b/src/ImageLoader.cpp
+@@ -933,7 +933,7 @@ void ImageLoader::recursiveMakeDataReadOnly(const LinkContext& context)
+ 			}
+ 
+ 			// if this image has __DATA_CONST, make that segment read-only
+-			makeDataReadOnly();
++			setReadOnlyDataWritable(false);
+ 		}
+ 		catch (const char* msg) {
+ 			fMadeReadOnly = false;
+diff --git a/src/ImageLoader.h b/src/ImageLoader.h
+index 60dd9a8..9c9f14b 100644
+--- a/src/ImageLoader.h
++++ b/src/ImageLoader.h
+@@ -614,7 +614,7 @@ public:
+ 
+ 	virtual bool						usesChainedFixups() const { return false; }
+ 
+-	virtual void						makeDataReadOnly() const {}
++	virtual void						setReadOnlyDataWritable(bool) const {}
+ 	
+ 										// when resolving symbols look in subImage if symbol can't be found
+ 	void								reExport(ImageLoader* subImage);
+@@ -699,6 +699,7 @@ public:
+ 	
+ 			void						setObjCMappedNotified() { fObjCMappedNotified = true; }
+ 			bool						objCMappedNotified() const { return fObjCMappedNotified; }
++			bool						madeDataReadOnly() const { return fMadeReadOnly; }
+ 
+ 	struct InterposeTuple { 
+ 		uintptr_t										replacement;
+diff --git a/src/ImageLoaderMachOCompressed.cpp b/src/ImageLoaderMachOCompressed.cpp
+index 54fb8dc..7469c69 100644
+--- a/src/ImageLoaderMachOCompressed.cpp
++++ b/src/ImageLoaderMachOCompressed.cpp
+@@ -1209,7 +1209,7 @@ struct ThreadedBindData {
+     uint8_t type               = 0;
+ };
+ 
+-void ImageLoaderMachOCompressed::makeDataReadOnly() const
++void ImageLoaderMachOCompressed::setReadOnlyDataWritable(bool writable) const
+ {
+ #if !TEXT_RELOC_SUPPORT
+ 	if ( fReadOnlyDataSegment && !this->ImageLoader::inSharedCache() ) {
+@@ -1224,7 +1224,7 @@ void ImageLoaderMachOCompressed::makeDataReadOnly() const
+ 						continue;
+ 				}
+ 	#endif
+-				::mprotect((void*)start, size, PROT_READ);
++				::mprotect((void*)start, size, writable ? (PROT_READ | PROT_WRITE) : PROT_READ);
+ 				//dyld::log("make read-only 0x%09lX -> 0x%09lX\n", (long)start, (long)(start+size));
+ 			}
+ 		}
+diff --git a/src/ImageLoaderMachOCompressed.h b/src/ImageLoaderMachOCompressed.h
+index 080b47d..dd184a5 100644
+--- a/src/ImageLoaderMachOCompressed.h
++++ b/src/ImageLoaderMachOCompressed.h
+@@ -69,7 +69,7 @@ public:
+ 	virtual	void						updateUsesCoalIterator(CoalIterator&, uintptr_t newAddr, ImageLoader* target, unsigned targetIndex, const LinkContext& context);
+ 	virtual void						registerInterposing(const LinkContext& context);
+ 	virtual bool						usesChainedFixups() const;
+-	virtual void						makeDataReadOnly() const;
++	virtual void						setReadOnlyDataWritable(bool writable) const;
+ 
+ protected:
+ 	virtual void						doInterpose(const LinkContext& context);
