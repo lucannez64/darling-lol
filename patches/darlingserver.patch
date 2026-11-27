@@ -214,7 +214,7 @@ index 633d729..75a3965 100644
  	dtape_condvar_t suspension_condvar;
  
 diff --git a/duct-tape/pthread/kern_synch.c b/duct-tape/pthread/kern_synch.c
-index aa2b6d3..ab7cdb7 100644
+index aa2b6d3..71ba60d 100644
 --- a/duct-tape/pthread/kern_synch.c
 +++ b/duct-tape/pthread/kern_synch.c
 @@ -42,6 +42,7 @@
@@ -225,7 +225,29 @@ index aa2b6d3..ab7cdb7 100644
  //#include <sys/proc_internal.h>
  #include <sys/kauth.h>
  #include <sys/systm.h>
-@@ -1236,8 +1237,22 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
+@@ -1162,8 +1163,19 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
+ 	 * user level as well.
+ 	 */
+ 	if (is_seqhigher_eq(csgen, lockseq) != 0) {
+-		__FAILEDUSERTEST__("psync_cvwait; invalid sequence numbers\n");
+-		return EINVAL;
++		/* The signal can consume this wait before it reaches the kernel.
++		 * Release the mutex as the normal wait path does, then let the
++		 * caller observe a completed (possibly spurious) wakeup. */
++		if (mutex != 0) {
++			uint32_t mutexrv = 0;
++			error = _psynch_mutexdrop(NULL, mutex, mgen, ugen, 0, flags,
++					&mutexrv);
++			if (error != 0) {
++				return error;
++			}
++		}
++		*retval = 0;
++		return 0;
+ 	}
+ 
+ 	PTHREAD_TRACE(psynch_cvar_kwait | DBG_FUNC_START, cv, mutex, cgen, 0);
+@@ -1236,8 +1248,22 @@ _psynch_cvwait(__unused proc_t p, user_addr_t cv, uint64_t cvlsgen,
  			struct timespec ts;
  			ts.tv_sec = (__darwin_time_t)sec;
  			ts.tv_nsec = (nsec & 0x3fffffff);
