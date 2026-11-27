@@ -974,6 +974,31 @@ class UpdateToolboxTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('stop --time 10 darling-lol', self.podman_lines())
 
+    def test_recorded_stopped_container_is_stopped_when_probe_fails_and_declined(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        result = self.run_update_in_terminal(
+            'n\n',
+            FAKE_PODMAN_EXISTS='1',
+            FAKE_PODMAN_RUNNING='0',
+            FAKE_TOOLBOX_CONTAINER_OK='0',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('stop --time 10 my-dbx', self.podman_lines())
+
+    def test_recorded_running_container_is_not_stopped_when_probe_fails_and_declined(self):
+        self.write_marker('my-dbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        result = self.run_update_in_terminal(
+            'n\n',
+            FAKE_PODMAN_EXISTS='1',
+            FAKE_PODMAN_RUNNING='1',
+            FAKE_TOOLBOX_CONTAINER_OK='0',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(any(line.startswith('stop ') for line in self.podman_lines()),
+                         self.podman_lines())
+
 
 if __name__ == '__main__':
     unittest.main()

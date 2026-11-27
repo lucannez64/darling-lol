@@ -671,6 +671,9 @@ if [ "$inside_container" = 0 ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			printf '  inside the container: %s\n' "$enter_cmd" >&2
 			exit 1
 		fi
+		if [ "$stop_container" = 1 ]; then
+			TOOLBOX_STOP=$name
+		fi
 		container_probe() {
 			if [ "$backend" = distrobox ]; then
 				distrobox_container_exists "$1" &&
