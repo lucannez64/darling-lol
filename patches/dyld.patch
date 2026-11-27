@@ -218,3 +218,86 @@ index 0000000..04d64c1
 +    return error;
 +}
 +#endif
+diff --git a/src/dyldAPIsInLibSystem.cpp b/src/dyldAPIsInLibSystem.cpp
+index 48dc1ac..e240e84 100644
+--- a/src/dyldAPIsInLibSystem.cpp
++++ b/src/dyldAPIsInLibSystem.cpp
+@@ -2059,6 +2059,13 @@ void _dyld_atfork_prepare()
+ {
+     if ( gUseDyld3 )
+         return dyld3::_dyld_atfork_prepare();
++#ifdef DARLING
++    // Like dyld3 does with its loader lock: hold the global dyld lock across
++    // fork(), so that no other thread holds it while the process is copied.
++    // Otherwise the child inherits it locked by a thread that does not exist
++    // there, and its first dlopen(), dlsym() or dladdr() waits forever.
++    dyldGlobalLockAcquire();
++#endif
+ }
+ 
+ // SPI called __fork
+@@ -2066,6 +2073,9 @@ void _dyld_atfork_parent()
+ {
+     if ( gUseDyld3 )
+         return dyld3::_dyld_atfork_parent();
++#ifdef DARLING
++    dyldGlobalLockRelease();
++#endif
+ }
+ 
+ // SPI called __fork
+@@ -2074,6 +2084,10 @@ void _dyld_fork_child()
+ 	if ( gUseDyld3 )
+ 		return dyld3::_dyld_fork_child();
+ 
++#ifdef DARLING
++	dyldGlobalLockResetInForkChild();
++#endif
++
+ 	DYLD_NO_LOCK_THIS_BLOCK;
+     typedef void (*funcType)();
+     static funcType __ptrauth_dyld_function_ptr p = NULL;
+diff --git a/src/dyldLock.cpp b/src/dyldLock.cpp
+index 18dfe14..d22e105 100644
+--- a/src/dyldLock.cpp
++++ b/src/dyldLock.cpp
+@@ -56,4 +56,24 @@ void dyldGlobalLockRelease()
+ 	pthread_mutex_unlock(&sGlobalMutex);
+ }
+ 
++#ifdef DARLING
++// Called in the child of a fork() after _dyld_atfork_prepare() took the lock
++// in the parent. The child's only thread has a new thread ID, so it can't
++// unlock a mutex that the parent's thread locked. Start over with a fresh
++// mutex, and take it again as many times as the forking thread already held
++// it before the fork (when it forked while inside a dyld API), so that its
++// later releases still match.
++void dyldGlobalLockResetInForkChild()
++{
++	static const pthread_mutex_t freshMutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
++	int depth = _dyld_global_lock_held - 1;
++
++	sGlobalMutex = freshMutex;
++	_dyld_global_lock_held = 0;
++
++	while (depth-- > 0)
++		dyldGlobalLockAcquire();
++}
++#endif
++
+ 
+diff --git a/src/dyldLock.h b/src/dyldLock.h
+index 461012d..f42a426 100644
+--- a/src/dyldLock.h
++++ b/src/dyldLock.h
+@@ -64,5 +64,10 @@ extern void dyldGlobalLockInitialize()		__attribute__((visibility("hidden")));
+ extern void dyldGlobalLockAcquire()			__attribute__((visibility("hidden")));
+ extern void dyldGlobalLockRelease()			__attribute__((visibility("hidden")));
+ 
++#ifdef DARLING
++// to keep the lock usable in the child of a fork()
++extern void dyldGlobalLockResetInForkChild()	__attribute__((visibility("hidden")));
++#endif
++
+ #endif // __DYLDLOCK__
+ 
