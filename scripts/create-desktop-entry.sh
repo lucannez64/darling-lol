@@ -29,7 +29,7 @@ if [ -r build/toolbox-backend ]; then
 fi
 set --
 if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
-  backend=${DARLING_LOL_TOOLBOX_BACKEND:-$recorded_backend}
+  backend=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
   name=${DARLING_LOL_TOOLBOX_NAME:-$recorded_toolbox}
   if [ -z "$name" ]; then
     # Keep the previous entry as a fallback for manually entered containers
