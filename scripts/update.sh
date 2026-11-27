@@ -639,6 +639,9 @@ if [ "$inside_container" = 0 ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			else
 				stop_container=1
 			fi
+			if [ "$stop_container" -eq 1 ]; then
+				TOOLBOX_STOP=darling-lol
+			fi
 			if DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name darling-lol -- sh -c 'command -v darling' </dev/null >/dev/null 2>&1; then
 				name=darling-lol
 				backend=distrobox

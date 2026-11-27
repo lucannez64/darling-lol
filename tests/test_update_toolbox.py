@@ -960,6 +960,20 @@ class UpdateToolboxTests(unittest.TestCase):
         )
         self.assertIn('stop --time 10 my-dbx', self.podman_lines())
 
+    def test_stopped_legacy_distrobox_without_darling_is_stopped_on_exit(self):
+        (self.bindir / 'toolbox').unlink()
+        bindir = tool_sandbox(self.folder, 'cat', 'dirname', 'grep', 'sed', 'head', 'sleep')
+        path = f'{self.bindir}:{bindir}'
+        result = self.run_update(
+            input_text='',
+            PATH=path,
+            FAKE_PODMAN_EXISTS='1',
+            FAKE_PODMAN_RUNNING='0',
+            FAKE_TOOLBOX_HAS_DARLING='0',
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('stop --time 10 darling-lol', self.podman_lines())
+
 
 if __name__ == '__main__':
     unittest.main()
