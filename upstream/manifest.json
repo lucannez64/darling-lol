@@ -236,7 +236,7 @@
       "revision": "b0795a2e1dab5331116770139bfea8d832478f5f",
       "repository": "https://github.com/darlinghq/darling-libkqueue.git",
       "patch": "patches/libkqueue.patch",
-      "modified_files": 13,
+      "modified_files": 15,
       "new_files": []
     },
     {

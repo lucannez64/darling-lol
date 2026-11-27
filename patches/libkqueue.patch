@@ -699,28 +699,104 @@ index b6d2b73..8c7e97d 100644
  
      return 0;
 diff --git a/src/linux/user.c b/src/linux/user.c
-index f109ce4..7285f2d 100644
+index f109ce4..5ceed51 100644
 --- a/src/linux/user.c
 +++ b/src/linux/user.c
-@@ -102,10 +102,14 @@ linux_evfilt_user_copyout(struct kevent64_s *dst, struct knote *src, void *ptr U
+@@ -56,37 +56,32 @@ eventfd_raise(int evfd)
+     return (rv);
+ }
+ 
+-/* NOTE: copy+pasted from linux_eventfd_lower() */
++/*
++ * Resets the counter of the (nonblocking) eventfd. Returns 1 if it was
++ * raised, 0 if it was not, and -1 on error.
++ */
+ static int
+ eventfd_lower(int evfd)
+ {
+     uint64_t cur;
+     ssize_t n;
+-    int rv = 0;
+ 
+-    /* Reset the counter */
+     dbg_puts("lowering event level");
+-    n = read(evfd, &cur, sizeof(cur));
+-    if (n < 0) {
+-        switch (errno) {
+-            case EAGAIN:    
+-                /* Not considered an error */
+-                break;
+-
+-            case EINTR:
+-                rv = -EINTR;
+-                break;
++    do {
++        n = read(evfd, &cur, sizeof(cur));
++    } while (n < 0 && errno == EINTR);
+ 
+-            default:
+-                dbg_printf("read(2): %s", strerror(errno));
+-                rv = -1;
+-        }
+-    } else if (n != sizeof(cur)) {
++    if (n < 0) {
++        if (errno == EAGAIN)
++            return (0);
++        dbg_printf("read(2): %s", strerror(errno));
++        return (-1);
++    }
++    if (n != sizeof(cur)) {
+         dbg_puts("short read");
+-        rv = -1;
++        return (-1);
+     }
+-
+-    return (rv);
++    return (1);
+ }
+ 
+ int
+@@ -102,10 +97,27 @@ linux_evfilt_user_copyout(struct kevent64_s *dst, struct knote *src, void *ptr U
      }
      if (src->kev.flags & EV_CLEAR)
          src->kev.fflags &= ~NOTE_TRIGGER;
 -    if (src->kev.flags & (EV_DISPATCH | EV_CLEAR | EV_ONESHOT)) {
 -        if (eventfd_lower(src->kdata.kn_eventfd) < 0)
--            return (-1);
--    }
 +    /* darling-lol: Chromium registers its EVFILT_USER wakeup with EV_ADD only.
 +     * A returned user knote means its eventfd was readable, regardless
 +     * of whether NOTE_TRIGGER is still visible in kev.fflags. A concurrent
 +     * trigger can raise the eventfd just before copyout clears the shared bit,
 +     * otherwise leaving a readable fd with no NOTE_TRIGGER forever. */
-+    if (eventfd_lower(src->kdata.kn_eventfd) < 0)
-+        return (-1);
++    {
++        int rv = eventfd_lower(src->kdata.kn_eventfd);
++
++        if (rv < 0)
+             return (-1);
++        if (rv == 0) {
++            /*
++             * Another thread waiting on this kqueue saw the same trigger
++             * and has delivered it already. Report nothing, and do not
++             * wait for the eventfd with the kqueue locked.
++             */
++            dst->filter = EVFILT_DROP;
++            return (0);
++        }
+     }
 +    src->kev.fflags &= ~NOTE_TRIGGER;
  
      if (src->kev.flags & EV_DISPATCH)
          src->kev.fflags &= ~NOTE_TRIGGER;
+@@ -119,8 +131,8 @@ linux_evfilt_user_knote_create(struct filter *filt, struct knote *kn)
+     struct epoll_event ev;
+     int evfd;
+ 
+-    /* Create an eventfd */
+-    evfd = eventfd(0, 0);
++    /* Create an eventfd; copyout must never block on it */
++    evfd = eventfd(0, EFD_NONBLOCK);
+     if (evfd < 0) {
+         dbg_perror("eventfd");
+         goto errout;
 diff --git a/src/linux/vnode.c b/src/linux/vnode.c
 index 58b1544..8337ea0 100644
 --- a/src/linux/vnode.c
