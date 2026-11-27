@@ -14902,7 +14902,7 @@ index 7a3a2a1c..e99104fb 100644
 +install(TARGETS lsregister DESTINATION "${lsregister_framework}/Versions/A/Support")
 +InstallSymlink("Versions/Current/Support" "${CMAKE_INSTALL_PREFIX}/${lsregister_framework}/Support")
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h
-index 61b58e14..ed0675b3 100644
+index 61b58e14..672e037b 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h
 +++ b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.h
 @@ -35,6 +35,12 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -14914,20 +14914,21 @@ index 61b58e14..ed0675b3 100644
 ++(BOOL)databaseIsOpen;
 ++(BOOL)registerBundleAtPath:(NSString*)path;
 ++(void)scanForBundles:(NSString*)dir;
-++(void)deleteBundleAtPath:(NSString*)path;
+++(BOOL)deleteBundleAtPath:(NSString*)path;
  @end
  
  #endif
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m
-index 38eec3a1..932b7109 100644
+index 38eec3a1..16b8c69c 100644
 --- a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m
 +++ b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/LSBundle.m
-@@ -468,11 +468,39 @@ static FSEventStreamRef g_eventStream;
+@@ -468,12 +468,50 @@ static FSEventStreamRef g_eventStream;
  	FSEventStreamStart(g_eventStream);
  }
  
+-+(void)deleteBundleAtPath:(NSString*) path
 ++(BOOL)databaseIsOpen
-+{
+ {
 +	return g_database != nil;
 +}
 +
@@ -14953,22 +14954,35 @@ index 38eec3a1..932b7109 100644
 +	return registered;
 +}
 +
- +(void)deleteBundleAtPath:(NSString*) path
- {
++// Returns whether the entries were deleted and committed.
+++(BOOL)deleteBundleAtPath:(NSString*) path
++{
++	if (g_database == nil)
++		return NO;
++
  	// Delete DB entries referring to path
- 	[g_database beginTransaction];
+-	[g_database beginTransaction];
 -	[g_database executeQuery: @"delete from bundle where path = ?", path];
+-	[g_database commit];
++	if (![g_database beginTransaction])
++		return NO;
 +	// executeQuery: only prepares the statement; the delete needs executeUpdate:.
-+	[g_database executeUpdate: @"delete from bundle where path = ?", path];
- 	[g_database commit];
++	BOOL deleted = [g_database executeUpdate: @"delete from bundle where path = ?", path];
++	if (!deleted)
++	{
++		[g_database rollback];
++		return NO;
++	}
++	return [g_database commit];
  }
  
+ @end
 diff --git a/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m
 new file mode 100644
-index 00000000..5007a03c
+index 00000000..e04f28b2
 --- /dev/null
 +++ b/src/frameworks/CoreServices/src/LaunchServices/launchservicesd/lsregister.m
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,169 @@
 +/*
 + This file is part of Darling.
 +
@@ -15119,7 +15133,12 @@ index 00000000..5007a03c
 +
 +			if (unregister)
 +			{
-+				[LSBundle deleteBundleAtPath:path];
++				if (![LSBundle deleteBundleAtPath:path])
++				{
++					// kLSUnknownErr (-10810): the database refused the change.
++					fprintf(stderr, "failed to scan %s: %d\n", [path fileSystemRepresentation], -10810);
++					status = 1;
++				}
 +				continue;
 +			}
 +

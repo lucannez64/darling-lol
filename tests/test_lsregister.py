@@ -68,6 +68,27 @@ class LsregisterTests(unittest.TestCase):
         self.assertIn('[g_database executeQuery: @"delete from bundle where path = ?", path];',
                       removed(LSD + 'LSBundle.m'))
 
+    def test_bundle_delete_reports_failure(self):
+        # deleteBundleAtPath: returns whether the delete was committed.
+        header = added(LSD + 'LSBundle.h')
+        self.assertIn('+(BOOL)deleteBundleAtPath:(NSString*)path;', header)
+        bundle = added(LSD + 'LSBundle.m')
+        delete = bundle.split('+(BOOL)deleteBundleAtPath:', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('if (g_database == nil)', delete)
+        self.assertIn('[g_database rollback];', delete)
+        self.assertRegex(delete, r'BOOL deleted = \[g_database executeUpdate: @"delete from bundle where path = \?", path\];')
+        self.assertIn('return [g_database commit];', delete)
+
+    def test_unregister_failure_exits_nonzero(self):
+        # lsregister -u used to exit 0 even when the delete failed. macOS
+        # reports a database failure as "failed to scan <path>: -10810"
+        # (kLSUnknownErr) and exits 1.
+        tool = added(LSD + 'lsregister.m')
+        unregister = tool.split('if (unregister)', 1)[1].split('continue;', 1)[0]
+        self.assertIn('if (![LSBundle deleteBundleAtPath:path])', unregister)
+        self.assertIn('"failed to scan %s: %d\\n", [path fileSystemRepresentation], -10810', unregister)
+        self.assertIn('status = 1;', unregister)
+
     def test_manifest_lists_lsregister_as_new(self):
         manifest = json.loads((ROOT / 'upstream/manifest.json').read_text())
         main = next(c for c in manifest['components'] if c['path'] == '.')
