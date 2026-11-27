@@ -91,6 +91,10 @@ stream for `WatchPaths`, `QueueDirectories` and `KeepAlive.PathState`,
 including paths that do not exist yet when a job is loaded. `WatchPaths`
 changes are coalesced over a short window, as FSEvents does, and delivered as
 one pulse; queue-directory and path-state conditions stay asserted while they
-hold. The Riot Client's install-check LaunchAgent depends on these events.
+hold. The agent sleeps until inotify or launchd wakes it: it has no polling
+timer, examines only the paths an event names, and updates a watched tree by
+the subtree that changed. Only a watch left incomplete (descriptor limit or
+directory budget) is retried every 5 seconds. The Riot Client's install-check
+LaunchAgent depends on these events.
 Host tests compile the agent's path handling against real inotify; delivery to
 a loaded job needs a guest check after installing the updated runtime.

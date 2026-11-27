@@ -37,12 +37,18 @@ class XPCPipeBootstrapTests(unittest.TestCase):
         code = added_pipe()
         self.assertNotRegex(code, r'if\s*\(\s*flags\s*&\s*XPC_PIPE_USE_SYNC_IPC_OVERRIDE')
 
-    def test_all_three_pipe_decode_paths_attach_the_kernel_audit_token(self):
+    def test_only_server_receive_paths_attach_the_kernel_audit_token(self):
+        # The two server receive paths (launchd's routines authenticate every
+        # request) attach the token; the routine reply path does not, so
+        # Libinfo's OpenDirectory reply check sees the same token as before.
         code = added_pipe()
-        self.assertEqual(code.count('audit_token_t* token = pipe_audit_token(header);'), 3)
-        self.assertEqual(code.count('[dict setAssociatedAuditToken: token];'), 3)
+        self.assertEqual(code.count('audit_token_t* token = pipe_audit_token(header);'), 2)
+        self.assertEqual(code.count('[dict setAssociatedAuditToken: token];'), 2)
         self.assertEqual(len(re.findall(r'if \(token\) \{\s*\[dict setAssociatedAuditToken: token\];',
-                                        code)), 3)
+                                        code)), 2)
+        self.assertNotRegex(code, r'audit_token_t\* token = pipe_audit_token\(header\);\n'
+                                  r'(?:.*\n){0,5}\s*\*reply = \[dict retain\];')
+        self.assertRegex(code, r'\*incomingMessage = \[dict retain\];')
 
     def test_audit_trailer_validation_and_alignment(self):
         code = added_pipe()

@@ -148,15 +148,19 @@ index 0870a6c..e2d4bd6 100644
  
  XPC_EXPORT
 diff --git a/src/pipe.m b/src/pipe.m
-index d04fb98..15e5443 100644
+index d04fb98..0f692c7 100644
 --- a/src/pipe.m
 +++ b/src/pipe.m
-@@ -45,6 +45,17 @@ XPC_LOGGER_DEF(pipe);
+@@ -45,6 +45,21 @@ XPC_LOGGER_DEF(pipe);
  // This function allows a service to act as a proxy, and any replies from the handling service are sent directly to the original client.
  //
  
 +/* Pipe servers (including launchd) identify callers using the kernel trailer,
 + * just as connection receivers do. Serialized payloads carry no caller identity.
++ * Only the server receive paths attach it: the server cannot tell which
++ * requests its demuxers will authenticate (launchd's routines all do).
++ * Replies keep their previous empty token, which Libinfo's OpenDirectory
++ * reply check (_valid_token) already accepts.
 + */
 +static audit_token_t* pipe_audit_token(mach_msg_header_t* header) {
 +	mach_msg_trailer_t* trailer = (mach_msg_trailer_t*)((char*)header + round_msg(header->msgh_size));
@@ -169,7 +173,7 @@ index d04fb98..15e5443 100644
  XPC_CLASS_SYMBOL_DECL(pipe);
  
  OS_OBJECT_NONLAZY_CLASS
-@@ -209,7 +220,14 @@ out:
+@@ -209,7 +224,14 @@ out:
  				goto out;
  			}
  
@@ -185,7 +189,7 @@ index d04fb98..15e5443 100644
  
  			status = 0;
  		} else {
-@@ -249,7 +267,12 @@ out:
+@@ -249,7 +271,12 @@ out:
  				goto out;
  			}
  
@@ -199,7 +203,7 @@ index d04fb98..15e5443 100644
  			*replyPort = header->msgh_local_port;
  
  			status = 0;
-@@ -411,11 +434,24 @@ out:
+@@ -411,11 +438,24 @@ out:
  
  		pthread_rwlock_init(&this->state_lock, NULL);
  
@@ -225,16 +229,11 @@ index d04fb98..15e5443 100644
  		this->checkin_port = port;
  		this->send_port = xpc_mach_port_create_send_receive();
  		this->recv_port = xpc_mach_port_create_receive();
-@@ -581,7 +617,12 @@ retry:
+@@ -581,7 +621,7 @@ retry:
  					goto out;
  				}
  
 -				*reply = dict;
-+				audit_token_t* token = pipe_audit_token(header);
-+				if (token) {
-+					[dict setAssociatedAuditToken: token];
-+				}
-+
 +				*reply = [dict retain];
  
  				status = 0;

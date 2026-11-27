@@ -13724,7 +13724,7 @@ index 1e9ec25..0114e25 100644
  				break;
  			}
 diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
-index a68739ff..da0da1de 100644
+index a68739ff..f68fb264 100644
 --- a/src/launchd/src/core.c
 +++ b/src/launchd/src/core.c
 @@ -463,6 +463,9 @@ static job_t job_mig_intran2(jobmgr_t jm, mach_port_t mport, pid_t upid);
@@ -13812,25 +13812,56 @@ index a68739ff..da0da1de 100644
  void
  jobmgr_kill_stray_children(jobmgr_t jm, pid_t *p, size_t np)
  {
-@@ -7601,6 +7665,49 @@ semaphoreitem_setup(launch_data_t obj, const char *key, void *context)
+@@ -7601,6 +7665,82 @@ semaphoreitem_setup(launch_data_t obj, const char *key, void *context)
  	}
  }
  
++/* Labels whose WatchPaths registration this launchd has already seen. The
++ * database record below is what survives restarts; this list keeps the
++ * decision for the session when the record cannot be written.
++ */
++struct watchpaths_label {
++	struct watchpaths_label *next;
++	char label[];
++};
++static struct watchpaths_label *s_watchpaths_labels;
++
++/* Remembers label for this session. Returns whether it was already known. */
++static bool
++externalevent_watchpaths_seen_this_session(const char *label)
++{
++	for (struct watchpaths_label *l = s_watchpaths_labels; l; l = l->next) {
++		if (strcmp(l->label, label) == 0) {
++			return true;
++		}
++	}
++	size_t length = strlen(label) + 1;
++	struct watchpaths_label *l = malloc(sizeof(*l) + length);
++	if (l) {
++		memcpy(l->label, label, length);
++		l->next = s_watchpaths_labels;
++		s_watchpaths_labels = l;
++	}
++	return false;
++}
++
 +/* Records each label that has registered WatchPaths in the launchd database,
 + * so the first registration survives runtime restarts as it does on macOS.
-+ * Returns true only for the first registration of the label.
++ * Returns true only for the first registration of the label. When the record
++ * cannot be stored, the session's memory decides, so the job still runs once.
 + */
 +static bool
 +externalevent_first_watchpaths_registration(job_t j)
 +{
++	bool seen = externalevent_watchpaths_seen_this_session(j->label);
 +	char *dir = launchd_copy_persistent_store(LAUNCHD_PERSISTENT_STORE_DB, "watchpaths-registered");
 +	if (!dir) {
-+		return false;
++		return !seen;
 +	}
 +	if (mkdir(dir, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) == -1 && errno != EEXIST) {
 +		job_log(j, LOG_ERR, "Could not create %s: %d: %s", dir, errno, strerror(errno));
 +		free(dir);
-+		return false;
++		return !seen;
 +	}
 +
 +	char name[PATH_MAX];
@@ -13844,25 +13875,27 @@ index a68739ff..da0da1de 100644
 +	(void)asprintf(&marker, "%s/%s", dir, name);
 +	free(dir);
 +	if (!marker) {
-+		return false;
++		return !seen;
 +	}
 +	int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 +	int error = errno;
 +	free(marker);
 +	if (fd == -1) {
-+		if (error != EEXIST) {
-+			job_log(j, LOG_ERR, "Could not record WatchPaths registration: %d: %s", error, strerror(error));
++		if (error == EEXIST) {
++			return false;
 +		}
-+		return false;
++		job_log(j, LOG_ERR, "Could not record WatchPaths registration: %d: %s", error, strerror(error));
++		return !seen;
 +	}
 +	(void)close(fd);
-+	return true;
++	/* Already run this session if an earlier record failed. */
++	return !seen;
 +}
 +
  bool
  externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_object_t event, uint64_t flags)
  {
-@@ -7639,6 +7746,16 @@ externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_obje
+@@ -7639,6 +7779,16 @@ externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_obje
  
  	job_log(j, LOG_DEBUG, "New event: %s/%s", sys->name, evname);
  
@@ -13879,7 +13912,7 @@ index a68739ff..da0da1de 100644
  	eventsystem_ping();
  	return true;
  }
-@@ -11796,6 +11913,7 @@ jobmgr_init(bool sflag)
+@@ -11796,6 +11946,7 @@ jobmgr_init(bool sflag)
  		}
  	}
  	s_no_hang_fd = _fd(s_no_hang_fd);
@@ -15270,10 +15303,10 @@ index 00000000..b025847a
 +</plist>
 diff --git a/src/UserEventAgent/main.c b/src/UserEventAgent/main.c
 new file mode 100644
-index 00000000..b8c63a70
+index 00000000..58655e07
 --- /dev/null
 +++ b/src/UserEventAgent/main.c
-@@ -0,0 +1,626 @@
+@@ -0,0 +1,742 @@
 +/* SPDX-License-Identifier: GPL-3.0-only
 + * Copyright (C) 2026 darling-lol contributors
 + * Filesystem LaunchEvents provider for Darling's launchd-842.
@@ -15314,9 +15347,10 @@ index 00000000..b8c63a70
 + * and a change while the job is still running is dropped by launchd.
 + */
 +#define COALESCE_SECONDS 0.5
-+/* Re-check in periodically in case a SIGUSR1 from launchd was missed. */
-+#define RECHECK_SECONDS 30.0
-+/* Retry incomplete watches (descriptor limits, races) this often. */
++/* Retry incomplete watches (descriptor limits, directory budget) this often.
++ * Complete watches never poll: inotify reports every change below them and
++ * IN_Q_OVERFLOW forces a full re-check, so the agent sleeps until an event.
++ */
 +#define RETRY_SECONDS 5.0
 +/* Upper bound on directories watched below one path. */
 +#define MAX_TREE_DIRECTORIES 65536
@@ -15336,13 +15370,21 @@ index 00000000..b8c63a70
 +};
 +static struct descriptor *descriptors;
 +
++/* One watched directory (or the watched file) and where it is, so a change
++ * below it updates only the affected subtree.
++ */
++struct tree_entry {
++	int wd;
++	char *path;
++};
++
 +struct path_watch {
 +	char *path;
 +	char *parent;       /* Nearest existing ancestor of path. */
 +	char *component;    /* Name below parent leading toward path. */
 +	bool component_is_path; /* parent is the path's own directory. */
 +	int parent_wd;
-+	int *tree;          /* Descriptors for path and, for a directory, its subtree. */
++	struct tree_entry *tree; /* tree[0] is path itself; for a directory, its subtree follows. */
 +	size_t tree_count, tree_capacity;
 +	struct stat previous;
 +	bool existed, initialized, changed, dirty, incomplete;
@@ -15463,28 +15505,70 @@ index 00000000..b8c63a70
 +	}
 +}
 +
-+static void tree_add(struct path_watch *watch, int wd)
++static void tree_add(struct path_watch *watch, int wd, const char *path)
 +{
 +	if (watch->tree_count == watch->tree_capacity) {
 +		size_t capacity = watch->tree_capacity ? watch->tree_capacity * 2 : 8;
-+		int *tree = realloc(watch->tree, capacity * sizeof(*tree));
++		struct tree_entry *tree = realloc(watch->tree, capacity * sizeof(*tree));
 +		if (!tree) { perror("UserEventAgent: realloc"); exit(1); }
 +		watch->tree = tree;
 +		watch->tree_capacity = capacity;
 +	}
-+	watch->tree[watch->tree_count++] = wd;
++	watch->tree[watch->tree_count].wd = wd;
++	watch->tree[watch->tree_count++].path = copy_string(path);
 +}
 +
-+static bool tree_contains(const struct path_watch *watch, int wd)
++/* Index of descriptor wd in the watched tree, or -1. */
++static long tree_find(const struct path_watch *watch, int wd)
 +{
 +	for (size_t i = 0; i < watch->tree_count; ++i)
-+		if (watch->tree[i] == wd) return true;
++		if (watch->tree[i].wd == wd) return (long)i;
++	return -1;
++}
++
++static bool tree_has_path(const struct path_watch *watch, const char *path)
++{
++	for (size_t i = 0; i < watch->tree_count; ++i)
++		if (!strcmp(watch->tree[i].path, path)) return true;
 +	return false;
++}
++
++static void tree_entry_release(struct tree_entry *entry)
++{
++	descriptor_release(entry->wd);
++	free(entry->path);
++}
++
++/* Drop the entries for path and everything below it, keeping the order (the
++ * watched path itself stays first).
++ */
++static void tree_remove_below(struct path_watch *watch, const char *path)
++{
++	size_t length = strlen(path), kept = 0;
++	for (size_t i = 0; i < watch->tree_count; ++i) {
++		const char *entry = watch->tree[i].path;
++		if (!strncmp(entry, path, length) && (entry[length] == 0 || entry[length] == '/'))
++			tree_entry_release(&watch->tree[i]);
++		else
++			watch->tree[kept++] = watch->tree[i];
++	}
++	watch->tree_count = kept;
++}
++
++/* The kernel dropped descriptor wd (its directory is gone): forget it. */
++static void tree_remove_descriptor(struct path_watch *watch, int wd)
++{
++	size_t kept = 0;
++	for (size_t i = 0; i < watch->tree_count; ++i) {
++		if (watch->tree[i].wd == wd) tree_entry_release(&watch->tree[i]);
++		else watch->tree[kept++] = watch->tree[i];
++	}
++	watch->tree_count = kept;
 +}
 +
 +static void watch_release(struct path_watch *watch)
 +{
-+	for (size_t i = 0; i < watch->tree_count; ++i) descriptor_release(watch->tree[i]);
++	for (size_t i = 0; i < watch->tree_count; ++i) tree_entry_release(&watch->tree[i]);
 +	watch->tree_count = 0;
 +	descriptor_release(watch->parent_wd);
 +	watch->parent_wd = -1;
@@ -15492,6 +15576,8 @@ index 00000000..b8c63a70
 +
 +/* Watch a directory and every directory below it, without following
 + * symlinks inside the tree (FSEvents reports the link, not its target).
++ * Each directory is armed before it is listed, so a subdirectory created
++ * meanwhile is either listed here or reported by the new descriptor.
 + */
 +static void watch_tree(struct path_watch *watch, const char *directory, size_t *budget)
 +{
@@ -15499,7 +15585,7 @@ index 00000000..b8c63a70
 +	--*budget;
 +	int wd = descriptor_acquire(directory);
 +	if (wd < 0) { watch->incomplete = true; return; }
-+	tree_add(watch, wd);
++	tree_add(watch, wd, directory);
 +	DIR *listing = opendir(directory);
 +	if (!listing) return;
 +	struct dirent *entry;
@@ -15515,6 +15601,16 @@ index 00000000..b8c63a70
 +	closedir(listing);
 +}
 +
++/* A directory appeared below a watched one: watch only its subtree. */
++static void watch_subtree_added(struct path_watch *watch, const char *directory)
++{
++	struct stat info;
++	if (tree_has_path(watch, directory)) return; /* Already listed by its parent's walk. */
++	if (lstat(directory, &info) != 0 || !S_ISDIR(info.st_mode)) return;
++	size_t budget = watch->tree_count < MAX_TREE_DIRECTORIES ?
++		MAX_TREE_DIRECTORIES - watch->tree_count : 0;
++	watch_tree(watch, directory, &budget);
++}
 +static char *parent_path(const char *path)
 +{
 +	char *parent = copy_string(path);
@@ -15540,10 +15636,20 @@ index 00000000..b8c63a70
 +	return component;
 +}
 +
-+/* Re-establish every descriptor for one watched path. */
++/* Re-establish every descriptor for one watched path, after the path itself
++ * appeared, disappeared or was replaced. The new descriptors are armed before
++ * the old ones are released: inotify returns the same descriptor for an inode
++ * it already watches, so directories that did not change keep reporting
++ * events throughout.
++ */
 +static void watch_rebuild(struct path_watch *watch)
 +{
-+	watch_release(watch);
++	struct tree_entry *old_tree = watch->tree;
++	size_t old_count = watch->tree_count;
++	int old_parent_wd = watch->parent_wd;
++	watch->tree = NULL;
++	watch->tree_count = watch->tree_capacity = 0;
++	watch->parent_wd = -1;
 +	watch->incomplete = false;
 +	watch->dirty = false;
 +
@@ -15557,7 +15663,7 @@ index 00000000..b8c63a70
 +		} else {
 +			/* Never open() the target: a FIFO would block the agent. */
 +			int wd = descriptor_acquire(target);
-+			if (wd >= 0) tree_add(watch, wd);
++			if (wd >= 0) tree_add(watch, wd, target);
 +			else watch->incomplete = true;
 +		}
 +	}
@@ -15585,8 +15691,11 @@ index 00000000..b8c63a70
 +	}
 +	watch->parent_wd = descriptor_acquire(parent);
 +	if (watch->parent_wd < 0) watch->incomplete = true;
-+}
 +
++	for (size_t i = 0; i < old_count; ++i) tree_entry_release(&old_tree[i]);
++	free(old_tree);
++	descriptor_release(old_parent_wd);
++}
 +static bool same_snapshot(const struct stat *a, const struct stat *b)
 +{
 +	return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
@@ -15598,8 +15707,9 @@ index 00000000..b8c63a70
 +		a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
 +}
 +
-+/* Returns whether the path changed since the last call. The stat snapshot
-+ * also covers changes inotify cannot see (descriptor limits, other mounts).
++/* Returns whether the path changed since the last call. Called when inotify
++ * reported something for the path, and on retries of incomplete watches,
++ * where the stat snapshot covers the part of the tree without a descriptor.
 + */
 +static bool refresh_path(struct path_watch *watch)
 +{
@@ -15626,21 +15736,38 @@ index 00000000..b8c63a70
 +				watch->changed = watch->dirty = true;
 +				continue;
 +			}
-+			if (tree_contains(watch, entry->wd)) {
-+				if (!(entry->mask & IN_IGNORED)) watch->changed = true;
-+				/* New or removed directories change the watched tree. */
-+				if ((entry->mask & IN_ISDIR) &&
-+					(entry->mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)))
-+					watch->dirty = true;
-+				if (entry->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
-+					watch->dirty = true;
++			long index = tree_find(watch, entry->wd);
++			if (index == 0 && (entry->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))) {
++				/* The watched path itself went away or moved. */
++				watch->changed = watch->dirty = true;
++			} else if (index > 0 && (entry->mask & IN_IGNORED)) {
++				/* A directory below was deleted; its parent reported it. */
++				tree_remove_descriptor(watch, entry->wd);
++			} else if (index >= 0) {
++				watch->changed = true;
++				/* A directory added or removed below changes only its own
++				 * subtree. The new subtree is armed and then listed, so
++				 * nothing created inside it in the meantime is missed.
++				 */
++				char child[PATH_MAX];
++				if ((entry->mask & IN_ISDIR) && entry->len &&
++					snprintf(child, sizeof(child), "%s/%s", watch->tree[index].path,
++						entry->name) < (int)sizeof(child)) {
++					if (entry->mask & (IN_DELETE | IN_MOVED_FROM))
++						tree_remove_below(watch, child);
++					if (entry->mask & (IN_CREATE | IN_MOVED_TO))
++						watch_subtree_added(watch, child);
++				}
 +			}
 +			if (entry->wd == watch->parent_wd) {
 +				/* An entry for the path itself is a change; one for a missing
 +				 * ancestor only moves the watch closer (macOS ignores it).
++				 * Only creation, deletion and renames replace the watched
++				 * tree; a change to the path's own attributes does not.
 +				 */
 +				if (entry->len && watch->component && !strcmp(entry->name, watch->component)) {
-+					watch->dirty = true;
++					if (entry->mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO))
++						watch->dirty = true;
 +					if (watch->component_is_path) watch->changed = true;
 +				}
 +				if (entry->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
@@ -15793,12 +15920,18 @@ index 00000000..b8c63a70
 +	xpc_release(reply);
 +}
 +
++/* Act on what inotify reported. Only paths with a reported change are
++ * examined again; with retry set, incomplete watches are re-armed and every
++ * path's snapshot is compared, since part of their tree has no descriptor.
++ */
 +static void evaluate_events(double time, bool retry)
 +{
 +	for (struct event *event = events; event; event = event->next) {
-+		bool changed = false, state = false;
++		bool changed = false, state = false, examined = !event->state_known;
 +		for (struct path_watch *watch = event->paths; watch; watch = watch->next) {
 +			if (retry && watch->incomplete) watch->dirty = true;
++			if (watch->initialized && !watch->changed && !watch->dirty) continue;
++			examined = true;
 +			changed |= refresh_path(watch);
 +		}
 +		if (event->watchpaths) {
@@ -15807,6 +15940,8 @@ index 00000000..b8c63a70
 +			if (event->pending && time >= event->pending) pulse_watchpaths(event);
 +			continue;
 +		}
++		/* Levels only change with their paths. */
++		if (!examined) continue;
 +		xpc_object_t paths = xpc_dictionary_get_value(event->description, "QueueDirectories");
 +		if (paths && xpc_get_type(paths) == XPC_TYPE_ARRAY) {
 +			for (size_t i = 0; i < xpc_array_get_count(paths); ++i) {
@@ -15830,19 +15965,32 @@ index 00000000..b8c63a70
 +	}
 +}
 +
-+/* Sleep until the earliest pending pulse, but at most one second so the stat
-+ * snapshots still catch changes inotify cannot report.
++/* How long to sleep: until the earliest pending pulse or, while a watch is
++ * incomplete, its next retry. Returns false when nothing is due, so the agent
++ * blocks until inotify or launchd's SIGUSR1 wakes it; with no registrations it
++ * never wakes on its own.
 + */
-+static struct timespec next_timeout(double time)
++static bool next_timeout(double time, double next_retry, struct timespec *timeout)
 +{
-+	double wait = 1.0;
++	bool due = false;
++	double wait = 0;
 +	for (struct event *event = events; event; event = event->next) {
-+		if (event->pending && event->pending - time < wait)
++		if (event->pending && (!due || event->pending - time < wait)) {
 +			wait = event->pending - time;
++			due = true;
++		}
++		for (struct path_watch *watch = event->paths; watch; watch = watch->next) {
++			if (watch->incomplete && (!due || next_retry - time < wait)) {
++				wait = next_retry - time;
++				due = true;
++			}
++		}
 +	}
++	if (!due) return false;
 +	if (wait < 0.01) wait = 0.01;
-+	struct timespec timeout = { (time_t)wait, (long)((wait - (time_t)wait) * 1e9) };
-+	return timeout;
++	timeout->tv_sec = (time_t)wait;
++	timeout->tv_nsec = (long)((wait - (time_t)wait) * 1e9);
++	return true;
 +}
 +
 +int main(void)
@@ -15865,24 +16013,28 @@ index 00000000..b8c63a70
 +	/* launchd serves event routines directly on the bootstrap port. */
 +	launchd_pipe = xpc_pipe_create_from_port(bootstrap_port, 0);
 +	if (!launchd_pipe) return 1;
++	/* launchd announces every registration change with SIGUSR1. The kqueue
++	 * signal filter was armed above and keeps the signal pending until it is
++	 * read (it is blocked, not discarded), so no timer re-checks registrations.
++	 */
 +	provider_check_in();
-+	double last_check_in = now(), last_retry = last_check_in;
++	double last_retry = now();
 +
 +	for (;;) {
 +		double time = now();
 +		bool retry = time - last_retry >= RETRY_SECONDS;
 +		if (retry) last_retry = time;
 +		evaluate_events(time, retry);
-+		if (registrations_changed || time - last_check_in >= RECHECK_SECONDS) {
++		if (registrations_changed) {
 +			registrations_changed = false;
 +			provider_check_in();
-+			last_check_in = now();
 +			continue;
 +		}
 +
-+		struct timespec timeout = next_timeout(time);
++		struct timespec timeout;
++		bool timed = next_timeout(time, last_retry + RETRY_SECONDS, &timeout);
 +		struct kevent notifications[16];
-+		int count = kevent(queue, NULL, 0, notifications, 16, &timeout);
++		int count = kevent(queue, NULL, 0, notifications, 16, timed ? &timeout : NULL);
 +		if (count < 0) {
 +			if (errno == EINTR) continue;
 +			perror("UserEventAgent: kevent"); return 1;
@@ -15894,10 +16046,7 @@ index 00000000..b8c63a70
 +			else if (notifications[i].filter == EVFILT_READ && (int)notifications[i].ident == notify)
 +				drain_notifications();
 +		}
-+		if (recheck) {
-+			provider_check_in();
-+			last_check_in = now();
-+		}
++		if (recheck) provider_check_in();
 +	}
 +}
 diff --git a/src/launchd/CMakeLists.txt b/src/launchd/CMakeLists.txt

@@ -80,14 +80,40 @@ class FSEventsMonitorSourceTests(unittest.TestCase):
         self.assertRegex(main, r'xpc_pipe_create_from_port\(bootstrap_port,\s*0\)')
         self.assertNotIn('XPC_PIPE_USE_SYNC_IPC_OVERRIDE', main)
 
-    def test_sigusr1_and_a_timer_both_recheck_registrations(self):
+    def test_sigusr1_rechecks_registrations(self):
         code = additions(SOURCE)
         main = function_body(code, 'main')
         self.assertIn('EVFILT_SIGNAL', main)
         self.assertRegex(main, r'(?s)ident == SIGUSR1\).*?recheck = true;')
-        self.assertRegex(main, r'(?s)if \(recheck\) \{\s*provider_check_in\(\);')
-        # A lost SIGUSR1 must not leave new jobs unwatched forever.
-        self.assertRegex(main, r'time - last_check_in >= RECHECK_SECONDS')
+        self.assertRegex(main, r'if \(recheck\) provider_check_in\(\);')
+        # The signal filter is armed before CHECK_IN and keeps SIGUSR1 pending,
+        # so no timer polls launchd for registrations.
+        self.assertLess(main.index('EVFILT_SIGNAL'), main.index('provider_check_in();'))
+        self.assertNotIn('RECHECK_SECONDS', code)
+
+    def test_idle_agent_blocks_without_a_timeout(self):
+        # With nothing pending and every watch complete, kevent gets no timeout:
+        # the agent sleeps until inotify or SIGUSR1 instead of waking every second.
+        code = additions(SOURCE)
+        main = function_body(code, 'main')
+        self.assertRegex(main, r'kevent\(queue, NULL, 0, notifications, 16, timed \? &timeout : NULL\)')
+        self.assertNotIn('1.0', function_body(code, 'next_timeout'))
+
+    def test_only_reported_paths_are_examined(self):
+        # No stat of every watched path on each wakeup: refresh_path runs for
+        # a path inotify reported, or on a retry of an incomplete watch.
+        evaluate = function_body(additions(SOURCE), 'evaluate_events')
+        self.assertRegex(evaluate, r'if \(watch->initialized && !watch->changed && !watch->dirty\) continue;')
+
+    def test_directory_changes_update_only_their_subtree(self):
+        code = additions(SOURCE)
+        notification = function_body(code, 'handle_notification')
+        self.assertIn('tree_remove_below(watch, child)', notification)
+        self.assertIn('watch_subtree_added(watch, child)', notification)
+        rebuild = function_body(code, 'watch_rebuild')
+        # A full rebuild arms the new descriptors before releasing the old ones.
+        self.assertLess(rebuild.index('watch_tree(watch, target, &budget)'),
+                        rebuild.index('tree_entry_release(&old_tree[i])'))
 
     def test_one_inotify_instance_serves_every_watch(self):
         code = additions(SOURCE)
@@ -146,6 +172,38 @@ class LaunchdWatchPathsTests(unittest.TestCase):
         set_state = function_body(additions(CORE), 'xpc_event_provider_set_state')
         self.assertNotIn('start_pending', set_state)
 
+    def test_first_registration_survives_an_unwritable_database(self):
+        # If the record cannot be stored, launchd still runs the first
+        # registration once and remembers it for the session.
+        compiler = find_compiler()
+        if not compiler:
+            self.skipTest('clang required')
+        code = additions(CORE)
+        functions = []
+        for name in ('externalevent_watchpaths_seen_this_session',
+                     'externalevent_first_watchpaths_registration'):
+            signature = re.search(r'^static bool\n' + name + r'\([^;{}]*\)\s*\{', code, re.M)
+            self.assertIsNotNone(signature, name + ' definition must be present')
+            functions.append(signature.group(0) + function_body(code, name) + '}')
+        declaration = re.search(r'struct watchpaths_label \{.*?\n\};\nstatic struct watchpaths_label \*s_watchpaths_labels;',
+                                code, re.S)
+        self.assertIsNotNone(declaration, 'the session list must be declared')
+        harness = (MARKER_HARNESS
+                   .replace('/* MARKER_DECLARATIONS */', declaration.group(0))
+                   .replace('/* MARKER_FUNCTIONS */', '\n\n'.join(functions)))
+        with tempfile.TemporaryDirectory(prefix='watchpaths-marker-') as folder:
+            directory = Path(folder)
+            source, binary = directory / 'check.c', directory / 'check'
+            source.write_text(harness)
+            build = subprocess.run([compiler, '-std=gnu11', '-Wall', '-Werror',
+                                    str(source), '-o', str(binary)],
+                                   capture_output=True, text=True, timeout=60)
+            self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+            result = subprocess.run([str(binary)], cwd=directory, capture_output=True,
+                                    text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('WATCHPATHS_MARKER_PASS', result.stdout)
+
 
 class FSEventsHostTests(unittest.TestCase):
     """Run the distributed watcher code against real inotify on the host."""
@@ -157,14 +215,14 @@ class FSEventsHostTests(unittest.TestCase):
         code = additions(SOURCE)
         self.assertTrue(code, 'monitor source must be distributed')
         pieces = []
-        for name in ('COALESCE_SECONDS', 'MAX_TREE_DIRECTORIES'):
+        for name in ('COALESCE_SECONDS', 'MAX_TREE_DIRECTORIES', 'RETRY_SECONDS'):
             match = re.search(r'^#define ' + name + r' .*$', code, re.M)
             self.assertIsNotNone(match, name + ' must be defined')
             pieces.append(match.group(0))
         match = re.search(r'^#define TREE_MASK .*?\n(?:\t.*\n)*', code, re.M)
         self.assertIsNotNone(match, 'TREE_MASK must be defined')
         pieces.append(match.group(0))
-        for name in ('descriptor', 'path_watch', 'event'):
+        for name in ('descriptor', 'tree_entry', 'path_watch', 'event'):
             match = re.search(r'struct ' + name + r' \{.*?\n\};', code, re.S)
             self.assertIsNotNone(match, name + ' declaration must be present')
             pieces.append(match.group(0))
@@ -172,11 +230,14 @@ class FSEventsHostTests(unittest.TestCase):
         functions = []
         for name in ('allocate', 'copy_string', 'pulse_watchpaths',
                      'descriptor_acquire', 'descriptor_release', 'tree_add',
-                     'tree_contains', 'watch_release', 'watch_tree', 'parent_path',
+                     'tree_find', 'tree_has_path', 'tree_entry_release',
+                     'tree_remove_below', 'tree_remove_descriptor', 'watch_release',
+                     'watch_tree', 'watch_subtree_added', 'parent_path',
                      'component_below', 'watch_rebuild', 'same_snapshot',
                      'refresh_path', 'handle_notification', 'drain_notifications',
                      'directory_nonempty', 'pathstate_matches', 'add_path',
-                     'new_event', 'free_event', 'reconcile_events', 'evaluate_events'):
+                     'new_event', 'free_event', 'reconcile_events', 'evaluate_events',
+                     'next_timeout'):
             signature = re.search(r'^static [^\n]+\b' + name + r'\s*\([^;{}]*\)\s*\{',
                                   code, re.M)
             self.assertIsNotNone(signature, name + ' definition must be present')
@@ -314,6 +375,18 @@ static void register_events(size_t count, const uint64_t *tokens, xpc_object_t *
     struct object registrations={.type=XPC_TYPE_ARRAY,.count=2*count,.items=items};
     reconcile_events(&registrations);
 }
+static struct path_watch *watch_for(uint64_t token) {
+    for (struct event *e = events; e; e = e->next) if (e->token == token) return e->paths;
+    abort();
+}
+static size_t tree_index(struct path_watch *w, const char *suffix) {
+    size_t n = strlen(suffix);
+    for (size_t i = 0; i < w->tree_count; ++i) {
+        size_t l = strlen(w->tree[i].path);
+        if (l >= n && !strcmp(w->tree[i].path + l - n, suffix)) return i;
+    }
+    abort();
+}
 static size_t descriptor_count(void) {
     size_t n = 0; for (struct descriptor *d = descriptors; d; d = d->next) ++n; return n;
 }
@@ -340,12 +413,46 @@ int main(void) {
     /* A directory created later is watched too. */
     assert(mkdir("w/sub/new",0700)==0); settle(); assert(pulses(1) == 8);
     touch("w/sub/new/file"); settle();            assert(pulses(1) == 9);
+    /* Directory changes below the path update only their subtree: no full
+     * rebuild, and descriptors of unrelated directories are kept. */
+    {
+        struct path_watch *w = watch_for(1);
+        size_t count = w->tree_count;
+        int inner = w->tree[tree_index(w, "w/sub/inner")].wd;
+        assert(mkdir("w/sub/n1",0700)==0 && mkdir("w/sub/n1/n2",0700)==0);
+        drain_notifications();
+        assert(!w->dirty && w->tree_count == count + 2);
+        assert(w->tree[tree_index(w, "w/sub/inner")].wd == inner);
+        touch("w/sub/n1/n2/f"); settle();         assert(pulses(1) == 10); /* nested new dir */
+        assert(unlink("w/sub/n1/n2/f")==0 && rmdir("w/sub/n1/n2")==0); drain_notifications();
+        assert(!w->dirty && w->tree_count == count + 1);
+        settle();                                 assert(pulses(1) == 11);
+        assert(rename("w/sub/n1","moved-out")==0); drain_notifications();
+        assert(!w->dirty && w->tree_count == count);
+        settle();                                 assert(pulses(1) == 12);
+        touch("moved-out/f"); settle();           assert(pulses(1) == 12); /* left the tree */
+        assert(rename("moved-out","w/moved-in")==0); drain_notifications();
+        assert(!w->dirty && w->tree_count == count + 1);
+        settle();                                 assert(pulses(1) == 13);
+        touch("w/moved-in/f"); settle();          assert(pulses(1) == 14);
+        assert(w->tree[tree_index(w, "w/sub/inner")].wd == inner);
+        size_t before = update_count;
+        evaluate_events(clock_time, false); clock_time += 10;
+        evaluate_events(clock_time, false);
+        assert(update_count == before);           /* nothing reported, nothing sent */
+        struct timespec idle;
+        assert(!next_timeout(clock_time, clock_time + RETRY_SECONDS, &idle)); /* blocks */
+        touch("w/g"); drain_notifications(); evaluate_events(clock_time, false);
+        assert(next_timeout(clock_time, clock_time + RETRY_SECONDS, &idle));  /* pulse due */
+        assert(idle.tv_sec == 0 && idle.tv_nsec > 0);
+        settle();                                 assert(pulses(1) == 15);
+    }
     /* Rename the whole watched directory away and back. */
-    assert(rename("w","w-away")==0); settle();    assert(pulses(1) == 10);
-    touch("w-away/ignored"); settle();            assert(pulses(1) == 10);
-    assert(rename("w-away","w")==0); settle();    assert(pulses(1) == 11);
-    touch("w/sub/inner/again"); settle();         assert(pulses(1) == 12);
-    settle(); settle();                           assert(pulses(1) == 12); /* idle */
+    assert(rename("w","w-away")==0); settle();    assert(pulses(1) == 16);
+    touch("w-away/ignored"); settle();            assert(pulses(1) == 16);
+    assert(rename("w-away","w")==0); settle();    assert(pulses(1) == 17);
+    touch("w/sub/inner/again"); settle();         assert(pulses(1) == 18);
+    settle(); settle();                           assert(pulses(1) == 18); /* idle */
 
     /* --- A watched path that does not exist yet ------------------------- */
     struct desc missing; xpc_object_t d2 = watchpaths(&missing, "m/later", NULL);
@@ -361,7 +468,7 @@ int main(void) {
     assert(mkdir("m/later",0700)==0); settle();   assert(pulses(2) == 5); /* recreated */
     touch("m/later/y"); settle();                 assert(pulses(2) == 6);
     touch("m/unrelated"); settle();               assert(pulses(2) == 6);
-    assert(pulses(1) == 12);
+    assert(pulses(1) == 18);
 
     /* --- Symlink, file target, and two jobs on one path ------------------ */
     assert(mkdir("real",0700)==0 && symlink("real","link")==0);
@@ -426,8 +533,65 @@ int main(void) {
     /* --- Everything released on unload ----------------------------------- */
     register_events(0, NULL, NULL);
     assert(events == NULL && descriptor_count() == 0);
+    struct timespec none; assert(!next_timeout(clock_time, clock_time + 1, &none));
     assert(qdesc.refs == 0 && pdesc.refs == 0 && fifo.dict.refs == 0);
     puts("FSEVENTS_HOST_PASS");
+    return 0;
+}
+'''
+
+
+MARKER_HARNESS = r'''
+#define _GNU_SOURCE
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <syslog.h>
+#include <unistd.h>
+
+struct job { const char *label; };
+typedef struct job *job_t;
+#define LAUNCHD_PERSISTENT_STORE_DB 1
+static const char *store = "db";
+static char *launchd_copy_persistent_store(int type, const char *name) {
+    char *path = NULL;
+    (void)type;
+    if (asprintf(&path, "%s/%s", store, name) < 0) return NULL;
+    return path;
+}
+static void job_log(job_t j, int level, const char *format, ...) { (void)j; (void)level; (void)format; }
+
+/* MARKER_DECLARATIONS */
+/* MARKER_FUNCTIONS */
+
+int main(void) {
+    struct job a = {"com.example.a"}, b = {"com.example.b"}, c = {"com.example.c"};
+
+    /* A writable database: first registration once, across sessions. */
+    assert(mkdir("db", 0700) == 0);
+    assert(externalevent_first_watchpaths_registration(&a));
+    assert(!externalevent_first_watchpaths_registration(&a));
+    s_watchpaths_labels = NULL;                  /* a new launchd session */
+    assert(!externalevent_first_watchpaths_registration(&a));
+
+    /* The database cannot be written (a file where its directory goes):
+     * the job still runs once, and only once this session. */
+    int fd = open("broken", O_CREAT | O_WRONLY, 0600); assert(fd >= 0); close(fd);
+    store = "broken";
+    assert(externalevent_first_watchpaths_registration(&b));
+    assert(!externalevent_first_watchpaths_registration(&b));
+    assert(externalevent_first_watchpaths_registration(&c));
+
+    /* The database becomes writable later: no second first run. */
+    store = "db";
+    assert(!externalevent_first_watchpaths_registration(&b));
+    puts("WATCHPATHS_MARKER_PASS");
     return 0;
 }
 '''
