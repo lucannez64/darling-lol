@@ -45,15 +45,11 @@ if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
   fi
 elif [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
   backend=${DARLING_LOL_TOOLBOX_BACKEND:-distrobox}
-  name=${DARLING_LOL_TOOLBOX_NAME:-$recorded_toolbox}
-  if [ -z "$name" ]; then
-    name=$(sed -n 's/^Exec=distrobox enter --no-tty --name \([^ ]*\) -- .*$/\1/p' \
-      "${HOME:-}/.local/share/applications/darling-launcher.desktop" 2>/dev/null | head -n 1)
-  fi
+  name=${DARLING_LOL_TOOLBOX_NAME:-$CONTAINER_ID}
   if [ "$backend" = distrobox ]; then
-    set -- --distrobox "${name:-$CONTAINER_ID}"
+    set -- --distrobox "$name"
   else
-    set -- --toolbox "${name:-$CONTAINER_ID}"
+    set -- --toolbox "$name"
   fi
 elif [ "${DARLING_LOL_TOOLBOX:-0}" = 1 ]; then
   backend=${DARLING_LOL_TOOLBOX_BACKEND:-$recorded_backend}

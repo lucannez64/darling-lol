@@ -131,3 +131,28 @@ class CreateDesktopEntryTests(unittest.TestCase):
                                 env=env, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), ['--distrobox', 'my-dbx'])
+
+    def test_inside_distrobox_prefers_live_container_id_over_stale_marker(self):
+        self.record_toolbox('old-box')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        containerenv = self.repo / 'containerenv'
+        containerenv.write_text('name="new-box"\n')
+        env = {**os.environ, 'HOME': str(self.home),
+               'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
+               'DARLING_TOOLBOX_ENV': str(self.repo / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(containerenv),
+               'DARLING_LOL_TOOLBOX': '0',
+               'DARLING_LOL_TOOLBOX_NAME': '',
+               'DARLING_LOL_TOOLBOX_BACKEND': '',
+               'CONTAINER_ID': 'new-box',
+               'DARLING_LOL_WINDOW_ENTRIES': '0'}
+        result = subprocess.run(['sh', str(self.repo / 'scripts/create-desktop-entry.sh')],
+                                env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ['--distrobox', 'new-box'])
+
+        env['DARLING_LOL_TOOLBOX_NAME'] = 'override-box'
+        override = subprocess.run(['sh', str(self.repo / 'scripts/create-desktop-entry.sh')],
+                                  env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(override.returncode, 0, override.stderr)
+        self.assertEqual(json.loads(override.stdout), ['--distrobox', 'override-box'])

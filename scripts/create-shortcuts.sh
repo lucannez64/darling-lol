@@ -181,11 +181,11 @@ parse_args() {
       --toolbox=*) TOOLBOX=${1#--toolbox=}; TOOLBOX_SET=1; TOOLBOX_FLAG=1 ;;
       --distrobox)
         (( $# >= 2 )) || fail '--distrobox requires a value.'
-        TOOLBOX=$2; TOOLBOX_SET=1; DISTROBOX_SET=1; CONTAINER_BACKEND=distrobox
+        TOOLBOX=$2; TOOLBOX_SET=1; DISTROBOX_SET=1
         shift
         ;;
       --distrobox=*)
-        TOOLBOX=${1#--distrobox=}; TOOLBOX_SET=1; DISTROBOX_SET=1; CONTAINER_BACKEND=distrobox
+        TOOLBOX=${1#--distrobox=}; TOOLBOX_SET=1; DISTROBOX_SET=1
         ;;
       --window-entries) WINDOW_ENTRIES=1 ;;
       --env)
@@ -296,21 +296,23 @@ detect_toolbox_install() {
 choose_target() {
   if (( INSIDE_TOOLBOX )); then
     local backend=${CONTAINER_BACKEND:-toolbox}
-    if [[ -z ${DARLING_LOL_TOOLBOX_BACKEND:-} && -f $TARGET_DIR/build/toolbox-backend ]] &&
+    if [[ ! -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]] &&
+       [[ -z ${DARLING_LOL_TOOLBOX_BACKEND:-} && -f $TARGET_DIR/build/toolbox-backend ]] &&
        [[ $(<"$TARGET_DIR/build/toolbox-backend") == distrobox ]]; then
       backend=distrobox
     fi
     local container=${DARLING_LOL_TOOLBOX_NAME:-}
-    if [[ -z $container && -f $TARGET_DIR/build/toolbox-container ]]; then
-      container=$(<"$TARGET_DIR/build/toolbox-container")
-    fi
     if [[ -z $container && $backend == distrobox && -n ${CONTAINER_ID:-} ]]; then
       container=$CONTAINER_ID
+    fi
+    if [[ -z $container && -f $TARGET_DIR/build/toolbox-container ]]; then
+      container=$(<"$TARGET_DIR/build/toolbox-container")
     fi
     container=${container:-$DEFAULT_TOOLBOX}
     local label='Toolbox'
     if [[ $backend == distrobox ]]; then label='Distrobox'; fi
-    if (( TOOLBOX_SET )) && [[ $TOOLBOX != "$container" ]]; then
+    if (( TOOLBOX_SET )) &&
+       [[ $TOOLBOX != "$container" || ( $DISTROBOX_SET -eq 1 && $backend != distrobox ) || ( $TOOLBOX_FLAG -eq 1 && $backend != toolbox ) ]]; then
       warning "Running inside $label '$container'; ignoring container override '$TOOLBOX'."
     fi
     TOOLBOX=$container
