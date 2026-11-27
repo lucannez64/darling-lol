@@ -268,7 +268,7 @@
       "revision": "5a3e5b529d25c70257dcfa97e94f1826e71e9f40",
       "repository": "https://github.com/darlinghq/darling-libplatform.git",
       "patch": "patches/libplatform.patch",
-      "modified_files": 6,
+      "modified_files": 7,
       "new_files": [
         "private/platform/string_avx2.h"
       ]
