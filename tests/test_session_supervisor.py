@@ -546,6 +546,30 @@ class ToolboxSessionTests(unittest.TestCase):
         _code, stop = self.run_supervisor(container=self.container)
         stop.assert_not_called()
 
+    def test_toolbox_worker_named_entrypoint_keeps_container_running(self):
+        worker = fake_process(self.proc, 12346, comm='entrypoint', ppid=1)
+        (worker / 'cmdline').write_bytes(b'/opt/worker/entrypoint\0--serve\0')
+        (worker / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_distrobox_child_or_exec_entrypoint_keeps_container_running(self):
+        shutil.rmtree(self.proc / '12345')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        for pid, ppid, cmd, cgroup in (
+            (22346, 22345, b'/opt/worker/entrypoint\0', '0::/user.slice/libpod-abc123.scope\n'),
+            (22347, 22345, b'/usr/bin/entrypoint\0--child\0', '0::/user.slice/libpod-abc123.scope\n'),
+            (22348, 1, b'/usr/bin/entrypoint\0--exec\0', '0::/user.slice/libpod-abc123.scope/exec\n'),
+        ):
+            proc = fake_process(self.proc, pid, comm='entrypoint', ppid=ppid)
+            (proc / 'cmdline').write_bytes(cmd)
+            (proc / 'cgroup').write_text(cgroup)
+            _code, stop = self.run_supervisor(container=self.container)
+            stop.assert_not_called()
+            shutil.rmtree(proc)
+
     def test_launcher_helpers_do_not_block_the_stop(self):
         for pid, name in enumerate(('close-league-client-in-game.py',
                                     'discord-ipc-relay.py',

@@ -493,6 +493,19 @@ def in_container_scope(proc, unit):
         return False
 
 
+def in_container_scope_root(proc, unit):
+    """True when `proc` sits directly in `unit`, not in a nested sub-cgroup."""
+    try:
+        for line in (proc / 'cgroup').read_text().splitlines():
+            if line.startswith('0::'):
+                parts = Path(line[3:]).parts
+                if parts and parts[-1] == unit:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def launcher_helper(script):
     """True when `script` is one of the helpers installed beside this module."""
     try:
@@ -501,17 +514,20 @@ def launcher_helper(script):
         return False
 
 
+DISTROBOX_INIT_PATHS = ('/usr/bin/entrypoint', '/usr/bin/distrobox-init')
+
+
 def is_container_init(args):
-    """Return 'toolbox' or 'distrobox' when `args` is that container's init."""
+    """Return 'toolbox' or 'distrobox' when `args` matches that container's init."""
     if not args:
         return None
     cmd = Path(args[0]).name
     if cmd == 'toolbox' and 'init-container' in args[1:]:
         return 'toolbox'
-    if cmd == 'entrypoint':
+    if args[0] in DISTROBOX_INIT_PATHS:
         return 'distrobox'
     if (len(args) > 1 and cmd in ('sh', 'dash', 'bash')
-            and Path(args[1]).name in ('entrypoint', 'distrobox-init')):
+            and args[1] in DISTROBOX_INIT_PATHS):
         return 'distrobox'
     return None
 
@@ -521,10 +537,7 @@ def toolbox_state(container_id, proc_root):
     unit = 'libpod-%s.scope' % container_id
     if not in_container_scope(proc_root / 'self', unit):
         return None, False
-    members = []
-    instance = None
-    init_pid = None
-    init_kind = None
+    scoped = []
     for proc in proc_root.iterdir():
         if not proc.name.isdigit() or int(proc.name) == os.getpid():
             continue
@@ -534,14 +547,24 @@ def toolbox_state(container_id, proc_root):
         if info is not None and info[0] in ('Z', 'X'):
             continue
         args = command_line(proc)
-        kind = is_container_init(args) if info is not None else None
-        if kind is not None:
-            # Both the mount namespace inode and PID can be reused at restart.
-            instance = '%s:%d' % (proc.name, info[2])
-            init_pid = int(proc.name)
-            init_kind = kind
+        scoped.append((int(proc.name), proc, info, args))
+    scope_pids = {pid for pid, _proc, _info, _args in scoped}
+    candidates = []
+    for pid, proc, info, args in scoped:
+        if info is None or info[1] in scope_pids or not in_container_scope_root(proc, unit):
             continue
-        members.append((info, args))
+        kind = is_container_init(args)
+        if kind is not None:
+            candidates.append((0 if kind == 'toolbox' else 1, info[2], pid, info, kind))
+    instance = None
+    init_pid = None
+    init_kind = None
+    if candidates:
+        candidates.sort()
+        _rank, start_ticks, init_pid, _info, init_kind = candidates[0]
+        # Both the mount namespace inode and PID can be reused at restart.
+        instance = '%s:%d' % (init_pid, start_ticks)
+    members = [(info, args) for pid, _proc, info, args in scoped if pid != init_pid]
     idle = True
     for info, args in members:
         if (init_kind == 'distrobox' and info is not None
