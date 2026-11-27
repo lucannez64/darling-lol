@@ -258,6 +258,8 @@ typedef unsigned int mach_port_name_t;
 #define VM_PROT_WRITE 2
 #define VM_PROT_EXECUTE 4
 #define LINUX_ENOENT 2
+#define LINUX_EINVAL 22
+#define LINUX_ENOTTY 25
 #define SENTINEL 0x7777
 static mach_port_name_t mach_task_self(void) {{ return 0x103; }}
 static int g_fail_ioctl;

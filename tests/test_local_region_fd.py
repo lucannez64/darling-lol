@@ -39,6 +39,7 @@ HARNESS = r'''
 typedef int kern_return_t;
 typedef unsigned int mach_port_name_t;
 #define KERN_SUCCESS 0
+#define KERN_INVALID_ADDRESS 1
 #define KERN_NO_SPACE 3
 #define VM_PROT_READ 1
 #define VM_PROT_WRITE 2
