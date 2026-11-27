@@ -953,8 +953,10 @@ class OmarchyTests(unittest.TestCase):
                 'detect_distribution\n'
                 'printf "FAMILY=%s IS_OMARCHY=%s\\n" "$FAMILY" "$IS_OMARCHY"\n'
             )
+            # Expose only what sourcing the installer needs, wherever it lives.
+            base_path = bin_sandbox(folder, 'bash', 'dirname', 'basename')
             return run_sourced(snippet, DARLING_OS_RELEASE=str(release_file),
-                               PATH='/usr/bin:/bin')
+                               PATH=str(base_path))
 
     def test_detects_omarchy_from_os_release(self):
         for release in ('ID=omarchy\nID_LIKE=arch\n', 'ID=arch\nID_LIKE=omarchy\n'):
@@ -969,7 +971,8 @@ class OmarchyTests(unittest.TestCase):
 
     def install(self, *, omarchy_command):
         with tempfile.TemporaryDirectory(prefix='install-native-omarchy ') as folder:
-            bin_dir = Path(folder) / 'bin'
+            # bin_sandbox() owns folder/bin; keep the stubs apart from it.
+            bin_dir = Path(folder) / 'stubs'
             bin_dir.mkdir()
             calls = Path(folder) / 'calls'
             names = ['sudo', 'git'] + (['omarchy'] if omarchy_command else [])
@@ -982,7 +985,8 @@ class OmarchyTests(unittest.TestCase):
                 'FAMILY=arch\nIS_OMARCHY=1\nYES=1\nPACKAGES=(cmake clang)\n'
                 'install_packages\n'
             )
-            result = run_sourced(snippet, PATH=f'{bin_dir}:/usr/bin:/bin')
+            base_path = bin_sandbox(folder, 'bash', 'dirname', 'basename')
+            result = run_sourced(snippet, PATH=f'{bin_dir}:{base_path}')
             self.assertEqual(result.returncode, 0, result.stderr)
             return calls.read_text()
 

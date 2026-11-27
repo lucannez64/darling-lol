@@ -14,6 +14,7 @@ import re
 import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -87,7 +88,8 @@ class RootCertificateTests(unittest.TestCase):
         stubs = self.root / 'bin'
         stubs.mkdir()
         for name, text in (('darling', DARLING_STUB), ('security', SECURITY_STUB)):
-            (stubs / name).write_text(text)
+            # /usr/bin/env is not everywhere (e.g. the Nix build sandbox).
+            (stubs / name).write_text(text.replace('#!/usr/bin/env python3', '#!' + sys.executable, 1))
             (stubs / name).chmod(0o755)
         self.darling = [str(stubs / 'darling')]
         self.log = self.root / 'darling.log'

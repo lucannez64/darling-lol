@@ -36,6 +36,18 @@ class PrefixTests(unittest.TestCase):
                                        PYTHONDONTWRITEBYTECODE='1'),
                               text=True, capture_output=True, timeout=30)
 
+    def require_user_xattrs(self):
+        # A real cross-device copy checks user.* xattrs on the target; some
+        # build sandboxes (e.g. Nix's /build) do not support them.
+        probe = self.folder / '.xattr-probe'
+        probe.touch()
+        try:
+            os.setxattr(probe, 'user.test', b'1')
+        except OSError:
+            self.skipTest('the temporary directory has no user xattrs')
+        finally:
+            probe.unlink()
+
     def saved_prefix(self):
         return json.loads((self.workspace / 'build/config.json').read_text())['prefix']
 
@@ -49,6 +61,7 @@ class PrefixTests(unittest.TestCase):
         self.assertEqual(self.saved_prefix(), str(new))
 
     def test_copies_across_filesystems_and_removes_the_old_copy_last(self):
+        self.require_user_xattrs()
         spec = importlib.util.spec_from_file_location('nix_prefix', self.workspace / 'scripts/nix-prefix.py')
         prefix = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(prefix)
@@ -91,6 +104,7 @@ class PrefixTests(unittest.TestCase):
         return patch.object(prefix.os, 'rename', rename_across)
 
     def test_copy_leaves_an_existing_partial_directory_alone(self):
+        self.require_user_xattrs()
         prefix = self.load()
         new = self.folder / 'bulk/prefix'
         unrelated = self.folder / 'bulk/prefix.partial'
@@ -107,7 +121,8 @@ class PrefixTests(unittest.TestCase):
         new = self.folder / 'bulk/prefix'
         new.parent.mkdir()
         error = subprocess.CalledProcessError(1, 'cp')
-        with self.cross_device(prefix), patch.object(prefix.subprocess, 'run', side_effect=error):
+        with self.cross_device(prefix), patch.object(prefix, 'check_xattrs'), \
+                patch.object(prefix.subprocess, 'run', side_effect=error):
             with self.assertRaises(subprocess.CalledProcessError):
                 prefix.move(self.old, new)
         self.assertEqual((self.old / 'Applications/League of Legends.app/game').read_text(), 'game data')

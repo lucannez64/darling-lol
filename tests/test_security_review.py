@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -102,6 +103,9 @@ int main() {
                 os.umask(old)
 
     def test_prefix_trust_requires_an_explicit_request(self):
+        bin_true = shutil.which('true')
+        if not bin_true:
+            raise unittest.SkipTest('"true" is unavailable')
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             sdk = folder / 'sdk'
@@ -118,7 +122,7 @@ int main() {
             dct = folder / 'dct.py'
             log = folder / 'entries'
             dct.write_text('import os, pathlib, sys\nif sys.argv[1] == "default-store": print("test-store")\nelse: pathlib.Path(os.environ["DC_POLICY_LOG"]).write_text(pathlib.Path(sys.argv[-1]).read_text())\n')
-            env = dict(os.environ, DCC=str(dcc), DCT=str(dct), RCODESIGN='/bin/true', DPREFIX=str(folder / 'prefix'),
+            env = dict(os.environ, DCC=str(dcc), DCT=str(dct), RCODESIGN=bin_true, DPREFIX=str(folder / 'prefix'),
                        DC_POLICY_LOG=str(log), DARLING_SIGN_CACHE=str(folder / 'sign-cache'))
             cases = [(['--prefix'], set()), (['--sdk', '--prefix'], {'sdk-hash'}),
                      ([], {'sdk-hash'}), (['--prefix', '--trust'], {'overlay-hash'}),
