@@ -15451,10 +15451,10 @@ index 00000000..b025847a
 +</plist>
 diff --git a/src/UserEventAgent/main.c b/src/UserEventAgent/main.c
 new file mode 100644
-index 00000000..58655e07
+index 00000000..7d5417c6
 --- /dev/null
 +++ b/src/UserEventAgent/main.c
-@@ -0,0 +1,742 @@
+@@ -0,0 +1,896 @@
 +/* SPDX-License-Identifier: GPL-3.0-only
 + * Copyright (C) 2026 darling-lol contributors
 + * Filesystem LaunchEvents provider for Darling's launchd-842.
@@ -15495,15 +15495,24 @@ index 00000000..58655e07
 + * and a change while the job is still running is dropped by launchd.
 + */
 +#define COALESCE_SECONDS 0.5
-+/* Retry incomplete watches (descriptor limits, directory budget) this often.
-+ * Complete watches never poll: inotify reports every change below them and
-+ * IN_Q_OVERFLOW forces a full re-check, so the agent sleeps until an event.
++/* Retry an incomplete watch (descriptor limits, unreadable directories,
++ * directory budget) after this long, doubling the wait after each retry that
++ * still leaves it incomplete, up to RETRY_MAX_SECONDS. Complete watches never
++ * poll: inotify reports every change below them and IN_Q_OVERFLOW forces a
++ * full re-check, so the agent sleeps until an event.
 + */
 +#define RETRY_SECONDS 5.0
++#define RETRY_MAX_SECONDS 60.0
 +/* Upper bound on directories watched below one path. */
 +#define MAX_TREE_DIRECTORIES 65536
 +
-+#define TREE_MASK (IN_MODIFY | IN_ATTRIB | IN_CREATE | IN_DELETE | IN_MOVED_FROM | \
++/* IN_CLOSE_WRITE, not IN_MODIFY: a download reports every written chunk as
++ * IN_MODIFY, while launchd only needs one pulse per coalescing window. A file
++ * reports its change when the writer closes it, which is when a WatchPaths job
++ * can read it whole; a writer that keeps a file open and appends to it is
++ * reported at close (or by the directory's own changes) instead.
++ */
++#define TREE_MASK (IN_CLOSE_WRITE | IN_ATTRIB | IN_CREATE | IN_DELETE | IN_MOVED_FROM | \
 +	IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF)
 +
 +static int queue = -1;
@@ -15534,6 +15543,13 @@ index 00000000..58655e07
 +	int parent_wd;
 +	struct tree_entry *tree; /* tree[0] is path itself; for a directory, its subtree follows. */
 +	size_t tree_count, tree_capacity;
++	/* Directories below the path that have no descriptor or listing yet;
++	 * a retry handles only these. incomplete means the path itself, its
++	 * parent or the directory budget failed, which needs a full rebuild.
++	 */
++	char **missing;
++	size_t missing_count, missing_capacity;
++	double retry_at, retry_delay; /* Next retry while incomplete; 0 when none. */
 +	struct stat previous;
 +	bool existed, initialized, changed, dirty, incomplete;
 +	struct path_watch *next;
@@ -15722,31 +15738,94 @@ index 00000000..58655e07
 +	watch->parent_wd = -1;
 +}
 +
-+/* Watch a directory and every directory below it, without following
-+ * symlinks inside the tree (FSEvents reports the link, not its target).
-+ * Each directory is armed before it is listed, so a subdirectory created
-+ * meanwhile is either listed here or reported by the new descriptor.
++/* Remember a directory whose subtree is not fully watched, so a retry can
++ * handle that subtree alone.
 + */
-+static void watch_tree(struct path_watch *watch, const char *directory, size_t *budget)
++static void watch_missing(struct path_watch *watch, const char *directory)
 +{
-+	if (*budget == 0) { watch->incomplete = true; return; }
++	if (watch->missing_count == watch->missing_capacity) {
++		size_t capacity = watch->missing_capacity ? watch->missing_capacity * 2 : 4;
++		char **missing = realloc(watch->missing, capacity * sizeof(*missing));
++		if (!missing) { perror("UserEventAgent: realloc"); exit(1); }
++		watch->missing = missing;
++		watch->missing_capacity = capacity;
++	}
++	watch->missing[watch->missing_count++] = copy_string(directory);
++}
++
++static void missing_clear(struct path_watch *watch)
++{
++	for (size_t i = 0; i < watch->missing_count; ++i) free(watch->missing[i]);
++	free(watch->missing);
++	watch->missing = NULL;
++	watch->missing_count = watch->missing_capacity = 0;
++}
++
++static bool watch_needs_retry(const struct path_watch *watch)
++{
++	return watch->incomplete || watch->missing_count;
++}
++
++/* Give directory a descriptor and a tree entry. */
++static bool watch_arm(struct path_watch *watch, const char *directory, size_t *budget)
++{
++	if (*budget == 0) { watch->incomplete = true; return false; }
 +	--*budget;
 +	int wd = descriptor_acquire(directory);
-+	if (wd < 0) { watch->incomplete = true; return; }
++	if (wd < 0) { watch_missing(watch, directory); return false; }
 +	tree_add(watch, wd, directory);
++	return true;
++}
++
++/* Watch every directory below an armed directory, without following symlinks
++ * inside the tree (FSEvents reports the link, not its target). Each directory
++ * is armed before it is listed, so a subdirectory created meanwhile is either
++ * listed here or reported by the new descriptor. The listing is closed before
++ * descending, so a deep tree never holds one directory stream per level.
++ * With known set (a retry), subdirectories already watched are skipped.
++ */
++static void watch_listing(struct path_watch *watch, const char *directory, size_t *budget, bool known)
++{
 +	DIR *listing = opendir(directory);
-+	if (!listing) return;
++	if (!listing) { watch_missing(watch, directory); return; }
++	char **children = NULL;
++	size_t count = 0, capacity = 0;
++	bool listed = true;
 +	struct dirent *entry;
 +	while ((entry = readdir(listing))) {
 +		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
 +		char child[PATH_MAX];
-+		if (snprintf(child, sizeof(child), "%s/%s", directory, entry->d_name) >= (int)sizeof(child))
++		if (snprintf(child, sizeof(child), "%s/%s", directory, entry->d_name) >= (int)sizeof(child)) {
++			listed = false; /* Too long to watch; retried with this directory. */
 +			continue;
++		}
 +		struct stat info;
-+		if (lstat(child, &info) == 0 && S_ISDIR(info.st_mode))
-+			watch_tree(watch, child, budget);
++		if (lstat(child, &info) != 0) {
++			if (errno != ENOENT) listed = false;
++			continue;
++		}
++		if (!S_ISDIR(info.st_mode) || (known && tree_has_path(watch, child))) continue;
++		if (count == capacity) {
++			capacity = capacity ? capacity * 2 : 16;
++			char **grown = realloc(children, capacity * sizeof(*grown));
++			if (!grown) { perror("UserEventAgent: realloc"); exit(1); }
++			children = grown;
++		}
++		children[count++] = copy_string(child);
 +	}
 +	closedir(listing);
++	if (!listed) watch_missing(watch, directory);
++	for (size_t i = 0; i < count; ++i) {
++		if (watch_arm(watch, children[i], budget))
++			watch_listing(watch, children[i], budget, false);
++		free(children[i]);
++	}
++	free(children);
++}
++
++static void watch_tree(struct path_watch *watch, const char *directory, size_t *budget)
++{
++	if (watch_arm(watch, directory, budget)) watch_listing(watch, directory, budget, false);
 +}
 +
 +/* A directory appeared below a watched one: watch only its subtree. */
@@ -15758,6 +15837,50 @@ index 00000000..58655e07
 +	size_t budget = watch->tree_count < MAX_TREE_DIRECTORIES ?
 +		MAX_TREE_DIRECTORIES - watch->tree_count : 0;
 +	watch_tree(watch, directory, &budget);
++}
++
++/* Retry only what a watch is missing: the subtrees recorded as missing, or the
++ * whole watch (through a rebuild) when its own descriptors or the directory
++ * budget failed.
++ */
++static void watch_retry(struct path_watch *watch)
++{
++	if (watch->incomplete) { watch->dirty = true; return; }
++	char **missing = watch->missing;
++	size_t count = watch->missing_count;
++	watch->missing = NULL;
++	watch->missing_count = watch->missing_capacity = 0;
++	size_t budget = watch->tree_count < MAX_TREE_DIRECTORIES ?
++		MAX_TREE_DIRECTORIES - watch->tree_count : 0;
++	for (size_t i = 0; i < count; ++i) {
++		struct stat info;
++		/* Gone since: its parent reported that, and a recreation is walked. */
++		if (lstat(missing[i], &info) == 0 && S_ISDIR(info.st_mode)) {
++			if (tree_has_path(watch, missing[i]))
++				watch_listing(watch, missing[i], &budget, true);
++			else
++				watch_tree(watch, missing[i], &budget);
++		}
++		free(missing[i]);
++	}
++	free(missing);
++}
++
++/* Schedule the next retry of an incomplete watch, backing off after each
++ * retry that did not complete it.
++ */
++static void watch_schedule_retry(struct path_watch *watch, double time, bool retried)
++{
++	if (!watch_needs_retry(watch)) {
++		watch->retry_at = watch->retry_delay = 0;
++	} else if (retried) {
++		double delay = watch->retry_delay * 2;
++		watch->retry_delay = delay < RETRY_MAX_SECONDS ? delay : RETRY_MAX_SECONDS;
++		watch->retry_at = time + watch->retry_delay;
++	} else if (!watch->retry_at) {
++		watch->retry_delay = RETRY_SECONDS;
++		watch->retry_at = time + RETRY_SECONDS;
++	}
 +}
 +static char *parent_path(const char *path)
 +{
@@ -15800,9 +15923,11 @@ index 00000000..58655e07
 +	watch->parent_wd = -1;
 +	watch->incomplete = false;
 +	watch->dirty = false;
++	missing_clear(watch); /* The new walk records what it cannot watch. */
 +
 +	struct stat info;
-+	if (stat(watch->path, &info) == 0) {
++	bool path_existed = stat(watch->path, &info) == 0;
++	if (path_existed) {
 +		char resolved[PATH_MAX];
 +		const char *target = realpath(watch->path, resolved) ? resolved : watch->path;
 +		if (S_ISDIR(info.st_mode)) {
@@ -15839,6 +15964,23 @@ index 00000000..58655e07
 +	}
 +	watch->parent_wd = descriptor_acquire(parent);
 +	if (watch->parent_wd < 0) watch->incomplete = true;
++
++	/* The checks above ran before the parent reported anything: the path, or
++	 * the next missing directory toward it, may have been created since, and
++	 * its creation event came before the descriptor. Look again now that the
++	 * parent reports, and rebuild on the next pass if either appeared.
++	 */
++	if (!path_existed && watch->parent_wd >= 0) {
++		struct stat appeared;
++		char next[PATH_MAX];
++		if (stat(watch->path, &appeared) == 0) {
++			watch->changed = watch->dirty = true;
++		} else if (!watch->component_is_path &&
++			snprintf(next, sizeof(next), "%s/%s", parent, watch->component) < (int)sizeof(next) &&
++			stat(next, &appeared) == 0 && S_ISDIR(appeared.st_mode)) {
++			watch->dirty = true;
++		}
++	}
 +
 +	for (size_t i = 0; i < old_count; ++i) tree_entry_release(&old_tree[i]);
 +	free(old_tree);
@@ -15898,13 +16040,18 @@ index 00000000..58655e07
 +				 * nothing created inside it in the meantime is missed.
 +				 */
 +				char child[PATH_MAX];
-+				if ((entry->mask & IN_ISDIR) && entry->len &&
-+					snprintf(child, sizeof(child), "%s/%s", watch->tree[index].path,
-+						entry->name) < (int)sizeof(child)) {
-+					if (entry->mask & (IN_DELETE | IN_MOVED_FROM))
-+						tree_remove_below(watch, child);
-+					if (entry->mask & (IN_CREATE | IN_MOVED_TO))
-+						watch_subtree_added(watch, child);
++				if ((entry->mask & IN_ISDIR) && entry->len) {
++					if (snprintf(child, sizeof(child), "%s/%s", watch->tree[index].path,
++						entry->name) >= (int)sizeof(child)) {
++						/* Too long to watch; retried with its parent. */
++						if (entry->mask & (IN_CREATE | IN_MOVED_TO))
++							watch_missing(watch, watch->tree[index].path);
++					} else {
++						if (entry->mask & (IN_DELETE | IN_MOVED_FROM))
++							tree_remove_below(watch, child);
++						if (entry->mask & (IN_CREATE | IN_MOVED_TO))
++							watch_subtree_added(watch, child);
++					}
 +				}
 +			}
 +			if (entry->wd == watch->parent_wd) {
@@ -16010,6 +16157,7 @@ index 00000000..58655e07
 +		struct path_watch *watch = event->paths;
 +		event->paths = watch->next;
 +		watch_release(watch);
++		missing_clear(watch);
 +		free(watch->tree);
 +		free(watch->path);
 +		free(watch->parent);
@@ -16069,18 +16217,22 @@ index 00000000..58655e07
 +}
 +
 +/* Act on what inotify reported. Only paths with a reported change are
-+ * examined again; with retry set, incomplete watches are re-armed and every
-+ * path's snapshot is compared, since part of their tree has no descriptor.
++ * examined again. An incomplete watch whose retry is due re-arms what it is
++ * missing, and its snapshot is compared, since part of its tree had no
++ * descriptor.
 + */
-+static void evaluate_events(double time, bool retry)
++static void evaluate_events(double time)
 +{
 +	for (struct event *event = events; event; event = event->next) {
 +		bool changed = false, state = false, examined = !event->state_known;
 +		for (struct path_watch *watch = event->paths; watch; watch = watch->next) {
-+			if (retry && watch->incomplete) watch->dirty = true;
-+			if (watch->initialized && !watch->changed && !watch->dirty) continue;
-+			examined = true;
-+			changed |= refresh_path(watch);
++			bool retried = watch_needs_retry(watch) && watch->retry_at && time >= watch->retry_at;
++			if (retried) watch_retry(watch);
++			if (retried || !watch->initialized || watch->changed || watch->dirty) {
++				examined = true;
++				changed |= refresh_path(watch);
++			}
++			watch_schedule_retry(watch, time, retried);
 +		}
 +		if (event->watchpaths) {
 +			if (!event->state_known) event->state_known = set_state(event->token, false);
@@ -16113,12 +16265,12 @@ index 00000000..58655e07
 +	}
 +}
 +
-+/* How long to sleep: until the earliest pending pulse or, while a watch is
-+ * incomplete, its next retry. Returns false when nothing is due, so the agent
-+ * blocks until inotify or launchd's SIGUSR1 wakes it; with no registrations it
-+ * never wakes on its own.
++/* How long to sleep: until the earliest pending pulse, a watch left to
++ * rebuild, or an incomplete watch's next retry. Returns false when nothing is
++ * due, so the agent blocks until inotify or launchd's SIGUSR1 wakes it; with
++ * no registrations it never wakes on its own.
 + */
-+static bool next_timeout(double time, double next_retry, struct timespec *timeout)
++static bool next_timeout(double time, struct timespec *timeout)
 +{
 +	bool due = false;
 +	double wait = 0;
@@ -16128,8 +16280,13 @@ index 00000000..58655e07
 +			due = true;
 +		}
 +		for (struct path_watch *watch = event->paths; watch; watch = watch->next) {
-+			if (watch->incomplete && (!due || next_retry - time < wait)) {
-+				wait = next_retry - time;
++			double at = 0;
++			if (watch->dirty || watch->changed) at = time;
++			else if (watch_needs_retry(watch))
++				at = watch->retry_at ? watch->retry_at : time + RETRY_SECONDS;
++			else continue;
++			if (!due || at - time < wait) {
++				wait = at - time;
 +				due = true;
 +			}
 +		}
@@ -16166,13 +16323,10 @@ index 00000000..58655e07
 +	 * read (it is blocked, not discarded), so no timer re-checks registrations.
 +	 */
 +	provider_check_in();
-+	double last_retry = now();
 +
 +	for (;;) {
 +		double time = now();
-+		bool retry = time - last_retry >= RETRY_SECONDS;
-+		if (retry) last_retry = time;
-+		evaluate_events(time, retry);
++		evaluate_events(time);
 +		if (registrations_changed) {
 +			registrations_changed = false;
 +			provider_check_in();
@@ -16180,7 +16334,7 @@ index 00000000..58655e07
 +		}
 +
 +		struct timespec timeout;
-+		bool timed = next_timeout(time, last_retry + RETRY_SECONDS, &timeout);
++		bool timed = next_timeout(time, &timeout);
 +		struct kevent notifications[16];
 +		int count = kevent(queue, NULL, 0, notifications, 16, timed ? &timeout : NULL);
 +		if (count < 0) {

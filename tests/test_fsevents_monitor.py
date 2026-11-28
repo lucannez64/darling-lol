@@ -21,6 +21,7 @@ They never start Darling or a client.
 """
 from pathlib import Path
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -41,6 +42,31 @@ def additions(path):
             return '\n'.join(line[1:] for line in section.splitlines()
                              if line.startswith('+') and not line.startswith('+++'))
     return ''
+
+
+def hunks(path):
+    """Return (header, lines) for each hunk of a patch section."""
+    result = []
+    for section in (ROOT / 'patches/darling.patch').read_text().split('diff --git '):
+        if not section.startswith('a/' + path + ' b/'):
+            continue
+        for line in section.splitlines():
+            if line.startswith('@@'):
+                result.append((line, []))
+            elif result and line[:1] in (' ', '+', '-'):
+                result[-1][1].append(line)
+    return result
+
+
+def prepared_source(path):
+    """Read path from a prepared Darling checkout (DARLING_SRC), read-only."""
+    root = os.environ.get('DARLING_SRC')
+    candidates = [Path(root)] if root else []
+    candidates.append(ROOT / 'build/darling-src')
+    for candidate in candidates:
+        if (candidate / path).is_file():
+            return (candidate / path).read_text(errors='replace')
+    return None
 
 
 def function_body(code, name):
@@ -103,7 +129,50 @@ class FSEventsMonitorSourceTests(unittest.TestCase):
         # No stat of every watched path on each wakeup: refresh_path runs for
         # a path inotify reported, or on a retry of an incomplete watch.
         evaluate = function_body(additions(SOURCE), 'evaluate_events')
-        self.assertRegex(evaluate, r'if \(watch->initialized && !watch->changed && !watch->dirty\) continue;')
+        self.assertRegex(evaluate, r'if \(retried \|\| !watch->initialized \|\| watch->changed \|\| watch->dirty\) \{'
+                                   r'\s*examined = true;\s*changed \|= refresh_path\(watch\);')
+
+    def test_incomplete_watches_retry_only_what_is_missing_with_backoff(self):
+        code = additions(SOURCE)
+        self.assertRegex(code, r'(?m)^#define RETRY_MAX_SECONDS 60\.0$')
+        retry = function_body(code, 'watch_retry')
+        self.assertTrue(retry, 'watch_retry must be defined')
+        # A recorded subtree is re-listed or re-walked alone; only a failure of
+        # the path's own descriptors falls back to a full rebuild.
+        self.assertIn('watch_listing(watch, missing[i], &budget, true)', retry)
+        self.assertIn('watch_tree(watch, missing[i], &budget)', retry)
+        schedule = function_body(code, 'watch_schedule_retry')
+        self.assertIn('watch->retry_delay * 2', schedule)
+        self.assertIn('RETRY_MAX_SECONDS', schedule)
+
+    def test_listing_failures_and_long_paths_leave_the_watch_incomplete(self):
+        code = additions(SOURCE)
+        listing = function_body(code, 'watch_listing')
+        self.assertRegex(listing, r'if \(!listing\) \{ watch_missing\(watch, directory\); return; \}')
+        self.assertRegex(listing, r'(?s)>= \(int\)sizeof\(child\)\) \{\s*listed = false;')
+        self.assertIn('if (!listed) watch_missing(watch, directory);', listing)
+        # Streams are closed before descending into subdirectories.
+        self.assertLess(listing.index('closedir(listing);'), listing.index('watch_listing(watch, children[i]'))
+        notification = function_body(code, 'handle_notification')
+        self.assertRegex(notification, r'(?s)>= \(int\)sizeof\(child\)\) \{.*?'
+                                       r'watch_missing\(watch, watch->tree\[index\]\.path\);')
+
+    def test_rebuild_rechecks_after_arming_the_parent(self):
+        # A creation between the existence checks and inotify_add_watch on the
+        # parent sends its event before the descriptor exists; look again.
+        rebuild = function_body(additions(SOURCE), 'watch_rebuild')
+        arm = rebuild.index('watch->parent_wd = descriptor_acquire(parent);')
+        recheck = rebuild.index('if (!path_existed && watch->parent_wd >= 0)')
+        self.assertLess(arm, recheck)
+        self.assertRegex(rebuild[recheck:], r'(?s)stat\(watch->path, &appeared\) == 0\) \{\s*'
+                                            r'watch->changed = watch->dirty = true;')
+        self.assertRegex(rebuild[recheck:], r'(?s)S_ISDIR\(appeared\.st_mode\)\) \{\s*watch->dirty = true;')
+
+    def test_files_report_when_written_and_closed(self):
+        mask = re.search(r'^#define TREE_MASK (.*?)\n(?=\S|\n)', additions(SOURCE), re.M | re.S)
+        self.assertIsNotNone(mask)
+        self.assertIn('IN_CLOSE_WRITE', mask.group(1))
+        self.assertNotIn('IN_MODIFY', mask.group(1))
 
     def test_directory_changes_update_only_their_subtree(self):
         code = additions(SOURCE)
@@ -169,7 +238,20 @@ class LaunchdWatchPathsTests(unittest.TestCase):
 
     def test_a_change_while_the_job_runs_is_dropped_like_macos(self):
         # Measured on macOS: a touch during an 8 s run starts nothing more.
-        set_state = function_body(additions(CORE), 'xpc_event_provider_set_state')
+        # The handler is upstream code; the patch must not add a start to it.
+        for header, lines in hunks(CORE):
+            new_side = '\n'.join(line[1:] for line in lines if not line.startswith('-'))
+            if ('xpc_event_provider_set_state' in header or
+                    re.search(r'\bxpc_event_provider_set_state\s*\(job_t', new_side)):
+                added = '\n'.join(line[1:] for line in lines if line.startswith('+'))
+                self.assertNotIn('start_pending', added)
+        # When a prepared checkout is available, check the effective handler.
+        source = prepared_source(CORE)
+        if source is None:
+            self.skipTest('set DARLING_SRC to a prepared Darling checkout')
+        set_state = function_body(source, 'xpc_event_provider_set_state')
+        self.assertTrue(set_state, 'xpc_event_provider_set_state must be found')
+        self.assertIn('ei->state = state;', set_state)
         self.assertNotIn('start_pending', set_state)
 
     def test_first_registration_survives_an_unwritable_database(self):
@@ -215,7 +297,8 @@ class FSEventsHostTests(unittest.TestCase):
         code = additions(SOURCE)
         self.assertTrue(code, 'monitor source must be distributed')
         pieces = []
-        for name in ('COALESCE_SECONDS', 'MAX_TREE_DIRECTORIES', 'RETRY_SECONDS'):
+        for name in ('COALESCE_SECONDS', 'MAX_TREE_DIRECTORIES', 'RETRY_SECONDS',
+                     'RETRY_MAX_SECONDS'):
             match = re.search(r'^#define ' + name + r' .*$', code, re.M)
             self.assertIsNotNone(match, name + ' must be defined')
             pieces.append(match.group(0))
@@ -232,7 +315,10 @@ class FSEventsHostTests(unittest.TestCase):
                      'descriptor_acquire', 'descriptor_release', 'tree_add',
                      'tree_find', 'tree_has_path', 'tree_entry_release',
                      'tree_remove_below', 'tree_remove_descriptor', 'watch_release',
-                     'watch_tree', 'watch_subtree_added', 'parent_path',
+                     'watch_missing', 'missing_clear', 'watch_needs_retry',
+                     'watch_arm', 'watch_listing', 'watch_tree',
+                     'watch_subtree_added', 'watch_retry', 'watch_schedule_retry',
+                     'parent_path',
                      'component_below', 'watch_rebuild', 'same_snapshot',
                      'refresh_path', 'handle_notification', 'drain_notifications',
                      'directory_nonempty', 'pathstate_matches', 'add_path',
@@ -332,9 +418,9 @@ static double clock_time = 100;
 /* Deliver queued inotify events, then let the coalescing window elapse. */
 static void settle(void) {
     drain_notifications();
-    evaluate_events(clock_time, false);
+    evaluate_events(clock_time);
     clock_time += COALESCE_SECONDS + 0.01;
-    evaluate_events(clock_time, false);
+    evaluate_events(clock_time);
     clock_time += 0.01;
 }
 static size_t pulses(uint64_t token) {
@@ -437,13 +523,13 @@ int main(void) {
         touch("w/moved-in/f"); settle();          assert(pulses(1) == 14);
         assert(w->tree[tree_index(w, "w/sub/inner")].wd == inner);
         size_t before = update_count;
-        evaluate_events(clock_time, false); clock_time += 10;
-        evaluate_events(clock_time, false);
+        evaluate_events(clock_time); clock_time += 10;
+        evaluate_events(clock_time);
         assert(update_count == before);           /* nothing reported, nothing sent */
         struct timespec idle;
-        assert(!next_timeout(clock_time, clock_time + RETRY_SECONDS, &idle)); /* blocks */
-        touch("w/g"); drain_notifications(); evaluate_events(clock_time, false);
-        assert(next_timeout(clock_time, clock_time + RETRY_SECONDS, &idle));  /* pulse due */
+        assert(!next_timeout(clock_time, &idle)); /* blocks */
+        touch("w/g"); drain_notifications(); evaluate_events(clock_time);
+        assert(next_timeout(clock_time, &idle));  /* pulse due */
         assert(idle.tv_sec == 0 && idle.tv_nsec > 0);
         settle();                                 assert(pulses(1) == 15);
     }
@@ -495,6 +581,40 @@ int main(void) {
     uint64_t t7 = 7; register_events(1, &t7, &d7);   /* would hang if opened */
     settle(); assert(pulses(7) == 0);
 
+    /* --- An unreadable subtree is retried alone, with back-off ----------- */
+    if (geteuid() != 0) {
+        assert(mkdir("rt",0700)==0 && mkdir("rt/ok",0700)==0 && mkdir("rt/locked",0700)==0);
+        assert(mkdir("rt/locked/sub",0700)==0 && chmod("rt/locked",0)==0);
+        struct desc locked; xpc_object_t d10 = watchpaths(&locked, "rt", NULL);
+        uint64_t t10 = 10; register_events(1, &t10, &d10);
+        struct path_watch *w = watch_for(10);
+        assert(!w->incomplete && w->missing_count == 1);   /* only rt/locked */
+        int ok = w->tree[tree_index(w, "rt/ok")].wd;
+        size_t before_retry = w->tree_count;
+        evaluate_events(clock_time);                       /* schedules the first retry */
+        assert(w->retry_at == clock_time + RETRY_SECONDS);
+        struct timespec wait;
+        assert(next_timeout(clock_time, &wait) && wait.tv_sec == (time_t)RETRY_SECONDS);
+        /* Still unreadable: the wait doubles, capped at RETRY_MAX_SECONDS. */
+        double expected = RETRY_SECONDS;
+        for (int i = 0; i < 6; ++i) {
+            clock_time = w->retry_at;
+            evaluate_events(clock_time);
+            expected = expected * 2 < RETRY_MAX_SECONDS ? expected * 2 : RETRY_MAX_SECONDS;
+            assert(w->retry_delay == expected && w->missing_count == 1);
+            assert(w->tree_count == before_retry);
+        }
+        assert(w->retry_delay == RETRY_MAX_SECONDS);
+        /* Readable again: the retry adds that subtree without a rebuild. */
+        assert(chmod("rt/locked",0700)==0);
+        clock_time = w->retry_at; evaluate_events(clock_time);
+        assert(w->missing_count == 0 && w->retry_at == 0 && w->retry_delay == 0);
+        assert(w->tree[tree_index(w, "rt/ok")].wd == ok);  /* untouched */
+        (void)tree_index(w, "rt/locked/sub");
+        assert(!next_timeout(clock_time, &wait));           /* complete: blocks */
+        touch("rt/locked/sub/f"); settle(); assert(pulses(10) == 1);
+    }
+
     /* --- QueueDirectories and PathState are levels ----------------------- */
     struct object yes={.type=XPC_TYPE_BOOL,.boolean=true}, no={.type=XPC_TYPE_BOOL,.boolean=false};
     assert(mkdir("queue",0700)==0);
@@ -533,7 +653,7 @@ int main(void) {
     /* --- Everything released on unload ----------------------------------- */
     register_events(0, NULL, NULL);
     assert(events == NULL && descriptor_count() == 0);
-    struct timespec none; assert(!next_timeout(clock_time, clock_time + 1, &none));
+    struct timespec none; assert(!next_timeout(clock_time, &none));
     assert(qdesc.refs == 0 && pdesc.refs == 0 && fifo.dict.refs == 0);
     puts("FSEVENTS_HOST_PASS");
     return 0;
