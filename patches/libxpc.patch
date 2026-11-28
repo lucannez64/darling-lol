@@ -148,30 +148,88 @@ index 0870a6c..e2d4bd6 100644
  
  XPC_EXPORT
 diff --git a/src/pipe.m b/src/pipe.m
-index d04fb98..f60e6ac 100644
+index d04fb98..0f692c7 100644
 --- a/src/pipe.m
 +++ b/src/pipe.m
-@@ -209,7 +209,9 @@ out:
+@@ -45,6 +45,21 @@ XPC_LOGGER_DEF(pipe);
+ // This function allows a service to act as a proxy, and any replies from the handling service are sent directly to the original client.
+ //
+ 
++/* Pipe servers (including launchd) identify callers using the kernel trailer,
++ * just as connection receivers do. Serialized payloads carry no caller identity.
++ * Only the server receive paths attach it: the server cannot tell which
++ * requests its demuxers will authenticate (launchd's routines all do).
++ * Replies keep their previous empty token, which Libinfo's OpenDirectory
++ * reply check (_valid_token) already accepts.
++ */
++static audit_token_t* pipe_audit_token(mach_msg_header_t* header) {
++	mach_msg_trailer_t* trailer = (mach_msg_trailer_t*)((char*)header + round_msg(header->msgh_size));
++	if (trailer->msgh_trailer_type == MACH_MSG_TRAILER_FORMAT_0 && trailer->msgh_trailer_size >= sizeof(mach_msg_audit_trailer_t)) {
++		return &((mach_msg_audit_trailer_t*)trailer)->msgh_audit;
++	}
++	return NULL;
++}
++
+ XPC_CLASS_SYMBOL_DECL(pipe);
+ 
+ OS_OBJECT_NONLAZY_CLASS
+@@ -209,7 +224,14 @@ out:
  				goto out;
  			}
  
 -			*incomingMessage = dict;
++			audit_token_t* token = pipe_audit_token(header);
++			if (token) {
++				[dict setAssociatedAuditToken: token];
++			}
++
 +			// The deserializer autoreleases its result. The C pipe API
 +			// transfers an owned reference to the caller.
 +			*incomingMessage = [dict retain];
  
  			status = 0;
  		} else {
-@@ -249,7 +251,7 @@ out:
+@@ -249,7 +271,12 @@ out:
  				goto out;
  			}
  
 -			*incomingMessage = dict;
++			audit_token_t* token = pipe_audit_token(header);
++			if (token) {
++				[dict setAssociatedAuditToken: token];
++			}
++
 +			*incomingMessage = [dict retain];
  			*replyPort = header->msgh_local_port;
  
  			status = 0;
-@@ -581,7 +583,7 @@ retry:
+@@ -411,11 +438,24 @@ out:
+ 
+ 		pthread_rwlock_init(&this->state_lock, NULL);
+ 
+-		if (xpc_mach_port_retain_send(port) != KERN_SUCCESS) {
++		if (!MACH_PORT_VALID(port) || xpc_mach_port_retain_send(port) != KERN_SUCCESS) {
+ 			[self release];
+ 			return nil;
+ 		}
+ 
++		/* launchd receives routine messages directly on the bootstrap port, as
++		 * on macOS (xpc_pipe_create_from_port(bootstrap_port, 0)); it does not
++		 * accept the connection protocol's CHECKIN handshake. Select this by
++		 * destination: XPC_PIPE_USE_SYNC_IPC_OVERRIDE is Apple's QoS flag and
++		 * other callers pass it for ordinary services.
++		 * The retained right belongs solely to send_port in this mode.
++		 */
++		if (MACH_PORT_VALID(bootstrap_port) && port == bootstrap_port) {
++			this->send_port = port;
++			this->state = xpc_pipe_state_active;
++			return self;
++		}
++
+ 		this->checkin_port = port;
+ 		this->send_port = xpc_mach_port_create_send_receive();
+ 		this->recv_port = xpc_mach_port_create_receive();
+@@ -581,7 +621,7 @@ retry:
  					goto out;
  				}
  
