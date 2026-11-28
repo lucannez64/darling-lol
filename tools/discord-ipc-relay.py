@@ -12,6 +12,16 @@ unchanged, except that the ``pid`` argument of SET_ACTIVITY is replaced with
 the host PID of the connecting process (SO_PEERCRED). Nothing else is parsed,
 stored or logged. The relay exits when the process given with --watch-pid
 (the session supervisor) exits.
+
+The Riot Client connects but never sends SET_ACTIVITY: its server-side
+configuration keeps the Discord integration off ("Activity Gateway Discord is
+disabled"), and Linux Discord cannot detect the game by process name because
+a Darling process is the loader, not a Windows or macOS executable. So while
+the League game runs, the relay sets the activity Discord's own game detection
+shows: its own connection with Discord's League of Legends application, the
+relay's PID and the game's start time, nothing else. It closes that
+connection, which clears the activity, when the game exits or when the guest
+client sends an activity of its own. --no-game-activity turns this off.
 """
 
 import argparse
@@ -23,11 +33,25 @@ import socket
 import struct
 import sys
 import threading
+import time
 
 HEADER = struct.Struct('<II')
+OP_HANDSHAKE = 0
 OP_FRAME = 1
 MAX_FRAME = 1 << 20
 SLOTS = range(10)
+# Discord's detectable-games entry for League of Legends (the application its
+# own process detection reports on Windows and macOS).
+GAME_APPLICATION_ID = '1402418696126992445'
+# Basename of the game's argv[0] in the guest
+# (.../LeagueofLegends.app/Contents/MacOS/LeagueofLegends), as the other
+# launcher helpers match it.
+GAME_NAME = 'LeagueofLegends'
+GAME_POLL_SECONDS = 5.0
+REPLY_TIMEOUT = 10.0
+# Set once the guest client sends a non-empty activity: the client's own
+# status then wins and the relay stops setting one.
+client_activity = threading.Event()
 
 
 def peer_pid(conn):
@@ -42,7 +66,7 @@ def peer_pid(conn):
 
 def rewrite_frame(opcode, payload, pid):
     """Return the payload with SET_ACTIVITY's pid replaced; else unchanged."""
-    if opcode != OP_FRAME or pid <= 0:
+    if opcode != OP_FRAME:
         return payload
     try:
         message = json.loads(payload)
@@ -51,7 +75,9 @@ def rewrite_frame(opcode, payload, pid):
     if not isinstance(message, dict) or message.get('cmd') != 'SET_ACTIVITY':
         return payload
     args = message.get('args')
-    if not isinstance(args, dict) or 'pid' not in args or args['pid'] == pid:
+    if isinstance(args, dict) and args.get('activity'):
+        client_activity.set()
+    if pid <= 0 or not isinstance(args, dict) or 'pid' not in args or args['pid'] == pid:
         return payload
     args['pid'] = pid
     return json.dumps(message, separators=(',', ':'), ensure_ascii=False).encode()
@@ -163,6 +189,141 @@ def process_alive(pid):
     return True
 
 
+def boot_time(proc_root):
+    try:
+        with open(os.path.join(proc_root, 'stat'), encoding='ascii') as stat:
+            for line in stat:
+                if line.startswith('btime '):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def find_game(proc_root='/proc'):
+    """(pid, start in Unix seconds or None) of this user's League game, or None."""
+    uid = os.getuid()
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        proc = os.path.join(proc_root, entry)
+        try:
+            if os.stat(proc).st_uid != uid:
+                continue
+            with open(os.path.join(proc, 'cmdline'), 'rb') as cmdline:
+                argv0 = cmdline.read(4096).split(b'\0', 1)[0]
+        except OSError:
+            continue
+        if os.path.basename(os.fsdecode(argv0)) != GAME_NAME:
+            continue
+        start = None
+        btime = boot_time(proc_root)
+        try:
+            with open(os.path.join(proc, 'stat'), encoding='ascii', errors='replace') as stat:
+                ticks = int(stat.read().rsplit(')', 1)[1].split()[19])
+            if btime is not None:
+                start = btime + ticks // os.sysconf('SC_CLK_TCK')
+        except (OSError, ValueError, IndexError):
+            pass
+        return int(entry), start
+    return None
+
+
+def send_frame(conn, opcode, message):
+    payload = json.dumps(message, separators=(',', ':')).encode()
+    conn.sendall(HEADER.pack(opcode, len(payload)) + payload)
+
+
+def read_frame(conn):
+    header = recv_exact(conn, HEADER.size)
+    if header is None:
+        return None
+    opcode, length = HEADER.unpack(header)
+    if length > MAX_FRAME:
+        return None
+    payload = recv_exact(conn, length)
+    if payload is None:
+        return None
+    try:
+        return opcode, json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return opcode, None
+
+
+def wait_for(conn, accept):
+    """Read frames until accept(opcode, message) is true; False on close or error."""
+    while True:
+        reply = read_frame(conn)
+        if reply is None:
+            return False
+        opcode, message = reply
+        if opcode != OP_FRAME:
+            return False
+        if accept(message):
+            return isinstance(message, dict) and message.get('evt') != 'ERROR'
+
+
+def open_game_activity(host_path, start, nonce):
+    """Connect to Discord and set the League activity; the socket, or None."""
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(REPLY_TIMEOUT)
+    try:
+        conn.connect(host_path)
+        send_frame(conn, OP_HANDSHAKE, {'v': 1, 'client_id': GAME_APPLICATION_ID})
+        if not wait_for(conn, lambda m: isinstance(m, dict) and m.get('evt') in ('READY', 'ERROR')):
+            raise OSError('handshake refused')
+        activity = {'type': 0, 'timestamps': {'start': start or int(time.time())}}
+        send_frame(conn, OP_FRAME, {'cmd': 'SET_ACTIVITY', 'nonce': nonce,
+                                    'args': {'pid': os.getpid(), 'activity': activity}})
+        if not wait_for(conn, lambda m: isinstance(m, dict) and m.get('nonce') == nonce):
+            raise OSError('activity refused')
+    except (OSError, ValueError):
+        close_both(conn)
+        return None
+    conn.setblocking(False)
+    return conn
+
+
+def discord_closed(conn):
+    """Drain Discord's frames; True once Discord closed the connection."""
+    try:
+        while True:
+            if not conn.recv(65536):
+                return True
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+
+
+def game_activity(host_path, proc_root='/proc', poll=GAME_POLL_SECONDS, stop=None):
+    """Hold the League activity open while the game runs (see the module doc)."""
+    stop = stop or threading.Event()
+    conn = None
+    tried_pid = None
+    counter = 0
+    while not stop.is_set():
+        game = None if client_activity.is_set() else find_game(proc_root)
+        if conn is not None and (game is None or game[0] != tried_pid or discord_closed(conn)):
+            close_both(conn)
+            conn = None
+        # One attempt per game process: a refused application is not retried
+        # every poll.
+        if game is not None and conn is None and game[0] != tried_pid:
+            tried_pid = game[0]
+            counter += 1
+            conn = open_game_activity(host_path, game[1], f'darling-lol-{counter}')
+        if game is None:
+            tried_pid = None
+        stop.wait(poll)
+    if conn is not None:
+        close_both(conn)
+
+
 def serve(listeners, host_paths, watch_pid, relay_dir, poll=1.0):
     selector = selectors.DefaultSelector()
     for n, (listener, _path) in listeners.items():
@@ -197,6 +358,10 @@ def main(argv=None):
     parser.add_argument('--relay-dir', required=True, help='directory for the relay sockets')
     parser.add_argument('--watch-pid', type=int, default=0, help='exit when this process exits')
     parser.add_argument('--foreground', action='store_true', help='do not detach after binding')
+    parser.add_argument('--no-game-activity', action='store_true',
+                        help='do not set the League activity while the game runs')
+    parser.add_argument('--proc-root', default='/proc', help=argparse.SUPPRESS)
+    parser.add_argument('--game-poll', type=float, default=GAME_POLL_SECONDS, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     host_paths = host_sockets(args.host_dir)
@@ -222,6 +387,10 @@ def main(argv=None):
         os.close(devnull)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if not args.no_game_activity:
+        threading.Thread(target=game_activity,
+                         args=(host_paths[min(host_paths)], args.proc_root, args.game_poll),
+                         daemon=True).start()
     serve(listeners, host_paths, args.watch_pid, args.relay_dir)
     return 0
 
