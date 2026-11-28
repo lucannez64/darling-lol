@@ -407,7 +407,7 @@ detect_distribution() {
     # identity is informational and never gates the install.
     case "$ids" in
       *' fedora '*) FAMILY=fedora ;;
-      *' arch '*) FAMILY=arch ;;
+      *' arch '*|*' artix '*) FAMILY=arch ;;
       *' debian '*|*' ubuntu '*) FAMILY=debian ;;
       *) FAMILY=other ;;
     esac
@@ -432,7 +432,8 @@ detect_distribution() {
         fail 'Fedora 44 or newer is required (FFmpeg 8 or 9).'
       FAMILY=fedora
       ;;
-    *' arch '*|*' omarchy '*)
+    # Artix ships ID=artix without ID_LIKE=arch; it uses the Arch package names.
+    *' arch '*|*' artix '*|*' omarchy '*)
       FAMILY=arch
       if [[ $ids == *' omarchy '* ]] || command -v omarchy-pkg-add >/dev/null 2>&1; then
         IS_OMARCHY=1
@@ -458,7 +459,7 @@ detect_distribution() {
       FAMILY=debian
       ;;
     *)
-      fail 'Supported distributions: Fedora 44+, Arch Linux, Debian 14+ and Ubuntu 26.04+.'
+      fail 'Supported distributions: Fedora 44+, Arch Linux (and Artix), Debian 14+ and Ubuntu 26.04+.'
       ;;
   esac
 

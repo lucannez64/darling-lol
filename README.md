@@ -65,7 +65,7 @@ This is a development snapshot, not a finished launcher. The Riot and League cli
 
 Installs dependencies, configures the build environment and compiles Darling-LoL. Requires at least **50 GiB** of disk space in total; a previous build/prefix already on disk counts toward it only when it is on the same filesystem as the checkout.
 
-Supported distributions: Fedora 44+, Arch Linux, Debian 14+, Ubuntu 26.04+. Hosts outside this list (for example Ubuntu 24.04 and its derivatives) can still install through a Fedora Toolbox container with `--toolbox`.
+Supported distributions: Fedora 44+, Arch Linux (including Artix), Debian 14+, Ubuntu 26.04+. Hosts outside this list (for example Ubuntu 24.04 and its derivatives) can still install through a Fedora Toolbox container with `--toolbox`.
 
 ```bash
 git clone https://github.com/lucannez64/darling-lol

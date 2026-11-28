@@ -964,6 +964,12 @@ class OmarchyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('FAMILY=arch IS_OMARCHY=1', result.stdout)
 
+    def test_detects_artix_as_arch(self):
+        # Artix's os-release has ID=artix and no ID_LIKE (issue #375).
+        result = self.detect('NAME="Artix Linux"\nID=artix\nBUILD_ID=rolling\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FAMILY=arch IS_OMARCHY=0', result.stdout)
+
     def test_plain_arch_is_not_omarchy(self):
         result = self.detect('ID=arch\n')
         self.assertEqual(result.returncode, 0, result.stderr)
