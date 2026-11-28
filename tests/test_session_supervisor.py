@@ -256,22 +256,32 @@ class ContainerTests(unittest.TestCase):
         for signum, handler in self.handlers.items():
             signal.signal(signum, handler)
 
-    def metadata(self):
-        return supervisor.container_metadata(self.marker, self.containerenv)
+    def metadata(self, environ=None):
+        return supervisor.container_metadata(self.marker, self.containerenv, environ=environ)
 
     def test_toolbox_container_is_identified(self):
         self.containerenv.write_text(
             'engine="podman-5.8.9"\n'
             'name="darling-lol"\n'
             'id="612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356"\n')
-        self.assertEqual(self.metadata(), (
+        self.assertEqual(self.metadata(environ={}), (
+            'darling-lol',
+            '612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356'))
+
+    def test_distrobox_container_is_identified_via_container_id(self):
+        self.containerenv.write_text(
+            'engine="podman-5.8.9"\n'
+            'name="darling-lol"\n'
+            'id="612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356"\n')
+        self.marker.unlink()
+        self.assertEqual(self.metadata(environ={'CONTAINER_ID': 'darling-lol'}), (
             'darling-lol',
             '612a426929ab8d77263f96facc9c778c667e06583edc5f8a9026e6f5f81e9356'))
 
     def test_missing_toolbox_marker_is_ignored(self):
         self.containerenv.write_text('name="outer"\nid="abc123"\n')
         self.marker.unlink()
-        self.assertIsNone(self.metadata())
+        self.assertIsNone(self.metadata(environ={}))
 
     def test_missing_metadata_is_ignored(self):
         self.assertIsNone(self.metadata())
@@ -514,6 +524,76 @@ class ToolboxSessionTests(unittest.TestCase):
         (other / 'cgroup').write_text('0::/user.slice/libpod-other.scope\n')
         _code, stop = self.run_supervisor(container=self.container)
         stop.assert_called_once()
+
+    def test_distrobox_init_and_keepalive_sleep_are_idle(self):
+        shutil.rmtree(self.proc / '12345')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        sleeper = fake_process(self.proc, 22346, comm='sleep', ppid=22345)
+        (sleeper / 'cmdline').write_bytes(b'sleep\x0015\x00')
+        (sleeper / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_distrobox_interactive_shell_leaves_container_running(self):
+        shutil.rmtree(self.proc / '12345')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        shell = fake_process(self.proc, 22346, comm='bash', ppid=1)
+        (shell / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope/exec\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_toolbox_worker_named_entrypoint_keeps_container_running(self):
+        worker = fake_process(self.proc, 12346, comm='entrypoint', ppid=1)
+        (worker / 'cmdline').write_bytes(b'/opt/worker/entrypoint\0--serve\0')
+        (worker / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
+
+    def test_distrobox_child_or_exec_entrypoint_keeps_container_running(self):
+        shutil.rmtree(self.proc / '12345')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/user.slice/libpod-abc123.scope\n')
+        for pid, ppid, cmd, cgroup in (
+            (22346, 22345, b'/opt/worker/entrypoint\0', '0::/user.slice/libpod-abc123.scope\n'),
+            (22347, 22345, b'/usr/bin/entrypoint\0--child\0', '0::/user.slice/libpod-abc123.scope\n'),
+            (22348, 1, b'/usr/bin/entrypoint\0--exec\0', '0::/user.slice/libpod-abc123.scope/exec\n'),
+        ):
+            proc = fake_process(self.proc, pid, comm='entrypoint', ppid=ppid)
+            (proc / 'cmdline').write_bytes(cmd)
+            (proc / 'cgroup').write_text(cgroup)
+            _code, stop = self.run_supervisor(container=self.container)
+            stop.assert_not_called()
+            shutil.rmtree(proc)
+
+    def test_distrobox_private_cgroup_namespace_stops_idle_container(self):
+        shutil.rmtree(self.proc / '12345')
+        (self.proc / 'self/cgroup').write_text('0::/\n')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/\n')
+        sleeper = fake_process(self.proc, 22346, comm='sleep', ppid=22345)
+        (sleeper / 'cmdline').write_bytes(b'sleep\x0015\x00')
+        (sleeper / 'cgroup').write_text('0::/\n')
+        outside = fake_process(self.proc, 22347, comm='bash', ppid=1)
+        (outside / 'cgroup').write_text('0::/../../user.slice/session-1.scope\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_called_once()
+
+    def test_distrobox_private_cgroup_namespace_keeps_busy_container_running(self):
+        shutil.rmtree(self.proc / '12345')
+        (self.proc / 'self/cgroup').write_text('0::/\n')
+        init = fake_process(self.proc, 22345, comm='entrypoint', start_ticks=150)
+        (init / 'cmdline').write_bytes(b'/bin/sh\0/usr/bin/entrypoint\0--name\0darling-lol\0')
+        (init / 'cgroup').write_text('0::/\n')
+        shell = fake_process(self.proc, 22346, comm='bash', ppid=1)
+        (shell / 'cgroup').write_text('0::/exec\n')
+        _code, stop = self.run_supervisor(container=self.container)
+        stop.assert_not_called()
 
     def test_launcher_helpers_do_not_block_the_stop(self):
         for pid, name in enumerate(('close-league-client-in-game.py',

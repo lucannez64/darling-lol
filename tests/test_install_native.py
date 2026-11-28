@@ -583,14 +583,22 @@ class ToolboxSupportTests(unittest.TestCase):
 
     PLENTY_KIB = 200 * 1024 * 1024  # 200 GiB
 
-    def run_support(self, *, toolbox=True, podman=True, podman_info='ok',
-                    free_kib=PLENTY_KIB, family=''):
+    def run_support(self, *, toolbox=True, toolbox_stub=None, distrobox=False,
+                    podman=True, podman_info='ok', free_kib=PLENTY_KIB, family='',
+                    os_release=None, strict_err_trap=False):
         with tempfile.TemporaryDirectory(prefix='install-native-toolbox-support ') as folder:
             # Restrict PATH so the real toolbox/podman binaries cannot leak in.
             bindir = bin_sandbox(folder, 'bash', 'awk', 'dirname', 'basename')
             stubs = []
-            if toolbox:
-                stubs.append('toolbox() { :; }')
+            if toolbox_stub is not None:
+                stubs.append(toolbox_stub)
+            elif toolbox:
+                stubs.append(
+                    'toolbox() { [[ ${1:-} == --version ]] && '
+                    'printf "toolbox version 0.0.99.5\\n"; }'
+                )
+            if distrobox:
+                stubs.append('distrobox() { :; }')
             if podman:
                 if podman_info == 'ok':
                     stubs.append('podman() { printf "%s\\n" "/mock-toolbox-test/containers"; }')
@@ -600,14 +608,24 @@ class ToolboxSupportTests(unittest.TestCase):
                 'df() { printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n'
                 'mock 1 1 %s 1%% /\\n" "$DF_FREE"; }'
             )
-            snippet = '\n'.join([
-                'source "$INSTALLER"',
-                *stubs,
+            lines = ['source "$INSTALLER"']
+            if strict_err_trap:
+                lines.append('set -Eeuo pipefail')
+                lines.append('trap \'printf "ERR_TRAP\\n" >&2\' ERR')
+            lines.extend(stubs)
+            lines.extend([
+                'info() { printf "info:%s\\n" "$*"; }',
                 f'FAMILY={family}',
                 f'DF_FREE={free_kib}',
                 'check_toolbox_support',
+                'printf "BACKEND=%s\\n" "${CONTAINER_BACKEND:-none}"',
             ])
-            return run_sourced(snippet, PATH=str(bindir))
+            env = {'PATH': str(bindir)}
+            if os_release is not None:
+                release_file = Path(folder) / 'os-release'
+                release_file.write_text(os_release)
+                env['DARLING_OS_RELEASE'] = str(release_file)
+            return run_sourced('\n'.join(lines), **env)
 
     def test_toolbox_and_podman_with_plenty_of_storage_pass_on_any_host(self):
         result = self.run_support()
@@ -647,6 +665,49 @@ class ToolboxSupportTests(unittest.TestCase):
     def test_a_podman_info_failure_falls_back_to_the_default_storage(self):
         result = self.run_support(podman_info='fail')
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_opensuse_microos_toolbox_without_distrobox_gives_zypper_hint(self):
+        result = self.run_support(
+            toolbox_stub='toolbox() { echo "toolbox: unrecognized option \'$1\'" >&2; return 1; }',
+            os_release='ID=opensuse-tumbleweed\nID_LIKE="opensuse suse"\n',
+            strict_err_trap=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('ERR_TRAP', result.stderr)
+        self.assertIn("'toolbox' is not Toolbx (containers/toolbox)", result.stderr)
+        self.assertIn('sudo zypper install distrobox podman', result.stderr)
+
+    def test_incompatible_toolbox_falls_back_to_distrobox(self):
+        result = self.run_support(
+            toolbox_stub='toolbox() { echo "toolbox: unrecognized option \'$1\'" >&2; return 1; }',
+            distrobox=True,
+            strict_err_trap=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('ERR_TRAP', result.stderr)
+        self.assertIn('BACKEND=distrobox', result.stdout)
+        self.assertIn('using Distrobox instead', result.stdout)
+
+    def test_missing_toolbox_falls_back_to_distrobox(self):
+        result = self.run_support(toolbox=False, distrobox=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('BACKEND=distrobox', result.stdout)
+
+    def test_real_toolbx_is_preferred_over_distrobox(self):
+        result = self.run_support(toolbox=True, distrobox=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('BACKEND=toolbox', result.stdout)
+
+    def test_containers_toolbox_version_variants_pass(self):
+        for version in ('toolbox version 0.0.99.3', 'toolbox version 0.3'):
+            with self.subTest(version=version):
+                result = self.run_support(
+                    toolbox_stub=f'toolbox() {{ [[ ${{1:-}} == --version ]] && printf "{version}\\n"; }}',
+                    strict_err_trap=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('BACKEND=toolbox', result.stdout)
+                self.assertNotIn('ERR_TRAP', result.stderr)
 
 
 class PreflightTests(unittest.TestCase):
@@ -864,12 +925,13 @@ class DiskSpaceTests(unittest.TestCase):
 
 
 class ShowBannerTests(unittest.TestCase):
-    def run_banner(self, *, container=0, family='debian', region='EUW', locale='pt_BR',
+    def run_banner(self, *, container=0, backend='', family='debian', region='EUW', locale='pt_BR',
                    toolbox_release='', explicit=1, yes=0):
         release_line = f'\nTOOLBOX_RELEASE="{toolbox_release}"' if toolbox_release else ''
         snippet = (
             'source "$INSTALLER"\n'
             f'CONTAINER_INSTALL={container}\n'
+            f'CONTAINER_BACKEND="{backend}"\n'
             f'FAMILY={family}\n'
             f'REGION={region}\n'
             f'LOCALE={locale}\n'
@@ -889,6 +951,10 @@ class ShowBannerTests(unittest.TestCase):
 
         result = self.run_banner(container=1, toolbox_release='45')
         self.assertIn('Toolbox Distribution: Fedora 45', result.stdout)
+
+        result = self.run_banner(container=1, backend='distrobox', toolbox_release='44')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Distrobox Distribution: Fedora 44', result.stdout)
 
     def test_native_mode_shows_only_the_family(self):
         result = self.run_banner(container=0)
@@ -1003,7 +1069,7 @@ class OmarchyTests(unittest.TestCase):
 
 
 class DesktopEntryTests(unittest.TestCase):
-    def create_entry(self, *, inside_toolbox=0, name='darling-lol', helper=True,
+    def create_entry(self, *, inside_toolbox=0, backend='', name='darling-lol', helper=True,
                      helper_fails=False, entry=None, window_entries=0):
         with tempfile.TemporaryDirectory(prefix='install-native-desktop-') as folder:
             repo = Path(folder) / 'repo'
@@ -1043,6 +1109,7 @@ source "$INSTALLER"
 TARGET_DIR="{repo}"
 TOOLBOX_NAME="{name}"
 INSIDE_TOOLBOX={inside_toolbox}
+CONTAINER_BACKEND="{backend}"
 WINDOW_ENTRIES={window_entries}
 HOME="{home}"
 {fake_python}
@@ -1066,6 +1133,11 @@ create_desktop_entry
         self.assertEqual(len(arguments), 3)
         self.assertEqual(arguments[1:], ['--toolbox', 'my-box'])
         self.assertTrue(arguments[0].endswith('build/runtime/tools/desktop-entry.py'))
+
+    def test_distrobox_install_passes_the_container_name(self):
+        result, arguments, _ = self.create_entry(inside_toolbox=1, backend='distrobox', name='my-box')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(arguments[1:], ['--distrobox', 'my-box'])
 
     def test_window_entries_are_not_requested_by_default(self):
         result, arguments, _ = self.create_entry()
@@ -1227,7 +1299,8 @@ create_desktop_entry
 
 class ToolboxInvocationTests(unittest.TestCase):
     def run_install_toolbox(self, *, yes=0, verbose=0, name='darling-lol', exists=False,
-                            locale='pt_BR', family='', release='', toolbox_release=''):
+                            locale='pt_BR', family='', release='', toolbox_release='',
+                            backend='', manager='distrobox'):
         with tempfile.TemporaryDirectory(prefix='install-native-toolbox ') as folder:
             log = Path(folder) / 'log'
             snippet = f'''
@@ -1235,9 +1308,15 @@ source "$INSTALLER"
 run() {{ printf "run:%s\\n" "$*" >> "{log}"; }}
 info() {{ :; }}
 exec() {{ printf "exec:%s\\n" "$*" >> "{log}"; }}
-podman() {{ return "$PODMAN_RC"; }}
+podman() {{
+  case "${{2:-}}" in
+    exists) return "$PODMAN_RC" ;;
+    inspect) printf "%s\\n" "$PODMAN_MANAGER" ;;
+  esac
+}}
 USE_TOOLBOX=1
 INSIDE_TOOLBOX=0
+CONTAINER_BACKEND="{backend}"
 YES={yes}
 VERBOSE={verbose}
 REGION=EUW
@@ -1247,7 +1326,7 @@ TOOLBOX_RELEASE="{toolbox_release}"
 TOOLBOX_NAME="{name}"
 install_toolbox
 '''
-            env = {'PODMAN_RC': '0' if exists else '1'}
+            env = {'PODMAN_RC': '0' if exists else '1', 'PODMAN_MANAGER': manager}
             if release:
                 env['DARLING_LOL_TOOLBOX_RELEASE'] = release
             result = run_sourced(snippet, **env)
@@ -1315,6 +1394,65 @@ install_toolbox
         result, lines = self.run_install_toolbox(family='fedora', release='45')
         create = next(line for line in lines if 'toolbox create' in line)
         self.assertIn('--release 45', create)
+
+    def test_distrobox_create_and_enter_commands(self):
+        result, lines = self.run_install_toolbox(
+            backend='distrobox', name='my-box', release='45', exists=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = next(line for line in lines if 'distrobox create' in line)
+        command = next(line for line in lines if line.startswith('exec:'))
+        self.assertIn(
+            'env DBX_CONTAINER_MANAGER=podman distrobox create --yes --name my-box --image registry.fedoraproject.org/fedora-toolbox:45',
+            create,
+        )
+        self.assertIn('exec:env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-box -- ', command)
+        self.assertIn('DARLING_LOL_TOOLBOX_BACKEND=distrobox', command)
+        self.assertIn('DARLING_LOL_TOOLBOX_NAME=my-box', command)
+
+    def test_distrobox_refuses_preexisting_non_distrobox_container(self):
+        result, lines = self.run_install_toolbox(
+            backend='distrobox', name='darling-lol', exists=True, manager='')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('was not created by Distrobox', result.stderr)
+        self.assertIn('podman rm -f darling-lol', result.stderr)
+        self.assertEqual(lines, [])
+
+    def test_distrobox_reuses_existing_distrobox_container(self):
+        result, lines = self.run_install_toolbox(
+            backend='distrobox', name='my-box', exists=True, manager='distrobox')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any('distrobox create' in line for line in lines), lines)
+        self.assertTrue(
+            any('exec:env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-box -- ' in line
+                for line in lines),
+            lines,
+        )
+
+    def test_distrobox_enter_omits_no_tty_when_interactive(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-dbx-pty ') as folder:
+            log = Path(folder) / 'log'
+            snippet = f'''
+source "$INSTALLER"
+run() {{ :; }}
+info() {{ :; }}
+exec() {{ printf "exec:%s\\n" "$*" >> "{log}"; }}
+podman() {{ return 1; }}
+USE_TOOLBOX=1
+INSIDE_TOOLBOX=0
+CONTAINER_BACKEND="distrobox"
+REGION=EUW
+LOCALE="pt_BR"
+TOOLBOX_NAME="my-box"
+install_toolbox
+'''
+            code, output = run_sourced_pty(snippet, b'')
+            self.assertEqual(code, 0, output)
+            command = log.read_text().strip()
+            self.assertTrue(
+                command.startswith('exec:env DBX_CONTAINER_MANAGER=podman distrobox enter --name my-box -- '),
+                command,
+            )
+            self.assertNotIn('--no-tty', command)
 
 
 class RiotInstallerOfferTests(unittest.TestCase):
@@ -1410,7 +1548,7 @@ class RiotInstallerOfferTests(unittest.TestCase):
 
 
 class FinishTests(unittest.TestCase):
-    def finish_snippet(self, *, riot_offer_rc, desktop_offer_rc=1):
+    def finish_snippet(self, *, riot_offer_rc, desktop_offer_rc=1, inside_toolbox=0, backend=''):
         with tempfile.TemporaryDirectory(prefix='install-native-finish-') as folder:
             target = Path(folder) / 'repo'
             log = Path(folder) / 'install.log'
@@ -1428,7 +1566,9 @@ TARGET_DIR="{target}"
 LOG="{log}"
 REGION=EUW
 LOCALE=pt_BR
-INSIDE_TOOLBOX=0
+INSIDE_TOOLBOX={inside_toolbox}
+CONTAINER_BACKEND="{backend}"
+TOOLBOX_NAME="my-box"
 SECONDS=0
 finish
 '''
@@ -1523,6 +1663,12 @@ finish
         self.assertLess(declined.stdout.index('./scripts/installer.sh euw'),
                         declined.stdout.index('./scripts/create-shortcuts.sh'))
 
+    def test_distrobox_finish_suggests_distrobox_enter(self):
+        result = self.finish_snippet(riot_offer_rc=1, desktop_offer_rc=1,
+                                     inside_toolbox=1, backend='distrobox')
+        self.assertIn('  distrobox enter my-box\n', result.stdout)
+        self.assertNotIn('toolbox enter', result.stdout)
+
 
 class ConfigureProjectTests(unittest.TestCase):
     def test_configure_project_passes_the_selected_region_and_locale(self):
@@ -1598,6 +1744,7 @@ main
         env = installer_env()
         env.pop('DARLING_LOL_TOOLBOX', None)
         env.pop('DARLING_LOL_TOOLBOX_NAME', None)
+        env.pop('DARLING_LOL_TOOLBOX_BACKEND', None)
         env.update(toolbox_env or {})
         return subprocess.run(
             ['bash', '-c', snippet],
@@ -1633,13 +1780,90 @@ install_toolbox
 
     def test_inner_run_success_writes_marker(self):
         with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            (Path(folder) / 'build').mkdir(parents=True)
+            (Path(folder) / 'build' / 'toolbox-backend').write_text('distrobox\n')
             result = self.run_main(folder, toolbox_env={
                 'DARLING_LOL_TOOLBOX': '1', 'DARLING_LOL_TOOLBOX_NAME': 'newname'},
                 inside_toolbox=1)
             self.assertEqual(result.returncode, 0, result.stderr)
             marker = Path(folder) / 'build' / 'toolbox-container'
             self.assertEqual(marker.read_text(), 'newname\n')
+            self.assertFalse((Path(folder) / 'build' / 'toolbox-backend').exists())
             self.assertFalse((Path(folder) / 'build' / 'native-install').exists())
+
+    def test_inner_distrobox_run_writes_backend_marker(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            result = self.run_main(folder, toolbox_env={
+                'DARLING_LOL_TOOLBOX': '1',
+                'DARLING_LOL_TOOLBOX_NAME': 'my-dbx',
+                'DARLING_LOL_TOOLBOX_BACKEND': 'distrobox'},
+                inside_toolbox=1)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            build = Path(folder) / 'build'
+            self.assertEqual((build / 'toolbox-container').read_text(), 'my-dbx\n')
+            self.assertEqual((build / 'toolbox-backend').read_text(), 'distrobox\n')
+            self.assertFalse((build / 'native-install').exists())
+
+    def test_distrobox_detection_wins_over_darling_lol_toolbox_without_backend(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-dbx-detect ') as folder:
+            # distrobox-init creates /run/.toolboxenv too; CONTAINER_ID decides.
+            toolboxenv = Path(folder) / 'toolboxenv'
+            toolboxenv.write_text('')
+            containerenv = Path(folder) / 'containerenv'
+            containerenv.write_text('name="my-dbx"\n')
+            result = run_sourced(
+                'source "$INSTALLER"\n'
+                'printf "%s|%s|%s\\n" "$INSIDE_TOOLBOX" "$CONTAINER_BACKEND" "$TOOLBOX_NAME"',
+                DARLING_TOOLBOX_ENV=str(toolboxenv),
+                DARLING_CONTAINER_ENV=str(containerenv),
+                DARLING_LOL_TOOLBOX='1',
+                CONTAINER_ID='my-dbx',
+                DARLING_LOL_TOOLBOX_NAME='',
+                DARLING_LOL_TOOLBOX_BACKEND='',
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), '1|distrobox|my-dbx')
+
+    def test_inside_toolbx_without_container_id_stays_toolbox(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-tbx-detect ') as folder:
+            toolboxenv = Path(folder) / 'toolboxenv'
+            toolboxenv.write_text('')
+            containerenv = Path(folder) / 'containerenv'
+            containerenv.write_text('name="darling-lol"\n')
+            env = installer_env(
+                DARLING_TOOLBOX_ENV=str(toolboxenv),
+                DARLING_CONTAINER_ENV=str(containerenv),
+                DARLING_LOL_TOOLBOX_NAME='',
+                DARLING_LOL_TOOLBOX_BACKEND='',
+            )
+            env.pop('CONTAINER_ID', None)
+            env.pop('DARLING_LOL_TOOLBOX', None)
+            result = subprocess.run(
+                ['bash', '-c', 'source "$INSTALLER"\n'
+                 'printf "%s|%s|%s\\n" "$INSIDE_TOOLBOX" "$CONTAINER_BACKEND" "$TOOLBOX_NAME"'],
+                capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), '1|toolbox|darling-lol')
+
+    def test_manual_distrobox_install_records_distrobox_backend(self):
+        # Documented path: distrobox enter NAME, then
+        # DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh.
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            toolboxenv = Path(folder) / 'toolboxenv'
+            toolboxenv.write_text('')
+            containerenv = Path(folder) / 'containerenv'
+            containerenv.write_text('name="my-dbx"\n')
+            result = self.run_main(folder, toolbox_env={
+                'DARLING_LOL_TOOLBOX': '1',
+                'DARLING_TOOLBOX_ENV': str(toolboxenv),
+                'DARLING_CONTAINER_ENV': str(containerenv),
+                'CONTAINER_ID': 'my-dbx'},
+                inside_toolbox=1)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            build = Path(folder) / 'build'
+            self.assertEqual((build / 'toolbox-container').read_text(), 'my-dbx\n')
+            self.assertEqual((build / 'toolbox-backend').read_text(), 'distrobox\n')
+            self.assertFalse((build / 'native-install').exists())
 
     def test_inner_run_failure_preserves_existing_marker(self):
         with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
@@ -1676,11 +1900,14 @@ install_toolbox
 
     def test_native_success_records_native_mode(self):
         with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            (Path(folder) / 'build').mkdir(parents=True)
+            (Path(folder) / 'build' / 'toolbox-backend').write_text('distrobox\n')
             result = self.run_main(folder, preexisting='old')
             self.assertEqual(result.returncode, 0, result.stderr)
             build = Path(folder) / 'build'
             self.assertTrue((build / 'native-install').exists())
             self.assertFalse((build / 'toolbox-container').exists())
+            self.assertFalse((build / 'toolbox-backend').exists())
 
     def test_sign_sdk_runtime_runs_sudo_with_resolved_rcodesign_and_warns_on_failure(self):
         with tempfile.TemporaryDirectory(prefix='install-native-sign ') as folder:

@@ -581,11 +581,41 @@ fi
 # installer's default container. A native install records build/native-install
 # and is never redirected. DARLING_LOL_UPDATE_REEXEC stops the re-exec from
 # looping when the inner run is not recognized as being inside the container.
-if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
+is_toolbx_cli() {
+	command -v toolbox >/dev/null 2>&1 || return 1
+	case "$(toolbox --version </dev/null 2>/dev/null || true)" in
+	'toolbox version '*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+distrobox_container_exists() {
+	command -v podman >/dev/null 2>&1 || return 1
+	podman container exists -- "$1" >/dev/null 2>&1 || return 1
+	[ "$(podman container inspect --format '{{index .Config.Labels "manager"}}' "$1" 2>/dev/null || true)" = distrobox ]
+}
+
+inside_container=0
+inside_backend=''
+# Distrobox comes first: its init also creates /run/.toolboxenv, so only
+# CONTAINER_ID (set by distrobox create/enter) tells the two apart.
+if [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
+	inside_container=1
+	inside_backend=distrobox
+elif [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
+	inside_container=1
+	inside_backend=toolbox
+fi
+if [ "$inside_container" = 0 ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 	[ ! -f build/native-install ]; then
 	name=''
+	backend=''
 	if [ -f build/toolbox-container ]; then
 		name=$(cat build/toolbox-container)
+		backend=toolbox
+		if [ -r build/toolbox-backend ] && [ "$(cat build/toolbox-backend)" = distrobox ]; then
+			backend=distrobox
+		fi
 	else
 		# $HOME holds a single launcher entry shared by every checkout: only trust
 		# its container name when its Exec points at this checkout's scripts.
@@ -594,6 +624,15 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 		entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
 		name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
 			sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
+		if [ -n "$name" ]; then
+			backend=toolbox
+		else
+			name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
+				sed -n 's/^Exec=\(env DBX_CONTAINER_MANAGER=podman \)\{0,1\}distrobox enter --no-tty --name \([^ ]*\) -- .*$/\2/p' | head -n 1)
+			if [ -n "$name" ]; then
+				backend=distrobox
+			fi
+		fi
 	fi
 	# A container this run starts or restarts is stopped again when the update
 	# ends. One that is already reachable stays up: it belongs to a session the
@@ -605,29 +644,74 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 	# No record of any kind: only a legacy checkout can be assumed to live in the
 	# installer's default container. This probe also starts a stopped container,
 	# so it must not decide for checkouts that are already recorded above.
-	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1; then
-		if toolbox_container_running darling-lol; then
-			stop_container=0
-		else
-			stop_container=1
+	if [ -z "$name" ]; then
+		if is_toolbx_cli; then
+			if toolbox_container_running darling-lol; then
+				stop_container=0
+			else
+				stop_container=1
+			fi
+			if toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+				name=darling-lol
+				backend=toolbox
+			fi
 		fi
-		if toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
-			name=darling-lol
+		if [ -z "$name" ] && command -v distrobox >/dev/null 2>&1 &&
+			distrobox_container_exists darling-lol; then
+			if toolbox_container_running darling-lol; then
+				stop_container=0
+			else
+				stop_container=1
+			fi
+			if [ "$stop_container" -eq 1 ]; then
+				TOOLBOX_STOP=darling-lol
+			fi
+			if DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name darling-lol -- sh -c 'command -v darling' </dev/null >/dev/null 2>&1; then
+				name=darling-lol
+				backend=distrobox
+			fi
 		fi
 	fi
 	if [ -n "$name" ]; then
-		if ! command -v toolbox >/dev/null 2>&1; then
+		container_label=Toolbox
+		enter_cmd="toolbox enter $name"
+		if [ "$backend" = distrobox ]; then
+			container_label=Distrobox
+			enter_cmd="distrobox enter $name"
+			if ! command -v distrobox >/dev/null 2>&1; then
+				error "This checkout was installed via Distrobox container '$name', but Distrobox"
+				printf '  is not installed on this host. Install Distrobox, then run the update\n' >&2
+				printf '  inside the container: %s\n' "$enter_cmd" >&2
+				exit 1
+			fi
+			if ! distrobox_container_exists "$name"; then
+				error "This checkout was installed via Distrobox container '$name', but that container does not exist."
+				printf '  Recreate it or reinstall with scripts/install-native.sh --toolbox.\n' >&2
+				exit 1
+			fi
+		elif ! command -v toolbox >/dev/null 2>&1; then
 			error "This checkout was installed via Toolbox container '$name', but Toolbox"
 			printf '  is not installed on this host. Install Toolbox, then run the update\n' >&2
-			printf '  inside the container: toolbox enter %s\n' "$name" >&2
+			printf '  inside the container: %s\n' "$enter_cmd" >&2
 			exit 1
 		fi
-		# `toolbox run` starts a stopped container, but that start can still
-		# fail transiently (for example while another Toolbox session is
-		# shutting down). A container that podman reports as running yet stays
-		# unreachable needs a stop/start instead, because `toolbox run` alone
-		# cannot recover it. Ask before giving up, defaulting to the fix.
-		if ! toolbox run -c "$name" true 2>/dev/null; then
+		if [ "$stop_container" = 1 ]; then
+			TOOLBOX_STOP=$name
+		fi
+		container_probe() {
+			if [ "$backend" = distrobox ]; then
+				distrobox_container_exists "$1" &&
+					DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name "$1" -- true </dev/null 2>/dev/null
+			else
+				toolbox run -c "$1" true 2>/dev/null
+			fi
+		}
+		# `toolbox run` / `distrobox enter` starts a stopped container, but that start
+		# can still fail transiently (for example while another session is shutting
+		# down). A container that podman reports as running yet stays unreachable needs
+		# a stop/start instead, because re-entry alone cannot recover it. Ask before
+		# giving up, defaulting to the fix.
+		if ! container_probe "$name"; then
 			if toolbox_container_running "$name"; then
 				state='running but not reachable'
 				action='Restart'
@@ -635,8 +719,8 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 				state='not reachable'
 				action='Start'
 			fi
-			printf '\n%s%s%s Toolbox container %s is %s. %s it and continue the update? [Y/n] ' \
-				"$YELLOW" "$ICON_WARN" "$RESET" "'$name'" "$state" "$action"
+			printf '\n%s%s%s %s container %s is %s. %s it and continue the update? [Y/n] ' \
+				"$YELLOW" "$ICON_WARN" "$RESET" "$container_label" "'$name'" "$state" "$action"
 			reply=''
 			# Only a terminal can answer. Pipes and a closed stdin keep the
 			# default, so a non-interactive update never blocks here.
@@ -646,11 +730,11 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			case "$reply" in
 			n | N | no | No | NO)
 				if [ "$action" = Restart ]; then
-					error "This checkout was installed via Toolbox container '$name', but that container is"
+					error "This checkout was installed via $container_label container '$name', but that container is"
 					printf '  running but unreachable. Restart it and run the update inside it: podman restart %s\n' "$name" >&2
 				else
-					error "This checkout was installed via Toolbox container '$name', but that container is not"
-					printf '  reachable. Start it and run the update inside it: toolbox enter %s\n' "$name" >&2
+					error "This checkout was installed via $container_label container '$name', but that container is not"
+					printf '  reachable. Start it and run the update inside it: %s\n' "$enter_cmd" >&2
 				fi
 				exit 1
 				;;
@@ -660,7 +744,7 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 				riot_or_league_running || probe_status=$?
 				if [ "$probe_status" -eq 0 ]; then
 					error 'A Riot Client or League process is running; exit the game and both clients, then run this again.'
-					printf '  Toolbox container %s was left untouched.\n' "'$name'" >&2
+					printf '  %s container %s was left untouched.\n' "$container_label" "'$name'" >&2
 					exit 1
 				elif [ "$probe_status" -ne 1 ]; then
 					error 'Could not check for a running Riot Client or League process; refusing to restart.'
@@ -669,24 +753,24 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 				fi
 			fi
 			if [ "$action" = Restart ]; then
-				info "Restarting Toolbox container '$name'..."
+				info "Restarting $container_label container '$name'..."
 				if ! restart_toolbox_container "$name"; then
-					error "Toolbox container '$name' could not be stopped."
+					error "$container_label container '$name' could not be stopped."
 					printf '  Stop it by hand, then run the update again: podman stop %s\n' "$name" >&2
 					exit 1
 				fi
 			else
-				info "Starting Toolbox container '$name'..."
+				info "Starting $container_label container '$name'..."
 			fi
 			attempt=0
-			until toolbox run -c "$name" true 2>/dev/null; do
+			until container_probe "$name"; do
 				attempt=$((attempt + 1))
 				if [ "$attempt" -ge 10 ]; then
-					error "Toolbox container '$name' could not be started."
+					error "$container_label container '$name' could not be started."
 					if [ "$action" = Restart ]; then
 						printf '  Restart it and run the update inside it: podman restart %s\n' "$name" >&2
 					else
-						printf '  Start it and run the update inside it: toolbox enter %s\n' "$name" >&2
+						printf '  Start it and run the update inside it: %s\n' "$enter_cmd" >&2
 					fi
 					exit 1
 				fi
@@ -695,14 +779,24 @@ if [ ! -f /run/.toolboxenv ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 			# This run recovered the container, so it stops it again below.
 			stop_container=1
 		fi
-		info "Toolbox install detected; running the update inside container '$name'..."
+		info "$container_label install detected; running the update inside container '$name'..."
 		if [ "$stop_container" = 1 ]; then
 			TOOLBOX_STOP=$name
 		fi
 		# Keep the inner run's status: a failed update must not look successful
 		# here, and the EXIT trap stops the container either way.
 		rc=0
-		if [ "$VERBOSE" = 1 ]; then
+		if [ "$backend" = distrobox ]; then
+			set -- env DARLING_LOL_UPDATE_REEXEC=1 sh "$repo/scripts/update.sh"
+			if [ "$VERBOSE" = 1 ]; then
+				set -- "$@" --verbose
+			fi
+			if [ -t 0 ]; then
+				DBX_CONTAINER_MANAGER=podman distrobox enter --name "$name" -- "$@" || rc=$?
+			else
+				DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name "$name" -- "$@" || rc=$?
+			fi
+		elif [ "$VERBOSE" = 1 ]; then
 			toolbox run --container "$name" env DARLING_LOL_UPDATE_REEXEC=1 \
 				sh "$repo/scripts/update.sh" --verbose || rc=$?
 		else
@@ -715,12 +809,23 @@ fi
 
 # The re-exec lands here inside the container: say so, and name it when the
 # install marker that selected it is still in the checkout.
-if [ -f /run/.toolboxenv ]; then
+if [ "$inside_container" = 1 ]; then
 	name=''
 	if [ -f build/toolbox-container ]; then
 		IFS= read -r name <build/toolbox-container || true
+	elif [ "$inside_backend" = distrobox ] && [ -n "${CONTAINER_ID:-}" ]; then
+		name=$CONTAINER_ID
 	fi
-	if [ -n "$name" ]; then
+	if [ -r build/toolbox-backend ] && [ "$(cat build/toolbox-backend)" = distrobox ]; then
+		inside_backend=distrobox
+	fi
+	if [ "$inside_backend" = distrobox ]; then
+		if [ -n "$name" ]; then
+			info "Running inside Distrobox container '$name'."
+		else
+			info 'Running inside a Distrobox container.'
+		fi
+	elif [ -n "$name" ]; then
 		info "Running inside Toolbox container '$name'."
 	else
 		info 'Running inside a Toolbox container.'

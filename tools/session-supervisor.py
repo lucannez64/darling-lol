@@ -374,16 +374,19 @@ def cleanup(prefix, darling, namespace, proc_root=Path('/proc'), run=subprocess.
     return remaining
 
 
-def container_metadata(marker=TOOLBOX_MARKER, containerenv=CONTAINER_ENV):
-    """(name, id) of the Toolbox container hosting this process, or None.
+def container_metadata(marker=TOOLBOX_MARKER, containerenv=CONTAINER_ENV, environ=None):
+    """(name, id) of the Toolbx or Distrobox container hosting this process, or None.
 
-    Only a Toolbox container qualifies: `/run/.containerenv` exists in every
-    Podman container, but a native install inside an ordinary container must
-    not stop it. The ID is validated as hexadecimal because it becomes part of
-    a systemd unit name.
+    Only a Toolbx (`/run/.toolboxenv`) or Distrobox (`CONTAINER_ID` +
+    `/run/.containerenv`) container qualifies: `/run/.containerenv` exists in
+    every Podman container, so a native install inside an ordinary container
+    must not stop it. The ID is validated as hexadecimal because it becomes
+    part of a systemd unit name.
     """
+    env = os.environ if environ is None else environ
+    is_distrobox = bool((env.get('CONTAINER_ID') or '').strip())
     try:
-        if not marker.exists():
+        if not marker.exists() and not is_distrobox:
             return None
         lines = containerenv.read_text(errors='replace').splitlines()
     except OSError:
@@ -482,12 +485,32 @@ def session_registry(container_id, base=None):
     return root / 'darling-lol-toolbox' / container_id
 
 
-def in_container_scope(proc, unit):
+def cgroup_paths(proc):
     try:
-        return any(line.startswith('0::') and unit in Path(line[3:]).parts
-                   for line in (proc / 'cgroup').read_text().splitlines())
+        return [Path(line[3:]) for line in (proc / 'cgroup').read_text().splitlines()
+                if line.startswith('0::')]
     except OSError:
-        return False
+        return []
+
+
+def in_container_scope(proc, unit):
+    return any(unit in path.parts for path in cgroup_paths(proc))
+
+
+def in_container_scope_root(proc, unit):
+    """True when `proc` sits directly in `unit`, not in a nested sub-cgroup."""
+    return any(path.parts and path.parts[-1] == unit for path in cgroup_paths(proc))
+
+
+def in_private_cgroup_scope(proc):
+    """True when `proc` lives inside the reader's private cgroup namespace."""
+    return any(path.is_absolute() and '..' not in path.parts
+               for path in cgroup_paths(proc))
+
+
+def in_private_cgroup_root(proc):
+    """True when `proc` sits at `/` of the reader's private cgroup namespace."""
+    return any(path == Path('/') for path in cgroup_paths(proc))
 
 
 def launcher_helper(script):
@@ -498,26 +521,67 @@ def launcher_helper(script):
         return False
 
 
+DISTROBOX_INIT_PATHS = ('/usr/bin/entrypoint', '/usr/bin/distrobox-init')
+
+
+def is_container_init(args):
+    """Return 'toolbox' or 'distrobox' when `args` matches that container's init."""
+    if not args:
+        return None
+    cmd = Path(args[0]).name
+    if cmd == 'toolbox' and 'init-container' in args[1:]:
+        return 'toolbox'
+    if args[0] in DISTROBOX_INIT_PATHS:
+        return 'distrobox'
+    if (len(args) > 1 and cmd in ('sh', 'dash', 'bash')
+            and args[1] in DISTROBOX_INIT_PATHS):
+        return 'distrobox'
+    return None
+
+
 def toolbox_state(container_id, proc_root):
-    """Return the live Toolbx init identity and whether its scope is idle."""
+    """Return the live container init identity and whether its scope is idle."""
     unit = 'libpod-%s.scope' % container_id
-    if not in_container_scope(proc_root / 'self', unit):
+    host_scope = in_container_scope(proc_root / 'self', unit)
+    private_scope = not host_scope and in_private_cgroup_root(proc_root / 'self')
+    if not host_scope and not private_scope:
         return None, False
-    instance = None
-    idle = True
+    in_scope = ((lambda proc: in_container_scope(proc, unit)) if host_scope
+                else in_private_cgroup_scope)
+    at_scope_root = ((lambda proc: in_container_scope_root(proc, unit)) if host_scope
+                     else in_private_cgroup_root)
+    scoped = []
     for proc in proc_root.iterdir():
         if not proc.name.isdigit() or int(proc.name) == os.getpid():
             continue
-        if not in_container_scope(proc, unit):
+        if not in_scope(proc):
             continue
         info = process_info(proc)
         if info is not None and info[0] in ('Z', 'X'):
             continue
         args = command_line(proc)
-        if (info is not None and args and Path(args[0]).name == 'toolbox'
-                and 'init-container' in args[1:]):
-            # Both the mount namespace inode and PID can be reused at restart.
-            instance = '%s:%d' % (proc.name, info[2])
+        scoped.append((int(proc.name), proc, info, args))
+    scope_pids = {pid for pid, _proc, _info, _args in scoped}
+    candidates = []
+    for pid, proc, info, args in scoped:
+        if info is None or info[1] in scope_pids or not at_scope_root(proc):
+            continue
+        kind = is_container_init(args)
+        if kind is not None:
+            candidates.append((0 if kind == 'toolbox' else 1, info[2], pid, info, kind))
+    instance = None
+    init_pid = None
+    init_kind = None
+    if candidates:
+        candidates.sort()
+        _rank, start_ticks, init_pid, _info, init_kind = candidates[0]
+        # Both the mount namespace inode and PID can be reused at restart.
+        instance = '%s:%d' % (init_pid, start_ticks)
+    members = [(info, args) for pid, _proc, info, args in scoped if pid != init_pid]
+    idle = True
+    for info, args in members:
+        if (init_kind == 'distrobox' and info is not None
+                and info[1] == init_pid and args and Path(args[0]).name == 'sleep'):
             continue
         if (len(args) > 1 and Path(args[0]).name.startswith('python')
                 and Path(args[1]).name in LAUNCHER_HELPERS
@@ -529,6 +593,7 @@ def toolbox_state(container_id, proc_root):
                 and Path(args[1]).name == 'session-supervisor.py'):
             continue
         idle = False
+        break
     return instance, idle
 
 

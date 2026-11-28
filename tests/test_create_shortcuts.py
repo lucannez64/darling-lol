@@ -72,6 +72,10 @@ class CreateShortcutsTests(unittest.TestCase):
         stub = bin_dir / 'toolbox'
         stub.write_text(f'''\
 #!/bin/sh
+if [ "$1" = --version ]; then
+  printf 'toolbox version 0.0.99.5\\n'
+  exit 0
+fi
 # run -c CONTAINER ...: succeed only for {container}
 if [ "$1" = run ] && [ "$2" = -c ] && [ "$3" = {container} ]; then exit 0; fi
 exit 1
@@ -82,6 +86,8 @@ exit 1
     def run_script(self, *args, path=None, input=None, desktop='X-Unknown', lang='C'):
         env = {**os.environ,
                'HOME': str(self.home),
+               'DARLING_TOOLBOX_ENV': str(self.root / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(self.root / 'missing-containerenv'),
                # Desktop discovery (xdg-user-dir) must not read the caller's
                # configuration and write shortcuts into their real folders.
                'XDG_CONFIG_HOME': str(self.home / '.config'),
@@ -89,6 +95,9 @@ exit 1
                # ships, so the region/locale question is skipped unless a test
                # asks for a supported one.
                'LC_ALL': lang, 'LC_MESSAGES': lang, 'LANG': lang}
+        for key in ('CONTAINER_ID', 'DARLING_LOL_TOOLBOX',
+                    'DARLING_LOL_TOOLBOX_NAME', 'DARLING_LOL_TOOLBOX_BACKEND'):
+            env.pop(key, None)
         # Deterministic session: only XDG_CURRENT_DESKTOP=GNOME may create the
         # window entries by default or ask the window-entries question.
         env['XDG_CURRENT_DESKTOP'] = desktop
@@ -106,9 +115,15 @@ exit 1
         env = {**os.environ,
                'HOME': str(self.home),
                'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'DARLING_TOOLBOX_ENV': str(self.root / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(self.root / 'missing-containerenv'),
                'DARLING_LOL_SHORTCUT_SCRIPT': str(self.repo / 'scripts/create-shortcuts.sh'),
                'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
                **overrides}
+        for key in ('CONTAINER_ID', 'DARLING_LOL_TOOLBOX',
+                    'DARLING_LOL_TOOLBOX_NAME', 'DARLING_LOL_TOOLBOX_BACKEND'):
+            if key not in overrides:
+                env.pop(key, None)
         return subprocess.run(
             ['bash', '-c',
              f'source "$DARLING_LOL_SHORTCUT_SCRIPT"\n{snippet}'],
@@ -615,6 +630,211 @@ exit 1
         result = self.run_sourced('printf "%s\\n" "${LOCALES[*]}"')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), list(common.LOCALES))
+
+
+class DistroboxShortcutsTests(unittest.TestCase):
+    """Non-interactive Distrobox coverage for scripts/create-shortcuts.sh."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='create-shortcuts-distrobox-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / 'home'
+        self.home.mkdir()
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        (self.repo / 'scripts').mkdir()
+        (self.repo / 'tools').mkdir()
+        (self.repo / 'build').mkdir()
+        shutil.copy2(SCRIPT, self.repo / 'scripts/create-shortcuts.sh')
+        shutil.copy2(HELPER_SOURCE, self.repo / 'tools/desktop-entry.py')
+        for icon in ('darling-lol.svg', 'darling-lol.png'):
+            shutil.copy2(ROOT / icon, self.repo / icon)
+        (self.repo / 'scripts/configure.py').write_text(CONFIGURE_STUB)
+
+    def distrobox_toolboxenv(self):
+        """distrobox-init creates /run/.toolboxenv inside every Distrobox."""
+        toolboxenv = self.root / 'toolboxenv'
+        toolboxenv.write_text('')
+        return toolboxenv
+
+    def fake_distrobox(self, container='my-dbx'):
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir(exist_ok=True)
+        log = self.root / 'distrobox.log'
+        stub = bin_dir / 'distrobox'
+        stub.write_text(f'''\
+#!/bin/sh
+printf '%s:%s\\n' "${{DBX_CONTAINER_MANAGER:-}}" "$*" >> "{log}"
+if [ "$1" = enter ] && [ "$2" = --no-tty ] && [ "$3" = --name ] && [ "$4" = {container} ]; then
+  exit 0
+fi
+exit 1
+''')
+        stub.chmod(0o755)
+        podman_stub = bin_dir / 'podman'
+        podman_stub.write_text(f'''\
+#!/bin/sh
+case "${{1:-}}:${{2:-}}" in
+  container:exists) [ "${{4:-}}" = {container} ] ;;
+  container:inspect)
+    [ "${{5:-}}" = {container} ] || exit 1
+    printf 'distrobox\\n'
+    ;;
+  *) exit 1 ;;
+esac
+''')
+        podman_stub.chmod(0o755)
+        (bin_dir / 'toolbox').write_text('#!/bin/sh\nexit 1\n')
+        (bin_dir / 'toolbox').chmod(0o755)
+        return str(bin_dir)
+
+    def run_cli(self, *args, path=None):
+        env = {**os.environ,
+               'HOME': str(self.home),
+               'DARLING_TOOLBOX_ENV': str(self.root / 'missing-toolboxenv'),
+               'DARLING_CONTAINER_ENV': str(self.root / 'missing-containerenv'),
+               'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'XDG_CURRENT_DESKTOP': 'X-Unknown',
+               'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C'}
+        for key in ('CONTAINER_ID', 'DARLING_LOL_TOOLBOX',
+                    'DARLING_LOL_TOOLBOX_NAME', 'DARLING_LOL_TOOLBOX_BACKEND'):
+            env.pop(key, None)
+        if path is not None:
+            env['PATH'] = path + os.pathsep + env.get('PATH', '')
+        return subprocess.run(
+            ['bash', str(self.repo / 'scripts/create-shortcuts.sh'), *args],
+            capture_output=True, text=True, env=env, check=False, cwd=str(self.repo))
+
+    def test_distrobox_flag_creates_distrobox_shortcut(self):
+        path = self.fake_distrobox('my-dbx')
+        result = self.run_cli('--create', '--yes', '--distrobox', 'my-dbx', path=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+        calls = (self.root / 'distrobox.log').read_text().splitlines()
+        self.assertTrue(calls and all(line.startswith('podman:') for line in calls), calls)
+
+    def test_missing_distrobox_container_fails_without_entering(self):
+        path = self.fake_distrobox('my-dbx')
+        result = self.run_cli('--create', '--yes', '--distrobox', 'missing-box', path=path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('is not usable', result.stderr)
+        self.assertFalse((self.home / '.local/share/applications/darling-launcher.desktop').exists())
+        self.assertFalse((self.root / 'distrobox.log').exists())
+
+    def test_toolbox_flag_falls_back_to_distrobox_when_toolbox_fails(self):
+        path = self.fake_distrobox('my-dbx')
+        result = self.run_cli('--create', '--yes', '--toolbox', 'my-dbx', path=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+
+    def test_detected_distrobox_backend_creates_distrobox_shortcut(self):
+        path = self.fake_distrobox('my-dbx')
+        (self.repo / 'build/toolbox-container').write_text('my-dbx\n')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        result = self.run_cli('--create', '--yes', path=path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+
+    def test_inside_distrobox_with_darling_lol_toolbox_env_uses_distrobox(self):
+        path = self.fake_distrobox('my-dbx')
+        containerenv = self.root / 'containerenv'
+        containerenv.write_text('name="my-dbx"\n')
+        env = {**os.environ,
+               'HOME': str(self.home),
+               'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'XDG_CURRENT_DESKTOP': 'X-Unknown',
+               'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
+               'PATH': path + os.pathsep + os.environ.get('PATH', ''),
+               'DARLING_TOOLBOX_ENV': str(self.distrobox_toolboxenv()),
+               'DARLING_CONTAINER_ENV': str(containerenv),
+               'DARLING_LOL_TOOLBOX': '1',
+               'DARLING_LOL_TOOLBOX_NAME': 'my-dbx',
+               'DARLING_LOL_TOOLBOX_BACKEND': '',
+               'CONTAINER_ID': 'my-dbx'}
+        result = subprocess.run(
+            ['bash', str(self.repo / 'scripts/create-shortcuts.sh'), '--create', '--yes'],
+            capture_output=True, text=True, env=env, check=False, cwd=str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name my-dbx -- '), entry['Exec'])
+
+    def test_inside_distrobox_prefers_container_id_over_stale_marker(self):
+        path = self.fake_distrobox('new-box')
+        (self.repo / 'build/toolbox-container').write_text('old-box\n')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        containerenv = self.root / 'containerenv'
+        containerenv.write_text('name="new-box"\n')
+        env = {**os.environ,
+               'HOME': str(self.home),
+               'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'XDG_CURRENT_DESKTOP': 'X-Unknown',
+               'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
+               'PATH': path + os.pathsep + os.environ.get('PATH', ''),
+               'DARLING_TOOLBOX_ENV': str(self.distrobox_toolboxenv()),
+               'DARLING_CONTAINER_ENV': str(containerenv),
+               'DARLING_LOL_TOOLBOX_NAME': '',
+               'DARLING_LOL_TOOLBOX_BACKEND': '',
+               'CONTAINER_ID': 'new-box'}
+        result = subprocess.run(
+            ['bash', str(self.repo / 'scripts/create-shortcuts.sh'), '--create', '--yes'],
+            capture_output=True, text=True, env=env, check=False, cwd=str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
+        self.assertTrue(entry['Exec'].startswith('env DBX_CONTAINER_MANAGER=podman distrobox enter --no-tty --name new-box -- '), entry['Exec'])
+
+    def test_inside_toolbx_distrobox_flag_keeps_toolbx_backend(self):
+        path = self.fake_distrobox('other-box')
+        toolboxenv = self.root / 'toolboxenv'
+        toolboxenv.write_text('')
+        env = {**os.environ,
+               'HOME': str(self.home),
+               'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'XDG_CURRENT_DESKTOP': 'X-Unknown',
+               'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
+               'PATH': path + os.pathsep + os.environ.get('PATH', ''),
+               'DARLING_TOOLBOX_ENV': str(toolboxenv),
+               'DARLING_CONTAINER_ENV': str(self.root / 'missing-containerenv'),
+               'DARLING_LOL_TOOLBOX_NAME': 'cur-tbx',
+               'DARLING_LOL_TOOLBOX_BACKEND': ''}
+        result = subprocess.run(
+            ['bash', str(self.repo / 'scripts/create-shortcuts.sh'),
+             '--create', '--yes', '--distrobox', 'other-box'],
+            capture_output=True, text=True, env=env, check=False, cwd=str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ignoring container override 'other-box'", result.stderr)
+        entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
+        self.assertTrue(entry['Exec'].startswith('toolbox run -c cur-tbx '), entry['Exec'])
+
+    def test_inside_toolbx_without_container_id_keeps_toolbox(self):
+        # Toolbx (Silverblue): /run/.toolboxenv and /run/.containerenv, no
+        # CONTAINER_ID. A stale Distrobox backend marker must not switch it.
+        (self.repo / 'build/toolbox-container').write_text('tbx\n')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        toolboxenv = self.root / 'toolboxenv'
+        toolboxenv.write_text('')
+        containerenv = self.root / 'containerenv'
+        containerenv.write_text('name="tbx"\n')
+        env = {**os.environ,
+               'HOME': str(self.home),
+               'XDG_CONFIG_HOME': str(self.home / '.config'),
+               'XDG_CURRENT_DESKTOP': 'X-Unknown',
+               'LC_ALL': 'C', 'LC_MESSAGES': 'C', 'LANG': 'C',
+               'DARLING_TOOLBOX_ENV': str(toolboxenv),
+               'DARLING_CONTAINER_ENV': str(containerenv),
+               'DARLING_LOL_TOOLBOX_NAME': '',
+               'DARLING_LOL_TOOLBOX_BACKEND': ''}
+        env.pop('CONTAINER_ID', None)
+        env.pop('DARLING_LOL_TOOLBOX', None)
+        result = subprocess.run(
+            ['bash', str(self.repo / 'scripts/create-shortcuts.sh'), '--create', '--yes'],
+            capture_output=True, text=True, env=env, check=False, cwd=str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = parse_entry((self.home / '.local/share/applications/darling-launcher.desktop').read_text())
+        self.assertTrue(entry['Exec'].startswith('toolbox run -c tbx '), entry['Exec'])
 
 
 if __name__ == '__main__':

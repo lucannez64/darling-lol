@@ -40,6 +40,7 @@ VERBOSE=0
 USE_TOOLBOX=0
 CONTAINER_INSTALL=0
 INSIDE_TOOLBOX=0
+CONTAINER_BACKEND=''
 TOOLBOX_RELEASE=''
 # 1 when the hidden League/Riot Client window entries were requested
 # (--window-entries or DARLING_LOL_WINDOW_ENTRIES=1); never created by default.
@@ -61,8 +62,18 @@ LOCALE_EXPLICIT=0
 BG_PID=''
 SUDO_PID=''
 
-if [[ -f /run/.toolboxenv || ${DARLING_LOL_TOOLBOX:-0} == 1 ]]; then
+# Distrobox comes first: its init also creates /run/.toolboxenv, so only
+# CONTAINER_ID (set by distrobox create/enter) tells the two apart.
+if [[ -n ${CONTAINER_ID:-} && -f ${DARLING_CONTAINER_ENV:-/run/.containerenv} ]]; then
   INSIDE_TOOLBOX=1
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-distrobox}
+  TOOLBOX_NAME=${DARLING_LOL_TOOLBOX_NAME:-$CONTAINER_ID}
+elif [[ -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]]; then
+  INSIDE_TOOLBOX=1
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
+elif [[ ${DARLING_LOL_TOOLBOX:-0} == 1 ]]; then
+  INSIDE_TOOLBOX=1
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
 fi
 
 if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
@@ -244,7 +255,7 @@ Install Darling-LoL build dependencies, compile the project and install its runt
 
 Options:
   -v, --verbose       Show all command output
-  -t, --toolbox       Build inside a Fedora Toolbox container (any host with toolbox and podman)
+  -t, --toolbox       Build inside a Fedora Toolbx container (falls back to Distrobox when Toolbx is unavailable)
   -y, --yes           Skip confirmations (required for non-interactive use)
       --no-confirm     Skip the INSTALL confirmation only (used by the Toolbox re-exec; does not imply --yes)
       --region CODE   Riot server region: $(region_codes)
@@ -657,6 +668,16 @@ check_podman_storage_space() {
     fail "Podman storage '$graph_root' is on a filesystem with less than ${MIN_FREE_GIB_CONTAINER} GiB free. Container images live outside the repository checkout; free space there before installing."
 }
 
+# Toolbx (containers/toolbox) prints "toolbox version <semver>" on --version
+# before touching Podman or a pager. Incompatible scripts sharing the name
+# (notably openSUSE's microos-toolbox) reject --version or print something else.
+is_toolbx_cli() {
+  local version=''
+  command -v toolbox >/dev/null 2>&1 || return 1
+  version=$(toolbox --version </dev/null 2>/dev/null) || version=''
+  [[ $version == 'toolbox version '* ]]
+}
+
 check_toolbox_support() {
   # Package-manager hint follows the host distribution identified by
   # detect_distribution; unset/unknown families get a generic fallback.
@@ -667,8 +688,33 @@ check_toolbox_support() {
     debian) hint='sudo apt install podman-toolbox' ;;
     *) hint='the toolbox and podman packages from your distribution' ;;
   esac
-  command -v toolbox >/dev/null 2>&1 ||
-    fail "Toolbox is not installed. Install it with '${hint}'."
+  if is_toolbx_cli; then
+    CONTAINER_BACKEND=toolbox
+  elif command -v distrobox >/dev/null 2>&1; then
+    CONTAINER_BACKEND=distrobox
+    if command -v toolbox >/dev/null 2>&1; then
+      info "'toolbox' is not Toolbx (containers/toolbox); using Distrobox instead."
+    else
+      info 'Toolbx is unavailable; using Distrobox instead.'
+    fi
+  elif command -v toolbox >/dev/null 2>&1; then
+    local distrobox_hint='install distrobox and podman'
+    local os_release=${DARLING_OS_RELEASE:-/etc/os-release}
+    if [[ -r $os_release ]]; then
+      local os_line
+      while IFS= read -r os_line; do
+        case ${os_line,,} in
+          id=*suse*|id_like=*suse*)
+            distrobox_hint='sudo zypper install distrobox podman'
+            break
+            ;;
+        esac
+      done < "$os_release"
+    fi
+    fail "'toolbox' is not Toolbx (containers/toolbox) and Distrobox is not installed. Install Distrobox and Podman (${distrobox_hint}) and re-run with --toolbox."
+  else
+    fail "Toolbox is not installed. Install it with '${hint}' (or install distrobox and podman)."
+  fi
   command -v podman >/dev/null 2>&1 ||
     fail "Podman is not installed. Install it with '${hint}'."
   check_podman_storage_space
@@ -740,22 +786,10 @@ verify_ffmpeg() {
 }
 
 install_toolbox() {
-  local create_args=(--assumeyes --distro fedora)
   # TOOLBOX_RELEASE is resolved in detect_distribution (override > host Fedora
   # release when it meets the minimum > minimum supported). The env override
   # is honored here too so the create call stays self-contained.
-  create_args+=(--release "${DARLING_LOL_TOOLBOX_RELEASE:-${TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}}")
-
-  if ! podman container exists "$TOOLBOX_NAME"; then
-    run "Creating Toolbox container '$TOOLBOX_NAME'" \
-      toolbox create "${create_args[@]}" "$TOOLBOX_NAME"
-  else
-    info "Toolbox '$TOOLBOX_NAME' already exists."
-  fi
-
-  info "Entering Toolbox '$TOOLBOX_NAME'..."
-  printf '\n'
-
+  local release=${DARLING_LOL_TOOLBOX_RELEASE:-${TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}}
   local args=(--no-confirm --region "$REGION" --locale "$LOCALE")
   if (( YES )); then args+=(--yes); fi
   if (( VERBOSE )); then args+=(--verbose); fi
@@ -767,6 +801,45 @@ install_toolbox() {
   if [[ -n ${DARLING_LOL_DESKTOP_ENTRY+x} ]]; then
     inner_env+=(DARLING_LOL_DESKTOP_ENTRY="$DARLING_LOL_DESKTOP_ENTRY")
   fi
+
+  if [[ $CONTAINER_BACKEND == distrobox ]]; then
+    local image="registry.fedoraproject.org/fedora-toolbox:${release}"
+    if ! podman container exists "$TOOLBOX_NAME"; then
+      run "Creating Distrobox container '$TOOLBOX_NAME'" \
+        env DBX_CONTAINER_MANAGER=podman distrobox create --yes --name "$TOOLBOX_NAME" --image "$image"
+    else
+      local manager=''
+      manager=$(podman container inspect --format '{{index .Config.Labels "manager"}}' "$TOOLBOX_NAME" 2>/dev/null) || manager=''
+      if [[ $manager != distrobox ]]; then
+        fail "Container '$TOOLBOX_NAME' already exists in Podman, but was not created by Distrobox. Remove it with 'podman rm -f $TOOLBOX_NAME' (or set DARLING_LOL_TOOLBOX_NAME to another name) and re-run this script."
+      fi
+      info "Distrobox '$TOOLBOX_NAME' already exists."
+    fi
+
+    info "Entering Distrobox '$TOOLBOX_NAME'..."
+    printf '\n'
+
+    inner_env+=(DARLING_LOL_TOOLBOX_BACKEND=distrobox)
+    local enter_args=(--name "$TOOLBOX_NAME")
+    if [[ ! -t 0 ]]; then
+      enter_args=(--no-tty "${enter_args[@]}")
+    fi
+
+    exec env DBX_CONTAINER_MANAGER=podman distrobox enter "${enter_args[@]}" -- \
+      "${inner_env[@]}" bash "$SCRIPT_PATH" "${args[@]}"
+  fi
+
+  local create_args=(--assumeyes --distro fedora --release "$release")
+
+  if ! podman container exists "$TOOLBOX_NAME"; then
+    run "Creating Toolbox container '$TOOLBOX_NAME'" \
+      toolbox create "${create_args[@]}" "$TOOLBOX_NAME"
+  else
+    info "Toolbox '$TOOLBOX_NAME' already exists."
+  fi
+
+  info "Entering Toolbox '$TOOLBOX_NAME'..."
+  printf '\n'
 
   exec toolbox run --container "$TOOLBOX_NAME" \
     "${inner_env[@]}" bash "$SCRIPT_PATH" "${args[@]}"
@@ -796,7 +869,11 @@ show_banner() {
 
   distribution="Distribution: $FAMILY"
   if (( CONTAINER_INSTALL )); then
-    distribution="Toolbox Distribution: Fedora ${TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}"
+    if [[ $CONTAINER_BACKEND == distrobox ]]; then
+      distribution="Distrobox Distribution: Fedora ${TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}"
+    else
+      distribution="Toolbox Distribution: Fedora ${TOOLBOX_RELEASE:-$DEFAULT_FEDORA_RELEASE}"
+    fi
   fi
 
   printf '\n%s%sDarling-LoL installer%s\n' "$BOLD" "$CYAN" "$RESET"
@@ -1132,7 +1209,11 @@ create_desktop_entry() {
   fi
 
   if (( INSIDE_TOOLBOX )); then
-    args+=(--toolbox "$TOOLBOX_NAME")
+    if [[ $CONTAINER_BACKEND == distrobox ]]; then
+      args+=(--distrobox "$TOOLBOX_NAME")
+    else
+      args+=(--toolbox "$TOOLBOX_NAME")
+    fi
   fi
   if (( WINDOW_ENTRIES )); then
     args+=(--window-entries)
@@ -1269,7 +1350,11 @@ finish() {
   if (( ! shortcut_ready )); then
     printf 'To start the runtime:\n'
     if (( INSIDE_TOOLBOX )); then
-      printf '  toolbox enter %s\n' "$TOOLBOX_NAME"
+      if [[ $CONTAINER_BACKEND == distrobox ]]; then
+        printf '  distrobox enter %s\n' "$TOOLBOX_NAME"
+      else
+        printf '  toolbox enter %s\n' "$TOOLBOX_NAME"
+      fi
     fi
     printf '  cd "%s"\n' "$TARGET_DIR"
     printf '  RCLOL_REGION=%s RCLOL_LOCALE=%s sh scripts/run.sh\n\n' \
@@ -1303,7 +1388,11 @@ main() {
   fi
 
   if (( INSIDE_TOOLBOX )); then
-    info "Running inside Toolbox '$TOOLBOX_NAME'."
+    if [[ $CONTAINER_BACKEND == distrobox ]]; then
+      info "Running inside Distrobox '$TOOLBOX_NAME'."
+    else
+      info "Running inside Toolbox '$TOOLBOX_NAME'."
+    fi
   fi
 
   detect_distribution
@@ -1375,13 +1464,18 @@ main() {
     # the build cache and the installed runtime belong to this container.
     mkdir -p "$TARGET_DIR/build"
     printf '%s\n' "${DARLING_LOL_TOOLBOX_NAME:-$TOOLBOX_NAME}" > "$TARGET_DIR/build/toolbox-container"
+    if [[ $CONTAINER_BACKEND == distrobox ]]; then
+      printf 'distrobox\n' > "$TARGET_DIR/build/toolbox-backend"
+    else
+      rm -f "$TARGET_DIR/build/toolbox-backend"
+    fi
     rm -f "$TARGET_DIR/build/native-install"
   elif [[ $INSIDE_TOOLBOX != 1 ]]; then
     # Explicitly native install: record it so scripts/update.sh never re-execs
     # into a container, and drop a stale Toolbox marker.
     mkdir -p "$TARGET_DIR/build"
     : > "$TARGET_DIR/build/native-install"
-    rm -f "$TARGET_DIR/build/toolbox-container"
+    rm -f "$TARGET_DIR/build/toolbox-container" "$TARGET_DIR/build/toolbox-backend"
   fi
 
   finish
