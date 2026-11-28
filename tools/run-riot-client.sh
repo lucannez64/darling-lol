@@ -491,8 +491,12 @@ if [ "${RCLOL_DISCORD_RPC:-1}" != 0 ]; then
  relayed=''
  # Without a running Discord there is nothing to relay: keep the direct links for a later start.
  if [ "$discord_found" = 1 ] && [ "${RCLOL_DISCORD_PID_RELAY:-1}" != 0 ]; then
+  # The relay also sets the League activity while the game runs, since the client
+  # never sends one; RCLOL_DISCORD_GAME_ACTIVITY=0 keeps only the forwarding.
+  game_activity_flag=''
+  [ "${RCLOL_DISCORD_GAME_ACTIVITY:-1}" != 0 ] || game_activity_flag='--no-game-activity'
   relayed=$(python3 "$runner_dir/discord-ipc-relay.py" --host-dir "$host_ipc" \
-   --relay-dir "$relay_dir" --watch-pid "$$") || relayed=''
+   --relay-dir "$relay_dir" --watch-pid "$$" $game_activity_flag) || relayed=''
  fi
  (mkdir -p "$guest_ipc" && for n in 0 1 2 3 4 5 6 7 8 9; do
   target=$host_ipc

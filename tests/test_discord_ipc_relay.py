@@ -70,7 +70,8 @@ class RelayProcessTests(unittest.TestCase):
     def start_relay(self, watch_pid):
         return subprocess.run(
             [sys.executable, str(RELAY), '--host-dir', str(self.host_dir),
-             '--relay-dir', str(self.relay_dir), '--watch-pid', str(watch_pid)],
+             '--relay-dir', str(self.relay_dir), '--watch-pid', str(watch_pid),
+             '--no-game-activity'],
             capture_output=True, text=True, timeout=10, check=False)
 
     def test_relays_frames_and_replaces_the_pid(self):
@@ -143,7 +144,112 @@ class RelayProcessTests(unittest.TestCase):
         self.assertFalse((self.relay_dir).exists())
 
 
+GAME_ARGV0 = ('/Applications/League of Legends.app/Contents/LoL/Game/'
+              'LeagueofLegends.app/Contents/MacOS/LeagueofLegends')
+
+
+def fake_process(proc_root, pid, argv, start_ticks=500):
+    proc = Path(proc_root) / str(pid)
+    proc.mkdir()
+    (proc / 'cmdline').write_bytes(b'\0'.join(a.encode() for a in argv) + b'\0')
+    fields = ['S', '1'] + ['0'] * 17 + [str(start_ticks)] + ['0'] * 10
+    (proc / 'stat').write_text(f'{pid} (mldr) ' + ' '.join(fields) + '\n')
+    return proc
+
+
+class GameActivityTests(unittest.TestCase):
+    def setUp(self):
+        relay.client_activity.clear()
+        self.addCleanup(relay.client_activity.clear)
+        tmp = tempfile.TemporaryDirectory(prefix='discord game ')
+        self.addCleanup(tmp.cleanup)
+        self.proc_root = Path(tmp.name) / 'proc'
+        self.proc_root.mkdir()
+        (self.proc_root / 'stat').write_text('cpu 0 0\nbtime 1700000000\n')
+        self.host_path = str(Path(tmp.name) / 'discord-ipc-0')
+        self.discord = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(self.discord.close)
+        self.discord.bind(self.host_path)
+        self.discord.listen(2)
+        self.discord.settimeout(10)
+
+    def start_watcher(self):
+        stop = threading.Event()
+        thread = threading.Thread(target=relay.game_activity,
+                                  args=(self.host_path, str(self.proc_root), 0.05, stop),
+                                  daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(stop.set)
+        return stop
+
+    def accept_activity(self):
+        server, _ = self.discord.accept()
+        self.addCleanup(server.close)
+        server.settimeout(10)
+        self.assertEqual(read_frame(server),
+                         (0, {'v': 1, 'client_id': relay.GAME_APPLICATION_ID}))
+        server.sendall(frame(1, {'cmd': 'DISPATCH', 'evt': 'READY', 'data': {'v': 1}}))
+        opcode, message = read_frame(server)
+        self.assertEqual(opcode, 1)
+        self.assertEqual(message['cmd'], 'SET_ACTIVITY')
+        server.sendall(frame(1, {'cmd': 'SET_ACTIVITY', 'nonce': message['nonce'], 'data': {}}))
+        return server, message
+
+    def assert_closed(self, server):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if server.recv(4096) == b'':
+                return
+        self.fail('the activity connection stayed open')
+
+    def test_finds_only_the_game_and_its_start_time(self):
+        fake_process(self.proc_root, 10, ['/usr/bin/python3', 'LeagueofLegends'])
+        fake_process(self.proc_root, 11, ['/Applications/League of Legends.app/Contents/LoL/'
+                                          'LeagueClient.app/Contents/MacOS/LeagueClientUx'])
+        self.assertIsNone(relay.find_game(str(self.proc_root)))
+        fake_process(self.proc_root, 12, [GAME_ARGV0, '-Product=LoL'], start_ticks=300)
+        hz = os.sysconf('SC_CLK_TCK')
+        self.assertEqual(relay.find_game(str(self.proc_root)), (12, 1700000000 + 300 // hz))
+
+    def test_sets_the_activity_while_the_game_runs(self):
+        game = fake_process(self.proc_root, 12, [GAME_ARGV0], start_ticks=0)
+        self.start_watcher()
+        server, message = self.accept_activity()
+        self.assertEqual(message['args'], {'pid': os.getpid(), 'activity': {
+            'type': 0, 'timestamps': {'start': 1700000000}}})
+        # Only the start time goes to Discord, and the activity ends with the game.
+        (game / 'cmdline').unlink()
+        self.assert_closed(server)
+
+    def test_the_clients_own_activity_wins(self):
+        fake_process(self.proc_root, 12, [GAME_ARGV0])
+        self.start_watcher()
+        server, _ = self.accept_activity()
+        payload = json.dumps({'cmd': 'SET_ACTIVITY', 'args': {'pid': 1, 'activity': {'state': 'x'}}})
+        relay.rewrite_frame(1, payload.encode(), 9000)
+        self.assert_closed(server)
+
+    def test_a_refused_application_is_not_retried_for_the_same_game(self):
+        fake_process(self.proc_root, 12, [GAME_ARGV0])
+        self.start_watcher()
+        server, _ = self.discord.accept()
+        server.settimeout(10)
+        read_frame(server)
+        server.sendall(struct.pack('<II', 2, 2) + b'{}')
+        self.assert_closed(server)
+        server.close()
+        self.discord.settimeout(0.5)
+        with self.assertRaises(socket.timeout):
+            self.discord.accept()
+
+
 class LauncherTests(unittest.TestCase):
+    def test_launcher_has_a_game_activity_opt_out(self):
+        text = LAUNCHER.read_text()
+        self.assertIn('RCLOL_DISCORD_GAME_ACTIVITY', text)
+        self.assertIn('--no-game-activity', text)
+
     def test_launcher_links_relayed_slots_and_has_an_opt_out(self):
         text = LAUNCHER.read_text()
         self.assertIn('discord-ipc-relay.py', text)

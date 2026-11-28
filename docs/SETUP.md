@@ -268,6 +268,17 @@ unchanged except the `pid` argument of `SET_ACTIVITY`, replaced with the
 client's host PID. It logs nothing and exits with the session.
 `RCLOL_DISCORD_PID_RELAY=0` links straight to the Discord sockets instead.
 
+The Riot Client connects to Discord but never sends an activity: its
+server-side configuration keeps the Discord integration off (its log says
+"Activity Gateway Discord is disabled"), and Linux Discord cannot detect the
+game by process name, since every Darling process runs under the loader. So
+while the League game runs, the relay sets the activity Discord's game
+detection would show, "Playing League of Legends" with the elapsed time,
+through its own connection with Discord's League of Legends application. It
+sends only the game's start time, reads nothing from the client and clears the
+activity when the game exits; if the client ever sends an activity of its own,
+the relay steps aside. `RCLOL_DISCORD_GAME_ACTIVITY=0` turns this off.
+
 `RCLOL_FILTER_HOST_ENV=1` opts in to removing host desktop-session variables before
 the guest starts: `WAYLAND_DISPLAY`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`,
 GNOME/KDE/GDM, systemd, SSH agent, terminal, toolkit (`QT_*`, `GTK_*`, `GDK_*`),
