@@ -19,6 +19,7 @@ printf '%s\\n' "$*" >> "${BUILD_STUB_LOG:?}"
 printf '%s\\n' "$PWD" >> "${BUILD_STUB_LOG:?}.pwd"
 case "$*" in
   *build-configure-stamp.py*check*) [ "${BUILD_STUB_STAMP_CURRENT:-0}" = 1 ] || exit 1 ;;
+  *darling-build-stamp.py*check*) [ "${BUILD_STUB_BUILD_CURRENT:-0}" = 1 ] || exit 1 ;;
 esac
 exit 0
 '''
@@ -142,6 +143,47 @@ class BuildCacheWarningTests(unittest.TestCase):
         self.assertTrue(any(line.startswith('-S ') for line in argv), argv)
         self.assertTrue(any('build-configure-stamp.py' in line and 'record' in line
                             for line in argv), argv)
+
+    def test_skips_cmake_build_when_configure_and_build_stamps_are_current(self):
+        self.write_cache('GOOD_LIB:FILEPATH=/tmp/lib.so')
+        self.env['BUILD_STUB_STAMP_CURRENT'] = '1'
+        self.env['BUILD_STUB_BUILD_CURRENT'] = '1'
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('skipping cmake --build', result.stdout)
+        argv = self.log.read_text().splitlines()
+        self.assertFalse(any(line.startswith('-S ') for line in argv), argv)
+        self.assertFalse(any(line.startswith('--build ') for line in argv), argv)
+
+    def test_forced_rebuild_runs_cmake_build_and_records_stamp(self):
+        self.write_cache('GOOD_LIB:FILEPATH=/tmp/lib.so')
+        self.env['BUILD_STUB_STAMP_CURRENT'] = '1'
+        self.env['BUILD_STUB_BUILD_CURRENT'] = '1'
+        self.env['RCLOL_FORCE_REBUILD'] = '1'
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.log.read_text().splitlines()
+        self.assertTrue(any(line.startswith('--build ') for line in argv), argv)
+        self.assertTrue(any('darling-build-stamp.py' in line and 'record' in line
+                            for line in argv), argv)
+
+    def test_reconfigure_always_runs_cmake_build(self):
+        self.write_cache('GOOD_LIB:FILEPATH=/tmp/lib.so')
+        self.env['BUILD_STUB_STAMP_CURRENT'] = '0'
+        self.env['BUILD_STUB_BUILD_CURRENT'] = '1'
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.log.read_text().splitlines()
+        self.assertTrue(any(line.startswith('-S ') for line in argv), argv)
+        self.assertTrue(any(line.startswith('--build ') for line in argv), argv)
+
+    def test_clears_checkout_digest_cache_after_prepare(self):
+        cache = self.repo / 'digest-cache.json'
+        cache.write_text('{"root":"x","digest":"0"}')
+        self.env['RCLOL_CHECKOUT_DIGEST_CACHE'] = str(cache)
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(cache.exists())
 
 
 if __name__ == '__main__':

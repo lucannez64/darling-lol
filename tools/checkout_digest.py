@@ -13,13 +13,18 @@ Everything here fails closed: an unavailable git, a missing checkout or an
 unreadable changed file returns None, and every caller treats None as a change.
 """
 import hashlib
+import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from file_digest import sha256  # noqa: E402
+
+CACHE_ENV = 'RCLOL_CHECKOUT_DIGEST_CACHE'
+_HEX_CHARS = frozenset('0123456789abcdef')
 
 
 def entry(relative, path):
@@ -67,9 +72,53 @@ def _tree_digest(repo, prefix=''):
     return hasher.hexdigest()
 
 
+def _load_cache(cache_path, root):
+    if not cache_path:
+        return None
+    try:
+        data = json.loads(Path(cache_path).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get('root') != os.path.realpath(root):
+        return None
+    value = data.get('digest')
+    if (not isinstance(value, str) or len(value) != 64
+            or any(ch not in _HEX_CHARS for ch in value)):
+        return None
+    return value
+
+
+def _store_cache(cache_path, root, value):
+    if not cache_path or not value:
+        return
+    path = Path(cache_path)
+    tmp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix='.checkout-digest-', suffix='.tmp')
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump({'root': os.path.realpath(root), 'digest': value}, handle)
+        os.replace(tmp_path, path)
+    except OSError:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def digest(root):
     """Digest of HEAD, the changed files and the dirty submodules."""
+    cache_path = os.environ.get(CACHE_ENV)
+    cached = _load_cache(cache_path, root)
+    if cached is not None:
+        return cached
     try:
-        return _tree_digest(Path(root) / 'build/darling-src')
+        value = _tree_digest(Path(root) / 'build/darling-src')
     except (OSError, subprocess.CalledProcessError, ValueError):
         return None
+    if value is not None:
+        _store_cache(cache_path, root, value)
+    return value

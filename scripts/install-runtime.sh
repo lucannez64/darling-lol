@@ -10,13 +10,18 @@ if [ -n "${DARLING_WORKSPACE:-}" ]; then
   # Prefix initialization is a setup-only exception to the runner launch gate.
   export DARLING_SETUP=1
 fi
-python3 scripts/configure.py
+if [ "${RCLOL_SKIP_CONFIGURE:-0}" != 1 ] || [ ! -f build/runtime/tools/runtime-paths.sh ]; then
+  python3 scripts/configure.py
+fi
 . build/runtime/tools/runtime-paths.sh
 if [ -d build/venv/bin ]; then PATH="$repo/build/venv/bin:$PATH"; export PATH; fi
 # Check versions before any runtime helper touches the prefix or the running session.
 [ "${RCLOL_SKIP_PREFLIGHT:-0}" = 1 ] || python3 scripts/preflight.py
+runtime_stopped=${RCLOL_RUNTIME_STOPPED:-0}
 # A server killed by the base install leaves a stale .init.pid that makes darling shell fail.
-python3 build/runtime/tools/ensure-darling-runtime.py
+if [ "$runtime_stopped" != 1 ]; then
+  python3 build/runtime/tools/ensure-darling-runtime.py
+fi
 # Initialize the normal user-owned prefix before installing overrides.
 # Darling treats a missing prefix directory as new; only then is an identity generated below.
 new_prefix=
@@ -25,6 +30,7 @@ new_prefix=
 # system.prop behind as proof, so skip the full guest boot on re-installs.
 if [ -n "$new_prefix" ] || [ ! -e "$prefix_dir/private/etc/darling-system.prop" ]; then
   darling shell /usr/bin/true
+  runtime_stopped=0
 fi
 # The prefix has no /private/tmp of its own, so the guest falls through to the root-owned
 # installed layer and every write there (the Riot installer's temp files) fails with EACCES.
@@ -41,10 +47,22 @@ fi
 # One-time move of profiles installed while HOST was the default (issue #31).
 python3 build/runtime/tools/migrate-system-profile.py "$prefix/private/etc/darling-system.prop" || \
   echo "Hardware profile not migrated; set profile=compat in $prefix/private/etc/darling-system.prop" >&2
-# Build the system root store now that the prefix exists; Darling is stopped next anyway.
-python3 build/runtime/tools/ensure-darling-root-certificates.py || \
-  echo 'Darling system root store not installed; the launcher retries it' >&2
-python3 build/runtime/tools/stop-darling-runtime.py
+# Build the system root store now that the prefix exists; if certificates are
+# not already current, the helper may start Darling and must be followed by a stop.
+if [ "$runtime_stopped" = 1 ]; then
+  if ! python3 build/runtime/tools/ensure-darling-root-certificates.py --prefix "$prefix_dir" --check; then
+    runtime_stopped=0
+    python3 build/runtime/tools/ensure-darling-root-certificates.py --prefix "$prefix_dir" || \
+      echo 'Darling system root store not installed; the launcher retries it' >&2
+  fi
+else
+  python3 build/runtime/tools/ensure-darling-root-certificates.py --prefix "$prefix_dir" || \
+    echo 'Darling system root store not installed; the launcher retries it' >&2
+fi
+if [ "$runtime_stopped" != 1 ]; then
+  python3 build/runtime/tools/stop-darling-runtime.py
+  runtime_stopped=1
+fi
 # Give a new prefix its own synthetic serial, MLB, UUID and ROM instead of the host-derived defaults.
 # Existing prefixes keep their identity; update.sh only replaces the old shared serial and UUID,
 # while every existing prefix still gets its SystemVersion.plist aligned to the emulated macOS version.
@@ -59,8 +77,8 @@ fi
 # update: the CMake targets and overlay builders relink unconditionally, so a
 # pull that changes nothing they consume would still spend about a minute here.
 install_overlay_batch() {
-  sh build/runtime/tools/install-riot-presentation-runtime.sh
-  sh build/runtime/tools/install-riot-gpu-runtime.sh
+  RCLOL_RUNTIME_STOPPED=1 sh build/runtime/tools/install-riot-presentation-runtime.sh
+  RCLOL_RUNTIME_STOPPED=1 RCLOL_PRESENTATION_BUILT_XSHM=1 sh build/runtime/tools/install-riot-gpu-runtime.sh
   # darling-lol perf: build and install optimized libc/libc++/libplatform.
   if [ -f build/runtime/tools/build-riot-libs-runtime.sh ]; then
     sh build/runtime/tools/build-riot-libs-runtime.sh
@@ -84,12 +102,16 @@ else
   echo 'Runtime overlays are up to date; skipping the overlay rebuild.'
 fi
 # Every guest process loads these overlays; refuse a set the compiler broke (check-darwin-tlv-calls.py).
-# Validation, the canonical mirror and signing always run: they also repair a
-# prefix whose overlays were removed or left unsigned.
-python3 build/runtime/tools/validate-riot-runtime.py
-# Mirror per-user overlays to canonical prefix paths (/System/Library/Frameworks,
-# /usr/lib) so the launcher can run without DYLD_LIBRARY_PATH/DYLD_FRAMEWORK_PATH.
-python3 "$repo/tools/sync-canonical-runtime-overlays.py" --prefix "$prefix_dir" --guest-home "$guest_home"
+# When the overlay stamp already matches (including the installed overlays, canonical copies,
+# and validation/sync scripts), skip the serial disassembly and byte-compare pass unless forced.
+if [ -n "$overlay_rebuilt" ] || [ "${RCLOL_FORCE_VALIDATE:-0}" = 1 ]; then
+  python3 build/runtime/tools/validate-riot-runtime.py
+  # Mirror per-user overlays to canonical prefix paths (/System/Library/Frameworks,
+  # /usr/lib) so the launcher can run without DYLD_LIBRARY_PATH/DYLD_FRAMEWORK_PATH.
+  python3 "$repo/tools/sync-canonical-runtime-overlays.py" --prefix "$prefix_dir" --guest-home "$guest_home"
+else
+  echo 'Runtime overlays already validated and synced; skipping validation and canonical mirror.'
+fi
 # Sign the installed runtime and populate the local trust store. The base SDK
 # is signed only when this process can actually write it; the per-user
 # RuntimeLibraries/RuntimeFrameworks overlays are always signed.

@@ -6,6 +6,8 @@ also implied by -march=native on Zen) can load the descriptor into another regis
 through it, leaving %rdi unrelated: the thunk then returns NULL and the first write crashes.
 Usage: check-darwin-tlv-calls.py BINARY... ; exits 1 and lists every bad access it finds.
 """
+from concurrent.futures import ThreadPoolExecutor
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -15,9 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import llvm_tools
 
 
-def thread_vars_ranges(path):
+def thread_vars_ranges(path, objdump=None):
     """Address ranges of the __thread_vars sections, which hold the TLV descriptors."""
-    output = subprocess.run([llvm_tools.require('llvm-objdump'), '--macho', '--section-headers', path],
+    tool = objdump or llvm_tools.require('llvm-objdump')
+    output = subprocess.run([tool, '--macho', '--section-headers', path],
                             capture_output=True, text=True, check=True).stdout
     ranges = []
     for line in output.splitlines():
@@ -28,14 +31,15 @@ def thread_vars_ranges(path):
     return ranges
 
 
-def bad_accesses(path):
+def bad_accesses(path, objdump=None):
     with open(path, 'rb') as binary:
         if binary.read(4) not in (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe'):
             return []
-    ranges = thread_vars_ranges(path)
+    tool = objdump or llvm_tools.require('llvm-objdump')
+    ranges = thread_vars_ranges(path, tool)
     if not ranges:
         return []
-    disassembly = subprocess.run([llvm_tools.require('llvm-objdump'), '-d', '--no-show-raw-insn', path],
+    disassembly = subprocess.run([tool, '-d', '--no-show-raw-insn', path],
                                  capture_output=True, text=True, check=True).stdout
     load = re.compile(r'(?:leaq|movq)\s+-?0x[0-9a-f]+\(%rip\), %(\w+)\s+#+ 0x([0-9a-f]+)')
     found, function, pending = [], '?', {}
@@ -55,15 +59,40 @@ def bad_accesses(path):
     return found
 
 
-if len(sys.argv) < 2:
-    sys.exit('No runtime binaries supplied for validation')
+def _worker_count(total):
+    raw = os.environ.get('RCLOL_TLV_JOBS')
+    if raw:
+        try:
+            jobs = int(raw)
+            if jobs > 0:
+                return min(total, jobs)
+        except ValueError:
+            pass
+    return max(1, min(total, os.cpu_count() or 4))
 
-status = 0
-for binary in sys.argv[1:]:
-    problems = bad_accesses(binary)
-    if problems:
-        status = 1
-        print('%s: %d thread-local access(es) without the descriptor in %%rdi' % (binary, len(problems)))
-        for problem in problems[:20]:
-            print('  ' + problem)
-sys.exit(status)
+
+def main(argv=None):
+    binaries = list(sys.argv[1:] if argv is None else argv)
+    if not binaries:
+        sys.exit('No runtime binaries supplied for validation')
+
+    objdump = llvm_tools.require('llvm-objdump')
+    workers = _worker_count(len(binaries))
+    if workers > 1 and len(binaries) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(lambda binary: bad_accesses(binary, objdump), binaries))
+    else:
+        results = [bad_accesses(binary, objdump) for binary in binaries]
+
+    status = 0
+    for binary, problems in zip(binaries, results):
+        if problems:
+            status = 1
+            print('%s: %d thread-local access(es) without the descriptor in %%rdi' % (binary, len(problems)))
+            for problem in problems[:20]:
+                print('  ' + problem)
+    return status
+
+
+if __name__ == '__main__':
+    sys.exit(main())

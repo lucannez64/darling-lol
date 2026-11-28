@@ -159,6 +159,32 @@ class RootCertificateTests(unittest.TestCase):
         self.assertTrue(kept, output)
         shutil.rmtree(kept.group(1))
 
+    def test_check_flag_reports_currency_without_starting_darling(self):
+        bundle = self.root / 'test-bundle.pem'
+        bundle.write_bytes(b'-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n')
+        self.assertEqual(
+            1,
+            tool['main'](['--prefix', str(self.prefix), '--bundle', str(bundle),
+                          '--darling', ' '.join(self.darling), '--check']),
+        )
+        folder = self.prefix / 'System/Library/Keychains'
+        folder.mkdir(parents=True)
+        (folder / tool['KEYCHAIN']).write_bytes(b'kc')
+        (folder / tool['TRUST_SETTINGS']).write_bytes(b'plist')
+        tool['write_stamp'](folder, tool['bundle_digest'](bundle.read_bytes()), bundle, [], set())
+        self.assertEqual(
+            0,
+            tool['main'](['--prefix', str(self.prefix), '--bundle', str(bundle),
+                          '--darling', ' '.join(self.darling), '--check']),
+        )
+        bundle.write_bytes(b'-----BEGIN CERTIFICATE-----\nBAUG\n-----END CERTIFICATE-----\n')
+        self.assertEqual(
+            1,
+            tool['main'](['--prefix', str(self.prefix), '--bundle', str(bundle),
+                          '--darling', ' '.join(self.darling), '--check']),
+        )
+        self.assertEqual(self.log.read_text(), '')
+
 
 if __name__ == '__main__':
     unittest.main()
