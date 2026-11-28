@@ -136,12 +136,14 @@ distrobox_container_exists() {
 
 inside_toolbox=0
 inside_backend=''
-if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
-	inside_toolbox=1
-	inside_backend=toolbox
-elif [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
+# Distrobox comes first: its init also creates /run/.toolboxenv, so only
+# CONTAINER_ID (set by distrobox create/enter) tells the two apart.
+if [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
 	inside_toolbox=1
 	inside_backend=distrobox
+elif [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
+	inside_toolbox=1
+	inside_backend=toolbox
 fi
 
 # A Toolbox or Distrobox install keeps Darling, the runtime and the build cache

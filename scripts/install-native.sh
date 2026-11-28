@@ -62,13 +62,15 @@ LOCALE_EXPLICIT=0
 BG_PID=''
 SUDO_PID=''
 
-if [[ -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]]; then
-  INSIDE_TOOLBOX=1
-  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
-elif [[ -n ${CONTAINER_ID:-} && -f ${DARLING_CONTAINER_ENV:-/run/.containerenv} ]]; then
+# Distrobox comes first: its init also creates /run/.toolboxenv, so only
+# CONTAINER_ID (set by distrobox create/enter) tells the two apart.
+if [[ -n ${CONTAINER_ID:-} && -f ${DARLING_CONTAINER_ENV:-/run/.containerenv} ]]; then
   INSIDE_TOOLBOX=1
   CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-distrobox}
   TOOLBOX_NAME=${DARLING_LOL_TOOLBOX_NAME:-$CONTAINER_ID}
+elif [[ -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]]; then
+  INSIDE_TOOLBOX=1
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
 elif [[ ${DARLING_LOL_TOOLBOX:-0} == 1 ]]; then
   INSIDE_TOOLBOX=1
   CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}

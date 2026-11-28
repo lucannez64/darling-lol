@@ -1806,12 +1806,15 @@ install_toolbox
 
     def test_distrobox_detection_wins_over_darling_lol_toolbox_without_backend(self):
         with tempfile.TemporaryDirectory(prefix='install-native-dbx-detect ') as folder:
+            # distrobox-init creates /run/.toolboxenv too; CONTAINER_ID decides.
+            toolboxenv = Path(folder) / 'toolboxenv'
+            toolboxenv.write_text('')
             containerenv = Path(folder) / 'containerenv'
             containerenv.write_text('name="my-dbx"\n')
             result = run_sourced(
                 'source "$INSTALLER"\n'
                 'printf "%s|%s|%s\\n" "$INSIDE_TOOLBOX" "$CONTAINER_BACKEND" "$TOOLBOX_NAME"',
-                DARLING_TOOLBOX_ENV=str(Path(folder) / 'missing-toolboxenv'),
+                DARLING_TOOLBOX_ENV=str(toolboxenv),
                 DARLING_CONTAINER_ENV=str(containerenv),
                 DARLING_LOL_TOOLBOX='1',
                 CONTAINER_ID='my-dbx',
@@ -1820,6 +1823,47 @@ install_toolbox
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), '1|distrobox|my-dbx')
+
+    def test_inside_toolbx_without_container_id_stays_toolbox(self):
+        with tempfile.TemporaryDirectory(prefix='install-native-tbx-detect ') as folder:
+            toolboxenv = Path(folder) / 'toolboxenv'
+            toolboxenv.write_text('')
+            containerenv = Path(folder) / 'containerenv'
+            containerenv.write_text('name="darling-lol"\n')
+            env = installer_env(
+                DARLING_TOOLBOX_ENV=str(toolboxenv),
+                DARLING_CONTAINER_ENV=str(containerenv),
+                DARLING_LOL_TOOLBOX_NAME='',
+                DARLING_LOL_TOOLBOX_BACKEND='',
+            )
+            env.pop('CONTAINER_ID', None)
+            env.pop('DARLING_LOL_TOOLBOX', None)
+            result = subprocess.run(
+                ['bash', '-c', 'source "$INSTALLER"\n'
+                 'printf "%s|%s|%s\\n" "$INSIDE_TOOLBOX" "$CONTAINER_BACKEND" "$TOOLBOX_NAME"'],
+                capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), '1|toolbox|darling-lol')
+
+    def test_manual_distrobox_install_records_distrobox_backend(self):
+        # Documented path: distrobox enter NAME, then
+        # DARLING_LOL_TOOLBOX=1 bash scripts/install-native.sh.
+        with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:
+            toolboxenv = Path(folder) / 'toolboxenv'
+            toolboxenv.write_text('')
+            containerenv = Path(folder) / 'containerenv'
+            containerenv.write_text('name="my-dbx"\n')
+            result = self.run_main(folder, toolbox_env={
+                'DARLING_LOL_TOOLBOX': '1',
+                'DARLING_TOOLBOX_ENV': str(toolboxenv),
+                'DARLING_CONTAINER_ENV': str(containerenv),
+                'CONTAINER_ID': 'my-dbx'},
+                inside_toolbox=1)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            build = Path(folder) / 'build'
+            self.assertEqual((build / 'toolbox-container').read_text(), 'my-dbx\n')
+            self.assertEqual((build / 'toolbox-backend').read_text(), 'distrobox\n')
+            self.assertFalse((build / 'native-install').exists())
 
     def test_inner_run_failure_preserves_existing_marker(self):
         with tempfile.TemporaryDirectory(prefix='install-native-marker ') as folder:

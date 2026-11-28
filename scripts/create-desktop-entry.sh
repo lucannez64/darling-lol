@@ -28,7 +28,17 @@ if [ -r build/toolbox-backend ]; then
   fi
 fi
 set --
-if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
+# Distrobox comes first: its init also creates /run/.toolboxenv, so only
+# CONTAINER_ID (set by distrobox create/enter) tells the two apart.
+if [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
+  backend=${DARLING_LOL_TOOLBOX_BACKEND:-distrobox}
+  name=${DARLING_LOL_TOOLBOX_NAME:-$CONTAINER_ID}
+  if [ "$backend" = distrobox ]; then
+    set -- --distrobox "$name"
+  else
+    set -- --toolbox "$name"
+  fi
+elif [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
   backend=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
   name=${DARLING_LOL_TOOLBOX_NAME:-$recorded_toolbox}
   if [ -z "$name" ]; then
@@ -42,14 +52,6 @@ if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
     set -- --distrobox "${name:-darling-lol}"
   else
     set -- --toolbox "${name:-darling-lol}"
-  fi
-elif [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
-  backend=${DARLING_LOL_TOOLBOX_BACKEND:-distrobox}
-  name=${DARLING_LOL_TOOLBOX_NAME:-$CONTAINER_ID}
-  if [ "$backend" = distrobox ]; then
-    set -- --distrobox "$name"
-  else
-    set -- --toolbox "$name"
   fi
 elif [ "${DARLING_LOL_TOOLBOX:-0}" = 1 ]; then
   backend=${DARLING_LOL_TOOLBOX_BACKEND:-$recorded_backend}

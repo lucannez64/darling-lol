@@ -575,12 +575,14 @@ distrobox_container_exists() {
 
 inside_container=0
 inside_backend=''
-if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
-	inside_container=1
-	inside_backend=toolbox
-elif [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
+# Distrobox comes first: its init also creates /run/.toolboxenv, so only
+# CONTAINER_ID (set by distrobox create/enter) tells the two apart.
+if [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
 	inside_container=1
 	inside_backend=distrobox
+elif [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
+	inside_container=1
+	inside_backend=toolbox
 fi
 if [ "$inside_container" = 0 ] && [ -z "${DARLING_LOL_UPDATE_REEXEC:-}" ] &&
 	[ ! -f build/native-install ]; then

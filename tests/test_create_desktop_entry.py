@@ -51,6 +51,12 @@ class CreateDesktopEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout), result.stderr
 
+    def distrobox_toolboxenv(self):
+        """distrobox-init creates /run/.toolboxenv inside every Distrobox."""
+        toolboxenv = self.repo / 'toolboxenv'
+        toolboxenv.write_text('')
+        return toolboxenv
+
     def record_toolbox(self, name='my-box'):
         (self.repo / 'build/toolbox-container').write_text(name + '\n')
 
@@ -120,7 +126,7 @@ class CreateDesktopEntryTests(unittest.TestCase):
         containerenv.write_text('name="my-dbx"\n')
         env = {**os.environ, 'HOME': str(self.home),
                'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
-               'DARLING_TOOLBOX_ENV': str(self.repo / 'missing-toolboxenv'),
+               'DARLING_TOOLBOX_ENV': str(self.distrobox_toolboxenv()),
                'DARLING_CONTAINER_ENV': str(containerenv),
                'DARLING_LOL_TOOLBOX': '1',
                'DARLING_LOL_TOOLBOX_NAME': '',
@@ -139,7 +145,7 @@ class CreateDesktopEntryTests(unittest.TestCase):
         containerenv.write_text('name="new-box"\n')
         env = {**os.environ, 'HOME': str(self.home),
                'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
-               'DARLING_TOOLBOX_ENV': str(self.repo / 'missing-toolboxenv'),
+               'DARLING_TOOLBOX_ENV': str(self.distrobox_toolboxenv()),
                'DARLING_CONTAINER_ENV': str(containerenv),
                'DARLING_LOL_TOOLBOX': '0',
                'DARLING_LOL_TOOLBOX_NAME': '',
@@ -156,6 +162,28 @@ class CreateDesktopEntryTests(unittest.TestCase):
                                   env=env, capture_output=True, text=True, check=False)
         self.assertEqual(override.returncode, 0, override.stderr)
         self.assertEqual(json.loads(override.stdout), ['--distrobox', 'override-box'])
+
+    def test_inside_toolbx_with_containerenv_and_no_container_id_uses_toolbox(self):
+        # Toolbx (Silverblue) has both markers but never sets CONTAINER_ID.
+        self.record_toolbox('cur-tbx')
+        (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
+        toolboxenv = self.repo / 'toolboxenv'
+        toolboxenv.write_text('')
+        containerenv = self.repo / 'containerenv'
+        containerenv.write_text('name="cur-tbx"\n')
+        env = {**os.environ, 'HOME': str(self.home),
+               'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
+               'DARLING_TOOLBOX_ENV': str(toolboxenv),
+               'DARLING_CONTAINER_ENV': str(containerenv),
+               'DARLING_LOL_TOOLBOX': '0',
+               'DARLING_LOL_TOOLBOX_NAME': '',
+               'DARLING_LOL_TOOLBOX_BACKEND': '',
+               'DARLING_LOL_WINDOW_ENTRIES': '0'}
+        env.pop('CONTAINER_ID', None)
+        result = subprocess.run(['sh', str(self.repo / 'scripts/create-desktop-entry.sh')],
+                                env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ['--toolbox', 'cur-tbx'])
 
     def test_inside_toolbx_ignores_recorded_distrobox_backend(self):
         self.record_toolbox('cur-tbx')

@@ -920,15 +920,49 @@ class UpdateToolboxTests(unittest.TestCase):
         (self.repo / 'build/toolbox-backend').write_text('distrobox\n')
         containerenv = self.folder / 'containerenv'
         containerenv.write_text('name="my-dbx"\n')
+        # distrobox-init creates /run/.toolboxenv inside every Distrobox.
+        toolboxenv = self.folder / 'toolboxenv'
+        toolboxenv.write_text('')
         result = self.run_update(
             input_text='',
-            DARLING_TOOLBOX_ENV=str(self.folder / 'missing-toolboxenv'),
+            DARLING_TOOLBOX_ENV=str(toolboxenv),
             DARLING_CONTAINER_ENV=str(containerenv),
             CONTAINER_ID='my-dbx',
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn('No existing build', result.stderr)
         self.assertEqual(self.distrobox_lines(), [])
+
+    def test_inside_distrobox_without_markers_names_distrobox(self):
+        containerenv = self.folder / 'containerenv'
+        containerenv.write_text('name="my-dbx"\n')
+        toolboxenv = self.folder / 'toolboxenv'
+        toolboxenv.write_text('')
+        result = self.run_update(
+            input_text='',
+            DARLING_TOOLBOX_ENV=str(toolboxenv),
+            DARLING_CONTAINER_ENV=str(containerenv),
+            CONTAINER_ID='my-dbx',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Running inside Distrobox container 'my-dbx'.", result.stdout)
+        self.assertEqual(self.distrobox_lines(), [])
+        self.assertEqual(self.argv_lines(), [])
+
+    def test_inside_toolbx_without_container_id_names_toolbox(self):
+        containerenv = self.folder / 'containerenv'
+        containerenv.write_text('name="darling-lol"\n')
+        toolboxenv = self.folder / 'toolboxenv'
+        toolboxenv.write_text('')
+        result = self.run_update(
+            input_text='',
+            DARLING_TOOLBOX_ENV=str(toolboxenv),
+            DARLING_CONTAINER_ENV=str(containerenv),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Running inside a Toolbox container.', result.stdout)
+        self.assertEqual(self.distrobox_lines(), [])
+        self.assertEqual(self.argv_lines(), [])
 
     def test_missing_distrobox_container_fails_without_entering_or_prompting(self):
         self.write_marker('my-dbx')

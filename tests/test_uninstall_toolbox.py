@@ -284,9 +284,12 @@ class UninstallToolboxTests(unittest.TestCase):
         self.write_build_file('toolbox-backend', 'distrobox\n')
         containerenv = self.home / 'containerenv'
         containerenv.write_text('name="my-dbx"\n')
+        # distrobox-init creates /run/.toolboxenv inside every Distrobox.
+        toolboxenv = self.home / 'toolboxenv'
+        toolboxenv.write_text('')
         result = self.run_uninstall(
             '--yes',
-            DARLING_TOOLBOX_ENV=str(self.home / 'missing-toolboxenv'),
+            DARLING_TOOLBOX_ENV=str(toolboxenv),
             DARLING_CONTAINER_ENV=str(containerenv),
             CONTAINER_ID='my-dbx',
         )

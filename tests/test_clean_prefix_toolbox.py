@@ -366,9 +366,12 @@ class CleanPrefixToolboxTests(unittest.TestCase):
         (self.repo / 'build' / 'toolbox-backend').write_text('distrobox\n')
         containerenv = self.folder / 'containerenv'
         containerenv.write_text('name="my-dbx"\n')
+        # distrobox-init creates /run/.toolboxenv inside every Distrobox.
+        toolboxenv = self.folder / 'toolboxenv'
+        toolboxenv.write_text('')
         result = self.run_clean(
             '--help', stdin=subprocess.DEVNULL,
-            DARLING_TOOLBOX_ENV=str(self.folder / 'missing-toolboxenv'),
+            DARLING_TOOLBOX_ENV=str(toolboxenv),
             DARLING_CONTAINER_ENV=str(containerenv),
             CONTAINER_ID='my-dbx',
         )

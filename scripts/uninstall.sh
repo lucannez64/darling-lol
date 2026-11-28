@@ -61,9 +61,10 @@ distrobox_container_exists() {
 }
 
 inside_container=0
-if [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
+# Distrobox also creates /run/.toolboxenv; either marker means inside.
+if [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
 	inside_container=1
-elif [ -n "${CONTAINER_ID:-}" ] && [ -f "${DARLING_CONTAINER_ENV:-/run/.containerenv}" ]; then
+elif [ -f "${DARLING_TOOLBOX_ENV:-/run/.toolboxenv}" ]; then
 	inside_container=1
 fi
 if [ "$inside_container" = 0 ] && [ -z "${UNINSTALL_REEXEC:-}" ] &&

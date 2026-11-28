@@ -119,6 +119,8 @@ If `toolbox` keeps pulling an old image, create the container from an explicit r
 
 `--toolbox` uses **Toolbx** (`containers/toolbox`, packaged as `toolbox` on Fedora and Arch Linux and as `podman-toolbox` on Debian and Ubuntu), and automatically falls back to **Distrobox** when Toolbx is unavailable.
 
+The Distrobox path requires Podman. Every Distrobox call runs with `DBX_CONTAINER_MANAGER=podman`, and the scripts look the container up with `podman`, so a Docker-only Distrobox setup is not supported.
+
 On openSUSE (Tumbleweed, Leap, MicroOS), `zypper install toolbox` installs `microos-toolbox`, a different script that uses an incompatible set of CLI flags. If `distrobox` and `podman` are installed, `scripts/install-native.sh --toolbox` skips `microos-toolbox` and uses Distrobox automatically; if `distrobox` is not installed yet, it fails before starting the install and tells you how to install it:
 
 ```sh

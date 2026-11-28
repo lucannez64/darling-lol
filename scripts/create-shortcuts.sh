@@ -52,14 +52,21 @@ CURRENT_NAME=''
 CURRENT_ICON=''
 CURRENT_ENV=()
 
-if [[ -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]]; then
+# Distrobox comes first: its init also creates /run/.toolboxenv, so only
+# CONTAINER_ID (set by distrobox create/enter) tells the two apart.
+# INSIDE_KIND records which check matched: distrobox, toolbx or env.
+INSIDE_KIND=''
+if [[ -n ${CONTAINER_ID:-} && -f ${DARLING_CONTAINER_ENV:-/run/.containerenv} ]]; then
   INSIDE_TOOLBOX=1
-  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
-elif [[ -n ${CONTAINER_ID:-} && -f ${DARLING_CONTAINER_ENV:-/run/.containerenv} ]]; then
-  INSIDE_TOOLBOX=1
+  INSIDE_KIND=distrobox
   CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-distrobox}
+elif [[ -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]]; then
+  INSIDE_TOOLBOX=1
+  INSIDE_KIND=toolbx
+  CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
 elif [[ ${DARLING_LOL_TOOLBOX:-0} == 1 ]]; then
   INSIDE_TOOLBOX=1
+  INSIDE_KIND=env
   CONTAINER_BACKEND=${DARLING_LOL_TOOLBOX_BACKEND:-toolbox}
 fi
 
@@ -306,7 +313,7 @@ detect_toolbox_install() {
 choose_target() {
   if (( INSIDE_TOOLBOX )); then
     local backend=${CONTAINER_BACKEND:-toolbox}
-    if [[ ! -f ${DARLING_TOOLBOX_ENV:-/run/.toolboxenv} ]] &&
+    if [[ $INSIDE_KIND != toolbx ]] &&
        [[ -z ${DARLING_LOL_TOOLBOX_BACKEND:-} && -f $TARGET_DIR/build/toolbox-backend ]] &&
        [[ $(<"$TARGET_DIR/build/toolbox-backend") == distrobox ]]; then
       backend=distrobox
