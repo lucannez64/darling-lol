@@ -199,18 +199,25 @@ pin_nvidia_vulkan_icd() {
  for sw in "$3"/usr/share/vulkan/icd.d/lvp_icd*.json "$3"/etc/vulkan/icd.d/lvp_icd*.json; do
   [ -r "$sw" ] && { has_sw_icd=1; break; }
  done
- nvicd=
- for candidate in "$3"/usr/share/vulkan/icd.d/nvidia_icd*.json "$3"/etc/vulkan/icd.d/nvidia_icd*.json; do
-  [ -r "$candidate" ] && { nvicd=$candidate; break; }
- done
+ nvicd=$(nvidia_vulkan_icd_in "$3") || nvicd=
  if [ -z "$nvicd" ] && [ -f "$1" ]; then
-  for candidate in "$2"/usr/share/vulkan/icd.d/nvidia_icd*.json "$2"/etc/vulkan/icd.d/nvidia_icd*.json; do
-   [ -r "$candidate" ] && { nvicd=$candidate; has_sw_icd=1; break; }
-  done
+  nvicd=$(nvidia_vulkan_icd_in "$2") && has_sw_icd=1 || nvicd=
  fi
  [ "$has_sw_icd" = 1 ] && [ -n "$nvicd" ] || return 0
  export VK_DRIVER_FILES="$nvicd"
  export VK_ICD_FILENAMES="$nvicd"
+}
+# Prints the 64-bit NVIDIA Vulkan ICD under the root $1: nvidia_icd.x86_64.json, then
+# nvidia_icd.json, then any other nvidia_icd*.json. A 32-bit *i686* manifest sorts first
+# but cannot drive the 64-bit loader, so it is never picked.
+nvidia_vulkan_icd_in() {
+ for icd_dir in "$1"/usr/share/vulkan/icd.d "$1"/etc/vulkan/icd.d; do
+  for candidate in "$icd_dir"/nvidia_icd.x86_64.json "$icd_dir"/nvidia_icd.json "$icd_dir"/nvidia_icd*.json; do
+   case ${candidate##*/} in *i686*|*i386*) continue ;; esac
+   [ -r "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+ done
+ return 1
 }
 # Prints the first library named $1 under the container root $2, then the host root $3.
 find_nvidia_library() {
@@ -243,14 +250,18 @@ write_nvidia_egl_manifests() {
  egl_vendor=$(find_nvidia_library libEGL_nvidia.so.0 "$3" "$2") || return 0
  (umask 077; mkdir -p "$5") || return 0
  printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s"}}\n' "$egl_vendor" >"$5/vendor.json"
+ # The platform list replaces the system one, so it is exported only when it covers the
+ # X11 window the game draws into (xcb or xlib); wayland stays in it when found too.
  platforms=
+ x11_platform=0
  for platform in wayland:libnvidia-egl-wayland.so.1 xcb:libnvidia-egl-xcb.so.1 xlib:libnvidia-egl-xlib.so.1; do
   platform_library=$(find_nvidia_library "${platform#*:}" "$3" "$2") || continue
   printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s"}}\n' "$platform_library" >"$5/${platform%%:*}.json"
   platforms="${platforms:+$platforms:}$5/${platform%%:*}.json"
+  case $platform in xcb:*|xlib:*) x11_platform=1 ;; esac
  done
  export __EGL_VENDOR_LIBRARY_FILENAMES="$5/vendor.json"
- [ -z "$platforms" ] || export __EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES="$platforms"
+ [ "$x11_platform" = 0 ] || export __EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES="$platforms"
 }
 pin_nvidia_vulkan_icd /run/.toolboxenv /run/host '' /sys/class/drm
 write_nvidia_egl_manifests /run/.toolboxenv /run/host '' /sys/class/drm \

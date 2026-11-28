@@ -357,17 +357,25 @@ NVIDIA_EGL_LIBDIRS = ('usr/lib64', 'usr/lib/x86_64-linux-gnu', 'usr/lib')
 
 def nvidia_egl_location(marker=Path('/run/.toolboxenv'), container_root=Path('/'),
                         host_root=Path('/run/host')):
-    """Where libEGL_nvidia.so.0 lives inside Toolbox: 'container', 'host' or 'missing'.
+    """Where libEGL_nvidia.so.0 lives inside Toolbox, as the launcher sees it (issue #361).
 
-    Outside Toolbox this is 'not-toolbox'. The launcher writes absolute-path EGL manifests
-    when the library is only on the host side (issue #361).
+    'container': the container has the library and its own glvnd manifest, so the launcher
+    leaves EGL alone. 'container-library': the library without a manifest; the launcher
+    writes one with the container path. 'host': only under /run/host; the launcher writes a
+    manifest with that path. 'missing': neither. Outside Toolbox this is 'not-toolbox'.
     """
     if not Path(marker).exists():
         return 'not-toolbox'
-    for place, root in (('container', Path(container_root)), ('host', Path(host_root))):
-        if any((root / libdir / 'libEGL_nvidia.so.0').exists() for libdir in NVIDIA_EGL_LIBDIRS):
-            return place
-    return 'missing'
+    container_root, host_root = Path(container_root), Path(host_root)
+
+    def has_library(root):
+        return any((root / libdir / 'libEGL_nvidia.so.0').exists() for libdir in NVIDIA_EGL_LIBDIRS)
+
+    if has_library(container_root):
+        manifests = [path for folder in ('usr/share/glvnd/egl_vendor.d', 'etc/glvnd/egl_vendor.d')
+                     for path in (container_root / folder).glob('*nvidia*.json')]
+        return 'container' if manifests else 'container-library'
+    return 'host' if has_library(host_root) else 'missing'
 
 
 def rootless_namespace(proc_root=Path('/proc')):
@@ -569,13 +577,19 @@ def check_toolbox_nvidia_egl(facts):
     location = facts.get('nvidia_egl', 'not-toolbox')
     if location == 'not-toolbox':
         return 'ok', 'Not inside Toolbox'
-    if not any(gpu.get('vendor_id') == '0x10de' for gpu in facts['gpus']):
-        return 'ok', 'No NVIDIA GPU'
+    # The launcher acts only when every DRM card is NVIDIA (host_gpus_all_nvidia).
+    vendors = {gpu.get('vendor_id') for gpu in facts['gpus'] if gpu.get('vendor_id')}
+    if vendors != {'0x10de'}:
+        return 'ok', 'Not an NVIDIA-only host; the launcher leaves EGL alone'
     guide = 'see docs/TROUBLESHOOTING.md, "NVIDIA in Toolbox"'
     if location == 'host':
-        return 'warn', ('The NVIDIA EGL vendor library is only on the host side (/run/host); the launcher '
-                        'writes EGL manifests with its absolute path. If OpenGL still lands on llvmpipe, '
-                        + guide)
+        return 'warn', ('The NVIDIA EGL vendor library is only on the host side (/run/host). The launcher '
+                        'writes an EGL manifest with its absolute path, but NVIDIA\'s own libraries load '
+                        'their dependencies by bare name, so matching NVIDIA userspace (same driver '
+                        'version) must also exist in the container; ' + guide)
+    if location == 'container-library':
+        return 'ok', ('NVIDIA EGL vendor library inside the container without a glvnd manifest; the '
+                      'launcher writes one with its absolute path')
     if location == 'missing':
         return 'warn', ('No NVIDIA EGL vendor library (libEGL_nvidia.so.0) in the container or under '
                         '/run/host: OpenGL falls back to llvmpipe and the game cannot present; ' + guide)

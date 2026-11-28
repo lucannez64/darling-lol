@@ -433,6 +433,45 @@ class ToolboxNvidia(HostEnvFixture):
         self.assertEqual(json.loads((self.stage / 'vendor.json').read_text())['ICD']['library_path'],
                          str(self.container / 'usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0'))
 
+    def test_host_icd_prefers_x86_64_over_the_i686_manifest(self):
+        self.host_driver()
+        self.touch(self.host / 'usr/share/vulkan/icd.d/nvidia_icd.i686.json')
+        values = self.launch()
+        expected = str(self.host / 'usr/share/vulkan/icd.d/nvidia_icd.x86_64.json')
+        self.assertEqual((values['VK_DRIVER_FILES'], values['VK_ICD_FILENAMES']), (expected, expected))
+
+    def test_container_icd_prefers_the_64_bit_manifest(self):
+        icd_dir = self.container / 'usr/share/vulkan/icd.d'
+        for name in ('lvp_icd.x86_64.json', 'nvidia_icd.i686.json', 'nvidia_icd.json'):
+            self.touch(icd_dir / name)
+        values = self.launch()
+        self.assertEqual(values['VK_ICD_FILENAMES'], str(icd_dir / 'nvidia_icd.json'))
+        self.touch(icd_dir / 'nvidia_icd.x86_64.json')
+        self.assertEqual(self.launch()['VK_ICD_FILENAMES'], str(icd_dir / 'nvidia_icd.x86_64.json'))
+
+    def test_container_with_only_an_i686_icd_falls_back_to_the_host(self):
+        icd = self.host_driver()
+        self.touch(self.host / 'usr/share/vulkan/icd.d/nvidia_icd.i686.json')
+        self.touch(self.container / 'usr/share/vulkan/icd.d/nvidia_icd.i686.json')
+        self.assertEqual(self.launch()['VK_ICD_FILENAMES'], str(icd))
+        # Outside Toolbox an i686-only container is left alone.
+        self.touch(self.container / 'usr/share/vulkan/icd.d/lvp_icd.x86_64.json')
+        values = self.launch(marker=self.marker.parent / 'no toolboxenv')
+        self.assertEqual(values['VK_ICD_FILENAMES'], 'unset')
+
+    def test_wayland_platform_alone_keeps_the_system_platform_list(self):
+        self.touch(self.host / 'usr/lib64/libEGL_nvidia.so.0')
+        self.touch(self.host / 'usr/lib64/libnvidia-egl-wayland.so.1')
+        values = self.launch()
+        self.assertEqual(values['__EGL_VENDOR_LIBRARY_FILENAMES'], str(self.stage / 'vendor.json'))
+        self.assertEqual(values['__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES'], 'unset')
+
+    def test_wayland_platform_stays_next_to_an_x11_platform(self):
+        self.host_driver()
+        self.touch(self.host / 'usr/lib64/libnvidia-egl-wayland.so.1')
+        platforms = self.launch()['__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES'].split(':')
+        self.assertEqual(platforms, [str(self.stage / name) for name in ('wayland.json', 'xcb.json', 'xlib.json')])
+
     def test_no_runtime_directory_writes_nothing(self):
         self.host_driver()
         self.stage = ''

@@ -1087,15 +1087,26 @@ exports `__EGL_VENDOR_LIBRARY_FILENAMES` (for `libEGL_nvidia.so.0`) and
 `__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES` (for the `libnvidia-egl-wayland`,
 `-xcb` and `-xlib` platform libraries it finds). It looks in `usr/lib64`,
 `usr/lib/x86_64-linux-gnu` and `usr/lib` of the container first, then of
-`/run/host`. When the container has no NVIDIA Vulkan ICD, the host's
-`/run/host/usr/share/vulkan/icd.d/nvidia_icd*.json` is pinned as well, so
-Vulkan and OpenGL stay on the same GPU. Setting any of
+`/run/host`. The platform list replaces the system one, so it is exported
+only when an xcb or xlib platform library was found. When the container has
+no NVIDIA Vulkan ICD, the host's 64-bit
+`/run/host/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json` (or
+`nvidia_icd.json`) is pinned as well, so Vulkan and OpenGL stay on the same
+GPU; a 32-bit `nvidia_icd.i686.json` is never pinned.
+
+The manifests only fix where the first library is found. NVIDIA's own
+libraries (`libEGL_nvidia.so.0` and the Vulkan ICD's `libGLX_nvidia.so.0`)
+load their other NVIDIA libraries by bare name, and the darling executable
+drops `LD_LIBRARY_PATH`, so a driver that exists only under `/run/host` is
+not enough: install the NVIDIA userspace libraries of the host's exact driver
+version inside the container as well. Setting any of
 `__EGL_VENDOR_LIBRARY_FILENAMES`, `__EGL_VENDOR_LIBRARY_DIRS`,
 `__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES` or
 `__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS` turns the EGL part off, and
 `VK_ICD_FILENAMES` or `VK_DRIVER_FILES` the Vulkan part. `darling-lol --doctor`
-reports, under "Toolbox NVIDIA EGL", whether the vendor library was found only
-on the host side. Check the result with the `presenting GL` line described in
+reports, under "Toolbox NVIDIA EGL", whether the vendor library was found in
+the container (with or without its own manifest), only on the host side, or
+not at all. Check the result with the `presenting GL` line described in
 [Vulkan device or ICD selection](#vulkan-device-or-icd-selection).
 
 ## Vulkan device or ICD selection
