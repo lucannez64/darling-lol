@@ -43,3 +43,21 @@ index 73f77a8..a9c3905 100644
 +
 +__ZdlPvm
 +__ZdaPvm
+diff --git a/runtime/objc-os.h b/runtime/objc-os.h
+index 5fa7b41..934d55e 100644
+--- a/runtime/objc-os.h
++++ b/runtime/objc-os.h
+@@ -719,7 +719,12 @@ template <bool Debug> class mutex_tt;
+ template <bool Debug> class monitor_tt;
+ template <bool Debug> class recursive_mutex_tt;
+ 
+-#if DEBUG
++// Lock debugging records every lock taken in a hash table (allocating on
++// each acquisition), and the side table's spinlock is taken by every retain
++// and release. Darling's default build type keeps assertions enabled
++// (DEBUG), so lock debugging has to be requested explicitly with
++// -DDARLING_OBJC_LOCKDEBUG rather than following DEBUG.
++#if DEBUG && defined(DARLING_OBJC_LOCKDEBUG)
+ #   define LOCKDEBUG 1
+ #else
+ #   define LOCKDEBUG 0

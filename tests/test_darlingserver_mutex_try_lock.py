@@ -29,7 +29,10 @@ def new_side(path):
 class MicrothreadTryLockTests(unittest.TestCase):
     def setUp(self):
         text = new_side(LOCKS)
-        start = text.index('dtape_mutex_assert(mutex, false);')
+        # dtape_mutex_lock() has a hunk before this one; take the assert that
+        # opens dtape_mutex_try_lock(), the last one before its comment.
+        start = text.rindex('dtape_mutex_assert(mutex, false);', 0,
+                            text.index('the owner may only be examined with the queue lock held'))
         self.body = text[start:text.index('\n};', start)]
 
     def test_queue_lock_is_taken_before_the_owner_is_read(self):

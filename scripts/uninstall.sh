@@ -40,6 +40,52 @@ for arg in "$@"; do
 	esac
 done
 
+# A Toolbox install keeps Darling and the runtime inside the container, so a
+# host run cannot stop the runtime. Find the container the way
+# scripts/clean-prefix.sh does (marker, then this checkout's launcher entry,
+# then the installer's default container for a legacy checkout) and run the
+# same command there. A native install records build/native-install and is
+# never redirected; UNINSTALL_REEXEC stops the re-exec from looping.
+if [ ! -f /run/.toolboxenv ] && [ -z "${UNINSTALL_REEXEC:-}" ] &&
+	[ -z "${DARLING_WORKSPACE:-}" ] && [ ! -f build/native-install ]; then
+	name=''
+	if [ -f build/toolbox-container ]; then
+		IFS= read -r name <build/toolbox-container || true
+	else
+		entry="${HOME:-}/.local/share/applications/darling-launcher.desktop"
+		name=$(grep '^Exec=' "$entry" 2>/dev/null | grep -F -- "$repo/scripts/" |
+			sed -n 's/^Exec=toolbox run -c \([^ ]*\) .*$/\1/p' | head -n 1)
+	fi
+	if [ -z "$name" ] && command -v toolbox >/dev/null 2>&1 &&
+		toolbox run -c darling-lol sh -c 'command -v darling' >/dev/null 2>&1; then
+		name=darling-lol
+	fi
+	if [ -n "$name" ]; then
+		if ! command -v toolbox >/dev/null 2>&1; then
+			echo "This checkout was installed via Toolbox container '$name', but Toolbox is not installed on this host. Install Toolbox, or run this inside the container: toolbox enter $name" >&2
+			exit 1
+		fi
+		if ! toolbox run -c "$name" true 2>/dev/null; then
+			echo "This checkout was installed via Toolbox container '$name', but that container is not reachable. Start it and run this inside it: toolbox enter $name" >&2
+			exit 1
+		fi
+		echo "Toolbox install detected; running the uninstall inside container '$name'..."
+		# `toolbox run` uses the container environment and executes its first
+		# argument, so overrides go after `env`. The confirmation happens inside.
+		set -- UNINSTALL_REEXEC=1 sh "$repo/scripts/uninstall.sh" "$@"
+		if [ -n "${DPREFIX+x}" ]; then
+			set -- DPREFIX="$DPREFIX" "$@"
+		fi
+		if [ -n "${RIOT_GUEST_HOME+x}" ]; then
+			set -- RIOT_GUEST_HOME="$RIOT_GUEST_HOME" "$@"
+		fi
+		if [ -n "${UNINSTALL_PROC_ROOT+x}" ]; then
+			set -- UNINSTALL_PROC_ROOT="$UNINSTALL_PROC_ROOT" "$@"
+		fi
+		exec toolbox run --container "$name" env "$@"
+	fi
+fi
+
 python3 scripts/configure.py >/dev/null
 . build/runtime/tools/runtime-paths.sh
 prefix=$prefix_dir

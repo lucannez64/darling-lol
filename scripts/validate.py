@@ -3,6 +3,7 @@
 import ast,json,re,subprocess,sys
 from pathlib import Path
 from common import ROOT
+import compat_language
 subprocess.run([sys.executable,str(ROOT/'scripts/configure.py')],check=True)
 try:
     files=subprocess.check_output(['git','-C',str(ROOT),'ls-files','-z'],stderr=subprocess.DEVNULL).decode().split('\0')
@@ -22,6 +23,7 @@ for name in filter(None,files):
     if re.search(r'/(?:home|Users)/' + 'hi' + 'rew' + r'(?:/|\b)',text):
         errors.append(name+': development-machine path')
     if any(re.search(pattern,text) for pattern in secret_patterns):errors.append(name+': possible credential; review before publishing')
+    errors+=compat_language.errors(name,text)
     if name.split('/')[0] in ['build','logs','Config','Library'] or p.suffix in ['.dylib','.so','.asar','.perf','.zip']:
         errors.append(name+': local artifact')
 for p in list((ROOT/'scripts').glob('*.py'))+list((ROOT/'build/runtime/tools').glob('*.py')):

@@ -12767,7 +12767,7 @@ index 0000000..1f3c473
 +}
 +#endif
 diff --git a/src/startup/mldr/elfcalls/threads.c b/src/startup/mldr/elfcalls/threads.c
-index e789986..7e056a3 100644
+index e789986ea..704f36848 100644
 --- a/src/startup/mldr/elfcalls/threads.c
 +++ b/src/startup/mldr/elfcalls/threads.c
 @@ -32,6 +32,8 @@ along with Darling.  If not, see <http://www.gnu.org/licenses/>.
@@ -12779,7 +12779,44 @@ index e789986..7e056a3 100644
  
  #include "dthreads.h"
  
-@@ -216,7 +218,12 @@ static void* darling_thread_entry(void* p)
+@@ -67,6 +69,7 @@ struct arg_struct
+ 	uintptr_t stack_bottom;
+ 	uintptr_t stack_addr;
+ 	bool is_workqueue;
++	sigset_t sigmask; // the mask the new thread takes once it can handle signals
+ };
+ 
+ static void* darling_thread_entry(void* p);
+@@ -173,6 +176,11 @@ void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_si
+ 	// otherwise, allocate them ourselves
+ 	if (pth == NULL || args.is_workqueue) {
+ 		pth = dthread_structure_allocate(stack_size, DEFAULT_DTHREAD_GUARD_SIZE, (void**)&args.stack_addr);
++		if (pth == NULL) {
++			// no stack to run the thread on
++			pthread_attr_destroy(&attr);
++			return NULL;
++		}
+ 	} else if (!args.is_workqueue) {
+ 		// `arg2` is `stack_addr` for normal threads
+ 		args.stack_addr = arg2;
+@@ -193,7 +201,16 @@ void* __darling_thread_create(unsigned long stack_size, unsigned long pth_obj_si
+ 	//pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+ 
+ 	args.pth = pth;
++
++	// A signal sent to the process can be delivered to any thread that does not
++	// block it, but a thread can only handle signals once it has checked in with
++	// darlingserver. Start the thread with all signals blocked, so that until then
++	// they go to other threads (or stay pending); it takes our mask afterwards.
++	sigset_t all;
++	sigfillset(&all);
++	pthread_sigmask(SIG_SETMASK, &all, &args.sigmask);
+ 	pthread_create(&nativeLibcThread, &attr, darling_thread_entry, &args);
++	pthread_sigmask(SIG_SETMASK, &args.sigmask, NULL);
+ 	pthread_attr_destroy(&attr);
+ 
+ 	while (args.pth != NULL)
+@@ -216,7 +233,12 @@ static void* darling_thread_entry(void* p)
  	int new_rpc_fd = __mldr_create_rpc_socket();
  	if (new_rpc_fd < 0) {
  		// we can't do anything if we don't get our own separate connection to darlingserver
@@ -12793,7 +12830,45 @@ index e789986..7e056a3 100644
  		abort();
  	}
  
-@@ -387,8 +394,9 @@ int __darling_thread_rpc_socket(void) {
+@@ -244,6 +266,8 @@ static void* darling_thread_entry(void* p)
+ 	dthread->tsd[DTHREAD_TSD_SLOT_MACH_THREAD_SELF] = (void*)(intptr_t)thread_self_port;
+ 	args.port = thread_self_port;
+ 
++	pthread_sigmask(SIG_SETMASK, &args.sigmask, NULL);
++
+ 	in_args->pth = NULL;
+ 
+ 	if (setjmp(t_jmpbuf))
+@@ -329,6 +353,12 @@ int __darling_thread_terminate(void* stackaddr,
+ {
+ 	int checkout_result = 0;
+ 
++	// Once checked out, this thread cannot handle signals any more. Block them
++	// all, so that signals sent to the process go to the remaining threads.
++	sigset_t all;
++	sigfillset(&all);
++	pthread_sigmask(SIG_SETMASK, &all, NULL);
++
+ 	if (t_server_socket != -1) {
+ 		checkout_result = dserver_rpc_explicit_checkout(t_server_socket, -1, false);
+ 	} else {
+@@ -356,12 +386,10 @@ int __darling_thread_terminate(void* stackaddr,
+ 	{
+ 		// dispatch_main() calls pthread_exit(NULL) on the main thread,
+ 		// which turns our process into a zombie on Linux.
+-		// Let's just hang around forever.
+-		sigset_t mask;
+-		memset(&mask, 0, sizeof(mask));
+-
++		// Let's just hang around forever, with all signals still blocked:
++		// they are for the threads that remain.
+ 		while (1)
+-			sigsuspend(&mask);
++			sigsuspend(&all);
+ 	}
+ 
+ 	t_freeaddr = stackaddr;
+@@ -387,8 +415,9 @@ int __darling_thread_rpc_socket(void) {
  			// this is the main thread
  			t_server_socket = __dserver_main_thread_socket_fd;
  		} else {
@@ -13664,7 +13739,7 @@ index 00000000..f2727207
 +
 +#endif /* DC_CODESIGN_H */
 diff --git a/src/startup/mldr/loader.c b/src/startup/mldr/loader.c
-index 1e9ec25..0114e25 100644
+index 1e9ec25d9..811182e71 100644
 --- a/src/startup/mldr/loader.c
 +++ b/src/startup/mldr/loader.c
 @@ -6,13 +6,14 @@
@@ -13683,7 +13758,49 @@ index 1e9ec25..0114e25 100644
  static void setup_space(struct load_results* lr, bool is_64_bit);
  static void* compatible_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
  
-@@ -227,6 +228,30 @@ no_slide:
+@@ -182,8 +183,13 @@ no_slide:
+ 					}
+ 					else
+ 					{
+-						size_t size = seg->vmsize - seg->filesize;
+-						rv = compatible_mmap((void*) PAGE_ALIGN(seg->vmaddr + seg->vmsize - size), PAGE_ROUNDUP(size), useprot,
++						// Zero-fill from the page holding the end of the file data up to the
++						// page holding the end of the segment. Rounding the start down and the
++						// size up separately left the last page unmapped whenever vmsize is not
++						// page-aligned (e.g. binaries linked by Zig).
++						uintptr_t zf_start = PAGE_ALIGN(seg->vmaddr + seg->filesize);
++						uintptr_t zf_end = PAGE_ROUNDUP(seg->vmaddr + seg->vmsize);
++						rv = compatible_mmap((void*) zf_start, zf_end - zf_start, useprot,
+ 								MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED_NOREPLACE, -1, 0);
+ 						if (rv == (void*)MAP_FAILED)
+ 						{
+@@ -220,6 +226,25 @@ no_slide:
+ 						}
+ 					}
+ 
++					// The file mapping covers its whole last page: past filesize that page
++					// holds whatever follows in the file, where the segment must read as
++					// zeros (start of __bss/__thread_bss), as the XNU loader guarantees.
++					if (seg->filesize < seg->vmsize)
++					{
++						uintptr_t tail = addr + seg->filesize;
++						uintptr_t tail_end = PAGE_ROUNDUP(tail);
++						if (tail_end > addr + seg->vmsize)
++							tail_end = addr + seg->vmsize;
++						if (tail_end > tail)
++						{
++							if (!(useprot & PROT_WRITE))
++								mprotect((void*) PAGE_ALIGN(tail), PAGE_SIZE, useprot | PROT_WRITE);
++							memset((void*) tail, 0, tail_end - tail);
++							if (!(useprot & PROT_WRITE))
++								mprotect((void*) PAGE_ALIGN(tail), PAGE_SIZE, useprot);
++						}
++					}
++
+ 					if (seg->fileoff == 0)
+ 						mappedHeader = (struct MACH_HEADER_STRUCT*) (seg->vmaddr + slide);
+ 				}
+@@ -227,6 +252,30 @@ no_slide:
  				if (seg->vmaddr + slide + seg->vmsize > lr->vm_addr_max)
  					lr->vm_addr_max = seg->vmaddr + slide + seg->vmsize;
  
@@ -13714,7 +13831,7 @@ index 1e9ec25..0114e25 100644
  				if (strcmp(SEG_DATA, seg->segname) == 0)
  				{
  					// Look for section named __all_image_info for GDB integration
-@@ -308,7 +333,7 @@ no_slide:
+@@ -308,7 +357,7 @@ no_slide:
  					exit(1);
  				}
  
@@ -13724,7 +13841,7 @@ index 1e9ec25..0114e25 100644
  				break;
  			}
 diff --git a/src/launchd/src/core.c b/src/launchd/src/core.c
-index a68739ff..f68fb264 100644
+index a68739ff0..d3fb9a06c 100644
 --- a/src/launchd/src/core.c
 +++ b/src/launchd/src/core.c
 @@ -463,6 +463,9 @@ static job_t job_mig_intran2(jobmgr_t jm, mach_port_t mport, pid_t upid);
@@ -13737,7 +13854,38 @@ index a68739ff..f68fb264 100644
  static void jobmgr_setup_env_from_other_jobs(jobmgr_t jm);
  static void jobmgr_export_env_from_other_jobs(jobmgr_t jm, launch_data_t dict);
  static struct machservice *jobmgr_lookup_service(jobmgr_t jm, const char *name, bool check_parent, pid_t target_pid);
-@@ -4312,6 +4315,8 @@ jobmgr_callback(void *obj, struct kevent *kev)
+@@ -1729,6 +1732,7 @@ job_new_anonymous(jobmgr_t jm, pid_t anonpid)
+ 		return NULL;
+ 	}
+ 
++#ifndef DARLING
+ 	if (anonpid >= 100000) {
+ 		/* The kernel current defines PID_MAX to be 99999, but that define isn't
+ 		 * exported.
+@@ -1737,6 +1741,13 @@ job_new_anonymous(jobmgr_t jm, pid_t anonpid)
+ 		errno = EINVAL;
+ 		return NULL;
+ 	}
++#else
++	if (anonpid >= 4194304) {
++		launchd_syslog(LOG_WARNING, "Did PID_MAX change? Got request from PID: %d", anonpid);
++		errno = EINVAL;
++		return NULL;
++	}
++#endif
+ 
+ 	/* libproc returns the number of bytes written into the buffer upon success,
+ 	 * zero on failure. I'd much rather it return -1 on failure, like sysctl(3).
+@@ -1989,7 +2000,7 @@ job_new_subjob(job_t j, uuid_t identifier)
+ 			nj->stdinpath = strdup(j->stdinpath);
+ 		}
+ 		if (j->stdoutpath) {
+-			nj->stdoutpath = strdup(j->stdinpath);
++			nj->stdoutpath = strdup(j->stdoutpath);
+ 		}
+ 		if (j->stderrpath) {
+ 			nj->stderrpath = strdup(j->stderrpath);
+@@ -4312,6 +4323,8 @@ jobmgr_callback(void *obj, struct kevent *kev)
  		} else if (kev->ident == (uintptr_t)jm) {
  			jobmgr_log(jm, LOG_DEBUG, "Shutdown timer firing.");
  			jobmgr_still_alive_with_check(jm);
@@ -13746,7 +13894,7 @@ index a68739ff..f68fb264 100644
  		} else if (kev->ident == (uintptr_t)&jm->reboot_flags) {
  			jobmgr_do_garbage_collection(jm);
  		} else if (kev->ident == (uintptr_t)&launchd_runtime_busy_time) {
-@@ -6702,6 +6707,65 @@ jobmgr_do_garbage_collection(jobmgr_t jm)
+@@ -6702,6 +6715,65 @@ jobmgr_do_garbage_collection(jobmgr_t jm)
  	return jm;
  }
  
@@ -13812,7 +13960,7 @@ index a68739ff..f68fb264 100644
  void
  jobmgr_kill_stray_children(jobmgr_t jm, pid_t *p, size_t np)
  {
-@@ -7601,6 +7665,82 @@ semaphoreitem_setup(launch_data_t obj, const char *key, void *context)
+@@ -7601,6 +7673,82 @@ semaphoreitem_setup(launch_data_t obj, const char *key, void *context)
  	}
  }
  
@@ -13895,7 +14043,7 @@ index a68739ff..f68fb264 100644
  bool
  externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_object_t event, uint64_t flags)
  {
-@@ -7639,6 +7779,16 @@ externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_obje
+@@ -7639,6 +7787,16 @@ externalevent_new(job_t j, struct eventsystem *sys, const char *evname, xpc_obje
  
  	job_log(j, LOG_DEBUG, "New event: %s/%s", sys->name, evname);
  
@@ -13912,7 +14060,7 @@ index a68739ff..f68fb264 100644
  	eventsystem_ping();
  	return true;
  }
-@@ -11796,6 +11946,7 @@ jobmgr_init(bool sflag)
+@@ -11796,6 +11954,7 @@ jobmgr_init(bool sflag)
  		}
  	}
  	s_no_hang_fd = _fd(s_no_hang_fd);

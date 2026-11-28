@@ -222,7 +222,9 @@
           runHook preInstall
 
           mkdir -p $out/bin $out/share/darling-lol $out/share/icons/hicolor/scalable/apps $out/share/icons/hicolor/128x128/apps $out/share/pixmaps $out/share/applications
-          cp -r * $out/share/darling-lol/
+          # "." (not "*") keeps dotfiles such as .gitignore and .github that the
+          # packaging check runs the repository tests against.
+          cp -r . $out/share/darling-lol/
           cp darling-lol.svg $out/share/icons/hicolor/scalable/apps/darling-launcher.svg
           cp darling-lol.png $out/share/icons/hicolor/128x128/apps/darling-launcher.png
           cp darling-lol.png $out/share/pixmaps/darling-launcher.png
@@ -324,13 +326,17 @@ DESKTOP_EOF
           touch "$out"
         '';
 
-        packaging = pkgs.runCommand "darling-lol-packaging-tests" {
-          nativeBuildInputs = [ pythonEnv pkgs.bash pkgs.git pkgs.coreutils pkgs.util-linux pkgs.gawk ];
+        # runCommandCC provides cc/c++ for the tests that compile host C checks.
+        packaging = pkgs.runCommandCC "darling-lol-packaging-tests" {
+          nativeBuildInputs = [ pythonEnv pkgs.bash pkgs.git pkgs.git-lfs pkgs.coreutils pkgs.util-linux pkgs.gawk pkgs.pkg-config ];
+          buildInputs = [ pkgs.libxml2 pkgs.openssl ];
         } ''
           cp -R ${darlingLol}/share/darling-lol source
           chmod -R u+w source
           cd source
           export HOME="$TMPDIR/home" PYTHONDONTWRITEBYTECODE=1
+          # The sandbox has no /etc/ssl; the root-certificate tests read a CA bundle.
+          export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
           mkdir -p "$HOME"
           # Tests use private stub binaries/repositories, never Darling itself.
           python3 -m unittest discover -s tests -v

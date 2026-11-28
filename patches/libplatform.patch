@@ -634,3 +634,18 @@ index 94aa085..0966fb7 100644
  }
  
  #if VARIANT_STATIC
+diff --git a/src/simple/asl.c b/src/simple/asl.c
+index 6e58e09..3c8e53e 100644
+--- a/src/simple/asl.c
++++ b/src/simple/asl.c
+@@ -290,7 +290,9 @@ _simple_asl_send(_SIMPLE_STRING __b)
+ 		if (_simple_sappend(__b, "]\n")) break;
+ 
+ 		cp = _simple_string(__b);
+-		__sendto(asl_fd, cp, strlen(cp), 0, NULL, 0);
++		/* Logging is best effort: when the log socket's queue is full the
++		 * message is dropped (EAGAIN) instead of blocking the caller. */
++		__sendto(asl_fd, cp, strlen(cp), MSG_DONTWAIT, NULL, 0);
+     } while (0);
+ #else // TARGET_OS_DRIVERKIT
+ 	char *cp;
