@@ -6,13 +6,27 @@ source_dir="$project_dir/build/darling-src"
 build_dir="$source_dir/build"
 . "$project_dir/tools/runtime-paths.sh"
 mkdir -p "$project_dir/build"
-make -C "$build_dir/src/external/xnu/darling/src/libsystem_kernel" system_kernel -j8
-make -C "$build_dir/src/external/libplatform" platform -j8
-make -C "$build_dir/src/external/corefoundation" CoreFoundation_x86_64 -j8
-make -C "$build_dir/src/external/cfnetwork/src" CFNetwork -j8
-make -C "$build_dir/src/external/configd/SystemConfiguration.fproj" SystemConfiguration -j8
-make -C "$build_dir/src/external/cocotron/QuartzCore" QuartzCore -j8
-make -C "$build_dir/src/external/cocotron/AppKit" AppKit X11_backend -j8
+presentation_cmake_artifacts_ready() {
+  for artifact in \
+    "$build_dir/src/external/xnu/darling/src/libsystem_kernel/libsystem_kernel.dylib" \
+    "$build_dir/src/external/libplatform/libsystem_platform.dylib" \
+    "$build_dir/src/external/corefoundation/CoreFoundation" \
+    "$build_dir/src/external/cfnetwork/src/CFNetwork" \
+    "$build_dir/src/external/configd/SystemConfiguration.fproj/SystemConfiguration" \
+    "$build_dir/src/external/cocotron/QuartzCore/QuartzCore" \
+    "$build_dir/src/external/cocotron/AppKit/AppKit" \
+    "$build_dir/src/external/cocotron/AppKit/X11"; do
+    [ -f "$artifact" ] || return 1
+  done
+  return 0
+}
+if [ "${RCLOL_SKIP_CMAKE_SUBTARGETS:-0}" = 1 ] && presentation_cmake_artifacts_ready; then
+  :
+else
+  make -C "$build_dir" -j"${JOBS:-$(nproc 2>/dev/null || echo 8)}" \
+    system_kernel platform CoreFoundation_x86_64 CFNetwork \
+    SystemConfiguration QuartzCore AppKit X11_backend
+fi
 cc -shared -fPIC -O3 -march=native -mtune=generic -Wall -Wextra \
   "-Wl,-soname,$project_dir/build/libdarling-xshm.so" \
   "$project_dir/tools/m58f299-xshm.c" -o "$project_dir/build/libdarling-xshm.next.so" \
@@ -30,7 +44,7 @@ rm -f "$project_dir/build/libdarling-wayland.next.so" "$project_dir/build/libDar
 sh "$project_dir/tools/build-darling-wayland.sh" ||
   echo 'warning: the experimental Wayland transport did not build; RCLOL_WAYLAND=1 will stay on X11' >&2
 # Stop before changing the overlay's upper directory, even with atomic writes.
-python3 "$project_dir/tools/stop-darling-runtime.py"
+[ "${RCLOL_RUNTIME_STOPPED:-0}" = 1 ] || python3 "$project_dir/tools/stop-darling-runtime.py"
 mkdir -p "$guest_home"
 mv -f "$project_dir/build/libdarling-xshm.next.so" "$project_dir/build/libdarling-xshm.so"
 install -m755 "$project_dir/build/libDarlingXShm.next.dylib" "$guest_home/libDarlingXShm.next.dylib"

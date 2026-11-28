@@ -19,11 +19,23 @@ done
 RCLOL_CLANG_CACHE_SHIMS=$clang_cache_bin
 PATH="$clang_cache_bin:$PATH"
 export RCLOL_CLANG_CACHE_SHIMS PATH
-# Rebuild the native wrapper with floating-point-safe symbol resolvers.
-make -C build/darling-src/build/src/native GL -j4
-make -C build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices LaunchServices -j4
-# WebAudio gain, mixing, filters and FFTs need real vDSP kernels, not stubs.
-make -C build/darling-src/build/src/frameworks/Accelerate/vecLib/vDSP vDSP -j4
+gpu_cmake_artifacts_ready() {
+  for artifact in \
+    build/darling-src/build/src/native/libGL.dylib \
+    build/darling-src/build/src/frameworks/CoreServices/src/LaunchServices/LaunchServices \
+    build/darling-src/build/src/frameworks/Accelerate/vecLib/vDSP/libvDSP.dylib; do
+    [ -f "$artifact" ] || return 1
+  done
+  return 0
+}
+if [ "${RCLOL_SKIP_CMAKE_SUBTARGETS:-0}" = 1 ] && gpu_cmake_artifacts_ready; then
+  :
+else
+  # Rebuild the native wrapper with floating-point-safe symbol resolvers,
+  # LaunchServices, and real vDSP kernels in one parallel GNU Make pass.
+  make -C build/darling-src/build -j"${JOBS:-$(nproc 2>/dev/null || echo 4)}" \
+    GL LaunchServices vDSP
+fi
 # The overlay builders are independent: each one has its own object prefix,
 # folder and output. build-riot-metal-runtime.py links its sampler probe against
 # build/riot-libindium.dylib, so Metal runs after this pool has finished indium.
@@ -50,14 +62,20 @@ printf '%s\n' \
 	sh tools/run-parallel.sh
 python3 tools/build-riot-metal-runtime.py
 build/riot-host-message-check
-cc -shared -fPIC -O2 -Wall -Wextra -Wl,-soname,"$project_dir/build/libdarling-xshm.so" tools/m58f299-xshm.c -o build/libdarling-xshm.so.next -pthread $(pkg-config --cflags --libs x11 x11-xcb xcb-shm xext)
-python3 tools/stop-darling-runtime.py
+built_xshm=0
+if [ "${RCLOL_PRESENTATION_BUILT_XSHM:-0}" != 1 ] || [ ! -f build/libdarling-xshm.so ]; then
+  cc -shared -fPIC -O3 -march=native -mtune=generic -Wall -Wextra -Wl,-soname,"$project_dir/build/libdarling-xshm.so" tools/m58f299-xshm.c -o build/libdarling-xshm.so.next -pthread $(pkg-config --cflags --libs x11 x11-xcb xcb-shm xext)
+  built_xshm=1
+fi
+[ "${RCLOL_RUNTIME_STOPPED:-0}" = 1 ] || python3 tools/stop-darling-runtime.py
 mkdir -p "$guest_home/RuntimeFrameworks"
 # Host fileports own SCM_RIGHTS descriptors and must die with their last sender.
-if sudo -n true 2>/dev/null; then
-  sudo make -C "$project_dir/build/darling-src/build/src/external/darlingserver" install -j12
-else
-  echo 'Skipped the darlingserver install (needs sudo); the base install already ships it: sudo cmake --install build/darling-src/build' >&2
+if [ "${RCLOL_SKIP_DARLINGSERVER_INSTALL:-0}" != 1 ]; then
+  if sudo -n true 2>/dev/null; then
+    sudo make -C "$project_dir/build/darling-src/build/src/external/darlingserver" install -j12
+  else
+    echo 'Skipped the darlingserver install (needs sudo); the base install already ships it: sudo cmake --install build/darling-src/build' >&2
+  fi
 fi
 # Electron's window-visibility correction lives in the AppKit overlay
 # (NSWindow -occlusionState, cocotron.patch); no Riot binary is modified here.
@@ -164,8 +182,10 @@ if [ ! -f "$allocator.before-gpu-direct" ]; then
 fi
 install -m755 build/riot-libsystem_malloc.dylib "$allocator.next"
 mv -f "$allocator.next" "$allocator"
-if [ -f build/libdarling-xshm.so ] && [ ! -f build/libdarling-xshm.so.before-gpu-direct ]; then cp -p build/libdarling-xshm.so build/libdarling-xshm.so.before-gpu-direct; fi
-mv -f build/libdarling-xshm.so.next build/libdarling-xshm.so
+if [ "$built_xshm" = 1 ]; then
+  if [ -f build/libdarling-xshm.so ] && [ ! -f build/libdarling-xshm.so.before-gpu-direct ]; then cp -p build/libdarling-xshm.so build/libdarling-xshm.so.before-gpu-direct; fi
+  mv -f build/libdarling-xshm.so.next build/libdarling-xshm.so
+fi
 
 objc_library="$guest_home/RuntimeLibraries/libobjc.A.dylib"
 if [ ! -f "$objc_library.before-m761" ]; then

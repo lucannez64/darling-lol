@@ -11,7 +11,7 @@ framework="$guest_home/RuntimeFrameworks/CarbonCore.framework"
 prefix_binary="$prefix_dir/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore"
 [ -f "$artifact" ] || { echo "Build CarbonCore first: $artifact" >&2; exit 1; }
 [ -f "$sdk_framework/Versions/A/CarbonCore" ] || { echo "Missing SDK CarbonCore framework" >&2; exit 1; }
-python3 "$project_dir/tools/stop-darling-runtime.py"
+[ "${RCLOL_RUNTIME_STOPPED:-0}" = 1 ] || python3 "$project_dir/tools/stop-darling-runtime.py"
 mkdir -p "$guest_home/RuntimeFrameworks" "$backup_dir"
 if [ ! -d "$framework" ]; then
   cp -a "$sdk_framework" "$framework"
